@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0F172A;
+    color: #F1F5F9;
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    padding: 36px 32px;
+    width: 1600px;
+  }
+  .title {
+    text-align: center;
+    font-size: 24px;
+    font-weight: 700;
+    margin-bottom: 4px;
+  }
+  .subtitle {
+    text-align: center;
+    font-size: 12px;
+    color: #94A3B8;
+    margin-bottom: 28px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+  }
+  .diagram-area {
+    position: relative;
+    width: 1536px;
+    height: 920px;
+  }
+
+  /* SVG edges layer */
+  .edges-svg {
+    position: absolute;
+    top: 0; left: 0;
+    width: 1536px;
+    height: 920px;
+    pointer-events: none;
+    z-index: 1;
+  }
+  .edge-line {
+    stroke: #334155;
+    stroke-width: 1.5;
+    fill: none;
+    opacity: 0.7;
+  }
+  .edge-line.highlight {
+    stroke: #64748B;
+    stroke-width: 2;
+    opacity: 0.9;
+  }
+  .edge-arrow {
+    fill: #475569;
+    opacity: 0.7;
+  }
+  .edge-arrow.highlight {
+    fill: #64748B;
+    opacity: 0.9;
+  }
+
+  /* Category groups */
+  .category-group {
+    position: absolute;
+    z-index: 2;
+  }
+  .category-label {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+    padding-left: 4px;
+  }
+
+  /* Node */
+  .node {
+    background: #1E293B;
+    border: 1.5px solid #334155;
+    border-radius: 8px;
+    padding: 7px 14px;
+    font-size: 11.5px;
+    color: #CBD5E1;
+    white-space: nowrap;
+    margin-bottom: 5px;
+    position: relative;
+    z-index: 3;
+    transition: all 0.2s;
+  }
+  .node.core {
+    border-color: #64748B;
+    background: rgba(30,41,59,0.95);
+    font-weight: 600;
+    color: #F1F5F9;
+  }
+
+  /* Category colors */
+  .cat-data .category-label { color: #7DD3FC; }
+  .cat-data .node { border-color: rgba(125,211,252,0.25); }
+  .cat-data .node.core { border-color: rgba(125,211,252,0.5); box-shadow: 0 0 12px rgba(125,211,252,0.08); }
+
+  .cat-brain .category-label { color: #6EE7B7; }
+  .cat-brain .node { border-color: rgba(110,231,183,0.25); }
+  .cat-brain .node.core { border-color: rgba(110,231,183,0.5); box-shadow: 0 0 12px rgba(110,231,183,0.08); }
+
+  .cat-strategy .category-label { color: #FCD34D; }
+  .cat-strategy .node { border-color: rgba(252,211,77,0.25); }
+  .cat-strategy .node.core { border-color: rgba(252,211,77,0.5); box-shadow: 0 0 12px rgba(252,211,77,0.08); }
+
+  .cat-risk .category-label { color: #FCA5A5; }
+  .cat-risk .node { border-color: rgba(252,165,165,0.25); }
+  .cat-risk .node.core { border-color: rgba(252,165,165,0.5); box-shadow: 0 0 12px rgba(252,165,165,0.08); }
+
+  .cat-decision .category-label { color: #C4B5FD; }
+  .cat-decision .node { border-color: rgba(196,181,253,0.25); }
+  .cat-decision .node.core { border-color: rgba(196,181,253,0.5); box-shadow: 0 0 12px rgba(196,181,253,0.15); }
+
+  .cat-exec .category-label { color: #94A3B8; }
+  .cat-exec .node { border-color: rgba(148,163,184,0.25); }
+  .cat-exec .node.core { border-color: rgba(148,163,184,0.4); }
+
+  /* Legend */
+  .legend {
+    position: absolute;
+    bottom: 0;
+    right: 0;
+    background: rgba(15,23,42,0.9);
+    border: 1px solid #334155;
+    border-radius: 8px;
+    padding: 12px 16px;
+    z-index: 10;
+  }
+  .legend-title {
+    font-size: 10px;
+    color: #64748B;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 8px;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+    font-size: 11px;
+    color: #94A3B8;
+  }
+  .legend-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 3px;
+  }
+</style>
+</head>
+<body>
+
+<div class="title">CryptoQuant Terminal</div>
+<div class="subtitle">Module Dependency Map</div>
+
+<div class="diagram-area">
+
+  <!-- SVG EDGES -->
+  <svg class="edges-svg" viewBox="0 0 1536 920">
+    <defs>
+      <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+        <polygon points="0 0, 8 3, 0 6" class="edge-arrow"/>
+      </marker>
+      <marker id="arrowhead-hl" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+        <polygon points="0 0, 8 3, 0 6" class="edge-arrow highlight"/>
+      </marker>
+    </defs>
+
+    <!-- Brain Orchestrator → children -->
+    <path d="M 420 190 C 420 210, 230 210, 230 240" class="edge-line highlight" marker-end="url(#arrowhead-hl)"/>
+    <path d="M 420 190 C 420 210, 340 210, 340 240" class="edge-line highlight" marker-end="url(#arrowhead-hl)"/>
+    <path d="M 420 190 C 420 210, 450 210, 450 240" class="edge-line highlight" marker-end="url(#arrowhead-hl)"/>
+    <path d="M 420 190 C 420 220, 560 220, 560 240" class="edge-line highlight" marker-end="url(#arrowhead-hl)"/>
+    <path d="M 420 190 C 420 220, 670 220, 670 240" class="edge-line highlight" marker-end="url(#arrowhead-hl)"/>
+    <path d="M 420 190 C 420 230, 780 230, 780 240" class="edge-line highlight" marker-end="url(#arrowhead-hl)"/>
+
+    <!-- Brain Scheduler → children -->
+    <path d="M 420 130 C 420 150, 230 160, 230 130" class="edge-line" marker-end="url(#arrowhead)"/>
+    <!-- Brain Scheduler is at top, let's use its center -->
+    <path d="M 420 95 C 380 110, 230 110, 230 240" class="edge-line" marker-end="url(#arrowhead)"/>
+    <path d="M 420 95 C 500 120, 800 140, 800 240" class="edge-line" marker-end="url(#arrowhead)"/>
+
+    <!-- SDE → children -->
+    <path d="M 900 460 C 900 480, 860 500, 860 580" class="edge-line highlight" marker-end="url(#arrowhead-hl)"/>
+    <path d="M 900 460 C 870 480, 740 500, 740 580" class="edge-line highlight" marker-end="url(#arrowhead-hl)"/>
+    <path d="M 900 460 C 930 480, 980 500, 980 580" class="edge-line highlight" marker-end="url(#arrowhead-hl)"/>
+    <path d="M 900 460 C 940 480, 1100 510, 1100 580" class="edge-line highlight" marker-end="url(#arrowhead-hl)"/>
+    <path d="M 900 460 C 950 490, 1220 530, 1220 580" class="edge-line highlight" marker-end="url(#arrowhead-hl)"/>
+    <path d="M 900 460 C 960 500, 1340 550, 1340 580" class="edge-line highlight" marker-end="url(#arrowhead-hl)"/>
+
+    <!-- Paper Trading → -->
+    <path d="M 260 680 C 350 700, 450 720, 500 750" class="edge-line" marker-end="url(#arrowhead)"/>
+    <path d="M 260 680 C 260 720, 860 730, 860 580" class="edge-line" marker-end="url(#arrowhead)"/>
+
+    <!-- Auto-Evolution → -->
+    <path d="M 900 310 C 860 340, 820 370, 820 400" class="edge-line" marker-end="url(#arrowhead)"/>
+    <path d="M 900 310 C 950 350, 1050 370, 1050 400" class="edge-line" marker-end="url(#arrowhead)"/>
+
+    <!-- Brain Cycle → Brain Orchestrator -->
+    <path d="M 420 280 C 400 260, 400 220, 420 200" class="edge-line" marker-end="url(#arrowhead)"/>
+
+    <!-- Cross-group: Brain → SDE -->
+    <path d="M 560 290 C 600 340, 800 380, 870 400" class="edge-line highlight" marker-end="url(#arrowhead-hl)"/>
+  </svg>
+
+  <!-- DATA SOURCES (top-left) -->
+  <div class="category-group cat-data" style="left:20px; top:10px;">
+    <div class="category-label">Data Sources</div>
+    <div class="node">CoinGecko Client</div>
+    <div class="node">DexScreener Client</div>
+    <div class="node">DexPaprika Client</div>
+    <div class="node">Binance Client</div>
+    <div class="node">Etherscan Client</div>
+    <div class="node core">OHLCV Pipeline</div>
+    <div class="node core">Data Ingestion</div>
+  </div>
+
+  <!-- BRAIN / ANALYSIS (top-center) -->
+  <div class="category-group cat-brain" style="left:320px; top:10px;">
+    <div class="category-label">Brain / Analysis</div>
+    <div style="display:flex; gap:8px;">
+      <div style="display:flex;flex-direction:column;">
+        <div class="node core">Brain Scheduler</div>
+        <div class="node core">Brain Orchestrator</div>
+        <div class="node">Brain Cycle Engine</div>
+      </div>
+      <div style="display:flex;flex-direction:column;">
+        <div class="node">Token Lifecycle</div>
+        <div class="node">Behavioral Model</div>
+        <div class="node">Candlestick Patterns</div>
+        <div class="node core">Deep Analysis</div>
+        <div class="node">Cross-Correlation</div>
+        <div class="node">Smart Money Tracker</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- STRATEGY (top-right) -->
+  <div class="category-group cat-strategy" style="left:760px; top:10px;">
+    <div class="category-label">Strategy</div>
+    <div style="display:flex; gap:8px;">
+      <div style="display:flex;flex-direction:column;">
+        <div class="node core">Trading System Engine</div>
+        <div class="node core">Backtesting Engine</div>
+        <div class="node">Walk-Forward Engine</div>
+        <div class="node">Signal Generators</div>
+      </div>
+      <div style="display:flex;flex-direction:column;">
+        <div class="node core">Strategy Evolution</div>
+        <div class="node core">Auto-Evolution Loop</div>
+        <div class="node">Feedback Loop</div>
+        <div class="node">Technical Indicators</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- DECISION (center) -->
+  <div class="category-group cat-decision" style="left:780px; top:400px;">
+    <div class="category-label">Decision</div>
+    <div class="node core" style="font-size:14px;padding:10px 20px;border-width:2px;">Strategy Decision Engine (SDE)</div>
+    <div class="node" style="margin-top:6px;">Token Decision Engine (TDE)</div>
+  </div>
+
+  <!-- RISK (bottom-center-right) -->
+  <div class="category-group cat-risk" style="left:650px; top:560px;">
+    <div class="category-label">Risk</div>
+    <div style="display:flex; gap:8px; flex-wrap:wrap; max-width:740px;">
+      <div class="node core">Kill Switch Service</div>
+      <div class="node">Risk Controls Verifier</div>
+      <div class="node core">Capital Allocation Engine</div>
+      <div class="node">Capital Strategy Manager</div>
+      <div class="node">Monte Carlo Simulator</div>
+      <div class="node">Operability Score</div>
+      <div class="node">Alert Engine</div>
+      <div class="node">Regime Heuristic</div>
+      <div class="node">Strategy Correlation</div>
+      <div class="node">Parameter Drift Analyzer</div>
+    </div>
+  </div>
+
+  <!-- EXECUTION (bottom-left) -->
+  <div class="category-group cat-exec" style="left:20px; top:620px;">
+    <div class="category-label">Execution</div>
+    <div class="node core">Paper Trading Engine</div>
+    <div class="node core">Trade Execution Engine</div>
+    <div class="node core">Autonomous Execution Engine</div>
+  </div>
+
+  <!-- LEGEND -->
+  <div class="legend">
+    <div class="legend-title">Dependencies</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#64748B;"></div> Key dependency (thick)</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#334155;"></div> Standard dependency</div>
+    <div class="legend-item" style="margin-top:6px;">
+      <div style="width:30px;height:2px;background:#64748B;border-radius:1px;"></div> Dependency flow
+    </div>
+  </div>
+
+</div>
+
+</body>
+</html>

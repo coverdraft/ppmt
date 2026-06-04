@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0F172A;
+    color: #F1F5F9;
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    padding: 40px 48px;
+    width: 1400px;
+  }
+  .title {
+    text-align: center;
+    font-size: 26px;
+    font-weight: 700;
+    margin-bottom: 6px;
+    letter-spacing: -0.5px;
+  }
+  .subtitle {
+    text-align: center;
+    font-size: 13px;
+    color: #94A3B8;
+    margin-bottom: 32px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+  }
+  .pipeline {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0;
+  }
+
+  /* Input/Output blocks */
+  .io-block {
+    width: 900px;
+    background: #1E293B;
+    border: 2px solid #64748B;
+    border-radius: 12px;
+    padding: 16px 24px;
+    text-align: center;
+  }
+  .io-block .io-label {
+    font-size: 10px;
+    color: #64748B;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    margin-bottom: 6px;
+  }
+  .io-block .io-name {
+    font-size: 16px;
+    font-weight: 700;
+    color: #F1F5F9;
+  }
+  .io-block .io-params {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    justify-content: center;
+    margin-top: 8px;
+  }
+  .io-block .io-param {
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 4px;
+    padding: 3px 10px;
+    font-size: 11px;
+    color: #94A3B8;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+  }
+
+  /* Arrows */
+  .arrow-down {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 6px 0;
+  }
+  .arrow-down .line {
+    width: 2px;
+    height: 20px;
+    background: #475569;
+  }
+  .arrow-down .head {
+    width: 0; height: 0;
+    border-left: 7px solid transparent;
+    border-right: 7px solid transparent;
+    border-top: 9px solid #64748B;
+  }
+
+  /* Step cards */
+  .step-card {
+    width: 1100px;
+    border-radius: 12px;
+    border: 1px solid #334155;
+    padding: 20px 24px;
+    position: relative;
+  }
+  .step-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 14px;
+  }
+  .step-num {
+    width: 40px;
+    height: 40px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    font-weight: 800;
+    color: #F1F5F9;
+    flex-shrink: 0;
+  }
+  .step-title {
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+  }
+  .step-body {
+    display: flex;
+    gap: 12px;
+    flex-direction: column;
+  }
+  .check-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 12px;
+    background: rgba(255,255,255,0.03);
+    border-radius: 6px;
+    border-left: 3px solid transparent;
+  }
+  .check-icon {
+    font-size: 13px;
+    width: 20px;
+    text-align: center;
+    flex-shrink: 0;
+  }
+  .check-text {
+    font-size: 12.5px;
+    color: #CBD5E1;
+  }
+  .check-text code {
+    color: #E2E8F0;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 11.5px;
+    background: rgba(255,255,255,0.06);
+    padding: 1px 5px;
+    border-radius: 3px;
+  }
+  .result-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 3px 10px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+  }
+  .reject { background: rgba(239,68,68,0.15); color: #FCA5A5; border: 1px solid rgba(239,68,68,0.3); }
+  .pass { background: rgba(34,197,94,0.15); color: #86EFAC; border: 1px solid rgba(34,197,94,0.3); }
+  .strong { background: rgba(34,197,94,0.15); color: #86EFAC; border: 1px solid rgba(34,197,94,0.3); }
+  .adequate { background: rgba(234,179,8,0.15); color: #FDE047; border: 1px solid rgba(234,179,8,0.3); }
+  .weak { background: rgba(239,68,68,0.15); color: #FCA5A5; border: 1px solid rgba(239,68,68,0.3); }
+  .active { background: rgba(34,197,94,0.15); color: #86EFAC; }
+  .conditional { background: rgba(234,179,8,0.15); color: #FDE047; }
+  .paused { background: rgba(239,68,68,0.15); color: #FCA5A5; }
+
+  .step-note {
+    margin-top: 10px;
+    padding: 8px 12px;
+    background: rgba(255,255,255,0.04);
+    border-radius: 6px;
+    font-size: 11.5px;
+    color: #94A3B8;
+    border-left: 3px solid #475569;
+  }
+  .step-note strong { color: #CBD5E1; }
+
+  /* Step colors */
+  .s1 { background: linear-gradient(135deg, #1E293B 0%, #2a1520 100%); }
+  .s1 .step-num { background: #7f1d1d; }
+  .s1 .step-title { color: #FCA5A5; }
+
+  .s2 { background: linear-gradient(135deg, #1E293B 0%, #1a2a35 100%); }
+  .s2 .step-num { background: #1e3a5f; }
+  .s2 .step-title { color: #7DD3FC; }
+
+  .s3 { background: linear-gradient(135deg, #1E293B 0%, #1a2d25 100%); }
+  .s3 .step-num { background: #14532d; }
+  .s3 .step-title { color: #86EFAC; }
+
+  .s4 { background: linear-gradient(135deg, #1E293B 0%, #2d2a1e 100%); }
+  .s4 .step-num { background: #4a3d1e; }
+  .s4 .step-title { color: #FCD34D; }
+
+  .s5 { background: linear-gradient(135deg, #1E293B 0%, #1e2435 100%); }
+  .s5 .step-num { background: #1e2d4a; }
+  .s5 .step-title { color: #A5B4FC; }
+
+  .s6 { background: linear-gradient(135deg, #1E293B 0%, #1a2738 100%); }
+  .s6 .step-num { background: #1e3a5f; }
+  .s6 .step-title { color: #7DD3FC; }
+
+  .formula {
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 11px;
+    color: #94A3B8;
+    background: rgba(0,0,0,0.2);
+    padding: 2px 6px;
+    border-radius: 3px;
+  }
+
+  .grid-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+
+  .action-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 8px;
+  }
+  .action-table th {
+    text-align: left;
+    font-size: 10px;
+    color: #64748B;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    padding: 4px 10px;
+    border-bottom: 1px solid #334155;
+  }
+  .action-table td {
+    padding: 5px 10px;
+    font-size: 12px;
+    color: #CBD5E1;
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+  }
+</style>
+</head>
+<body>
+
+<div class="title">Strategy Decision Engine (SDE)</div>
+<div class="subtitle">6-Step Decision Pipeline &mdash; Detailed Flow</div>
+
+<div class="pipeline">
+
+  <!-- INPUT -->
+  <div class="io-block">
+    <div class="io-label">Input</div>
+    <div class="io-name">SDEInput</div>
+    <div class="io-params">
+      <div class="io-param">backtest</div>
+      <div class="io-param">monteCarlo</div>
+      <div class="io-param">walkForward</div>
+      <div class="io-param">operability</div>
+      <div class="io-param">paperTrading</div>
+      <div class="io-param">portfolioState</div>
+      <div class="io-param">regimeAssessment</div>
+    </div>
+  </div>
+
+  <div class="arrow-down"><div class="line"></div><div class="head"></div></div>
+
+  <!-- STEP 1: HARD VETOS -->
+  <div class="step-card s1">
+    <div class="step-header">
+      <div class="step-num">1</div>
+      <div class="step-title">HARD VETOS</div>
+    </div>
+    <div class="step-body">
+      <div class="check-row" style="border-left-color:#EF4444;">
+        <div class="check-icon">&#9888;</div>
+        <div class="check-text">Total Trades &lt; 50? <span class="result-badge reject">REJECT</span></div>
+      </div>
+      <div class="check-row" style="border-left-color:#EF4444;">
+        <div class="check-icon">&#9888;</div>
+        <div class="check-text">Risk of Ruin &gt; threshold? <span class="result-badge reject">REJECT</span></div>
+      </div>
+      <div class="check-row" style="border-left-color:#EF4444;">
+        <div class="check-icon">&#9888;</div>
+        <div class="check-text">Max Drawdown &gt; 50%? <span class="result-badge reject">REJECT</span></div>
+      </div>
+      <div class="check-row" style="border-left-color:#EF4444;">
+        <div class="check-icon">&#9888;</div>
+        <div class="check-text">WFE &lt; 30%? <span class="result-badge reject">REJECT</span></div>
+      </div>
+      <div class="check-row" style="border-left-color:#EF4444;">
+        <div class="check-icon">&#9888;</div>
+        <div class="check-text">Win Rate &lt; 35% AND Payoff &lt; 2.5? <span class="result-badge reject">REJECT</span></div>
+      </div>
+    </div>
+    <div class="step-note"><strong>Any fail</strong> = <span class="result-badge reject">REJECTED</span> + <code>EXIT</code> &nbsp;&nbsp;|&nbsp;&nbsp; <strong>All pass</strong> = <span class="result-badge pass">PROCEED</span> to Step 2</div>
+  </div>
+
+  <div class="arrow-down"><div class="line"></div><div class="head"></div></div>
+
+  <!-- STEP 2: COMPOSITE SCORES -->
+  <div class="step-card s2">
+    <div class="step-header">
+      <div class="step-num">2</div>
+      <div class="step-title">COMPOSITE SCORES</div>
+    </div>
+    <div class="step-body">
+      <div class="check-row" style="border-left-color:#38BDF8;">
+        <div class="check-icon" style="color:#7DD3FC;">&#9632;</div>
+        <div class="check-text"><strong style="color:#7DD3FC;">Robustness:</strong> <span class="formula">WFE &times; 0.35 + probOfProfit &times; 0.30 + paramStability &times; 0.35</span></div>
+      </div>
+      <div class="check-row" style="border-left-color:#38BDF8;">
+        <div class="check-icon" style="color:#7DD3FC;">&#9632;</div>
+        <div class="check-text"><strong style="color:#7DD3FC;">Overfitting:</strong> <span class="formula">degradation &times; 0.45 + WFE_variance &times; 0.30 + tradeCountPenalty &times; 0.25</span></div>
+      </div>
+      <div class="check-row" style="border-left-color:#38BDF8;">
+        <div class="check-icon" style="color:#7DD3FC;">&#9632;</div>
+        <div class="check-text"><strong style="color:#7DD3FC;">Stability:</strong> <span class="formula">paramStability &times; 0.40 + OOS_winRate_std &times; 0.30 + regimeConsistency &times; 0.30</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow-down"><div class="line"></div><div class="head"></div></div>
+
+  <!-- STEP 3: SIGNAL QUALITY -->
+  <div class="step-card s3">
+    <div class="step-header">
+      <div class="step-num">3</div>
+      <div class="step-title">SIGNAL QUALITY</div>
+    </div>
+    <div class="step-body">
+      <div class="check-row" style="border-left-color:#22C55E;">
+        <div class="check-icon" style="color:#86EFAC;">&#9733;</div>
+        <div class="check-text"><span class="result-badge strong">STRONG</span> &nbsp;&mdash;&nbsp; robustness &gt; 75 AND overfitting &lt; 25 AND stability &gt; 70</div>
+      </div>
+      <div class="check-row" style="border-left-color:#EAB308;">
+        <div class="check-icon" style="color:#FDE047;">&#9733;</div>
+        <div class="check-text"><span class="result-badge adequate">ADEQUATE</span> &nbsp;&mdash;&nbsp; robustness &gt; 50 AND overfitting &lt; 40 AND stability &gt; 45</div>
+      </div>
+      <div class="check-row" style="border-left-color:#EF4444;">
+        <div class="check-icon" style="color:#FCA5A5;">&#9733;</div>
+        <div class="check-text"><span class="result-badge weak">WEAK</span> &nbsp;&mdash;&nbsp; otherwise</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow-down"><div class="line"></div><div class="head"></div></div>
+
+  <!-- STEP 4: STATE + CAPITAL ACTION -->
+  <div class="step-card s4">
+    <div class="step-header">
+      <div class="step-num">4</div>
+      <div class="step-title">STATE + CAPITAL ACTION</div>
+    </div>
+    <div class="step-body">
+      <table class="action-table">
+        <thead>
+          <tr><th>Condition</th><th>State</th><th>Capital Action</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><span class="result-badge strong">STRONG</span></td>
+            <td><span class="result-badge active">ACTIVE</span></td>
+            <td><span style="color:#86EFAC;font-weight:600;">INCREASE</span></td>
+          </tr>
+          <tr>
+            <td><span class="result-badge adequate">ADEQUATE</span></td>
+            <td><span class="result-badge active">ACTIVE</span></td>
+            <td><span style="color:#FDE047;font-weight:600;">MAINTAIN</span></td>
+          </tr>
+          <tr>
+            <td><span class="result-badge weak">WEAK</span></td>
+            <td><span class="result-badge conditional">CONDITIONAL</span></td>
+            <td><span style="color:#FDE047;font-weight:600;">MAINTAIN</span></td>
+          </tr>
+          <tr>
+            <td>robustness &lt; 30</td>
+            <td><span class="result-badge conditional">CONDITIONAL</span></td>
+            <td><span style="color:#FCA5A5;font-weight:600;">REDUCE</span></td>
+          </tr>
+          <tr>
+            <td>paper DD &gt; 15%</td>
+            <td><span class="result-badge paused">PAUSED</span></td>
+            <td><span style="color:#FCA5A5;font-weight:600;">EXIT</span></td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="step-note">4 possible states &times; 4 possible capital actions = 16 combinations, narrowed to 5 key rules</div>
+    </div>
+  </div>
+
+  <div class="arrow-down"><div class="line"></div><div class="head"></div></div>
+
+  <!-- STEP 5: CAPITAL RECOMMENDATION -->
+  <div class="step-card s5">
+    <div class="step-header">
+      <div class="step-num">5</div>
+      <div class="step-title">CAPITAL RECOMMENDATION</div>
+    </div>
+    <div class="step-body">
+      <div class="check-row" style="border-left-color:#818CF8;">
+        <div class="check-icon" style="color:#A5B4FC;">&#9654;</div>
+        <div class="check-text"><strong style="color:#A5B4FC;">Method Selection</strong> &mdash; 5 allocation methods (Kelly Modified, Risk Parity, Vol Targeting, Max DD Control, Equal Weight)</div>
+      </div>
+      <div class="check-row" style="border-left-color:#818CF8;">
+        <div class="check-icon" style="color:#A5B4FC;">&#9654;</div>
+        <div class="check-text"><strong style="color:#A5B4FC;">Position Size Calculation</strong> &mdash; based on selected method + portfolio constraints</div>
+      </div>
+      <div class="check-row" style="border-left-color:#818CF8;">
+        <div class="check-icon" style="color:#A5B4FC;">&#9654;</div>
+        <div class="check-text"><strong style="color:#A5B4FC;">Concentration Limit</strong> &mdash; max 15% per single token position</div>
+      </div>
+      <div class="check-row" style="border-left-color:#818CF8;">
+        <div class="check-icon" style="color:#A5B4FC;">&#9654;</div>
+        <div class="check-text"><strong style="color:#A5B4FC;">Correlation Check</strong> &mdash; ensure diversification across strategies</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow-down"><div class="line"></div><div class="head"></div></div>
+
+  <!-- STEP 6: AUDIT RECORD -->
+  <div class="step-card s6">
+    <div class="step-header">
+      <div class="step-num">6</div>
+      <div class="step-title">AUDIT RECORD</div>
+    </div>
+    <div class="step-body">
+      <div class="check-row" style="border-left-color:#38BDF8;">
+        <div class="check-icon" style="color:#7DD3FC;">&#128196;</div>
+        <div class="check-text"><strong style="color:#7DD3FC;">DecisionAudit</strong> &mdash; <span class="formula">inputs + processing + decision + configSnapshot</span></div>
+      </div>
+      <div class="step-note">Full traceability: every decision is recorded with complete input data, intermediate scores, final decision, and the configuration that produced it.</div>
+    </div>
+  </div>
+
+  <div class="arrow-down"><div class="line"></div><div class="head"></div></div>
+
+  <!-- OUTPUT -->
+  <div class="io-block" style="border-color: #22C55E; background: linear-gradient(135deg, #1E293B 0%, #162920 100%);">
+    <div class="io-label" style="color:#22C55E;">Output</div>
+    <div class="io-name" style="color:#86EFAC;">StrategyDecision</div>
+    <div class="io-params">
+      <div class="io-param" style="border-color:rgba(34,197,94,0.3);color:#86EFAC;">state</div>
+      <div class="io-param" style="border-color:rgba(34,197,94,0.3);color:#86EFAC;">capitalAction</div>
+      <div class="io-param" style="border-color:rgba(34,197,94,0.3);color:#86EFAC;">signalQuality</div>
+      <div class="io-param" style="border-color:rgba(34,197,94,0.3);color:#86EFAC;">scores</div>
+      <div class="io-param" style="border-color:rgba(34,197,94,0.3);color:#86EFAC;">capitalRecommendation</div>
+      <div class="io-param" style="border-color:rgba(34,197,94,0.3);color:#86EFAC;">auditId</div>
+    </div>
+  </div>
+
+</div>
+
+</body>
+</html>
