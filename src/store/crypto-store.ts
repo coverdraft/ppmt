@@ -148,6 +148,25 @@ export interface PortfolioIntelligenceState {
   currentWeights: Record<string, number>;
 }
 
+export interface MetaModelEngine {
+  name: string;
+  accuracy: number;
+  weight: number;
+  predictions: number;
+  last24hAccuracy: number;
+  status: 'active' | 'retraining' | 'flagged' | 'idle';
+  weightChange: number;
+  rollingD7: number;
+  rollingD30: number;
+  rollingD90: number;
+}
+
+export interface MetaModelReport {
+  engines: MetaModelEngine[];
+  overallAccuracy: number;
+  lastUpdated: string;
+}
+
 export interface ExecutionCostResult {
   totalCostPct: number;
   slippagePct: number;
@@ -294,6 +313,10 @@ interface CryptoStore {
   portfolioIntelligence: PortfolioIntelligenceState;
   setPortfolioIntelligence: (state: Partial<PortfolioIntelligenceState>) => void;
   clearPortfolioIntelligence: () => void;
+
+  // Meta Model
+  metaModelReport: MetaModelReport | null;
+  setMetaModelReport: (report: MetaModelReport | null) => void;
 }
 
 export const useCryptoStore = create<CryptoStore>((set) => ({
@@ -443,4 +466,8 @@ export const useCryptoStore = create<CryptoStore>((set) => ({
         currentWeights: {},
       },
     }),
+
+  // Meta Model
+  metaModelReport: null,
+  setMetaModelReport: (report) => set({ metaModelReport: report }),
 }));

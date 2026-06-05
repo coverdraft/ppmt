@@ -36,6 +36,7 @@ import {
   Briefcase,
   Code2,
   Trophy,
+  Check,
 } from 'lucide-react';
 import { UserProvider, useUser } from '@/components/auth/user-provider';
 import { DashboardLevelProvider, useDashboardLevel, type DashboardLevel } from '@/components/dashboard/dashboard-level-provider';
