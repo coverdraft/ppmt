@@ -156,6 +156,8 @@ export async function POST(request: NextRequest) {
         impactScore: impact.impactScore,
         riskContribution: impact.riskContribution,
         diversificationDelta: impact.diversificationDelta,
+        correlationWithExisting: impact.correlationWithExisting,
+        varDelta: impact.varDelta,
         recommendations: impact.recommendations,
       },
     });

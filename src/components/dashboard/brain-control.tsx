@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -264,42 +265,11 @@ function BrainControlSkeleton() {
 // ============================================================
 
 export default function BrainControl() {
-  const [data, setData] = useState<SchedulerStatusReport | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const queryClient = useQueryClient();
   const [configOpen, setConfigOpen] = useState(false);
   const [now, setNow] = useState(Date.now());
-  const [refreshKey, setRefreshKey] = useState(0);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  // Fetch scheduler status
-  const fetchStatus = useCallback(async () => {
-    try {
-      const res = await fetch('/api/brain/scheduler');
-      if (!res.ok) {
-        const errBody = await res.json().catch(() => ({}));
-        throw new Error(errBody.error || `HTTP ${res.status}`);
-      }
-      const json = await res.json();
-      setData(json.data || json);
-      setError(null);
-    } catch (err: any) {
-      setError(err.message || 'Failed to fetch scheduler status');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  // Initial fetch + auto-refresh every 15 seconds (reduced from 5s for stability)
-  useEffect(() => {
-    fetchStatus();
-    intervalRef.current = setInterval(fetchStatus, 15000);
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-    };
-  }, [fetchStatus, refreshKey]);
 
   // Countdown ticker every second
   useEffect(() => {
@@ -309,45 +279,72 @@ export default function BrainControl() {
     };
   }, []);
 
-  // Scheduler control action
-  const sendAction = useCallback(
-    async (action: 'start' | 'stop' | 'pause' | 'resume') => {
-      setActionLoading(action);
+  // Fetch scheduler status via useQuery
+  const { data: schedulerData, isLoading: schedulerLoading, refetch: refetchScheduler } = useQuery({
+    queryKey: ['brain-scheduler'],
+    queryFn: async () => {
       try {
-        const body: Record<string, any> = { action };
-        // Include config as params when starting (API reads params key)
-        if (action === 'start' && data?.config) {
-          body.params = {
-            capitalUsd: data.config.capitalUsd,
-            initialCapitalUsd: data.config.initialCapitalUsd,
-            chain: data.config.chain,
-            scanLimit: data.config.scanLimit,
-          };
-        }
-        const res = await fetch('/api/brain/scheduler', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        });
+        const res = await fetch('/api/brain/scheduler');
         if (!res.ok) {
           const errBody = await res.json().catch(() => ({}));
-          throw new Error(errBody.error || `Action failed: HTTP ${res.status}`);
+          throw new Error(errBody.error || `HTTP ${res.status}`);
         }
-        // Immediately refresh status
-        await fetchStatus();
+        const json = await res.json();
+        return json.data as SchedulerStatusReport;
       } catch (err: any) {
-        setError(err.message || `Failed to ${action} scheduler`);
-      } finally {
-        setActionLoading(null);
+        throw new Error(err.message || 'Failed to fetch scheduler status');
       }
     },
-    [data?.config, fetchStatus]
-  );
+    refetchInterval: 15000,
+    staleTime: 10000,
+  });
 
-  // Run single brain cycle
-  const runCycle = useCallback(async () => {
-    setActionLoading('cycle');
-    try {
+  // Fetch brain status via useQuery
+  const { data: brainStatusData } = useQuery({
+    queryKey: ['brain-status'],
+    queryFn: async () => {
+      try {
+        const res = await fetch('/api/brain/status');
+        if (!res.ok) return null;
+        const json = await res.json();
+        return json.data as Record<string, unknown> | null;
+      } catch {
+        return null;
+      }
+    },
+    refetchInterval: 30000,
+    staleTime: 20000,
+  });
+
+  const data = schedulerData;
+
+  // Scheduler action mutation (start, stop, pause, resume)
+  const schedulerMutation = useMutation({
+    mutationFn: async ({ action, params }: { action: 'start' | 'stop' | 'pause' | 'resume'; params?: Record<string, unknown> }) => {
+      const res = await fetch('/api/brain/scheduler', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, params }),
+      });
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        throw new Error(errBody.error || `Action failed: HTTP ${res.status}`);
+      }
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['brain-scheduler'] });
+      queryClient.invalidateQueries({ queryKey: ['brain-status'] });
+      setError(null);
+    },
+    onError: (err: Error) => {
+      setError(err.message || 'Scheduler action failed');
+    },
+  });
+
+  // Run cycle mutation
+  const cycleMutation = useMutation({
+    mutationFn: async () => {
       const res = await fetch('/api/brain/pipeline', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -356,46 +353,78 @@ export default function BrainControl() {
         const errBody = await res.json().catch(() => ({}));
         throw new Error(errBody.error || 'Cycle failed');
       }
-      await fetchStatus();
-    } catch (err: any) {
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['brain-scheduler'] });
+      queryClient.invalidateQueries({ queryKey: ['brain-status'] });
+    },
+    onError: (err: Error) => {
       setError(err.message || 'Failed to run cycle');
-    } finally {
-      setActionLoading(null);
-    }
-  }, [fetchStatus]);
+    },
+  });
 
-  // Force market sync — we can use the brain pipeline endpoint with a flag
-  // or just re-trigger a cycle. Here we'll hit the analyze endpoint as a "force sync"
-  const forceSync = useCallback(async () => {
-    setActionLoading('sync');
-    try {
-      // Force sync by running analysis on the configured chain
-      const chain = data?.config?.chain || 'solana';
-      const res = await fetch('/api/brain', {
+  // Force sync mutation — trigger a brain pipeline run with current config
+  const syncMutation = useMutation({
+    mutationFn: async () => {
+      const chain = data?.config?.chain || 'SOL';
+      const res = await fetch('/api/brain/pipeline', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'analyze_token', address: '*', chain }),
+        body: JSON.stringify({ chain }),
       });
       if (!res.ok) {
         const errBody = await res.json().catch(() => ({}));
         throw new Error(errBody.error || 'Sync failed');
       }
-      await fetchStatus();
-    } catch (err: any) {
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['brain-scheduler'] });
+      queryClient.invalidateQueries({ queryKey: ['brain-status'] });
+    },
+    onError: (err: Error) => {
       setError(err.message || 'Failed to force sync');
-    } finally {
-      setActionLoading(null);
-    }
-  }, [data?.config?.chain, fetchStatus]);
+    },
+  });
 
-  // Manual refresh
-  const manualRefresh = useCallback(() => {
-    setLoading(true);
-    fetchStatus();
-  }, [fetchStatus]);
+  // Start all mutation
+  const startAllMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch('/api/brain/start-all', { method: 'POST' });
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        throw new Error(errBody.error || 'Start All failed');
+      }
+      return res.json();
+    },
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ['brain-scheduler'] });
+      queryClient.invalidateQueries({ queryKey: ['brain-status'] });
+      if (!result.success) {
+        setError(result.message || 'Start All partially failed');
+      } else {
+        setError(null);
+      }
+    },
+    onError: (err: Error) => {
+      setError(err.message || 'Start All failed');
+    },
+  });
+
+  // Computed action loading state
+  const actionLoading = schedulerMutation.isPending
+    ? schedulerMutation.variables?.action ?? 'scheduler'
+    : cycleMutation.isPending
+      ? 'cycle'
+      : syncMutation.isPending
+        ? 'sync'
+        : startAllMutation.isPending
+          ? 'startall'
+          : null;
 
   // Loading state
-  if (loading && !data) {
+  if (schedulerLoading && !data) {
     return <BrainControlSkeleton />;
   }
 
@@ -423,11 +452,11 @@ export default function BrainControl() {
           <Button
             variant="ghost"
             size="sm"
-            onClick={manualRefresh}
-            disabled={loading}
+            onClick={() => refetchScheduler()}
+            disabled={schedulerLoading}
             className="h-5 w-5 p-0 text-[#64748b] hover:text-[#e2e8f0]"
           >
-            <RefreshCw className={`h-3 w-3 ${loading ? 'animate-spin' : ''}`} />
+            <RefreshCw className={`h-3 w-3 ${schedulerLoading ? 'animate-spin' : ''}`} />
           </Button>
         </div>
       </div>
@@ -524,7 +553,12 @@ export default function BrainControl() {
         <div className="flex items-center gap-1.5 flex-wrap">
           <Button
             size="sm"
-            onClick={() => sendAction('start')}
+            onClick={() => schedulerMutation.mutate({ action: 'start', params: data?.config ? {
+              capitalUsd: data.config.capitalUsd,
+              initialCapitalUsd: data.config.initialCapitalUsd,
+              chain: data.config.chain,
+              scanLimit: data.config.scanLimit,
+            } : undefined })}
             disabled={status === 'RUNNING' || actionLoading !== null}
             className="h-7 px-3 text-[10px] font-mono bg-emerald-600/20 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-600/30 hover:text-emerald-300 disabled:opacity-40"
             variant="outline"
@@ -538,7 +572,7 @@ export default function BrainControl() {
           </Button>
           <Button
             size="sm"
-            onClick={() => sendAction('pause')}
+            onClick={() => schedulerMutation.mutate({ action: 'pause' })}
             disabled={status !== 'RUNNING' || actionLoading !== null}
             className="h-7 px-3 text-[10px] font-mono bg-amber-600/20 text-amber-400 border border-amber-500/30 hover:bg-amber-600/30 hover:text-amber-300 disabled:opacity-40"
             variant="outline"
@@ -552,7 +586,7 @@ export default function BrainControl() {
           </Button>
           <Button
             size="sm"
-            onClick={() => sendAction('resume')}
+            onClick={() => schedulerMutation.mutate({ action: 'resume' })}
             disabled={status !== 'PAUSED' || actionLoading !== null}
             className="h-7 px-3 text-[10px] font-mono bg-cyan-600/20 text-cyan-400 border border-cyan-500/30 hover:bg-cyan-600/30 hover:text-cyan-300 disabled:opacity-40"
             variant="outline"
@@ -566,7 +600,7 @@ export default function BrainControl() {
           </Button>
           <Button
             size="sm"
-            onClick={() => sendAction('stop')}
+            onClick={() => schedulerMutation.mutate({ action: 'stop' })}
             disabled={status === 'STOPPED' || actionLoading !== null}
             className="h-7 px-3 text-[10px] font-mono bg-red-600/20 text-red-400 border border-red-500/30 hover:bg-red-600/30 hover:text-red-300 disabled:opacity-40"
             variant="outline"
@@ -853,25 +887,7 @@ export default function BrainControl() {
             <div className="flex items-center gap-2 flex-wrap">
               <Button
                 size="sm"
-                onClick={async () => {
-                  setActionLoading('startall');
-                  try {
-                    const res = await fetch('/api/brain/start-all', { method: 'POST' });
-                    const result = await res.json();
-                    if (!res.ok) {
-                      setError(result.error || result.message || 'Start All failed');
-                    } else if (result.success) {
-                      setError(null);
-                    } else {
-                      setError(result.message || 'Start All partially failed');
-                    }
-                  } catch (err: any) {
-                    setError(err.message || 'Start All failed');
-                  } finally {
-                    setActionLoading(null);
-                    await fetchStatus();
-                  }
-                }}
+                onClick={() => startAllMutation.mutate()}
                 disabled={actionLoading !== null}
                 className="h-8 px-4 text-[11px] font-mono font-bold bg-gradient-to-r from-emerald-600/30 to-cyan-600/30 text-emerald-300 border border-emerald-500/40 hover:from-emerald-600/40 hover:to-cyan-600/40 hover:text-emerald-200 disabled:opacity-40 shadow-lg shadow-emerald-500/10"
                 variant="outline"
@@ -885,7 +901,7 @@ export default function BrainControl() {
               </Button>
               <Button
                 size="sm"
-                onClick={runCycle}
+                onClick={() => cycleMutation.mutate()}
                 disabled={actionLoading !== null}
                 className="h-7 px-3 text-[10px] font-mono bg-cyan-600/20 text-cyan-400 border border-cyan-500/30 hover:bg-cyan-600/30 hover:text-cyan-300 disabled:opacity-40"
                 variant="outline"
@@ -899,7 +915,7 @@ export default function BrainControl() {
               </Button>
               <Button
                 size="sm"
-                onClick={forceSync}
+                onClick={() => syncMutation.mutate()}
                 disabled={actionLoading !== null}
                 className="h-7 px-3 text-[10px] font-mono bg-violet-600/20 text-violet-400 border border-violet-500/30 hover:bg-violet-600/30 hover:text-violet-300 disabled:opacity-40"
                 variant="outline"
@@ -922,6 +938,7 @@ export default function BrainControl() {
                     }).catch(() => { /* store not available */ });
                   } catch { /* store not available */ }
                 }}
+                disabled={actionLoading !== null}
                 className="h-7 px-3 text-[10px] font-mono bg-yellow-600/20 text-yellow-400 border border-yellow-500/30 hover:bg-yellow-600/30 hover:text-yellow-300"
                 variant="outline"
               >

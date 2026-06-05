@@ -6,7 +6,6 @@ import { useQuery } from '@tanstack/react-query';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Database, RefreshCw, Loader2, Radio, Download, ArrowUp, ArrowDown, Search } from 'lucide-react';
-
 // ============================================================
 // API RESPONSE TYPES
 // ============================================================
@@ -152,9 +151,10 @@ export function TokenFlow() {
   const [isSyncing, setIsSyncing] = useState(false);
   const [sortColumn, setSortColumn] = useState<SortColumn>('volume');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
+  const [isSeeding, setIsSeeding] = useState(false);
 
   // Fetch ALL token data from DB
-  const { data: apiTokensData, isLoading: apiLoading } = useQuery({
+  const { data: apiTokensData, isLoading: apiLoading, refetch: refetchTokens } = useQuery({
     queryKey: ['market-tokens', chainFilter, riskFilter, sortBy, search],
     queryFn: async () => {
       try {
@@ -313,6 +313,29 @@ export function TokenFlow() {
       setSortDirection('desc');
     }
   }, [sortColumn]);
+
+  // Seed handler for when DB is empty
+  const handleSeed = useCallback(async () => {
+    setIsSeeding(true);
+    try {
+      const res = await fetch('/api/seed', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'tokens' }),
+      });
+      if (!res.ok) {
+        const json = await res.json().catch(() => null);
+        throw new Error(json?.error || 'Seed failed');
+      }
+      // Wait for DB writes to settle, then refetch
+      await new Promise(r => setTimeout(r, 2000));
+      await refetchTokens();
+    } catch (err) {
+      console.error('[TokenFlow] Seed failed:', err);
+    } finally {
+      setIsSeeding(false);
+    }
+  }, [refetchTokens]);
 
   // Stats
   const apiTokenCount = mergedTokens.filter(t => (t as TokenData & { _dataSource: string })._dataSource === 'api').length;
@@ -579,6 +602,22 @@ export function TokenFlow() {
               <>
                 <Loader2 className="h-3 w-3 animate-spin text-[#d4af37]" />
                 <span>Loading tokens...</span>
+              </>
+            ) : mergedTokens.length === 0 && !isSeeding ? (
+              <>
+                <Database className="h-4 w-4 text-[#475569]" />
+                <span>No tokens in database</span>
+                <Button
+                  onClick={handleSeed}
+                  className="mt-1 bg-[#3b82f6] hover:bg-[#3b82f6]/80 text-white font-mono text-[9px] h-6 px-3"
+                >
+                  <Database className="h-2.5 w-2.5 mr-1" /> Load Data
+                </Button>
+              </>
+            ) : isSeeding ? (
+              <>
+                <Loader2 className="h-3 w-3 animate-spin text-[#3b82f6]" />
+                <span>Seeding tokens...</span>
               </>
             ) : (
               <span>No tokens matching filters</span>

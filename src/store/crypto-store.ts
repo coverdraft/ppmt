@@ -202,6 +202,7 @@ export interface PreFilterResult {
   checks: PreFilterCheckResult[];
   riskScore: number;
   reason?: string;
+  warnings?: string[];
 }
 
 interface CryptoStore {

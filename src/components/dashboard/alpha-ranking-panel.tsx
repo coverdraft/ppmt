@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useMemo, useCallback } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
   BarChart,
@@ -30,7 +30,23 @@ import {
   ChevronUp,
   ChevronDown,
 } from 'lucide-react';
-import { useCryptoStore, type AlphaRankingData } from '@/store/crypto-store';
+// ============================================================
+// LOCAL TYPES
+// ============================================================
+
+interface AlphaRankingData {
+  tokenId: string;
+  symbol: string;
+  alphaScore: number;
+  category: string;
+  momentum: number;
+  signal: string;
+  chain: string;
+  direction: string;
+  confidence: number;
+  expectedReturn: number;
+  rank: number;
+}
 
 // ============================================================
 // CONSTANTS & HELPERS
@@ -149,8 +165,6 @@ export function AlphaRankingPanel() {
   const [selectedTokenId, setSelectedTokenId] = useState<string | null>(null);
   const [sortField, setSortField] = useState<string>('alphaScore');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
-  const setAlphaRankings = useCryptoStore((s) => s.setAlphaRankings);
-  const alphaRankings = useCryptoStore((s) => s.alphaRankings);
 
   // Fetch data with 120s auto-refresh
   const { data: apiData, isLoading, refetch } = useQuery({
@@ -197,11 +211,6 @@ export function AlphaRankingPanel() {
       };
     });
   }, [apiData]);
-
-  // Sync to Zustand store
-  useEffect(() => {
-    setAlphaRankings(transformedRankings);
-  }, [transformedRankings, setAlphaRankings]);
 
   const rankings = transformedRankings;
 

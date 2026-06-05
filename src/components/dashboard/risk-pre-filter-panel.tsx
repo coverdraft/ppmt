@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useCallback } from 'react';
+import { useMutation } from '@tanstack/react-query';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Shield,
@@ -228,31 +229,19 @@ export function RiskPreFilterPanel() {
     setForm((prev) => ({ ...prev, [key]: value }));
   }, []);
 
-  // ---- Run Pre-Filter ----
-  const runPreFilter = useCallback(async () => {
-    if (!form.symbol.trim()) {
-      toast.error('Token symbol is required');
-      return;
-    }
-    if (form.positionSizeUsd <= 0) {
-      toast.error('Position size must be positive');
-      return;
-    }
-
-    setRiskPreFilterLoading(true);
-    setRiskPreFilterResult(null);
-
-    try {
+  // ---- Run Pre-Filter (useMutation) ----
+  const preFilterMutation = useMutation({
+    mutationFn: async (formState: PreFilterFormState) => {
       const res = await fetch('/api/risk/pre-filter', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          tokenAddress: form.symbol.trim().toUpperCase(),
+          tokenAddress: formState.symbol.trim().toUpperCase(),
           chain: 'SOL',
-          direction: form.signalType === 'BUY' ? 'LONG' : 'SHORT',
-          confidence: form.confidence / 100,
+          direction: formState.signalType === 'BUY' ? 'LONG' : 'SHORT',
+          confidence: formState.confidence / 100,
           strategyName: 'Manual Pre-Filter',
-          sizeUsd: form.positionSizeUsd,
+          sizeUsd: formState.positionSizeUsd,
         }),
       });
 
@@ -262,22 +251,39 @@ export function RiskPreFilterPanel() {
       }
 
       const raw = await res.json();
-      const result = mapApiResponse(raw);
+      return mapApiResponse(raw);
+    },
+    onMutate: () => {
+      setRiskPreFilterLoading(true);
+      setRiskPreFilterResult(null);
+    },
+    onSuccess: (result) => {
       setRiskPreFilterResult(result);
-
+      setRiskPreFilterLoading(false);
       if (result.passed) {
         toast.success('Signal passed pre-filter checks');
       } else {
         toast.error('Signal blocked by pre-filter');
       }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Unknown error';
-      toast.error(`Pre-filter failed: ${message}`);
+    },
+    onError: (error: Error) => {
+      toast.error(`Pre-filter failed: ${error.message}`);
       setRiskPreFilterResult(null);
-    } finally {
       setRiskPreFilterLoading(false);
+    },
+  });
+
+  const runPreFilter = useCallback(() => {
+    if (!form.symbol.trim()) {
+      toast.error('Token symbol is required');
+      return;
     }
-  }, [form, setRiskPreFilterLoading, setRiskPreFilterResult]);
+    if (form.positionSizeUsd <= 0) {
+      toast.error('Position size must be positive');
+      return;
+    }
+    preFilterMutation.mutate(form);
+  }, [form, preFilterMutation]);
 
   // ---- Reset ----
   const resetForm = useCallback(() => {

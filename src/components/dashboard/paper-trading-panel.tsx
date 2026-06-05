@@ -33,6 +33,14 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useState, useMemo } from 'react';
+import { Input } from '@/components/ui/input';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import {
   ComposedChart,
   Area,
@@ -457,6 +465,45 @@ export default function PaperTradingPanel() {
     },
   });
 
+  // Open Position mutation - manually open a paper trading position
+  const openPositionMutation = useMutation({
+    mutationFn: async ({ tokenAddress, tokenSymbol, chain, direction }: {
+      tokenAddress: string; tokenSymbol: string; chain: string; direction: 'LONG' | 'SHORT';
+    }) => {
+      const res = await fetch('/api/paper-trading', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'activate_strategy',
+          tokenAddress,
+          tokenSymbol,
+          chain,
+          strategyName: config.systemName,
+          direction,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || 'Failed to open position');
+      }
+      return res.json();
+    },
+    onSuccess: (data) => {
+      const d = data.data;
+      toast.success(`Position opened: ${d?.symbol || 'Token'} ${d?.direction || ''}`);
+      queryClient.invalidateQueries({ queryKey: ['paper-trading-status'] });
+      queryClient.invalidateQueries({ queryKey: ['paper-trading-positions'] });
+      queryClient.invalidateQueries({ queryKey: ['paper-trading-trades'] });
+    },
+    onError: (err: Error) => {
+      toast.error(err.message || 'Failed to open position');
+    },
+  });
+
+  // Open position form state
+  const [openPosForm, setOpenPosForm] = useState({ tokenAddress: '', symbol: '', chain: 'SOL', direction: 'LONG' as 'LONG' | 'SHORT' });
+  const [showOpenPosForm, setShowOpenPosForm] = useState(false);
+
   // ---- LOADING STATE ----
 
   if (isLoading) {
@@ -573,6 +620,19 @@ export default function PaperTradingPanel() {
             </Button>
           )}
 
+          {/* Open Position */}
+          {isRunning && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className={`h-6 text-[9px] font-mono px-2 ${showOpenPosForm ? 'text-[#d4af37] bg-[#d4af37]/10' : 'text-emerald-400'}`}
+              onClick={() => setShowOpenPosForm(!showOpenPosForm)}
+            >
+              <TrendingUp className="h-3 w-3 mr-1" />
+              Open
+            </Button>
+          )}
+
           {/* Start / Stop */}
           {isStopped ? (
             <Button
@@ -607,6 +667,85 @@ export default function PaperTradingPanel() {
           )}
         </div>
       </div>
+
+      {/* ===== OPEN POSITION FORM (collapsible) ===== */}
+      <AnimatePresence>
+        {showOpenPosForm && isRunning && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            className="overflow-hidden border-b border-[#1e293b]"
+          >
+            <div className="px-4 py-3 bg-[#0d1117] flex items-center gap-3 flex-wrap">
+              <div className="flex flex-col gap-0.5">
+                <span className="text-[8px] font-mono text-[#475569] uppercase">Token Address</span>
+                <Input
+                  value={openPosForm.tokenAddress}
+                  onChange={(e) => setOpenPosForm({ ...openPosForm, tokenAddress: e.target.value })}
+                  placeholder="e.g. So11111111111111111111111111111111111111112"
+                  className="h-7 text-[10px] font-mono bg-[#0a0e17] border-[#1e293b] text-[#e2e8f0] w-64"
+                />
+              </div>
+              <div className="flex flex-col gap-0.5">
+                <span className="text-[8px] font-mono text-[#475569] uppercase">Symbol</span>
+                <Input
+                  value={openPosForm.symbol}
+                  onChange={(e) => setOpenPosForm({ ...openPosForm, symbol: e.target.value })}
+                  placeholder="e.g. SOL"
+                  className="h-7 text-[10px] font-mono bg-[#0a0e17] border-[#1e293b] text-[#e2e8f0] w-24"
+                />
+              </div>
+              <div className="flex flex-col gap-0.5">
+                <span className="text-[8px] font-mono text-[#475569] uppercase">Chain</span>
+                <Select value={openPosForm.chain} onValueChange={(v) => setOpenPosForm({ ...openPosForm, chain: v })}>
+                  <SelectTrigger className="h-7 text-[10px] font-mono bg-[#0a0e17] border-[#1e293b] text-[#e2e8f0] w-20">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent className="bg-[#111827] border-[#1e293b]">
+                    <SelectItem value="SOL" className="text-[10px] font-mono">SOL</SelectItem>
+                    <SelectItem value="ETH" className="text-[10px] font-mono">ETH</SelectItem>
+                    <SelectItem value="BASE" className="text-[10px] font-mono">BASE</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="flex flex-col gap-0.5">
+                <span className="text-[8px] font-mono text-[#475569] uppercase">Direction</span>
+                <Select value={openPosForm.direction} onValueChange={(v) => setOpenPosForm({ ...openPosForm, direction: v as 'LONG' | 'SHORT' })}>
+                  <SelectTrigger className="h-7 text-[10px] font-mono bg-[#0a0e17] border-[#1e293b] text-[#e2e8f0] w-24">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent className="bg-[#111827] border-[#1e293b]">
+                    <SelectItem value="LONG" className="text-[10px] font-mono text-emerald-400">LONG</SelectItem>
+                    <SelectItem value="SHORT" className="text-[10px] font-mono text-red-400">SHORT</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <Button
+                size="sm"
+                onClick={() => {
+                  if (!openPosForm.tokenAddress.trim() || !openPosForm.symbol.trim()) {
+                    toast.error('Token address and symbol are required');
+                    return;
+                  }
+                  openPositionMutation.mutate({
+                    tokenAddress: openPosForm.tokenAddress.trim(),
+                    tokenSymbol: openPosForm.symbol.trim().toUpperCase(),
+                    chain: openPosForm.chain,
+                    direction: openPosForm.direction,
+                  });
+                }}
+                disabled={openPositionMutation.isPending || !openPosForm.tokenAddress.trim() || !openPosForm.symbol.trim()}
+                className="h-7 px-3 text-[10px] font-mono bg-emerald-600/20 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-600/30 hover:text-emerald-300 disabled:opacity-40"
+                variant="outline"
+              >
+                {openPositionMutation.isPending ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <ArrowUpRight className="h-3 w-3 mr-1" />}
+                Open Position
+              </Button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* ===== CONFIG PANEL (collapsible) ===== */}
       <AnimatePresence>

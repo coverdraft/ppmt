@@ -29,6 +29,8 @@ import {
   Zap,
   DollarSign,
   Activity,
+  Database,
+  RefreshCw,
 } from 'lucide-react';
 import { formatVolume, formatPrice, formatPct } from '@/lib/format';
 
@@ -131,9 +133,11 @@ function MiniSparkline({ data, color, width = 60, height = 20 }: {
 export default function MultiChainDashboard() {
   const [selectedChains, setSelectedChains] = useState<string[]>([]);
   const [comparisonMetric, setComparisonMetric] = useState<MetricType>('volume');
+  const [isSeeding, setIsSeeding] = useState(false);
+  const [seedError, setSeedError] = useState<string | null>(null);
 
   // Fetch multi-chain data
-  const { data: apiResponse, isLoading, isError } = useQuery({
+  const { data: apiResponse, isLoading, isError, refetch } = useQuery({
     queryKey: ['multi-chain', selectedChains.join(',')],
     queryFn: async () => {
       const chainsParam = selectedChains.length > 0 ? selectedChains.join(',').toLowerCase() : '';
@@ -191,6 +195,30 @@ export default function MultiChainDashboard() {
   }, []);
 
   const clearFilters = useCallback(() => setSelectedChains([]), []);
+
+  // Seed handler
+  const handleSeed = useCallback(async () => {
+    setIsSeeding(true);
+    setSeedError(null);
+    try {
+      const res = await fetch('/api/seed', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'tokens' }),
+      });
+      if (!res.ok) {
+        const json = await res.json().catch(() => null);
+        throw new Error(json?.error || 'Seed failed');
+      }
+      // Wait a bit for DB writes to settle, then refetch
+      await new Promise(r => setTimeout(r, 2000));
+      await refetch();
+    } catch (err) {
+      setSeedError(err instanceof Error ? err.message : 'Seed failed');
+    } finally {
+      setIsSeeding(false);
+    }
+  }, [refetch]);
 
   // ============================================================
   // COMPUTE COMPARISON BAR CHART DATA
@@ -251,13 +279,32 @@ export default function MultiChainDashboard() {
 
   if (isError || !filteredData) {
     return (
-      <div className="flex flex-col items-center justify-center h-full bg-[#0d1117] border border-[#1e293b] rounded-lg">
-        <Layers className="h-8 w-8 text-[#475569] mb-3" />
+      <div className="flex flex-col items-center justify-center h-full bg-[#0d1117] border border-[#1e293b] rounded-lg gap-3 px-4">
+        <Layers className="h-8 w-8 text-[#475569]" />
         <span className="font-mono text-[11px] text-[#64748b]">Unable to load multi-chain data</span>
-        <span className="font-mono text-[9px] text-[#475569] mt-1">Check that tokens exist in the database</span>
+        <span className="font-mono text-[9px] text-[#475569]">The database may be empty or the API is unreachable</span>
+        <Button
+          onClick={handleSeed}
+          disabled={isSeeding}
+          className="mt-2 bg-[#3b82f6] hover:bg-[#3b82f6]/80 text-white font-mono text-[11px] h-8 px-4"
+        >
+          {isSeeding ? (
+            <><Loader2 className="h-3 w-3 mr-1.5 animate-spin" /> Seeding...</>
+          ) : (
+            <><Database className="h-3 w-3 mr-1.5" /> Load Data</>
+          )}
+        </Button>
+        {seedError && (
+          <span className="font-mono text-[9px] text-red-400">{seedError}</span>
+        )}
       </div>
     );
   }
+
+  // Check if data is sparse (fewer than 3 chains with tokens)
+  const chainsWithTokens = Object.values(filteredData.chainSummary).filter(s => s.tokenCount > 0).length;
+  const totalTokens = Object.values(filteredData.chainSummary).reduce((s, c) => s + c.tokenCount, 0);
+  const isDataSparse = chainsWithTokens < 3 || totalTokens < 10;
 
   return (
     <div className="flex flex-col h-full overflow-y-auto custom-scrollbar">
@@ -270,20 +317,59 @@ export default function MultiChainDashboard() {
             <Layers className="h-4 w-4 text-[#d4af37]" />
             <h2 className="text-sm font-mono font-bold text-[#f1f5f9]">Multi-Chain Dashboard</h2>
             <span className="font-mono text-[9px] text-[#475569]">
-              {availableChains.length} chains · {Object.values(filteredData.chainSummary).reduce((s, c) => s + c.tokenCount, 0)} tokens
+              {availableChains.length} chains · {totalTokens} tokens
             </span>
           </div>
-          {selectedChains.length > 0 && (
+          <div className="flex items-center gap-2">
+            {isDataSparse && (
+              <Button
+                onClick={handleSeed}
+                disabled={isSeeding}
+                className="bg-[#3b82f6] hover:bg-[#3b82f6]/80 text-white font-mono text-[9px] h-5 px-2"
+              >
+                {isSeeding ? (
+                  <><Loader2 className="h-2.5 w-2.5 mr-1 animate-spin" /> Seeding...</>
+                ) : (
+                  <><Database className="h-2.5 w-2.5 mr-1" /> Load Data</>
+                )}
+              </Button>
+            )}
             <Button
               variant="ghost"
               size="sm"
-              onClick={clearFilters}
-              className="h-6 px-2 text-[9px] font-mono text-[#64748b] hover:text-[#94a3b8]"
+              onClick={() => refetch()}
+              className="h-5 px-2 text-[9px] font-mono text-[#64748b] hover:text-[#94a3b8]"
             >
-              Clear filters
+              <RefreshCw className="h-2.5 w-2.5 mr-1" /> Refresh
             </Button>
-          )}
+            {selectedChains.length > 0 && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={clearFilters}
+                className="h-6 px-2 text-[9px] font-mono text-[#64748b] hover:text-[#94a3b8]"
+              >
+                Clear filters
+              </Button>
+            )}
+          </div>
         </div>
+
+        {/* Data sparse warning */}
+        {isDataSparse && !isSeeding && (
+          <div className="mb-2 px-2 py-1 rounded bg-amber-500/10 border border-amber-500/20">
+            <span className="font-mono text-[8px] text-amber-400">
+              ⚠ Low data — only {chainsWithTokens} chains with {totalTokens} tokens. Click "Load Data" to seed the database.
+            </span>
+          </div>
+        )}
+        {seedError && (
+          <div className="mb-2 px-2 py-1 rounded bg-red-500/10 border border-red-500/20">
+            <span className="font-mono text-[8px] text-red-400">
+              Seed error: {seedError}
+            </span>
+          </div>
+        )}
 
         {/* Chain Filter Pills */}
         <div className="flex flex-wrap gap-1.5">

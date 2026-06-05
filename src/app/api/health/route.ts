@@ -17,6 +17,7 @@ interface HealthResponse {
   status: 'ok' | 'degraded' | 'critical';
   timestamp: string;
   uptime: number;
+  seedNeeded: boolean;
   database: SectionCheck;
   dataAvailability: SectionCheck;
   apiKeys: SectionCheck;
@@ -77,6 +78,15 @@ export async function GET() {
     dataQualityGate.status,
   );
 
+  // Determine if seeding is needed (fewer than 50 tokens in DB)
+  let seedNeeded = false;
+  try {
+    const tokenCount = await db.token.count();
+    seedNeeded = tokenCount < 50;
+  } catch {
+    seedNeeded = true;
+  }
+
   // Recommendations
   const recommendations = buildRecommendations(
     database,
@@ -90,6 +100,7 @@ export async function GET() {
     status,
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
+    seedNeeded,
     database,
     dataAvailability,
     apiKeys,

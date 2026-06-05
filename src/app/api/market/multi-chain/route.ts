@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { normalizeChain, getChainVariants } from '@/lib/format';
+import { dexScreenerClient, type DexScreenerPair } from '@/lib/services/data-sources/dexscreener-client';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -67,6 +68,79 @@ function getDbChainValues(chainKey: string): string[] {
 
 const SUPPORTED_CHAINS = ['SOL', 'ETH', 'BASE', 'BSC', 'MATIC', 'ARB', 'OP', 'AVAX'];
 
+/** Map our canonical chain keys to DexScreener search terms */
+const CHAIN_TO_DEXSCREENER_QUERY: Record<string, string> = {
+  SOL: 'solana',
+  ETH: 'ethereum',
+  BSC: 'bsc',
+  BASE: 'base',
+  ARB: 'arbitrum',
+  MATIC: 'polygon',
+  AVAX: 'avalanche',
+  OP: 'optimism',
+};
+
+const MIN_TOKENS_PER_CHAIN = 5;
+
+// ============================================================
+// DEXSCREENER ENRICHMENT
+// ============================================================
+
+/** Convert a DexScreener pair to a normalized token shape that matches DB tokens */
+function dexPairToToken(pair: DexScreenerPair) {
+  const chainKey = normalizeChain(pair.chainId);
+  return {
+    id: `dex-${pair.pairAddress}`,
+    symbol: (pair.baseToken?.symbol || '').toUpperCase(),
+    name: pair.baseToken?.name || '',
+    chain: chainKey,
+    priceUsd: parseFloat(pair.priceUsd || '0') || 0,
+    volume24h: pair.volume?.h24 || 0,
+    marketCap: pair.marketCap || pair.fdv || 0,
+    liquidity: pair.liquidity?.usd || 0,
+    priceChange5m: pair.priceChange?.m5 || 0,
+    priceChange15m: pair.priceChange?.m15 || 0,
+    priceChange1h: pair.priceChange?.h1 || 0,
+    priceChange6h: pair.priceChange?.h6 || 0,
+    priceChange24h: pair.priceChange?.h24 || 0,
+  };
+}
+
+/** Fetch tokens from DexScreener for chains that have insufficient DB data */
+async function enrichFromDexScreener(
+  chainsNeedingEnrichment: string[],
+): Promise<typeof normalizedTokens> {
+  const enriched: typeof normalizedTokens = [];
+
+  for (const chainKey of chainsNeedingEnrichment) {
+    const query = CHAIN_TO_DEXSCREENER_QUERY[chainKey];
+    if (!query) continue;
+
+    try {
+      console.log(`[/api/market/multi-chain] Enriching ${chainKey} from DexScreener (query: "${query}")`);
+      const pairs = await dexScreenerClient.searchTokenByName(query);
+      // Filter to only pairs on this chain
+      const chainNorm = dexScreenerClient.normalizeChain(query);
+      const filtered = pairs.filter(p => dexScreenerClient.normalizeChain(p.chainId) === chainNorm);
+
+      // Sort by volume, take top 20
+      filtered.sort((a, b) => (b.volume?.h24 || 0) - (a.volume?.h24 || 0));
+      const topPairs = filtered.slice(0, 20);
+
+      for (const pair of topPairs) {
+        const token = dexPairToToken(pair);
+        if (SUPPORTED_CHAINS.includes(token.chain)) {
+          enriched.push(token as any);
+        }
+      }
+    } catch (err) {
+      console.warn(`[/api/market/multi-chain] DexScreener enrichment failed for ${chainKey}:`, err);
+    }
+  }
+
+  return enriched;
+}
+
 // ============================================================
 // GET HANDLER
 // ============================================================
@@ -109,6 +183,39 @@ export async function GET(request: NextRequest) {
       ...t,
       chain: normalizeChainKey(t.chain),
     })).filter(t => SUPPORTED_CHAINS.includes(t.chain));
+
+    // ============================================================
+    // DEXSCREENER ENRICHMENT: Fill gaps where DB has < 5 tokens
+    // ============================================================
+    const tokensPerChain: Record<string, number> = {};
+    for (const chain of requestedChains) {
+      tokensPerChain[chain] = normalizedTokens.filter(t => t.chain === chain).length;
+    }
+
+    const chainsNeedingEnrichment = requestedChains.filter(
+      chain => tokensPerChain[chain] < MIN_TOKENS_PER_CHAIN
+    );
+
+    let enrichmentSource: string | null = null;
+    if (chainsNeedingEnrichment.length > 0) {
+      const enriched = await enrichFromDexScreener(chainsNeedingEnrichment);
+
+      // Merge: add enriched tokens that don't already exist by symbol+chain
+      const existingKeys = new Set(
+        normalizedTokens.map(t => `${t.symbol.toUpperCase()}-${t.chain}`)
+      );
+      for (const token of enriched) {
+        const key = `${token.symbol.toUpperCase()}-${token.chain}`;
+        if (!existingKeys.has(key)) {
+          normalizedTokens.push(token);
+          existingKeys.add(key);
+        }
+      }
+
+      if (enriched.length > 0) {
+        enrichmentSource = `dexscreener (${chainsNeedingEnrichment.join(',')})`;
+      }
+    }
 
     // ============================================================
     // 1. CHAIN SUMMARY
@@ -260,10 +367,11 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({
       data: response,
       error: null,
-      source: 'db',
+      source: enrichmentSource ? `db+${enrichmentSource}` : 'db',
       chains: requestedChains,
       metric,
       topN,
+      enrichment: enrichmentSource ? { enrichedChains: chainsNeedingEnrichment, source: 'dexscreener' } : null,
     });
   } catch (error) {
     console.error('[/api/market/multi-chain] Error:', error);

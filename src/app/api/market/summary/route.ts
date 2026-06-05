@@ -6,6 +6,11 @@ let cachedSummary: any = null;
 let cachedAt = 0;
 const CACHE_TTL = 60_000; // 60 seconds
 
+// In-memory cache for Fear & Greed Index
+let cachedFearGreed: number | null = null;
+let cachedFearGreedAt = 0;
+const FEAR_GREED_CACHE_TTL = 300_000; // 5 minutes
+
 /**
  * GET /api/market/summary
  *
@@ -77,6 +82,35 @@ export async function GET() {
 }
 
 // ============================================================
+// Fear & Greed Index (alternative.me — free, no key needed)
+// ============================================================
+
+async function fetchFearGreedIndex(): Promise<number> {
+  // Return cached value if fresh
+  if (cachedFearGreed !== null && Date.now() - cachedFearGreedAt < FEAR_GREED_CACHE_TTL) {
+    return cachedFearGreed;
+  }
+
+  try {
+    const res = await fetch('https://api.alternative.me/fng/?limit=1', {
+      headers: { 'Accept': 'application/json' },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return cachedFearGreed ?? 50;
+    const data = await res.json();
+    const value = parseInt(data?.data?.[0]?.value ?? '50', 10);
+    if (!isNaN(value) && value >= 0 && value <= 100) {
+      cachedFearGreed = value;
+      cachedFearGreedAt = Date.now();
+      return value;
+    }
+    return cachedFearGreed ?? 50;
+  } catch {
+    return cachedFearGreed ?? 50;
+  }
+}
+
+// ============================================================
 // CoinGecko via coinGeckoClient (rate-limited, cached)
 // ============================================================
 
@@ -105,7 +139,7 @@ async function fetchFromCoinGecko() {
       totalVolume24h: globalData?.total_volume?.usd ?? 0,
       btcDominance: globalData?.market_cap_percentage?.btc ?? 0,
       ethDominance: globalData?.market_cap_percentage?.eth ?? 0,
-      fearGreedIndex: 50,
+      fearGreedIndex: await fetchFearGreedIndex(),
       lastUpdated: Date.now(),
     };
   } catch {
@@ -156,7 +190,7 @@ async function fetchFromDatabase() {
     ethDominance: eth?.marketCap && totalMarketCap._sum.marketCap
       ? (eth.marketCap / totalMarketCap._sum.marketCap) * 100
       : 0,
-    fearGreedIndex: 50,
+    fearGreedIndex: cachedFearGreed ?? 50,
     lastUpdated: Date.now(),
   };
 }

@@ -1,6 +1,7 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { useCryptoStore, type MarketRegimeData } from '@/store/crypto-store';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -343,74 +344,53 @@ export default function MarketRegimePanel() {
     setMarketRegimeLoading,
   } = useCryptoStore();
 
-  const [error, setError] = useState<string | null>(null);
   const [timeline, setTimeline] = useState<TimelineSegment[]>([]);
   const [countdown, setCountdown] = useState(60);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const isVisibleRef = useRef(true);
 
-  // ---- FETCH REGIME DATA ----
-  const fetchRegime = useCallback(async () => {
-    setMarketRegimeLoading(true);
-    setError(null);
-    try {
+  // ---- FETCH REGIME DATA via useQuery ----
+  const { refetch: refetchRegime, error: queryError } = useQuery({
+    queryKey: ['regime-assess'],
+    queryFn: async () => {
       const res = await fetch('/api/regime/assess');
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}`);
-      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = await res.json();
-      if (json.error) {
-        throw new Error(json.error);
-      }
-      const data: MarketRegimeData = json.data;
+      if (json.error) throw new Error(json.error);
+      return json.data as MarketRegimeData;
+    },
+    refetchInterval: 60000,
+    staleTime: 30000,
+    select: (data) => {
+      // Sync to store whenever data changes
       setMarketRegime(data);
       setTimeline(generateTimeline(data.regime));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to fetch regime');
-    } finally {
-      setMarketRegimeLoading(false);
-    }
-  }, [setMarketRegime, setMarketRegimeLoading]);
+      return data;
+    },
+  });
 
-  // ---- AUTO-REFRESH ----
+  // Sync loading state from query
   useEffect(() => {
-    fetchRegime();
+    setMarketRegimeLoading(false);
+  }, [marketRegime, setMarketRegimeLoading]);
 
-    // Visibility change handler
-    const handleVisibility = () => {
-      isVisibleRef.current = !document.hidden;
-      if (!document.hidden) {
-        fetchRegime();
-        setCountdown(60);
-      }
-    };
-    document.addEventListener('visibilitychange', handleVisibility);
-
-    // Countdown timer
+  // Countdown timer
+  useEffect(() => {
     countdownRef.current = setInterval(() => {
-      if (isVisibleRef.current) {
-        setCountdown((prev) => {
-          if (prev <= 1) return 60;
-          return prev - 1;
-        });
-      }
+      setCountdown((prev) => {
+        if (prev <= 1) {
+          refetchRegime();
+          return 60;
+        }
+        return prev - 1;
+      });
     }, 1000);
 
-    // Auto-refresh every 60s
-    intervalRef.current = setInterval(() => {
-      if (isVisibleRef.current) {
-        fetchRegime();
-        setCountdown(60);
-      }
-    }, 60000);
-
     return () => {
-      document.removeEventListener('visibilitychange', handleVisibility);
-      if (intervalRef.current) clearInterval(intervalRef.current);
       if (countdownRef.current) clearInterval(countdownRef.current);
     };
-  }, [fetchRegime]);
+  }, [refetchRegime]);
+
+  const error = queryError ? (queryError instanceof Error ? queryError.message : 'Failed to fetch regime') : null;
 
   // ---- DERIVED DATA ----
   const regime = marketRegime?.regime ?? 'RANGING';
@@ -540,7 +520,7 @@ export default function MarketRegimePanel() {
             {error}
           </p>
           <Button
-            onClick={fetchRegime}
+            onClick={() => refetchRegime()}
             className="mt-4 h-7 text-[10px] font-mono font-bold bg-cyan-500 hover:bg-cyan-600 text-black px-4"
           >
             <RefreshCw className="h-3 w-3 mr-1.5" />
@@ -581,7 +561,7 @@ export default function MarketRegimePanel() {
             <Button
               variant="ghost"
               size="sm"
-              onClick={fetchRegime}
+              onClick={() => refetchRegime()}
               disabled={marketRegimeLoading}
               className="h-6 text-[9px] font-mono px-2 text-[#94a3b8] hover:text-cyan-400 hover:bg-cyan-500/10"
             >

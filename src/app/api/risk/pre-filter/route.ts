@@ -107,6 +107,11 @@ export async function POST(request: NextRequest) {
         warnings: result.warnings,
         riskScore: result.riskScore,
         adjustedConfidence: result.adjustedConfidence,
+        filterDetails: result.filterDetails.map(fd => ({
+          filterName: fd.filterName,
+          passed: fd.passed,
+          reason: fd.reason,
+        })),
       },
     });
   } catch (error) {

@@ -1,6 +1,7 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Progress } from '@/components/ui/progress';
@@ -146,33 +147,25 @@ function getMethodLabel(method: string): string {
 
 export default function AllocationDashboard() {
   const [data, setData] = useState<DashboardData | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
 
-  const fetchDashboard = useCallback(async () => {
-    try {
+  // Fetch dashboard data via useQuery
+  const { isLoading: loading, error: queryError, refetch: fetchDashboard } = useQuery({
+    queryKey: ['capital-allocation-dashboard'],
+    queryFn: async () => {
       const res = await fetch('/api/capital-allocation/dashboard');
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = await res.json();
       if (json.data) {
         setData(json.data as DashboardData);
-        setError(null);
-      } else {
-        setError(json.error || 'No data returned');
+        return json.data as DashboardData;
       }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to fetch');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+      throw new Error(json.error || 'No data returned');
+    },
+    refetchInterval: 10000,
+    staleTime: 5000,
+  });
 
-  // Auto-refresh every 10 seconds
-  useEffect(() => {
-    fetchDashboard();
-    const interval = setInterval(fetchDashboard, 10000);
-    return () => clearInterval(interval);
-  }, [fetchDashboard]);
+  const error = queryError ? (queryError instanceof Error ? queryError.message : 'Failed to fetch') : null;
 
   if (loading) {
     return (

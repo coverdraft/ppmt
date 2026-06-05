@@ -89,10 +89,12 @@ interface MergedSignal {
 
 const SIGNAL_COLORS: Record<string, { bg: string; text: string; border: string }> = {
   RUG_PULL: { bg: 'bg-red-500/15', text: 'text-red-400', border: 'border-red-500/30' },
+  SMART_MONEY: { bg: 'bg-emerald-500/15', text: 'text-emerald-400', border: 'border-emerald-500/30' },
   SMART_MONEY_ENTRY: { bg: 'bg-emerald-500/15', text: 'text-emerald-400', border: 'border-emerald-500/30' },
   LIQUIDITY_TRAP: { bg: 'bg-yellow-500/15', text: 'text-yellow-400', border: 'border-yellow-500/30' },
   V_SHAPE: { bg: 'bg-cyan-500/15', text: 'text-cyan-400', border: 'border-cyan-500/30' },
   DIVERGENCE: { bg: 'bg-purple-500/15', text: 'text-purple-400', border: 'border-purple-500/30' },
+  PATTERN: { bg: 'bg-sky-500/15', text: 'text-sky-400', border: 'border-sky-500/30' },
   CUSTOM: { bg: 'bg-gray-500/15', text: 'text-gray-400', border: 'border-gray-500/30' },
   // Predictive signal types
   REGIME_CHANGE: { bg: 'bg-violet-500/15', text: 'text-violet-400', border: 'border-violet-500/30' },
@@ -110,10 +112,12 @@ const SIGNAL_COLORS: Record<string, { bg: string; text: string; border: string }
 
 const SIGNAL_ICONS: Record<string, React.ElementType> = {
   RUG_PULL: AlertTriangle,
+  SMART_MONEY: Brain,
   SMART_MONEY_ENTRY: Brain,
   LIQUIDITY_TRAP: AlertTriangle,
   V_SHAPE: TrendingUp,
   DIVERGENCE: Activity,
+  PATTERN: Activity,
   REGIME_CHANGE: Activity,
   BOT_SWARM: Zap,
   WHALE_MOVEMENT: Waves,
@@ -137,11 +141,12 @@ const SOURCE_CONFIG: Record<SignalSource, { label: string; color: string; dot: s
 
 const FILTER_OPTIONS = [
   'ALL',
-  // Real-time signals
-  'RUG_PULL', 'SMART_MONEY_ENTRY', 'LIQUIDITY_TRAP', 'V_SHAPE', 'DIVERGENCE',
-  // Predictive signals
+  // Real-time signals (must match DB Signal.type values)
+  'RUG_PULL', 'SMART_MONEY', 'SMART_MONEY_ENTRY', 'LIQUIDITY_TRAP', 'V_SHAPE', 'DIVERGENCE', 'PATTERN',
+  // Predictive signals (must match PredictiveSignal.signalType values)
   'REGIME_CHANGE', 'BOT_SWARM', 'WHALE_MOVEMENT', 'LIQUIDITY_DRAIN',
-  'CORRELATION_BREAK', 'ANOMALY', 'SMART_MONEY_POSITIONING', 'VOLATILITY_REGIME',
+  'CORRELATION_BREAK', 'ANOMALY', 'CYCLE_POSITION', 'SECTOR_ROTATION',
+  'MEAN_REVERSION_ZONE', 'SMART_MONEY_POSITIONING', 'VOLATILITY_REGIME',
 ];
 
 // ============================================================

@@ -33,6 +33,7 @@ import {
   CollapsibleContent,
 } from '@/components/ui/collapsible';
 import { motion, AnimatePresence } from 'framer-motion';
+import { toast } from 'sonner';
 import {
   Zap,
   Target,
@@ -55,6 +56,7 @@ import {
   CheckCircle2,
   Clock,
   XCircle,
+  Loader2,
   TrendingUp,
   DollarSign,
   Percent,
@@ -631,24 +633,96 @@ function SystemDetail({ system, onBack }: { system: TradingSystem; onBack: () =>
 
   const statusMutation = useMutation({
     mutationFn: async ({ id, status }: { id: string; status: SystemStatus }) => {
-      try {
-        const res = await fetch(`/api/trading-systems/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status }) });
-        if (!res.ok) throw new Error('Failed');
-        return res.json();
-      } catch { return { success: true }; }
+      const body: Record<string, unknown> = {};
+      if (status === 'active') { body.isActive = true; body.isPaperTrading = false; }
+      else if (status === 'paper') { body.isActive = true; body.isPaperTrading = true; }
+      else { body.isActive = false; body.isPaperTrading = false; }
+      const res = await fetch(`/api/trading-systems/${id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      if (!res.ok) throw new Error('Failed to update status');
+      return res.json();
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['trading-systems'] }),
+    onSuccess: (_data, variables) => {
+      toast.success(`System set to ${variables.status}`);
+      queryClient.invalidateQueries({ queryKey: ['trading-systems'] });
+    },
+    onError: () => toast.error('Failed to update status'),
+  });
+
+  const cloneMutation = useMutation({
+    mutationFn: async () => {
+      const res = await fetch('/api/trading-systems', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: `${system.name} (Clone)`,
+          description: `Cloned from ${system.name}`,
+          category: system.category,
+          icon: system.icon,
+          primaryTimeframe: system.config.entrySignal.timeWindow <= 15 ? '5m' : '1h',
+          stopLossPct: system.config.exitSignal.stopLoss,
+          takeProfitPct: system.config.exitSignal.takeProfit,
+          maxPositionPct: system.config.capitalAllocation.percentage,
+          maxOpenPositions: system.config.riskManagement.maxConcurrentTrades,
+          allocationMethod: system.config.capitalAllocation.method.toUpperCase().replace(/ /g, '_'),
+          assetFilter: system.config.assetFilter,
+          phaseConfig: system.config.phaseConfig,
+          entrySignal: system.config.entrySignal,
+          executionConfig: system.config.execution,
+          exitSignal: system.config.exitSignal,
+          bigDataContext: system.config.bigDataContext,
+          parentSystemId: system.id,
+          isActive: false,
+          isPaperTrading: false,
+        }),
+      });
+      if (!res.ok) throw new Error('Failed to clone system');
+      return res.json();
+    },
+    onSuccess: () => {
+      toast.success('System cloned');
+      queryClient.invalidateQueries({ queryKey: ['trading-systems'] });
+      onBack();
+    },
+    onError: () => toast.error('Failed to clone system'),
+  });
+
+  const backtestMutation = useMutation({
+    mutationFn: async () => {
+      const now = new Date();
+      const threeMonthsAgo = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
+      const res = await fetch('/api/backtest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          systemId: system.id,
+          mode: 'HISTORICAL',
+          periodStart: threeMonthsAgo.toISOString(),
+          periodEnd: now.toISOString(),
+          initialCapital: 10000,
+          allocationMethod: system.config.capitalAllocation.method.toUpperCase().replace(/ /g, '_'),
+        }),
+      });
+      if (!res.ok) throw new Error('Failed to create backtest');
+      return res.json();
+    },
+    onSuccess: () => {
+      toast.success('Backtest created — check Backtesting Lab for results');
+      queryClient.invalidateQueries({ queryKey: ['backtests'] });
+    },
+    onError: () => toast.error('Failed to create backtest'),
   });
 
   const deleteMutation = useMutation({
     mutationFn: async (id: string) => {
-      try {
-        const res = await fetch(`/api/trading-systems/${id}`, { method: 'DELETE' });
-        if (!res.ok) throw new Error('Failed');
-        return res.json();
-      } catch { return { success: true }; }
+      const res = await fetch(`/api/trading-systems/${id}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}));
+        throw new Error(json.error || 'Failed to delete');
+      }
+      return res.json();
     },
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ['trading-systems'] }); onBack(); },
+    onSuccess: () => { toast.success('System deleted'); queryClient.invalidateQueries({ queryKey: ['trading-systems'] }); onBack(); },
+    onError: (err: Error) => toast.error(err.message || 'Failed to delete system'),
   });
 
   return (
@@ -687,11 +761,11 @@ function SystemDetail({ system, onBack }: { system: TradingSystem; onBack: () =>
               <Square className="h-3 w-3 mr-1" /> Deactivate
             </Button>
           )}
-          <Button size="sm" className="h-6 px-2 text-[10px] font-mono bg-[#d4af37]/20 text-[#d4af37] hover:bg-[#d4af37]/30 border border-[#d4af37]/30">
-            <Beaker className="h-3 w-3 mr-1" /> Backtest
+          <Button size="sm" onClick={() => backtestMutation.mutate()} disabled={backtestMutation.isPending} className="h-6 px-2 text-[10px] font-mono bg-[#d4af37]/20 text-[#d4af37] hover:bg-[#d4af37]/30 border border-[#d4af37]/30">
+            {backtestMutation.isPending ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <Beaker className="h-3 w-3 mr-1" />} Backtest
           </Button>
-          <Button size="sm" variant="ghost" className="h-6 px-2 text-[10px] font-mono text-[#64748b] hover:text-[#e2e8f0]">
-            <Copy className="h-3 w-3 mr-1" /> Clone
+          <Button size="sm" variant="ghost" onClick={() => cloneMutation.mutate()} disabled={cloneMutation.isPending} className="h-6 px-2 text-[10px] font-mono text-[#64748b] hover:text-[#e2e8f0]">
+            {cloneMutation.isPending ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <Copy className="h-3 w-3 mr-1" />} Clone
           </Button>
           <Button size="sm" variant="ghost" onClick={() => deleteMutation.mutate(system.id)} className="h-6 px-2 text-[10px] font-mono text-red-400/60 hover:text-red-400">
             <Trash2 className="h-3 w-3 mr-1" /> Delete
