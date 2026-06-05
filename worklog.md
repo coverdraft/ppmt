@@ -758,3 +758,35 @@ Stage Summary:
 - Meta-Model: 12 engines with 8.3% weight each (baseline)
 - Portfolio: Empty portfolio returns zeros (expected — no positions yet)
 - Alpha Ranking: Returns empty (needs brain cycle to generate data)
+---
+Task ID: 1
+Agent: Main Agent
+Task: Implement Two-Mode Workflow (Research/Operation) with step-by-step guided pipeline
+
+Work Log:
+- Analyzed full codebase: 70+ API routes, 40+ services, 26 tabs, 47 DB models
+- Designed Two-Mode Architecture: RESEARCH (6 steps) and OPERATION (6 steps)
+- Created OperationModeProvider with localStorage persistence
+- Created WorkflowStepper components: ModeSwitcher, WorkflowStepperCompact, WorkflowGuidePanel
+- Integrated mode switcher into TopBar alongside Dashboard Level selector
+- Updated Sidebar to highlight current workflow step with colored dots (cyan=Research, amber=Operation)
+- Updated QuickStartGuide to show mode-aware pipeline cards with step completion tracking
+- Tested all 70+ API endpoints end-to-end
+- Verified: Health (200), Market Summary with live CoinGecko data (BTC $62,181), Brain Status (4,997 tokens, 37,507 candles)
+- Verified: Risk Pre-Filter POST works (passed: false, riskScore: 0.8)
+- Verified: Trading System creation works (201 created, ID: cmq0isa550001sf5j1hacxn5x)
+- Verified: Portfolio Intelligence POST works (approved: true, impactScore: 0.5)
+- Verified: Execution Cost POST works (totalCost: 0.70%, slippage: 0.01%)
+- Verified: Brain Pipeline starts (message: Brain cycle started with $10 capital)
+- Verified: Market Regime returns TRENDING_BULL with 0.73 confidence
+- Verified: Capital Allocation has multiple methods including Kelly Modified
+- Verified: Kill Switch returns globalPause: false (system active)
+- Committed and pushed to repo
+
+Stage Summary:
+- Two-Mode workflow fully implemented and integrated into UI
+- All API endpoints tested and confirmed working
+- Research mode pipeline: Scan → Analyze → Filter → Design → Backtest → Optimize
+- Operation mode pipeline: Select → Configure → Paper Trade → Monitor → Execute → Control
+- Floating Workflow Guide Panel for step-by-step guidance
+- Step completion tracking persisted to localStorage
