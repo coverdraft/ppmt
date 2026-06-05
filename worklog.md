@@ -231,3 +231,30 @@ Stage Summary:
 - Removed: markVerified(), verifiedChecks map, null-based present fields, MANUAL_CHECKLIST/MANUAL confidence
 - Added: verifyControl() private helper, dynamic imports, actual runtime checks, HIGH/MEDIUM/LOW confidence
 - Build status: No new TypeScript errors
+---
+Task ID: fix-arch-gaps
+Agent: Super Z (main)
+Task: Fix and improve 6 architectural gaps in CryptoQuant Terminal
+
+Work Log:
+- Synced repo (already up to date)
+- Read all key service files: SDE, PTE, TDE, FLE, KillSwitch, AlertEngine, RiskControlsVerifier
+- Discovered 5 of 6 original gaps were already resolved in prior commits
+- Identified real issues: TypeScript errors in core services, missing Prisma field, incomplete RiskControlsVerifier
+- Fixed PaperPosition interface: added strategyName field
+- Fixed Prisma schema: added lowestPrice to PaperTradingPosition
+- Fixed portfolio-review/route.ts: type-safe numeric extraction from backtest records
+- Fixed pipeline/route.ts: removed incorrect InstanceType patterns
+- Fix lifecycle/route.ts: added createdAt to select query
+- Fixed SDE correlation cache access: proper type casting
+- Fixed strategy-state-manager: added SDE_VALIDATION_FAILED to TriggerReason union
+- Rewrote risk-controls-verifier: 20 comprehensive checks (was 10 shallow checks)
+- Ran prisma db push and prisma generate
+- Verified: 0 TypeScript errors in core services
+- Committed and pushed (21412ab)
+
+Stage Summary:
+- Original 6 gaps: 5 already resolved, 1 (RiskControlsVerifier) rewritten with real pipeline verification
+- 8 files modified with 292 insertions, 66 deletions
+- Core TypeScript errors reduced from 36 to 0 (remaining 15 are in UI components, pre-existing)
+- RiskControlsVerifier now has 20 checks across 4 sections: config, mechanisms, SDE pipeline, integration wiring
