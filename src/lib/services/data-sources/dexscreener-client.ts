@@ -78,7 +78,7 @@ const INTER_REQUEST_DELAY = 300; // ms between requests
 export class DexScreenerClient {
   private lastRequestTime = 0;
 
-  private async rateLimitedFetch(url: string): Promise<Response> {
+  private async rateLimitedFetch(url: string, retriesLeft = 3): Promise<Response> {
     const elapsed = Date.now() - this.lastRequestTime;
     if (elapsed < INTER_REQUEST_DELAY) {
       await new Promise(r => setTimeout(r, INTER_REQUEST_DELAY - elapsed));
@@ -91,9 +91,15 @@ export class DexScreenerClient {
     });
 
     if (res.status === 429) {
-      console.log('[DexScreener] Rate limited, waiting 60s...');
-      await new Promise(r => setTimeout(r, 60000));
-      return this.rateLimitedFetch(url);
+      if (retriesLeft <= 1) {
+        console.warn('[DexScreener] Rate limited and retries exhausted, returning null');
+        return res;
+      }
+      // Shorter backoff: 5s first retry, max 2 retries total
+      const delayMs = retriesLeft <= 2 ? 5000 : 10000;
+      console.log(`[DexScreener] Rate limited, retrying in ${delayMs / 1000}s... (${retriesLeft - 1} retries left)`);
+      await new Promise(r => setTimeout(r, delayMs));
+      return this.rateLimitedFetch(url, retriesLeft - 1);
     }
 
     return res;

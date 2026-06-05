@@ -14,6 +14,8 @@ export async function POST(request: NextRequest) {
     const backtestDataBridge = bdbModule.backtestDataBridge;
     const tseModule = await import('@/lib/services/strategy/trading-system-engine');
     const tradingSystemEngine = tseModule.tradingSystemEngine;
+    const pdaModule = await import('@/lib/services/strategy/parameter-drift-analyzer');
+    const parameterDriftAnalyzer = pdaModule.parameterDriftAnalyzer;
 
     const body = await request.json();
     const {
@@ -22,7 +24,7 @@ export async function POST(request: NextRequest) {
       endDate,
       windowCount = 5,
       trainRatio = 0.7,
-      initialCapital = 10,
+      initialCapital = 1000,
       minWFE = 0.5,
       anchored = false,
       chain = 'SOL',
@@ -104,6 +106,12 @@ export async function POST(request: NextRequest) {
     // Generate human-readable summary
     const summary = walkForwardEngine.generateWFASummary(wfaResult);
 
+    // Run Parameter Drift Analysis
+    const driftResult = parameterDriftAnalyzer.analyzeDrift(
+      wfaResult.windows,
+      systemName,
+    );
+
     return NextResponse.json({
       data: {
         id: wfaResult.id,
@@ -129,6 +137,19 @@ export async function POST(request: NextRequest) {
           inSampleTrades: w.inSampleResult?.totalTrades ?? 0,
           outOfSampleTrades: w.outOfSampleResult?.totalTrades ?? 0,
         })),
+        parameterDrift: {
+          overallDriftScore: driftResult.overallDriftScore,
+          isStable: driftResult.isStable,
+          windowCount: driftResult.windowCount,
+          recommendation: driftResult.recommendation,
+          parameterDrifts: driftResult.parameterDrifts.map(d => ({
+            parameter: d.parameter,
+            meanValue: d.meanValue,
+            stdDev: d.stdDev,
+            coefficientOfVariation: d.coefficientOfVariation,
+            driftCategory: d.driftCategory,
+          })),
+        },
         summary,
         tokensAnalyzed: tokenData.length,
       },

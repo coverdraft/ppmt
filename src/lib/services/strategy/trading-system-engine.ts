@@ -332,7 +332,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
     assetFilter: {
       minLiquidityUsd: 5000,
       maxAgeHours: 6,
-      chains: ['solana', 'ethereum', 'base'],
+      chains: ['SOL', 'ETH', 'BASE'],
       tokenTypes: ['new_listing', 'presale'],
       excludeRugScoreAbove: 60,
       maxBotRatio: 0.7,
@@ -358,7 +358,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       timeInForce: 'IOC',
     },
     exitSignal: {
-      stopLossPct: -8,
+      stopLossPct: 8,
       takeProfitPct: 50,
       trailingStopPct: 15,
       trailingActivationPct: 20,
@@ -400,7 +400,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       minLiquidityUsd: 20000,
       maxAgeHours: 72,
       minVolume24h: 5000,
-      chains: ['solana', 'base', 'ethereum'],
+      chains: ['SOL', 'BASE', 'ETH'],
       tokenTypes: ['meme', 'social'],
       excludeRugScoreAbove: 50,
       maxBotRatio: 0.6,
@@ -428,7 +428,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       timeInForce: 'GTC',
     },
     exitSignal: {
-      stopLossPct: -12,
+      stopLossPct: 12,
       takeProfitPct: 40,
       trailingStopPct: 20,
       trailingActivationPct: 15,
@@ -473,7 +473,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
     assetFilter: {
       minLiquidityUsd: 15000,
       maxAgeHours: 168,
-      chains: ['solana', 'ethereum'],
+      chains: ['SOL', 'ETH'],
       tokenTypes: ['any'],
       maxBotRatio: 0.8,
       customFilters: { requireProfitableBotActivity: true },
@@ -499,7 +499,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       timeInForce: 'IOC',
     },
     exitSignal: {
-      stopLossPct: -10,
+      stopLossPct: 10,
       takeProfitPct: 30,
       trailingStopPct: 12,
       trailingActivationPct: 10,
@@ -541,7 +541,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
     assetFilter: {
       minLiquidityUsd: 10000,
       maxAgeHours: 48,
-      chains: ['solana', 'ethereum', 'base', 'arbitrum'],
+      chains: ['SOL', 'ETH', 'BASE', 'ARBITRUM'],
       tokenTypes: ['new_listing'],
       excludeRugScoreAbove: 55,
       maxBotRatio: 0.75,
@@ -567,7 +567,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       timeInForce: 'IOC',
     },
     exitSignal: {
-      stopLossPct: -8,
+      stopLossPct: 8,
       takeProfitPct: 25,
       trailingStopPct: 10,
       trailingActivationPct: 12,
@@ -611,7 +611,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       minLiquidityUsd: 50000,
       minMarketCapUsd: 100000,
       minHolders: 100,
-      chains: ['solana', 'ethereum', 'base'],
+      chains: ['SOL', 'ETH', 'BASE'],
       tokenTypes: ['any'],
       minSmartMoneyHolders: 2,
       excludeRugScoreAbove: 40,
@@ -638,7 +638,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       timeInForce: 'GTC',
     },
     exitSignal: {
-      stopLossPct: -15,
+      stopLossPct: 15,
       takeProfitPct: 35,
       trailingStopPct: 10,
       trailingActivationPct: 15,
@@ -683,7 +683,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
     assetFilter: {
       minLiquidityUsd: 30000,
       minHolders: 50,
-      chains: ['solana', 'ethereum', 'base', 'arbitrum'],
+      chains: ['SOL', 'ETH', 'BASE', 'ARBITRUM'],
       tokenTypes: ['any'],
       minSmartMoneyHolders: 1,
       excludeRugScoreAbove: 45,
@@ -710,7 +710,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       timeInForce: 'GTC',
     },
     exitSignal: {
-      stopLossPct: -15,
+      stopLossPct: 15,
       takeProfitPct: 40,
       trailingStopPct: 12,
       trailingActivationPct: 15,
@@ -755,7 +755,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
     assetFilter: {
       minLiquidityUsd: 20000,
       minHolders: 30,
-      chains: ['solana', 'ethereum', 'base'],
+      chains: ['SOL', 'ETH', 'BASE'],
       tokenTypes: ['any'],
       minSmartMoneyHolders: 1,
       excludeRugScoreAbove: 45,
@@ -782,7 +782,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       timeInForce: 'GTC',
     },
     exitSignal: {
-      stopLossPct: -12,
+      stopLossPct: 12,
       takeProfitPct: 35,
       trailingStopPct: 10,
       trailingActivationPct: 12,
@@ -824,7 +824,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
     assetFilter: {
       minLiquidityUsd: 30000,
       minHolders: 50,
-      chains: ['solana', 'ethereum', 'base'],
+      chains: ['SOL', 'ETH', 'BASE'],
       tokenTypes: ['any'],
       minSmartMoneyHolders: 2,
     },
@@ -849,7 +849,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       timeInForce: 'IOC',
     },
     exitSignal: {
-      stopLossPct: -8,
+      stopLossPct: 8,
       takeProfitPct: 15,
       timeBasedExitMin: 1440,
       exitConditions: ['stop_loss_hit', 'take_profit_hit', 'time_expired'],
@@ -891,7 +891,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       minMarketCapUsd: 500000,
       minHolders: 200,
       minVolume24h: 10000,
-      chains: ['solana', 'ethereum', 'base', 'arbitrum'],
+      chains: ['SOL', 'ETH', 'BASE', 'ARBITRUM'],
       tokenTypes: ['any'],
       excludeRugScoreAbove: 30,
     },
@@ -917,7 +917,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       timeInForce: 'GTC',
     },
     exitSignal: {
-      stopLossPct: -10,
+      stopLossPct: 10,
       takeProfitPct: 30,
       trailingStopPct: 8,
       trailingActivationPct: 10,
@@ -960,7 +960,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       minLiquidityUsd: 100000,
       minMarketCapUsd: 1000000,
       minHolders: 500,
-      chains: ['solana', 'ethereum', 'base'],
+      chains: ['SOL', 'ETH', 'BASE'],
       tokenTypes: ['any'],
       excludeRugScoreAbove: 25,
     },
@@ -986,7 +986,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       timeInForce: 'GTC',
     },
     exitSignal: {
-      stopLossPct: -8,
+      stopLossPct: 8,
       takeProfitPct: 20,
       timeBasedExitMin: 10080,
       exitConditions: ['stop_loss_hit', 'take_profit_hit', 'price_returned_to_mean', 'time_expired'],
@@ -1031,7 +1031,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       minMarketCapUsd: 500000,
       minHolders: 300,
       minVolume24h: 15000,
-      chains: ['solana', 'ethereum', 'base', 'arbitrum'],
+      chains: ['SOL', 'ETH', 'BASE', 'ARBITRUM'],
       tokenTypes: ['any'],
       excludeRugScoreAbove: 30,
     },
@@ -1057,7 +1057,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       timeInForce: 'GTC',
     },
     exitSignal: {
-      stopLossPct: -12,
+      stopLossPct: 12,
       takeProfitPct: 0, // Uses trailing only
       trailingStopPct: 8,
       trailingActivationPct: 5,
@@ -1098,7 +1098,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
     assetFilter: {
       minLiquidityUsd: 40000,
       minHolders: 100,
-      chains: ['solana', 'ethereum', 'base'],
+      chains: ['SOL', 'ETH', 'BASE'],
       tokenTypes: ['any'],
       excludeRugScoreAbove: 35,
     },
@@ -1123,7 +1123,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       timeInForce: 'IOC',
     },
     exitSignal: {
-      stopLossPct: -10,
+      stopLossPct: 10,
       takeProfitPct: 25,
       trailingStopPct: 8,
       trailingActivationPct: 10,
@@ -1165,7 +1165,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       minLiquidityUsd: 60000,
       minMarketCapUsd: 500000,
       minHolders: 200,
-      chains: ['solana', 'ethereum', 'base', 'arbitrum'],
+      chains: ['SOL', 'ETH', 'BASE', 'ARBITRUM'],
       tokenTypes: ['any'],
       excludeRugScoreAbove: 30,
     },
@@ -1191,7 +1191,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       timeInForce: 'GTC',
     },
     exitSignal: {
-      stopLossPct: -8,
+      stopLossPct: 8,
       takeProfitPct: 20,
       trailingStopPct: 6,
       trailingActivationPct: 8,
@@ -1237,7 +1237,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       minMarketCapUsd: 1000000,
       minHolders: 500,
       minVolume24h: 20000,
-      chains: ['solana', 'ethereum', 'base'],
+      chains: ['SOL', 'ETH', 'BASE'],
       tokenTypes: ['any'],
       excludeRugScoreAbove: 20,
       excludeWashTradeAbove: 5,
@@ -1265,7 +1265,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       timeInForce: 'GTC',
     },
     exitSignal: {
-      stopLossPct: -8,
+      stopLossPct: 8,
       takeProfitPct: 15,
       timeBasedExitMin: 20160,
       exitConditions: ['stop_loss_hit', 'take_profit_hit', 'rug_score_increased', 'liquidity_dropping', 'time_expired'],
@@ -1306,7 +1306,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       minMarketCapUsd: 5000000,
       minHolders: 1000,
       minVolume24h: 50000,
-      chains: ['solana', 'ethereum'],
+      chains: ['SOL', 'ETH'],
       tokenTypes: ['any'],
       excludeRugScoreAbove: 15,
       maxBotRatio: 0.25,
@@ -1333,7 +1333,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       timeInForce: 'GTC',
     },
     exitSignal: {
-      stopLossPct: -6,
+      stopLossPct: 6,
       takeProfitPct: 12,
       timeBasedExitMin: 43200,
       exitConditions: ['stop_loss_hit', 'take_profit_hit', 'liquidity_deteriorating', 'time_expired'],
@@ -1373,7 +1373,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       minLiquidityUsd: 500000,
       minMarketCapUsd: 10000000,
       minHolders: 5000,
-      chains: ['solana', 'ethereum', 'base'],
+      chains: ['SOL', 'ETH', 'BASE'],
       tokenTypes: ['established', 'defi', 'l1_l2'],
       excludeRugScoreAbove: 10,
       maxBotRatio: 0.2,
@@ -1400,7 +1400,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       timeInForce: 'GTC',
     },
     exitSignal: {
-      stopLossPct: -5,
+      stopLossPct: 5,
       takeProfitPct: 10,
       timeBasedExitMin: 86400,
       exitConditions: ['stop_loss_hit', 'take_profit_hit', 'holder_base_declining', 'time_expired'],
@@ -1441,7 +1441,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       minMarketCapUsd: 20000000,
       minHolders: 2000,
       minVolume24h: 100000,
-      chains: ['solana', 'ethereum'],
+      chains: ['SOL', 'ETH'],
       tokenTypes: ['established', 'l1_l2'],
       excludeRugScoreAbove: 10,
       maxBotRatio: 0.2,
@@ -1468,7 +1468,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       timeInForce: 'GTC',
     },
     exitSignal: {
-      stopLossPct: -5,
+      stopLossPct: 5,
       takeProfitPct: 8,
       timeBasedExitMin: 43200,
       exitConditions: ['stop_loss_hit', 'take_profit_hit', 'confidence_dropped', 'time_expired'],
@@ -1508,7 +1508,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       minLiquidityUsd: 50000,
       minMarketCapUsd: 500000,
       minHolders: 200,
-      chains: ['solana', 'ethereum', 'base'],
+      chains: ['SOL', 'ETH', 'BASE'],
       tokenTypes: ['any'],
       excludeRugScoreAbove: 30,
     },
@@ -1578,7 +1578,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
     operationType: 'SCALP',
     assetFilter: {
       minLiquidityUsd: 30000,
-      chains: ['solana', 'ethereum'],
+      chains: ['SOL', 'ETH'],
       tokenTypes: ['any'],
       maxBotRatio: 0.8,
       customFilters: { requireMEVActivity: true },
@@ -1604,7 +1604,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       timeInForce: 'IOC',
     },
     exitSignal: {
-      stopLossPct: -10,
+      stopLossPct: 10,
       takeProfitPct: 25,
       trailingStopPct: 8,
       trailingActivationPct: 10,
@@ -1646,7 +1646,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
     assetFilter: {
       minLiquidityUsd: 40000,
       minHolders: 100,
-      chains: ['solana', 'ethereum', 'base'],
+      chains: ['SOL', 'ETH', 'BASE'],
       tokenTypes: ['any'],
       maxBotRatio: 0.4,
       customFilters: { maxSniperHolderPct: 20 },
@@ -1673,7 +1673,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       timeInForce: 'GTC',
     },
     exitSignal: {
-      stopLossPct: -8,
+      stopLossPct: 8,
       takeProfitPct: 20,
       trailingStopPct: 7,
       trailingActivationPct: 10,
@@ -1716,7 +1716,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       minLiquidityUsd: 50000,
       minMarketCapUsd: 500000,
       minHolders: 300,
-      chains: ['solana', 'ethereum', 'base'],
+      chains: ['SOL', 'ETH', 'BASE'],
       tokenTypes: ['any'],
       excludeWashTradeAbove: 5,
       excludeRugScoreAbove: 25,
@@ -1743,7 +1743,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       timeInForce: 'GTC',
     },
     exitSignal: {
-      stopLossPct: -10,
+      stopLossPct: 10,
       takeProfitPct: 15,
       trailingStopPct: 6,
       trailingActivationPct: 8,
@@ -1784,7 +1784,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
     operationType: 'SCALP',
     assetFilter: {
       minLiquidityUsd: 20000,
-      chains: ['solana', 'ethereum', 'base'],
+      chains: ['SOL', 'ETH', 'BASE'],
       tokenTypes: ['any'],
       customFilters: { requireBotActivityHistory: true },
     },
@@ -1809,7 +1809,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       timeInForce: 'IOC',
     },
     exitSignal: {
-      stopLossPct: -12,
+      stopLossPct: 12,
       takeProfitPct: 30,
       trailingStopPct: 10,
       trailingActivationPct: 12,
@@ -1854,7 +1854,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       minLiquidityUsd: 50000,
       minMarketCapUsd: 200000,
       minHolders: 200,
-      chains: ['solana', 'ethereum', 'base', 'arbitrum'],
+      chains: ['SOL', 'ETH', 'BASE', 'ARBITRUM'],
       tokenTypes: ['any'],
       excludeRugScoreAbove: 30,
     },
@@ -1880,7 +1880,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       timeInForce: 'GTC',
     },
     exitSignal: {
-      stopLossPct: -10,
+      stopLossPct: 10,
       takeProfitPct: 25,
       trailingStopPct: 8,
       trailingActivationPct: 12,
@@ -1926,7 +1926,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
     assetFilter: {
       minLiquidityUsd: 30000,
       minHolders: 100,
-      chains: ['solana', 'ethereum', 'base'],
+      chains: ['SOL', 'ETH', 'BASE'],
       tokenTypes: ['any'],
       excludeRugScoreAbove: 35,
     },
@@ -1952,7 +1952,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       timeInForce: 'GTC',
     },
     exitSignal: {
-      stopLossPct: -8,
+      stopLossPct: 8,
       takeProfitPct: 20,
       trailingStopPct: 7,
       trailingActivationPct: 10,
@@ -1994,7 +1994,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
     operationType: 'SCALP',
     assetFilter: {
       minLiquidityUsd: 20000,
-      chains: ['solana', 'ethereum', 'base', 'arbitrum'],
+      chains: ['SOL', 'ETH', 'BASE', 'ARBITRUM'],
       tokenTypes: ['bridged', 'native_multi_chain'],
       customFilters: { requireMultiChainPresence: true },
     },
@@ -2019,7 +2019,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       timeInForce: 'IOC',
     },
     exitSignal: {
-      stopLossPct: -3,
+      stopLossPct: 3,
       takeProfitPct: 5,
       timeBasedExitMin: 30,
       exitConditions: ['stop_loss_hit', 'take_profit_hit', 'arb_closed', 'time_expired'],
@@ -2057,7 +2057,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
     operationType: 'SWING',
     assetFilter: {
       minLiquidityUsd: 40000,
-      chains: ['solana', 'ethereum', 'base'],
+      chains: ['SOL', 'ETH', 'BASE'],
       tokenTypes: ['any'],
       excludeRugScoreAbove: 35,
     },
@@ -2083,7 +2083,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       timeInForce: 'GTC',
     },
     exitSignal: {
-      stopLossPct: -8,
+      stopLossPct: 8,
       takeProfitPct: 15,
       trailingStopPct: 5,
       trailingActivationPct: 8,
@@ -2127,7 +2127,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       minLiquidityUsd: 100000,
       minMarketCapUsd: 1000000,
       minHolders: 500,
-      chains: ['solana', 'ethereum'],
+      chains: ['SOL', 'ETH'],
       tokenTypes: ['any'],
       excludeRugScoreAbove: 20,
     },
@@ -2154,7 +2154,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       timeInForce: 'GTC',
     },
     exitSignal: {
-      stopLossPct: -8,
+      stopLossPct: 8,
       takeProfitPct: 30,
       trailingStopPct: 12,
       trailingActivationPct: 15,
@@ -2201,7 +2201,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
     operationType: 'SCALP',
     assetFilter: {
       minLiquidityUsd: 20000,
-      chains: ['ethereum', 'solana'],
+      chains: ['ETH', 'SOL'],
       tokenTypes: ['any'],
       customFilters: { requireMempoolAccess: true },
     },
@@ -2226,7 +2226,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       timeInForce: 'IOC',
     },
     exitSignal: {
-      stopLossPct: -5,
+      stopLossPct: 5,
       takeProfitPct: 15,
       timeBasedExitMin: 10,
       exitConditions: ['stop_loss_hit', 'take_profit_hit', 'mempool_opportunity_gone', 'time_expired'],
@@ -2264,7 +2264,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
     operationType: 'SCALP',
     assetFilter: {
       minLiquidityUsd: 30000,
-      chains: ['solana', 'ethereum', 'base'],
+      chains: ['SOL', 'ETH', 'BASE'],
       tokenTypes: ['any'],
     },
     phaseConfig: {
@@ -2288,7 +2288,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       timeInForce: 'IOC',
     },
     exitSignal: {
-      stopLossPct: -8,
+      stopLossPct: 8,
       takeProfitPct: 20,
       trailingStopPct: 6,
       trailingActivationPct: 8,
@@ -2329,7 +2329,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
     operationType: 'SCALP',
     assetFilter: {
       minLiquidityUsd: 25000,
-      chains: ['ethereum', 'base'],
+      chains: ['ETH', 'BASE'],
       tokenTypes: ['any'],
     },
     phaseConfig: {
@@ -2353,7 +2353,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       timeInForce: 'GTC',
     },
     exitSignal: {
-      stopLossPct: -10,
+      stopLossPct: 10,
       takeProfitPct: 25,
       trailingStopPct: 8,
       trailingActivationPct: 10,
@@ -2394,7 +2394,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
     operationType: 'SCALP',
     assetFilter: {
       minLiquidityUsd: 20000,
-      chains: ['solana', 'ethereum'],
+      chains: ['SOL', 'ETH'],
       tokenTypes: ['any'],
     },
     phaseConfig: {
@@ -2418,7 +2418,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       timeInForce: 'IOC',
     },
     exitSignal: {
-      stopLossPct: -5,
+      stopLossPct: 5,
       takeProfitPct: 10,
       timeBasedExitMin: 5,
       exitConditions: ['stop_loss_hit', 'take_profit_hit', 'block_window_closed', 'time_expired'],
@@ -2460,7 +2460,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
       minLiquidityUsd: 50000,
       minMarketCapUsd: 200000,
       minHolders: 100,
-      chains: ['solana', 'ethereum', 'base', 'arbitrum'],
+      chains: ['SOL', 'ETH', 'BASE', 'ARBITRUM'],
       tokenTypes: ['any'],
       excludeRugScoreAbove: 35,
     },
@@ -2531,7 +2531,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
     assetFilter: {
       minLiquidityUsd: 40000,
       minMarketCapUsd: 200000,
-      chains: ['solana', 'ethereum', 'base'],
+      chains: ['SOL', 'ETH', 'BASE'],
       tokenTypes: ['any'],
       excludeRugScoreAbove: 35,
     },
@@ -2603,7 +2603,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
     assetFilter: {
       minLiquidityUsd: 40000,
       minMarketCapUsd: 200000,
-      chains: ['solana', 'ethereum', 'base'],
+      chains: ['SOL', 'ETH', 'BASE'],
       tokenTypes: ['any'],
       excludeRugScoreAbove: 30,
     },
@@ -2673,7 +2673,7 @@ export const SYSTEM_TEMPLATES: SystemTemplate[] = [
     assetFilter: {
       minLiquidityUsd: 40000,
       minMarketCapUsd: 200000,
-      chains: ['solana', 'ethereum', 'base'],
+      chains: ['SOL', 'ETH', 'BASE'],
       tokenTypes: ['any'],
       excludeRugScoreAbove: 30,
     },

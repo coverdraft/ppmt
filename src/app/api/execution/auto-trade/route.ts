@@ -91,7 +91,7 @@ export async function POST(request: NextRequest) {
       direction,
       entryPrice: resolvedPrice,
       positionSizeUsd,
-      chain: chain || 'ETH',
+      chain: chain || 'SOL',
     });
 
     // Record state transition to PAPER_TRADING via strategy-state-manager

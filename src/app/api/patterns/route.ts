@@ -7,6 +7,7 @@ export const dynamic = 'force-dynamic';
 export async function GET() {
   try {
     const patterns = await db.patternRule.findMany({
+      take: 200,
       orderBy: { occurrences: 'desc' },
     });
 

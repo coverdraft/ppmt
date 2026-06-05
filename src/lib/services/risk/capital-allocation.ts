@@ -111,6 +111,9 @@ export interface AllocationOutput {
   cashReserve: number;
   totalAllocated: number;
   method: AllocationMethod;
+  cashReservePct?: number;
+  riskBudgetUtilization?: number;
+  metadata?: Record<string, unknown>;
 }
 
 export interface AllocationMethodInfo {
@@ -125,18 +128,20 @@ export interface AllocationMethodInfo {
 // ---------------------------------------------------------------------------
 
 export const ALLOCATION_METHODS: Record<AllocationMethod, AllocationMethodInfo> = {
+  /** @deprecated Removed in v1 — subsumed by KELLY_MODIFIED */
   FIXED_FRACTIONAL: {
     name: 'Fracción Fija',
     icon: '📐',
     description:
-      'Arriesga un porcentaje fijo del capital en cada operación. Por ejemplo, si el capital es $10 000 y el riesgo por operación es 1 %, se arriesgan $100. El tamaño de posición se calcula como: riesgo $ / stop-loss %. Es el método más sencillo y recomendado para principiantes porque limita las pérdidas de forma proporcional al capital disponible.',
+      '⚠️ DEPRECATED in v1 (subsumed by KELLY_MODIFIED). Arriesga un porcentaje fijo del capital en cada operación. Por ejemplo, si el capital es $10 000 y el riesgo por operación es 1 %, se arriesgan $100. El tamaño de posición se calcula como: riesgo $ / stop-loss %.',
     category: 'BASIC',
   },
+  /** @deprecated Removed in v1 — academic, rarely used */
   FIXED_RATIO: {
     name: 'Ratio Fijo (Ryan Jones)',
     icon: '📏',
     description:
-      'Método de Ryan Jones: aumenta el tamaño de posición solo cuando el capital crece en una cantidad fija (delta). Si delta = $2 000 y el capital base es $10 000, se añade una unidad de tamaño por cada $2 000 de beneficio. Esto permite un crecimiento acelerado cuando se gana, pero protege el capital durante rachas negativas, ya que no se aumenta el tamaño hasta superar el umbral.',
+      '⚠️ DEPRECATED in v1 (academic, rarely used). Método de Ryan Jones: aumenta el tamaño de posición solo cuando el capital crece en una cantidad fija (delta).',
     category: 'BASIC',
   },
   VOLATILITY_TARGETING: {
@@ -160,18 +165,20 @@ export const ALLOCATION_METHODS: Record<AllocationMethod, AllocationMethodInfo> 
       'Distribuye el capital equitativamente entre todos los activos de la cartera. Si hay N activos, cada uno recibe capital / N. Es el enfoque más simple de diversificación y, según estudios académicos, frecuentemente supera a asignaciones más complejas porque evita errores de estimación en parámetros estadísticos.',
     category: 'BASIC',
   },
+  /** @future Planned for v2 — needs 50+ strategy records for reliable covariance */
   MEAN_VARIANCE: {
     name: 'Media-Varianza (Markowitz)',
     icon: '📊',
     description:
-      'Optimización de Media-Varianza de Markowitz (MPT). Busca la cartera con máxima rentabilidad esperada para un nivel de riesgo dado. Requiere la matriz de covarianza y el vector de rendimientos esperados. Resuelve: max w′μ − λ w′Σ w, sujeto a Σwᵢ = 1. Es el pilar de la teoría moderna de carteras, aunque sensible a errores en las estimaciones de entrada.',
+      '⏳ DELAYED to v2 (needs reliable covariance). Optimización de Media-Varianza de Markowitz (MPT). Busca la cartera con máxima rentabilidad esperada para un nivel de riesgo dado. Requiere la matriz de covarianza y el vector de rendimientos esperados. Resuelve: max w′μ − λ w′Σ w, sujeto a Σwᵢ = 1. Es el pilar de la teoría moderna de carteras, aunque sensible a errores en las estimaciones de entrada.',
     category: 'PORTFOLIO_OPTIMIZATION',
   },
+  /** @future Planned for v2 — subset of Markowitz */
   MIN_VARIANCE: {
     name: 'Mínima Varianza',
     icon: '📉',
     description:
-      'Minimiza la varianza total de la cartera sin considerar el rendimiento esperado. Resuelve: min w′Σ w sujeto a Σwᵢ = 1. La solución analítica es w = Σ⁻¹1 / (1′Σ⁻¹1). Útil cuando las estimaciones de rendimiento son poco fiables y se prefiere la cartera de menor riesgo absoluto.',
+      '⏳ DELAYED to v2 (subset of Markowitz). Minimiza la varianza total de la cartera sin considerar el rendimiento esperado. Resuelve: min w′Σ w sujeto a Σwᵢ = 1. La solución analítica es w = Σ⁻¹1 / (1′Σ⁻¹1). Útil cuando las estimaciones de rendimiento son poco fiables y se prefiere la cartera de menor riesgo absoluto.',
     category: 'PORTFOLIO_OPTIMIZATION',
   },
   RISK_PARITY: {
@@ -181,11 +188,12 @@ export const ALLOCATION_METHODS: Record<AllocationMethod, AllocationMethodInfo> 
       'Cada activo contribuye igualmente al riesgo total de la cartera. La contribución de riesgo del activo i es wᵢ × (Σw)ᵢ. Se igualan todas las contribuciones mediante un algoritmo iterativo. A diferencia de peso igual, los activos menos volátiles reciben mayor asignación. Popularizado por Ray Dalio y Bridgewater en su cartera "All Weather".',
     category: 'PORTFOLIO_OPTIMIZATION',
   },
+  /** @deprecated Removed in v1 — subsumed by KELLY_MODIFIED */
   SCORE_BASED: {
     name: 'Asignación por Puntuación',
     icon: '🏆',
     description:
-      'Dimensiona la posición proporcionalmente a la puntuación de la señal (0-100). Fórmula: tamaño = tamañoBase × (puntuación / 100). Una señal con puntuación 80 recibe el 80 % del tamaño base, mientras que una de 40 solo el 40 %. Permite integrar señales cuantitativas y cualitativas en el dimensionamiento.',
+      '⚠️ DEPRECATED in v1 (subsumed by KELLY_MODIFIED). Dimensiona la posición proporcionalmente a la puntuación de la señal (0-100). Fórmula: tamaño = tamañoBase × (puntuación / 100). Una señal con puntuación 80 recibe el 80 % del tamaño base, mientras que una de 40 solo el 40 %. Permite integrar señales cuantitativas y cualitativas en el dimensionamiento.',
     category: 'ADVANCED',
   },
   KELLY_MODIFIED: {
@@ -195,46 +203,52 @@ export const ALLOCATION_METHODS: Record<AllocationMethod, AllocationMethodInfo> 
       'Criterio de Kelly con fracción ajustable: f = (p×b − q) / b, donde p = winRate, q = 1−p, b = avgWin/avgLoss. El Kelly completo maximiza el crecimiento a largo plazo pero produce gran volatilidad; por ello se usa Kelly fraccional (típicamente f/2 o "half-Kelly"). Con fraction = 0.5 se obtiene ~75 % del crecimiento óptimo con ~50 % menos de varianza.',
     category: 'ADVANCED',
   },
+  /** @future Planned for v2 — depends on regime detector */
   REGIME_BASED: {
     name: 'Asignación por Régimen',
     icon: '🌤️',
     description:
-      'Ajusta la asignación según el régimen de mercado detectado (BULL, BEAR, SIDEWAYS, VOLATILE). En mercado alcista se aumenta la exposición; en bajista se reduce. Se define un mapa de pesos por régimen que escala el tamaño base. Permite adaptar la estrategia a las condiciones macro del mercado cripto.',
+      '⏳ DELAYED to v2 (depends on regime detector). Ajusta la asignación según el régimen de mercado detectado (BULL, BEAR, SIDEWAYS, VOLATILE). En mercado alcista se aumenta la exposición; en bajista se reduce. Se define un mapa de pesos por régimen que escala el tamaño base. Permite adaptar la estrategia a las condiciones macro del mercado cripto.',
     category: 'ADAPTIVE',
   },
+  /** @deprecated Removed in v1 — toy without simulation environment */
   RL_ALLOCATION: {
     name: 'Asignación por Aprendizaje por Refuerzo',
     icon: '🤖',
     description:
-      'Utiliza una Q-table simplificada donde cada estado del mercado mapea a un valor de asignación. El estado se codifica combinando régimen, volatilidad y drawdown. La acción elegida es argmax Q(s, a). Representa una versión simplificada de RL para entornos sin simulación completa. Ideal cuando se dispone de datos históricos de estados y resultados.',
+      '⚠️ DEPRECATED in v1 (toy without simulation environment). Utiliza una Q-table simplificada donde cada estado del mercado mapea a un valor de asignación. El estado se codifica combinando régimen, volatilidad y drawdown. La acción elegida es argmax Q(s, a). Representa una versión simplificada de RL para entornos sin simulación completa. Ideal cuando se dispone de datos históricos de estados y resultados.',
     category: 'ADAPTIVE',
   },
+  /** @future Planned for v2 — needs 100+ decisions with feedback */
   META_ALLOCATION: {
     name: 'Meta-Asignación',
     icon: '🔀',
     description:
-      'Distribuye capital entre múltiples sistemas de trading basándose en su rendimiento histórico. A cada sistema se le asigna un peso proporcional a su performance normalizada. Si el Sistema A rinde 2× y el B 1×, A recibe el doble. Permite diversificar no solo entre activos sino entre estrategias, reduciendo la dependencia de un único enfoque.',
+      '⏳ DELAYED to v2 (needs 100+ decisions with feedback). Distribuye capital entre múltiples sistemas de trading basándose en su rendimiento histórico. A cada sistema se le asigna un peso proporcional a su performance normalizada. Si el Sistema A rinde 2× y el B 1×, A recibe el doble. Permite diversificar no solo entre activos sino entre estrategias, reduciendo la dependencia de un único enfoque.',
     category: 'COMBINED',
   },
+  /** @deprecated Removed in v1 — streak-based is gambling, not quantitative */
   ADAPTIVE: {
     name: 'Dimensionamiento Adaptativo',
     icon: '📈',
     description:
-      'Aumenta el tamaño tras rachas de victorias y lo reduce tras rachas de derrotas. Tras k victorias consecutivas: tamaño = base × (1 + 0.05 × k). Tras k pérdidas: tamaño = base × (1 − 0.05 × k), con un mínimo del 25 % del base. Captura la idea de "apostar con las ganancias" mientras protege el capital en rachas negativas.',
+      '⚠️ DEPRECATED in v1 (streak-based is gambling, not quantitative). Aumenta el tamaño tras rachas de victorias y lo reduce tras rachas de derrotas. Tras k victorias consecutivas: tamaño = base × (1 + 0.05 × k). Tras k pérdidas: tamaño = base × (1 − 0.05 × k), con un mínimo del 25 % del base. Captura la idea de "apostar con las ganancias" mientras protege el capital en rachas negativas.',
     category: 'ADAPTIVE',
   },
+  /** @deprecated Removed in v1 — premature over-engineering */
   CUSTOM_COMPOSITE: {
     name: 'Compuesto Personalizado',
     icon: '🧩',
     description:
-      'Combina múltiples métodos de asignación con pesos personalizados. El resultado es un promedio ponderado de las salidas de cada método: posición = Σ(wᵢ × posᵢ) / Σwᵢ. Permite, por ejemplo, combinar Kelly (50 %) + Paridad de Riesgo (30 %) + Volatilidad Objetivo (20 %) para aprovechar las fortalezas de cada enfoque y mitigar sus debilidades individuales.',
+      '⚠️ DEPRECATED in v1 (premature over-engineering). Combina múltiples métodos de asignación con pesos personalizados. El resultado es un promedio ponderado de las salidas de cada método: posición = Σ(wᵢ × posᵢ) / Σwᵢ. Permite, por ejemplo, combinar Kelly (50 %) + Paridad de Riesgo (30 %) + Volatilidad Objetivo (20 %) para aprovechar las fortalezas de cada enfoque y mitigar sus debilidades individuales.',
     category: 'COMBINED',
   },
+  /** @deprecated Removed in v1 — does not scale with capital */
   FIXED_AMOUNT: {
     name: 'Cantidad Fija',
     icon: '💲',
     description:
-      'Asigna una cantidad fija de dólares a cada operación, independientemente del capital total. Si el monto por operación es $500, cada posición será de $500. Es el método más simple pero no escala con el capital: no aprovecha el crecimiento ni protege contra pérdidas proporcionales. Útil para cuentas pequeñas o trading experimental con riesgo limitado.',
+      '⚠️ DEPRECATED in v1 (does not scale with capital). Asigna una cantidad fija de dólares a cada operación, independientemente del capital total. Si el monto por operación es $500, cada posición será de $500. Es el método más simple pero no escala con el capital: no aprovecha el crecimiento ni protege contra pérdidas proporcionales. Útil para cuentas pequeñas o trading experimental con riesgo limitado.',
     category: 'BASIC',
   },
 };
@@ -246,6 +260,7 @@ export const ALLOCATION_METHODS: Record<AllocationMethod, AllocationMethodInfo> 
 /**
  * a. Fixed Fractional — risk X% of capital per trade.
  * positionSize = (capital × riskPct) / stopLossPct
+ * @deprecated Removed in v1 — subsumed by KELLY_MODIFIED
  */
 export function fixedFractional(
   capital: number,
@@ -261,6 +276,7 @@ export function fixedFractional(
  * nextLevel = baseCapital + delta × units
  * positionSize = (capital - (baseCapital + delta × currentUnits)) / delta + 1
  * Simplified: capital at risk per unit.
+ * @deprecated Removed in v1 — academic, rarely used
  */
 export function fixedRatio(
   capital: number,
@@ -307,7 +323,8 @@ export function maxDrawdownControl(
   baseSize: number,   // base fraction of capital, e.g. 0.10
 ): number {
   if (maxDD <= 0) return 0;
-  const scaleFactor = Math.max(1 - currentDD / maxDD, 0);
+  const safeCurrentDD = Math.max(0, currentDD); // DD cannot be negative — clamp to 0
+  const scaleFactor = Math.max(1 - safeCurrentDD / maxDD, 0);
   return capital * baseSize * scaleFactor;
 }
 
@@ -327,6 +344,7 @@ export function equalWeight(
  * Solves: max w′μ − λ w′Σ w  s.t. Σwᵢ = 1
  * Using the analytical solution with a risk-aversion parameter λ.
  * w* = (Σ⁻¹ μ) / (1′ Σ⁻¹ μ)  (when sum-to-one constraint is applied)
+ * @future "Planned for v2"
  */
 export function meanVarianceOptimization(
   capital: number,
@@ -357,14 +375,19 @@ export function meanVarianceOptimization(
   const sum = rawWeights.reduce((a, b) => a + b, 0);
   if (sum === 0) return Array(n).fill(capital / n);
 
-  const weights = rawWeights.map((w) => w / sum);
+  const normalizedWeights = rawWeights.map((w) => w / sum);
 
-  return weights.map((w) => capital * Math.max(w, 0));
+  const clampedWeights = normalizedWeights.map(w => Math.max(w, 0));
+  const clampedSum = clampedWeights.reduce((s, w) => s + w, 0);
+  const finalWeights = clampedSum > 0 ? clampedWeights.map(w => w / clampedSum) : Array(rawWeights.length).fill(1 / rawWeights.length);
+
+  return finalWeights.map((w) => capital * w);
 }
 
 /**
  * g. Minimum Variance Portfolio.
  * w = Σ⁻¹1 / (1′Σ⁻¹1)
+ * @future "Planned for v2"
  */
 export function minimumVariance(
   capital: number,
@@ -486,7 +509,8 @@ export function kellyModified(
 ): number {
   const p = winRate;
   const q = 1 - p;
-  const b = avgLoss > 0 ? avgWin / avgLoss : 0;
+  const absAvgLoss = Math.abs(avgLoss);
+  const b = absAvgLoss > 0 ? avgWin / absAvgLoss : 0;
 
   if (b <= 0) return 0;
 
@@ -501,6 +525,7 @@ export function kellyModified(
 /**
  * k. Regime-Based Allocation — adjust by market regime.
  * Returns the allocation percentage based on the regime and its mapped weight.
+ * @future "Planned for v2"
  */
 export function regimeBasedAllocation(
   capital: number,
@@ -521,6 +546,7 @@ export function regimeBasedAllocation(
 /**
  * l. RL Allocation — simplified Q-table lookup.
  * Returns allocation based on the Q-value for the current state.
+ * @deprecated Removed in v1 — toy without simulation environment
  */
 export function rlAllocation(
   capital: number,
@@ -541,6 +567,7 @@ export function rlAllocation(
 /**
  * m. Meta-Allocation — allocate between trading systems based on performance.
  * Each system gets capital proportional to its normalised performance.
+ * @future "Planned for v2"
  */
 export function metaAllocation(
   capital: number,
@@ -568,6 +595,7 @@ export function metaAllocation(
  * n. Adaptive Position Sizing — increase on wins, decrease on losses.
  * On win streak:  size = base × (1 + 0.05 × streakLength)
  * On loss streak: size = base × (1 − 0.05 × streakLength), min 0.25 × base
+ * @deprecated Removed in v1 — streak-based is gambling, not quantitative
  */
 export function adaptivePositionSizing(
   capital: number,
@@ -589,6 +617,7 @@ export function adaptivePositionSizing(
 
 /**
  * o. Fixed Amount — fixed dollar amount per trade.
+ * @deprecated Removed in v1 — does not scale with capital
  */
 export function fixedAmount(
   capital: number,
@@ -600,6 +629,7 @@ export function fixedAmount(
 /**
  * p. Custom Composite — combine multiple methods with weights.
  * position = Σ(wᵢ × positionᵢ) / Σwᵢ
+ * @deprecated Removed in v1 — premature over-engineering
  */
 export function customComposite(
   capital: number,
@@ -716,6 +746,17 @@ export class CapitalAllocationEngine {
    * Calculate position allocation for a single method.
    */
   calculate(method: AllocationMethod, input: AllocationInput): AllocationOutput {
+    if (input.capital <= 0) {
+      return {
+        method,
+        positions: [],
+        totalAllocated: 0,
+        cashReserve: 0,
+        cashReservePct: 100,
+        riskBudgetUtilization: 0,
+        metadata: { reason: 'Capital is zero or negative — no allocation possible' },
+      };
+    }
     let positions: AllocationPosition[] = [];
     const capital = input.capital;
     const signals = input.signals;
@@ -980,32 +1021,24 @@ export class CapitalAllocationEngine {
     if (input.estimatedFeePct || input.estimatedSlippagePct) {
       const totalCostPct = (input.estimatedFeePct || 0) + (input.estimatedSlippagePct || 0);
       const minimumNetGain = input.minimumNetGainPct ?? totalCostPct * 3; // 3x safety margin
+      const expectedGainPct = input.expectedGainPct ?? 0;
+      const hasExpectedGain = expectedGainPct > 0;
 
       positions = positions.map(pos => {
         // Deduct fees from position: effective size = size * (1 - costPct)
         const effectiveSize = pos.sizeUsd * (1 - totalCostPct);
 
         // Check if expected gain justifies the trade
-        const expectedGain = input.expectedGainPct ?? 0;
-        const netGain = expectedGain - totalCostPct;
-        const shouldTrade = netGain >= minimumNetGain;
+        const netGain = expectedGainPct - totalCostPct;
+        const shouldTrade = hasExpectedGain ? netGain >= 0 : true;
+        const scaleFactor = shouldTrade ? 1 : (minimumNetGain > 0 && netGain > 0 ? netGain / minimumNetGain : (hasExpectedGain ? 0 : Math.max(0, 1 - totalCostPct)));
 
-        // If the trade doesn't justify fees, reduce position to minimum or zero
-        if (!shouldTrade && minimumNetGain > 0) {
-          // Scale down proportionally to how far we are from minimum
-          const scaleFactor = netGain > 0 ? netGain / minimumNetGain : 0;
-          return {
-            ...pos,
-            sizeUsd: effectiveSize * scaleFactor,
-            sizePct: (effectiveSize * scaleFactor) / capital,
-            confidence: pos.confidence * scaleFactor,
-          };
-        }
-
+        const finalSize = effectiveSize * scaleFactor;
         return {
           ...pos,
-          sizeUsd: effectiveSize,
-          sizePct: effectiveSize / capital,
+          sizeUsd: finalSize,
+          sizePct: finalSize / capital,
+          confidence: pos.confidence * scaleFactor,
         };
       });
     }

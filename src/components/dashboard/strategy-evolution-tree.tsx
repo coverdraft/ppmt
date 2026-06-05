@@ -31,6 +31,7 @@ import {
   Dna,
   X,
   Eye,
+  ShieldCheck,
 } from 'lucide-react';
 
 // ============================================================
@@ -592,6 +593,43 @@ function DetailPanel({
   node: TreeNode | null;
   onClose: () => void;
 }) {
+  const [sdeValidating, setSdeValidating] = React.useState(false);
+  const [sdeResult, setSdeResult] = React.useState<{
+    state: string;
+    capitalAction: string;
+    signalQuality: string;
+    vetoResults: Array<{ veto: string; passed: boolean; reason: string }>;
+  } | null>(null);
+
+  // Reset SDE result when node changes
+  React.useEffect(() => {
+    setSdeResult(null);
+  }, [node?.id]);
+
+  const handleSDEValidate = React.useCallback(async () => {
+    if (!node) return;
+    setSdeValidating(true);
+    setSdeResult(null);
+    try {
+      const res = await fetch(`/api/strategy-decision/validate?strategyId=${encodeURIComponent(node.id)}`);
+      if (res.ok) {
+        const json = await res.json();
+        if (json.data) {
+          setSdeResult({
+            state: json.data.state,
+            capitalAction: json.data.capitalAction,
+            signalQuality: json.data.signalQuality,
+            vetoResults: json.data.vetoResults || [],
+          });
+        }
+      }
+    } catch {
+      // Silently fail
+    } finally {
+      setSdeValidating(false);
+    }
+  }, [node]);
+
   if (!node) return null;
 
   const statusConfig = STATUS_CONFIG[node.status] || STATUS_CONFIG.IDLE;
@@ -706,6 +744,67 @@ function DetailPanel({
               <ParamRow label="Active" value={node.isActive ? 'Yes' : 'No'} />
               <ParamRow label="Paper Trading" value={node.isPaperTrading ? 'Yes' : 'No'} />
               <ParamRow label="Children" value={node.children.length.toString()} />
+            </div>
+          </div>
+
+          {/* SDE Validation */}
+          <div>
+            <div className="text-[8px] font-mono text-[#64748b] uppercase mb-2">SDE Validation</div>
+            <div className="bg-[#111827] border border-[#1e293b] rounded-lg p-3 space-y-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleSDEValidate}
+                disabled={sdeValidating}
+                className="w-full h-7 text-[8px] font-mono border-[#2d3748] hover:border-[#d4af37]/50 hover:bg-[#1a1f2e] text-[#94a3b8]"
+              >
+                {sdeValidating ? (
+                  <>
+                    <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                    Validating...
+                  </>
+                ) : (
+                  <>
+                    <ShieldCheck className="h-3 w-3 mr-1 text-[#d4af37]" />
+                    Validate with SDE
+                  </>
+                )}
+              </Button>
+              {sdeResult && (
+                <div className="space-y-1.5 pt-1">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[7px] font-mono text-[#64748b] uppercase">State</span>
+                    <Badge className={`text-[7px] h-3.5 px-1 font-mono border-0 ${
+                      sdeResult.state === 'ACTIVE' ? 'bg-emerald-500/15 text-emerald-400' :
+                      sdeResult.state === 'CONDITIONAL' ? 'bg-yellow-500/15 text-yellow-400' :
+                      sdeResult.state === 'PAUSED' ? 'bg-orange-500/15 text-orange-400' :
+                      'bg-red-500/15 text-red-400'
+                    }`}>
+                      {sdeResult.state}
+                    </Badge>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-[7px] font-mono text-[#64748b] uppercase">Action</span>
+                    <span className="text-[8px] font-mono text-[#94a3b8]">{sdeResult.capitalAction}</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-[7px] font-mono text-[#64748b] uppercase">Quality</span>
+                    <span className="text-[8px] font-mono text-[#94a3b8]">{sdeResult.signalQuality}</span>
+                  </div>
+                  {sdeResult.vetoResults.length > 0 && (
+                    <div className="pt-1 border-t border-[#1e293b]">
+                      <div className="text-[6px] font-mono text-[#475569] uppercase mb-1">Vetos</div>
+                      {sdeResult.vetoResults.map((v, i) => (
+                        <div key={i} className="flex items-center gap-1 text-[7px] font-mono">
+                          <div className={`w-1.5 h-1.5 rounded-full ${v.passed ? 'bg-emerald-400' : 'bg-red-400'}`} />
+                          <span className="text-[#64748b]">{v.veto}</span>
+                          <span className={v.passed ? 'text-emerald-400' : 'text-red-400'}>{v.passed ? 'PASS' : 'FAIL'}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
 

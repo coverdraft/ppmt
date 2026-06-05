@@ -37,8 +37,13 @@ function parseBrainAnalysis(json: string | null | undefined, fallback: { tokenAd
 }
 import { tradingSystemEngine, type SystemTemplate } from '@/lib/services/strategy/trading-system-engine';
 import { calculateOperabilityScore, type OperabilityInput } from '@/lib/services/risk/operability-score';
+import { capitalAllocationEngine, type AllocationInput, type AllocationMethod } from '@/lib/services/risk/capital-allocation';
 import { feedbackLoopEngine } from '@/lib/services/backtesting/feedback-loop-engine';
+import { riskPreFilter } from '@/lib/services/risk/risk-pre-filter';
+import { portfolioIntelligenceEngine } from '@/lib/services/portfolio/portfolio-intelligence-engine';
 import { dexScreenerClient } from '@/lib/services/data-sources/dexscreener-client';
+import { killSwitchService, type PortfolioState } from '@/lib/services/risk/kill-switch-service';
+import { eventBus } from '../shared/event-bus';
 
 // ============================================================
 // TYPES
@@ -69,9 +74,13 @@ export interface PaperPosition {
   quantity: number;
   positionSizeUsd: number;
   currentPrice: number;
+  strategyName: string;
   unrealizedPnl: number;
   unrealizedPnlPct: number;
+  /** Highest price reached since entry — used for LONG MFE + LONG trailing stop */
   highWaterMark: number;
+  /** Lowest price reached since entry — used for SHORT MFE + SHORT trailing stop */
+  lowWaterMark: number;
   exitConditions: string[];
   systemName: string;
   brainAnalysis: TokenAnalysis;
@@ -161,6 +170,9 @@ class PaperTradingEngine {
   // Contador de IDs
   private idCounter: number = 0;
 
+  // [INTEGRATION FIX] Cycle counter for periodic feedback processing
+  private cycleCount: number = 0;
+
   // ============================================================
   // 1. START - Con restauración desde DB
   // ============================================================
@@ -200,7 +212,12 @@ class PaperTradingEngine {
       this.config.chain = activeSession.chain;
       this.config.maxOpenPositions = activeSession.maxOpenPositions;
       this.config.scanIntervalMs = activeSession.scanIntervalMs;
-      this.config.feesPct = activeSession.feesPct / 100; // DB guarda como porcentaje
+      // FIX: Fee unit normalization — DB stores as percentage (e.g., 0.3 = 0.3%)
+      // Config stores as fraction (e.g., 0.003 = 0.3%)
+      // The write path ALWAYS stores config.feesPct * 100, so we ALWAYS divide by 100 on read.
+      // Previous threshold-based logic (>= 0.5) was broken for fees < 0.5% (e.g., 0.3% → DB=0.3 → not divided → 30% fee!)
+      const dbFeesPct = activeSession.feesPct;
+      this.config.feesPct = dbFeesPct / 100;
       this.config.slippagePct = activeSession.slippagePct;
       this.config.minOperabilityScore = activeSession.minOperabilityScore;
       this.config.autoFeedback = activeSession.autoFeedback;
@@ -224,9 +241,13 @@ class PaperTradingEngine {
           quantity: pos.quantity,
           positionSizeUsd: pos.sizeUsd,
           currentPrice: pos.currentPrice,
+          strategyName: pos.strategyName || this.config.systemName,
           unrealizedPnl: pos.pnlUsd,
           unrealizedPnlPct: pos.pnlPct,
           highWaterMark: pos.highestPrice,
+          lowWaterMark: pos.lowestPrice
+            ? Math.min(pos.entryPrice, pos.lowestPrice)
+            : Math.min(pos.entryPrice, pos.currentPrice || pos.entryPrice),
           exitConditions: this.buildExitConditions(pos),
           systemName: pos.strategyName || this.config.systemName,
           brainAnalysis: parseBrainAnalysis(pos.brainAnalysisJson, {
@@ -257,9 +278,11 @@ class PaperTradingEngine {
           quantity: t.quantity,
           positionSizeUsd: t.sizeUsd,
           currentPrice: t.exitPrice,
+          strategyName: t.strategyName || '',
           unrealizedPnl: t.pnlUsd,
           unrealizedPnlPct: t.pnlPct,
           highWaterMark: 0,
+          lowWaterMark: 0,
           exitConditions: [],
           systemName: t.strategyName || '',
           brainAnalysis: parseBrainAnalysis(t.brainAnalysisJson, {
@@ -493,6 +516,60 @@ class PaperTradingEngine {
   }
 
   // ============================================================
+  // 6b. GET PORTFOLIO STATE (for kill switch evaluation)
+  // ============================================================
+
+  getPortfolioState(): PortfolioState {
+    const totalPositionValue = Array.from(this.positions.values())
+      .reduce((sum, p) => sum + p.positionSizeUsd, 0);
+    const totalUnrealizedPnl = Array.from(this.positions.values())
+      .reduce((sum, p) => sum + p.unrealizedPnl, 0);
+    // Include unrealized PnL in drawdown calculation
+    // Otherwise kill switch misses deep unrealized losses on open positions
+    const effectiveCapital = this.currentCapital + totalUnrealizedPnl;
+    const currentDD = this.peakCapital > 0
+      ? Math.max(0, (this.peakCapital - effectiveCapital) / this.peakCapital) * 100
+      : 0;
+
+    // FIX: Use effectiveCapital (includes unrealized PnL) as denominator for concentration
+    // to prevent concentration exceeding 100% when positions have unrealized losses
+    const concentrationDenominator = Math.max(effectiveCapital, 1);
+
+    // Concentration by token
+    const tokenConcentration: Map<string, number> = new Map();
+    for (const pos of this.positions.values()) {
+      const pct = (pos.positionSizeUsd / concentrationDenominator) * 100;
+      tokenConcentration.set(pos.tokenAddress, (tokenConcentration.get(pos.tokenAddress) || 0) + pct);
+    }
+
+    // Concentration by chain
+    const chainConcentration: Map<string, number> = new Map();
+    for (const pos of this.positions.values()) {
+      const pct = (pos.positionSizeUsd / concentrationDenominator) * 100;
+      chainConcentration.set(pos.chain, (chainConcentration.get(pos.chain) || 0) + pct);
+    }
+
+    // Concentration by sector (inferred from token/chain)
+    const sectorConcentration: Map<string, number> = new Map();
+    for (const pos of this.positions.values()) {
+      const sector = killSwitchService.inferSector(pos.symbol, pos.chain);
+      const pct = (pos.positionSizeUsd / concentrationDenominator) * 100;
+      sectorConcentration.set(sector, (sectorConcentration.get(sector) || 0) + pct);
+    }
+
+    return {
+      totalCapital: this.currentCapital,
+      totalPositionValue,
+      totalUnrealizedPnl,
+      currentDrawdownPct: currentDD,
+      openPositionCount: this.positions.size,
+      tokenConcentration,
+      chainConcentration,
+      sectorConcentration,
+    };
+  }
+
+  // ============================================================
   // 7. FORCE CLOSE POSITION
   // ============================================================
 
@@ -510,6 +587,12 @@ class PaperTradingEngine {
 
   async runSingleScan(): Promise<{ tokensScanned: number; signalsGenerated: number; tradesOpened: number }> {
     if (this.status !== 'RUNNING') {
+      return { tokensScanned: 0, signalsGenerated: 0, tradesOpened: 0 };
+    }
+
+    // KILL SWITCH CHECK: Global pause
+    if (killSwitchService.getState().globalPause) {
+      console.warn('[PaperTrading] Kill switch: Global pause active — skipping scan');
       return { tokensScanned: 0, signalsGenerated: 0, tradesOpened: 0 };
     }
 
@@ -580,8 +663,173 @@ class PaperTradingEngine {
           // STEP 7: Señal generada
           signalsGenerated++;
 
-          // STEP 8: Abrir posición
-          const position = await this.openPosition(token, analysis, operResult.recommendedPositionUsd);
+          // KILL SWITCH CHECK: Can we open new positions?
+          let positionSizeUsd = this.calculatePositionSize();
+          // Get fresh portfolio state INSIDE the loop (not stale from before)
+          // This prevents race condition where position A is opened but
+          // token B's concentration check uses pre-A state
+          const portfolioState = this.getPortfolioState();
+          const budget = await killSwitchService.loadRiskBudget();
+
+          // Clamp position size to concentration limit: max (maxConcentrationPct% of total capital)
+          const maxAllowedByConcentration = portfolioState.totalCapital * budget.maxConcentrationPct / 100;
+          const currentTokenConcentration = portfolioState.tokenConcentration.get(token.address) ?? 0;
+          const currentTokenUsd = portfolioState.totalCapital * currentTokenConcentration / 100;
+          const remainingTokenCapacity = Math.max(0, maxAllowedByConcentration - currentTokenUsd);
+          positionSizeUsd = Math.min(positionSizeUsd, remainingTokenCapacity);
+
+          // Clamp position size to chain concentration limit
+          const maxAllowedByChain = portfolioState.totalCapital * budget.maxChainPct / 100;
+          const currentChainConcentration = portfolioState.chainConcentration.get(this.config.chain) ?? 0;
+          const currentChainUsd = portfolioState.totalCapital * currentChainConcentration / 100;
+          const remainingChainCapacity = Math.max(0, maxAllowedByChain - currentChainUsd);
+          positionSizeUsd = Math.min(positionSizeUsd, remainingChainCapacity);
+
+          if (positionSizeUsd < 0.01) {
+            // Position too small after concentration clamping — skip
+            continue;
+          }
+
+          const killSwitchCheck = await killSwitchService.canOpenPosition({
+            tokenAddress: token.address,
+            chain: this.config.chain,
+            sizeUsd: positionSizeUsd,
+            strategyId: this.config.systemName,
+            symbol: token.symbol,
+            currentPortfolioState: portfolioState,
+          });
+          if (!killSwitchCheck.allowed) {
+            if (killSwitchCheck.killSwitchTriggered) {
+              console.warn(`[PaperTrading] Kill switch blocked position: ${killSwitchCheck.reason}`);
+            }
+            continue;
+          }
+
+          // [INTEGRATION FIX] STEP 7a: Risk Pre-Filter — kill invalid signals before SDE
+          try {
+            const preFilterResult = await riskPreFilter.filter(
+              {
+                tokenAddress: token.address,
+                chain: this.config.chain,
+                direction: 'LONG' as const,
+                confidence: (analysis.operabilityScore || 50) / 100,
+                strategyName: this.config.systemName || 'default',
+                signalType: (analysis.action === 'TRADE' ? 'MOMENTUM' : 'EXIT') as 'MOMENTUM' | 'EXIT',
+                sizeUsd: positionSizeUsd,
+              },
+              {
+                totalCapital: this.config.initialCapital,
+                freeCapital: this.getAvailableCapital(),
+                openPositions: Array.from(this.positions.values()).map(p => ({
+                  tokenAddress: p.tokenAddress || '',
+                  chain: p.chain || this.config.chain,
+                  sizeUsd: p.positionSizeUsd,
+                  pnlPct: p.unrealizedPnlPct,
+                  direction: p.direction || 'LONG',
+                })),
+                currentDD: this.getCurrentDrawdownPct() / 100,
+                dailyPnL: this.getDailyPnL() / 100,
+              }
+            );
+
+            if (!preFilterResult.passed) {
+              console.log(`[PTE] Signal rejected by Risk Pre-Filter: ${preFilterResult.rejectionReasons.join(', ')}`);
+              continue;
+            }
+          } catch (preFilterError) {
+            // Risk pre-filter failure should NOT block trading — fail open
+            console.warn('[PTE] Risk Pre-Filter error (proceeding without pre-filter):', preFilterError instanceof Error ? preFilterError.message : String(preFilterError));
+          }
+
+          // STEP 7b: SDE Validation Gate — Strategy Decision Engine must approve
+          try {
+            const { strategyDecisionEngine } = await import('@/lib/services/strategy/strategy-decision-engine');
+            const sdeInput = await strategyDecisionEngine.buildInputFromStrategyId(
+              this.config.systemName,
+              {
+                totalCapitalUsd: portfolioState.totalCapital,
+                currentDrawdownPct: portfolioState.currentDrawdownPct,
+                activeStrategies: 1,
+                marketVolatility: 50, // default
+                marketRegime: 'SIDEWAYS', // default
+              },
+            );
+            if (sdeInput) {
+              const sdeDecision = await strategyDecisionEngine.validate(sdeInput, true);
+              if (sdeDecision.state === 'REJECTED' || sdeDecision.capitalAction === 'EXIT') {
+                console.warn(`[PaperTrading] SDE rejected position: state=${sdeDecision.state}, action=${sdeDecision.capitalAction}, quality=${sdeDecision.signalQuality}`);
+                continue;
+              }
+              if (sdeDecision.capitalAction === 'REDUCE') {
+                positionSizeUsd = positionSizeUsd * 0.5;
+                console.log(`[PaperTrading] SDE recommends REDUCE — halving position size to $${positionSizeUsd.toFixed(2)}`);
+              }
+              if (sdeDecision.state === 'ACTIVE' && sdeDecision.capitalAction === 'INCREASE') {
+                // SDE approves increase — allow up to 1.5x the calculated size (still capped by concentration)
+                positionSizeUsd = Math.min(positionSizeUsd * 1.5, portfolioState.totalCapital * budget.maxConcentrationPct / 100);
+              }
+            }
+          } catch (sdeError) {
+            // SDE validation failure should NOT block trading — fail open
+            console.warn('[PaperTrading] SDE validation error (proceeding without SDE gate):', sdeError instanceof Error ? sdeError.message : String(sdeError));
+          }
+
+          // [INTEGRATION FIX] STEP 7c: Portfolio Intelligence Engine — evaluate impact before opening
+          try {
+            const currentPositions = Array.from(this.positions.values()).map(p => ({
+              id: p.id,
+              tokenAddress: p.tokenAddress || '',
+              symbol: p.symbol,
+              chain: p.chain || this.config.chain,
+              sector: killSwitchService.inferSector(p.symbol, p.chain),
+              sizeUsd: p.positionSizeUsd,
+              entryPrice: p.entryPrice,
+              currentPrice: p.currentPrice,
+              unrealizedPnl: p.unrealizedPnl,
+              unrealizedPnlPct: p.unrealizedPnlPct,
+              weight: p.positionSizeUsd / Math.max(this.currentCapital, 1),
+              volatility: 0.6,
+              returns: [],
+              marketCapTier: 'MID' as const,
+              strategyId: p.systemName || null,
+              openedAt: p.entryTime,
+            }));
+
+            const totalPortfolioValue = this.currentCapital + Array.from(this.positions.values())
+              .reduce((sum, p) => sum + p.unrealizedPnl, 0);
+
+            const portfolioImpact = await portfolioIntelligenceEngine.evaluateNewPosition(
+              {
+                tokenAddress: token.address,
+                symbol: token.symbol,
+                chain: this.config.chain,
+                sector: killSwitchService.inferSector(token.symbol, this.config.chain),
+                proposedSizeUsd: positionSizeUsd,
+                expectedVolatility: analysis.volatilityRegime === 'EXTREME' ? 0.9 : analysis.volatilityRegime === 'HIGH' ? 0.7 : 0.5,
+                expectedReturn: analysis.regime === 'BULL' ? 0.05 : analysis.regime === 'BEAR' ? -0.02 : 0.01,
+                marketCapTier: 'MID' as const,
+                returns: [],
+                strategyId: this.config.systemName || null,
+              },
+              currentPositions,
+              Math.max(totalPortfolioValue, 1),
+            );
+
+            if (!portfolioImpact.approved) {
+              console.log(`[PTE] Position rejected by Portfolio Intelligence: ${portfolioImpact.recommendations.join(', ')}`);
+              continue;
+            }
+            // Adjust position size based on portfolio impact
+            if (portfolioImpact.impactScore < 0) {
+              positionSizeUsd = Math.min(positionSizeUsd, positionSizeUsd * (1 - Math.abs(portfolioImpact.impactScore)));
+            }
+          } catch (portfolioError) {
+            // Portfolio Intelligence failure should NOT block trading — fail open
+            console.warn('[PTE] Portfolio Intelligence error (proceeding without PI gate):', portfolioError instanceof Error ? portfolioError.message : String(portfolioError));
+          }
+
+          // STEP 8: Abrir posición (use the concentration-clamped size)
+          const position = await this.openPosition(token, analysis, positionSizeUsd);
           if (position) {
             tradesOpened++;
           }
@@ -604,6 +852,16 @@ class PaperTradingEngine {
     this.totalTokensScanned += tokensScanned;
     this.totalSignalsGenerated += signalsGenerated;
     this.lastScanAt = scanStart;
+
+    // [INTEGRATION FIX] Process feedback for recently closed trades (every 5th cycle)
+    this.cycleCount++;
+    if (this.cycleCount % 5 === 0) {
+      try {
+        await feedbackLoopEngine.validateSignals();
+      } catch (e) {
+        console.error('[PTE] Feedback processing error:', e);
+      }
+    }
 
     // Actualizar sesión en DB
     await this.updateSessionInDb();
@@ -704,6 +962,90 @@ class PaperTradingEngine {
 
     this.lastPriceSyncAt = new Date();
 
+    // FIX: Update peakCapital when effective capital exceeds it
+    // This ensures maxDrawdownPct is computed correctly when unrealized gains push total above peak
+    const totalUnrealizedPnlSync = Array.from(this.positions.values())
+      .reduce((sum, p) => sum + p.unrealizedPnl, 0);
+    const effectiveCapitalSync = this.currentCapital + totalUnrealizedPnlSync;
+    if (effectiveCapitalSync > this.peakCapital) {
+      this.peakCapital = effectiveCapitalSync;
+    }
+
+    // KILL SWITCH: Evaluate portfolio-level and position-level kill switches after price sync
+    try {
+      const portfolioState = this.getPortfolioState();
+
+      // Portfolio DD kill switch
+      const portfolioKillCheck = await killSwitchService.evaluatePortfolioKillSwitches(portfolioState);
+      if (portfolioKillCheck.triggered && portfolioKillCheck.actionRequired === 'PAUSE_ALL') {
+        console.error(`[PaperTrading] KILL SWITCH: Portfolio DD triggered — ${portfolioKillCheck.reason}`);
+        await this.pause();
+        try {
+          const { alertEngine } = await import('@/lib/services/risk/alert-engine');
+          await alertEngine.onRiskLimitTriggered('PORTFOLIO', {
+            killSwitch: true,
+            currentDD: portfolioState.currentDrawdownPct,
+            totalCapital: portfolioState.totalCapital,
+          });
+        } catch {}
+      }
+
+      // Position loss kill switches — emergency close individual positions
+      // CRITICAL FIX: Collect positions to close first, then close in separate loop
+      // to avoid mutating this.positions during iteration (race condition)
+      const openPositionsSnapshot = Array.from(this.positions.values());
+      const positionsToClose: { position: PaperPosition; reason: string }[] = [];
+
+      for (const pos of openPositionsSnapshot) {
+        const posKillCheck = await killSwitchService.evaluatePositionKillSwitch(pos.id, pos.unrealizedPnlPct);
+        if (posKillCheck.triggered && posKillCheck.actionRequired === 'CLOSE_POSITION') {
+          console.error(`[PaperTrading] KILL SWITCH: Position loss triggered for ${pos.symbol} — closing: ${posKillCheck.reason}`);
+          positionsToClose.push({ position: pos, reason: 'KILL_SWITCH_POSITION_LOSS' });
+        }
+      }
+
+      // Strategy DD kill switch — evaluate per-strategy drawdown
+      const strategyGroups = new Map<string, { totalEntryUsd: number; totalCurrentUsd: number; positions: typeof openPositionsSnapshot }>();
+      for (const pos of openPositionsSnapshot) {
+        const key = pos.strategyName || pos.tokenAddress;
+        const group = strategyGroups.get(key) || { totalEntryUsd: 0, totalCurrentUsd: 0, positions: [] as typeof openPositionsSnapshot };
+        group.totalEntryUsd += pos.positionSizeUsd;
+        group.totalCurrentUsd += pos.positionSizeUsd * (1 + pos.unrealizedPnlPct / 100);
+        group.positions.push(pos);
+        strategyGroups.set(key, group);
+      }
+      for (const [strategyKey, group] of strategyGroups) {
+        if (group.totalEntryUsd > 0) {
+          const strategyDD = Math.max(0, ((group.totalEntryUsd - group.totalCurrentUsd) / group.totalEntryUsd) * 100);
+          const strategyKillCheck = await killSwitchService.evaluateStrategyKillSwitch(strategyKey, strategyDD);
+          if (strategyKillCheck.triggered && strategyKillCheck.actionRequired === 'PAUSE_STRATEGY') {
+            console.error(`[PaperTrading] KILL SWITCH: Strategy DD triggered for ${strategyKey} — ${strategyKillCheck.reason}`);
+            for (const pos of group.positions) {
+              positionsToClose.push({ position: pos, reason: 'KILL_SWITCH_STRATEGY_DD' });
+            }
+            try {
+              const { alertEngine } = await import('@/lib/services/risk/alert-engine');
+              await alertEngine.onRiskLimitTriggered('STRATEGY', {
+                killSwitch: true,
+                strategyId: strategyKey,
+                currentDD: strategyDD,
+              });
+            } catch {}
+          }
+        }
+      }
+
+      // Now close all collected positions in a separate loop (safe from mutation)
+      for (const { position, reason } of positionsToClose) {
+        // Verify position still exists before closing
+        if (this.positions.has(position.id)) {
+          await this.closePosition(position, position.currentPrice, reason);
+        }
+      }
+    } catch (killSwitchError) {
+      console.warn('[PaperTrading] Kill switch evaluation error:', killSwitchError);
+    }
+
     // Actualizar timestamp en sesión
     if (this.currentSessionId) {
       try {
@@ -747,6 +1089,70 @@ class PaperTradingEngine {
       return { success: false, message: `Máximo de posiciones alcanzado (${this.config.maxOpenPositions})` };
     }
 
+    // Kill switch + concentration check — same gate as runSingleScan
+    // STEP 1: Calculate position size
+    const portfolioState = this.getPortfolioState();
+    const rawPositionSizeUsd = this.calculatePositionSize();
+
+    // STEP 2: Concentration clamping FIRST (before kill switch check)
+    const budget = await killSwitchService.loadRiskBudget();
+    let adjustedSize = rawPositionSizeUsd;
+    const currentTokenConcentration = portfolioState.tokenConcentration.get(params.tokenAddress) ?? 0;
+    const maxAllowedByConcentration = portfolioState.totalCapital * budget.maxConcentrationPct / 100;
+    const currentTokenUsd = portfolioState.totalCapital * currentTokenConcentration / 100;
+    const remainingTokenCapacity = Math.max(0, maxAllowedByConcentration - currentTokenUsd);
+    adjustedSize = Math.min(adjustedSize, remainingTokenCapacity);
+
+    const currentChainConcentration = portfolioState.chainConcentration.get(params.chain || this.config.chain) ?? 0;
+    const maxAllowedByChain = portfolioState.totalCapital * budget.maxChainPct / 100;
+    const currentChainUsd = portfolioState.totalCapital * currentChainConcentration / 100;
+    const remainingChainCapacity = Math.max(0, maxAllowedByChain - currentChainUsd);
+    adjustedSize = Math.min(adjustedSize, remainingChainCapacity);
+
+    if (adjustedSize < 0.01) {
+      return { success: false, message: 'Position too small after concentration limits' };
+    }
+
+    // STEP 3: Kill switch check with concentration-clamped size
+    const killSwitchCheck = await killSwitchService.canOpenPosition({
+      tokenAddress: params.tokenAddress,
+      chain: params.chain || this.config.chain,
+      sizeUsd: adjustedSize,
+      strategyId: params.strategyName,
+      symbol: params.tokenSymbol,
+      currentPortfolioState: portfolioState,
+    });
+    if (!killSwitchCheck.allowed) {
+      return { success: false, message: `Kill switch: ${killSwitchCheck.reason}` };
+    }
+
+    // SDE Validation Gate
+    try {
+      const { strategyDecisionEngine } = await import('@/lib/services/strategy/strategy-decision-engine');
+      const portfolioState = this.getPortfolioState();
+      const sdeInput = await strategyDecisionEngine.buildInputFromStrategyId(
+        params.strategyName,
+        {
+          totalCapitalUsd: portfolioState.totalCapital,
+          currentDrawdownPct: portfolioState.currentDrawdownPct,
+          activeStrategies: 1,
+          marketVolatility: 50,
+          marketRegime: 'SIDEWAYS',
+        },
+      );
+      if (sdeInput) {
+        const sdeDecision = await strategyDecisionEngine.validate(sdeInput, true);
+        if (sdeDecision.state === 'REJECTED' || sdeDecision.capitalAction === 'EXIT') {
+          return { success: false, message: `SDE rejected: state=${sdeDecision.state}, action=${sdeDecision.capitalAction}` };
+        }
+        if (sdeDecision.capitalAction === 'REDUCE') {
+          adjustedSize = adjustedSize * 0.5;
+        }
+      }
+    } catch (sdeError) {
+      console.warn('[PaperTrading] SDE validation error (proceeding without SDE gate):', sdeError instanceof Error ? sdeError.message : String(sdeError));
+    }
+
     try {
       // Obtener precio actual
       const priceUsd = await this.fetchCurrentPriceFromDb(params.tokenAddress);
@@ -754,8 +1160,8 @@ class PaperTradingEngine {
         return { success: false, message: `No se pudo obtener precio para ${params.tokenSymbol}` };
       }
 
-      // Calcular tamaño de posición
-      const positionSizeUsd = this.calculatePositionSize();
+      // Use concentration-clamped size from kill switch check above
+      const positionSizeUsd = adjustedSize;
       if (positionSizeUsd <= 0) {
         return { success: false, message: 'Capital insuficiente' };
       }
@@ -817,7 +1223,8 @@ class PaperTradingEngine {
       const position = await this.openPosition(
         { address: params.tokenAddress, symbol: params.tokenSymbol, priceUsd },
         analysis,
-        positionSizeUsd
+        positionSizeUsd,
+        params.direction || 'LONG',  // Pass direction — otherwise SHORTs open as LONG
       );
 
       if (position) {
@@ -955,6 +1362,9 @@ class PaperTradingEngine {
 
   // ============================================================
   // PRIVATE: CALCULATE POSITION SIZE
+  // Uses SDE dynamic method selection: picks the best allocation
+  // method based on portfolio state (drawdown, volatility, etc.)
+  // Falls back to EQUAL_WEIGHT if SDE/CAE fails.
   // ============================================================
 
   private calculatePositionSize(): number {
@@ -967,9 +1377,105 @@ class PaperTradingEngine {
     if (availableCapital <= 0) return 0;
 
     const remainingSlots = Math.max(1, this.config.maxOpenPositions - this.positions.size);
-    const positionSize = availableCapital / remainingSlots;
 
-    return Math.max(0, Math.round(positionSize * 100) / 100);
+    // SDE-based dynamic method selection
+    // Include unrealized PnL in drawdown calculation for accurate method selection
+    const totalUnrealizedPnl = Array.from(this.positions.values())
+      .reduce((sum, p) => sum + p.unrealizedPnl, 0);
+    const effectiveCapital = this.currentCapital + totalUnrealizedPnl;
+    const currentDD = this.peakCapital > 0
+      ? Math.max(0, (this.peakCapital - effectiveCapital) / this.peakCapital) * 100
+      : 0;
+
+    let method: AllocationMethod = 'KELLY_MODIFIED';
+
+    // SDE method selection logic (from Revisión 3)
+    if (currentDD > 10) {
+      method = 'MAX_DRAWDOWN_CONTROL';
+    } else if (this.positions.size >= 2) {
+      method = 'RISK_PARITY';
+    } else {
+      method = 'KELLY_MODIFIED';
+    }
+
+    try {
+      const winRate = this.tradeHistory.length > 0
+        ? this.tradeHistory.filter(t => t.pnl > 0).length / this.tradeHistory.length
+        : 0.5;
+      const avgWin = this.tradeHistory.length > 0
+        ? this.tradeHistory.filter(t => t.pnl > 0).reduce((s, t) => s + (t.pnlPct || 0.10), 0) / Math.max(1, this.tradeHistory.filter(t => t.pnl > 0).length) / 100
+        : 0.10;
+      const avgLoss = this.tradeHistory.length > 0
+        ? this.tradeHistory.filter(t => t.pnl <= 0).reduce((s, t) => s + Math.abs(t.pnlPct || 0.05), 0) / Math.max(1, this.tradeHistory.filter(t => t.pnl <= 0).length) / 100
+        : 0.05;
+
+      const allocationInput: AllocationInput = {
+        capital: availableCapital,
+        currentPositions: Array.from(this.positions.values()).map(p => ({
+          tokenAddress: p.tokenAddress,
+          sizeUsd: p.positionSizeUsd,
+          sizePct: p.positionSizeUsd / this.currentCapital,
+        })),
+        signals: Array.from({ length: remainingSlots }, (_, i) => ({
+          tokenAddress: `slot-${i}`,
+          confidence: 1 / remainingSlots,
+          direction: 'LONG' as const,
+        })),
+        historicalTrades: {
+          winRate,
+          avgWin,
+          avgLoss,
+          totalTrades: this.tradeHistory.length,
+        },
+        volatility: 0.6, // Default crypto volatility estimate
+        currentDrawdown: currentDD / 100,
+        maxDrawdown: 0.20,
+        marketRegime: 'SIDEWAYS',
+        estimatedFeePct: this.config.feesPct,
+        estimatedSlippagePct: this.config.slippagePct / 100,
+        minimumNetGainPct: 0.018, // 1.8% minimum after fees
+        expectedGainPct: 0.05,    // 5% expected gain
+      };
+
+      const result = capitalAllocationEngine.calculate(method, allocationInput);
+      const perSlotSize = result.positions.length > 0
+        ? result.positions[0].sizeUsd
+        : availableCapital / remainingSlots;
+
+      return Math.max(0, Math.round(perSlotSize * 100) / 100);
+    } catch {
+      // Fallback to simple equal-split if CapitalAllocationEngine fails
+      const positionSize = availableCapital / remainingSlots;
+      return Math.max(0, Math.round(positionSize * 100) / 100);
+    }
+  }
+
+  // [INTEGRATION FIX] Helper: get available (free) capital
+  private getAvailableCapital(): number {
+    const openPositionValue = Array.from(this.positions.values()).reduce(
+      (sum, p) => sum + p.positionSizeUsd, 0
+    );
+    return Math.max(0, this.currentCapital - openPositionValue);
+  }
+
+  // [INTEGRATION FIX] Helper: get current drawdown percentage
+  private getCurrentDrawdownPct(): number {
+    const totalUnrealizedPnl = Array.from(this.positions.values())
+      .reduce((sum, p) => sum + p.unrealizedPnl, 0);
+    const effectiveCapital = this.currentCapital + totalUnrealizedPnl;
+    return this.peakCapital > 0
+      ? Math.max(0, ((this.peakCapital - effectiveCapital) / this.peakCapital) * 100)
+      : 0;
+  }
+
+  // [INTEGRATION FIX] Helper: get daily PnL percentage
+  private getDailyPnL(): number {
+    const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const dailyTrades = this.tradeHistory.filter(t => t.exitTime >= oneDayAgo);
+    const dailyPnl = dailyTrades.reduce((sum, t) => sum + t.pnl, 0);
+    return this.config.initialCapital > 0
+      ? (dailyPnl / this.config.initialCapital) * 100
+      : 0;
   }
 
   // ============================================================
@@ -983,7 +1489,8 @@ class PaperTradingEngine {
       priceUsd: number;
     },
     analysis: TokenAnalysis,
-    recommendedPositionUsd: number
+    recommendedPositionUsd: number,
+    direction: 'LONG' | 'SHORT' = 'LONG',
   ): Promise<PaperPosition | null> {
     const positionSizeUsd = Math.min(
       this.calculatePositionSize(),
@@ -995,15 +1502,22 @@ class PaperTradingEngine {
     const system = tradingSystemEngine.getTemplate(this.config.systemName);
     if (!system) return null;
 
-    // Simular slippage en entrada
-    const slippageMultiplier = 1 + (this.config.slippagePct / 100);
+    // Direction-aware slippage on entry
+    // LONG: we buy, so slippage makes entry price HIGHER (unfavorable)
+    // SHORT: we sell, so slippage makes entry price LOWER (unfavorable)
+    const isShort = direction === 'SHORT';
+    const slippageMultiplier = isShort
+      ? 1 - (this.config.slippagePct / 100)
+      : 1 + (this.config.slippagePct / 100);
     const entryPrice = token.priceUsd * slippageMultiplier;
 
     // Deducir fees simuladas
     const entryFee = positionSizeUsd * this.config.feesPct;
 
-    const quantity = positionSizeUsd / entryPrice;
+    // Calculate quantity from NET position size (after fees)
+    // Previously used gross size, causing capital accounting error
     const netPositionSize = positionSizeUsd - entryFee;
+    const quantity = netPositionSize / entryPrice;
 
     // Construir condiciones de salida
     const exitConditions: string[] = [];
@@ -1020,15 +1534,17 @@ class PaperTradingEngine {
       tokenAddress: token.address,
       symbol: token.symbol,
       chain: this.config.chain,
-      direction: 'LONG',
+      direction: direction ?? 'LONG',
       entryTime: new Date(),
       entryPrice: Math.round(entryPrice * 100000000) / 100000000,
       quantity: Math.round(quantity * 100000000) / 100000000,
       positionSizeUsd: Math.round(netPositionSize * 100) / 100,
       currentPrice: entryPrice,
+      strategyName: this.config.systemName,
       unrealizedPnl: 0,
       unrealizedPnlPct: 0,
       highWaterMark: entryPrice,
+      lowWaterMark: entryPrice,
       exitConditions,
       systemName: this.config.systemName,
       brainAnalysis: { ...analysis },
@@ -1053,13 +1569,22 @@ class PaperTradingEngine {
           quantity: position.quantity,
           sizeUsd: position.positionSizeUsd,
           highestPrice: position.highWaterMark,
+          lowestPrice: position.lowWaterMark,
           operabilityScore: analysis.operabilityScore,
           brainAnalysisJson: JSON.stringify(position.brainAnalysis),
           strategyName: position.systemName,
           status: 'OPEN',
           openedAt: position.entryTime,
-          stopLoss: system.exitSignal.stopLossPct ? position.entryPrice * (1 + system.exitSignal.stopLossPct / 100) : null,
-          takeProfit: system.exitSignal.takeProfitPct ? position.entryPrice * (1 + system.exitSignal.takeProfitPct / 100) : null,
+          stopLoss: system.exitSignal.stopLossPct
+            ? (direction === 'SHORT'
+              ? position.entryPrice * (1 + system.exitSignal.stopLossPct / 100)   // SHORT: stop above entry (price rises = loss)
+              : position.entryPrice * (1 - system.exitSignal.stopLossPct / 100))  // LONG: stop below entry (price falls = loss)
+            : null,
+          takeProfit: system.exitSignal.takeProfitPct
+            ? (direction === 'SHORT'
+              ? position.entryPrice * (1 - system.exitSignal.takeProfitPct / 100)   // SHORT: TP below entry
+              : position.entryPrice * (1 + system.exitSignal.takeProfitPct / 100))  // LONG: TP above entry
+            : null,
           trailingStopPct: system.exitSignal.trailingStopPct || 0,
         },
       });
@@ -1079,6 +1604,20 @@ class PaperTradingEngine {
       console.warn('[PaperTrading] Alert engine error (open):', error);
     }
 
+    // Publish POSITION_OPENED event via event bus
+    try {
+      eventBus.publish('POSITION_OPENED', {
+        positionId: position.id,
+        tokenAddress: position.tokenAddress || '',
+        chain: position.chain || this.config.chain,
+        sizeUsd: position.positionSizeUsd,
+        direction: position.direction || 'LONG',
+        timestamp: new Date(),
+      }, 'paper-trading-engine');
+    } catch (eventError) {
+      console.warn('[PaperTrading] Event bus POSITION_OPENED error:', eventError);
+    }
+
     return position;
   }
 
@@ -1091,16 +1630,37 @@ class PaperTradingEngine {
     exitPrice: number,
     reason: string
   ): Promise<PaperTradeRecord> {
-    // Aplicar slippage en salida
-    const slippageMultiplier = reason === 'ENGINE_STOPPED' ? 1 : (1 - (this.config.slippagePct / 100));
+    // Idempotency guard — prevent double-close
+    if (!this.positions.has(position.id)) {
+      return null as unknown as PaperTradeRecord;
+    }
+
+    // Clear position kill switch flag
+    try {
+      killSwitchService.clearPositionKillSwitch(position.id);
+    } catch {}
+
+    // Direction-aware slippage on exit
+    // LONG: we sell to close, so slippage makes exit price LOWER (unfavorable)
+    // SHORT: we buy to cover, so slippage makes exit price HIGHER (unfavorable)
+    const isShort = position.direction === 'SHORT';
+    const slippageMultiplier = reason === 'ENGINE_STOPPED'
+      ? 1
+      : (isShort
+          ? 1 + (this.config.slippagePct / 100)
+          : 1 - (this.config.slippagePct / 100));
     const adjustedExitPrice = exitPrice * slippageMultiplier;
 
-    // Calcular PnL
+    // Direction-aware PnL
+    // LONG: profit when exit > entry → exitValue - entryValue
+    // SHORT: profit when entry > exit → entryValue - exitValue
     const entryValue = position.quantity * position.entryPrice;
     const exitValue = position.quantity * adjustedExitPrice;
     const exitFee = exitValue * this.config.feesPct;
 
-    const pnl = exitValue - entryValue - exitFee;
+    const pnl = isShort
+      ? entryValue - exitValue - exitFee
+      : exitValue - entryValue - exitFee;
     const pnlPct = entryValue > 0 ? (pnl / entryValue) * 100 : 0;
 
     const exitTime = new Date();
@@ -1149,6 +1709,7 @@ class PaperTradingEngine {
           mfe: record.mfe,
           mae: record.mae,
           highestPrice: position.highWaterMark,
+          lowestPrice: position.lowWaterMark,
           closedAt: exitTime,
           exitReason: reason,
         },
@@ -1198,11 +1759,30 @@ class PaperTradingEngine {
       `[PaperTrading] CERRADA ${position.direction} ${position.symbol} | Razón: ${reason} | PnL: $${pnl.toFixed(2)} (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%) | Hold: ${holdTimeMin.toFixed(0)}min | Capital: $${this.currentCapital.toFixed(2)}`
     );
 
-    // Auto-feedback
+    // Auto-feedback: SDE feedback loop (S1.14 — Paper trading close → reevaluar con SDE → actualizar DecisionAudit)
     if (this.config.autoFeedback) {
       this.submitFeedback(record).catch(err => {
         console.warn('[PaperTrading] Error enviando feedback:', err instanceof Error ? err.message : String(err));
       });
+      // Also call SDE provideFeedback to close the learning loop
+      try {
+        const { strategyDecisionEngine } = await import('@/lib/services/strategy/strategy-decision-engine');
+        // Find the latest audit for this strategy to feed back results
+        const audits = await strategyDecisionEngine.queryAudit({
+          strategyId: position.systemName || this.config.systemName,
+          limit: 1,
+        });
+        if (audits.length > 0) {
+          await strategyDecisionEngine.provideFeedback(
+            audits[0].id,
+            pnl > 0,
+            pnlPct,
+          );
+        }
+      } catch (sdeErr) {
+        // SDE feedback failure should not break the close flow
+        console.warn('[PaperTrading] SDE feedback error:', sdeErr instanceof Error ? sdeErr.message : String(sdeErr));
+      }
     }
 
     // Fire alert for trade closed
@@ -1211,6 +1791,57 @@ class PaperTradingEngine {
       await alertEngine.onTradeClosed(position.symbol, position.direction, pnl, reason);
     } catch (error) {
       console.warn('[PaperTrading] Alert engine error (close):', error);
+    }
+
+    // Publish POSITION_CLOSED event via event bus
+    try {
+      eventBus.publish('POSITION_CLOSED', {
+        positionId: position.id,
+        tokenAddress: position.tokenAddress || '',
+        chain: position.chain || this.config.chain,
+        pnlPct: record.pnlPct,
+        exitReason: record.exitReason || 'unknown',
+        timestamp: new Date(),
+      }, 'paper-trading-engine');
+    } catch (eventError) {
+      console.warn('[PaperTrading] Event bus POSITION_CLOSED error:', eventError);
+    }
+
+    // [INTEGRATION FIX] Feed trade outcome to feedback loop engine
+    try {
+      const { db: feedbackDb } = await import('@/lib/db');
+      await feedbackDb.predictiveSignal.create({
+        data: {
+          signalType: 'paper_trade_exit',
+          chain: position.chain,
+          tokenAddress: position.tokenAddress,
+          prediction: JSON.stringify({
+            direction: position.direction,
+            strategyName: position.systemName || position.strategyName,
+            entryPrice: position.entryPrice,
+            exitPrice: adjustedExitPrice,
+            pnlPct,
+            phase: 'unknown',
+          }),
+          direction: position.direction === 'LONG' ? 'UP' : 'DOWN',
+          confidence: (position.brainAnalysis?.operabilityScore || 50) / 100,
+          timeframe: `${Math.round(holdTimeMin)}min`,
+          validUntil: new Date(exitTime.getTime() + 60 * 60 * 1000), // 1h window for validation
+          evidence: JSON.stringify([{
+            actual: pnlPct > 0 ? 'UP' : 'DOWN',
+            predicted: position.direction === 'LONG' ? 'UP' : 'DOWN',
+            pnlPct,
+          }]),
+          historicalHitRate: this.tradeHistory.length > 0
+            ? this.tradeHistory.filter(t => t.pnl > 0).length / this.tradeHistory.length
+            : 0,
+          dataPointsUsed: 1,
+          wasCorrect: (position.direction === 'LONG' && pnlPct > 0) || (position.direction === 'SHORT' && pnlPct > 0) ? true : false,
+          actualOutcome: JSON.stringify({ realizedPnlPct: pnlPct, exitReason: reason }),
+        },
+      });
+    } catch (e) {
+      console.error('[PTE] Feedback loop error:', e);
     }
 
     return record;
@@ -1223,20 +1854,27 @@ class PaperTradingEngine {
   private async updatePositionPrice(position: PaperPosition, newPrice: number): Promise<void> {
     const entryValue = position.quantity * position.entryPrice;
     const currentValue = position.quantity * newPrice;
-    const pnlUsd = Math.round((currentValue - entryValue) * 100) / 100;
+    // Direction-aware PnL: SHORT profits when price falls, LONG profits when price rises
+    const pnlUsd = position.direction === 'SHORT'
+      ? Math.round((entryValue - currentValue) * 100) / 100
+      : Math.round((currentValue - entryValue) * 100) / 100;
     const pnlPct = entryValue > 0
-      ? Math.round(((currentValue - entryValue) / entryValue) * 10000) / 100
+      ? position.direction === 'SHORT'
+        ? Math.round(((entryValue - currentValue) / entryValue) * 10000) / 100
+        : Math.round(((currentValue - entryValue) / entryValue) * 10000) / 100
       : 0;
 
     const mfe = Math.max(position.brainAnalysis ? 0 : pnlPct, pnlPct); // Simplificado
     const mae = Math.min(0, pnlPct);
     const highestPrice = Math.max(position.highWaterMark, newPrice);
+    const lowestPrice = Math.min(position.lowWaterMark, newPrice);
 
     // Actualizar caché en memoria
     position.currentPrice = newPrice;
     position.unrealizedPnl = pnlUsd;
     position.unrealizedPnlPct = pnlPct;
     position.highWaterMark = highestPrice;
+    position.lowWaterMark = lowestPrice;
 
     // Persistir en DB
     try {
@@ -1250,8 +1888,15 @@ class PaperTradingEngine {
       });
 
       if (dbPos?.trailingStopPct && dbPos.trailingStopPct > 0) {
-        const threshold = position.entryPrice * (1 + (dbPos.trailingStopPct / 100));
-        if (newPrice >= threshold) trailingActivated = true;
+        // LONG: trailing activated when price rises above entry + threshold
+        // SHORT: trailing activated when price falls below entry - threshold
+        if (position.direction === 'SHORT') {
+          const threshold = position.entryPrice * (1 - (dbPos.trailingStopPct / 100));
+          if (newPrice <= threshold) trailingActivated = true;
+        } else {
+          const threshold = position.entryPrice * (1 + (dbPos.trailingStopPct / 100));
+          if (newPrice >= threshold) trailingActivated = true;
+        }
       }
 
       await db.paperTradingPosition.update({
@@ -1283,42 +1928,68 @@ class PaperTradingEngine {
     if (!system) return;
 
     const entryPrice = position.entryPrice;
+    const isShort = position.direction === 'SHORT';
+
+    // Price change from entry — for SHORT, inverted logic
     const priceChangePct = entryPrice > 0
-      ? ((currentPrice - entryPrice) / entryPrice) * 100
+      ? isShort
+        ? ((entryPrice - currentPrice) / entryPrice) * 100  // SHORT: profit when price falls
+        : ((currentPrice - entryPrice) / entryPrice) * 100  // LONG: profit when price rises
       : 0;
 
     let exitReason: string | null = null;
 
-    // 1. Stop Loss
+    // 1. Stop Loss — stopLossPct is positive (e.g., 8 = 8% drop triggers exit)
+    // priceChangePct is direction-aware: negative means loss in both LONG and SHORT
     if (system.exitSignal.stopLossPct !== 0) {
-      const stopLossPct = system.exitSignal.stopLossPct;
-      if (stopLossPct < 0 && priceChangePct <= stopLossPct) {
-        exitReason = `stop_loss_hit (${priceChangePct.toFixed(2)}% <= ${stopLossPct}%)`;
+      const stopLossPct = Math.abs(system.exitSignal.stopLossPct);
+      if (priceChangePct <= -stopLossPct) {
+        exitReason = `stop_loss_hit (${priceChangePct.toFixed(2)}% <= -${stopLossPct}%)`;
       }
     }
 
-    // 2. Take Profit
+    // 2. Take Profit — same logic for both directions (priceChangePct is already direction-aware)
     if (!exitReason && system.exitSignal.takeProfitPct !== 0 && system.exitSignal.takeProfitPct > 0) {
       if (priceChangePct >= system.exitSignal.takeProfitPct) {
         exitReason = `take_profit_hit (${priceChangePct.toFixed(2)}% >= ${system.exitSignal.takeProfitPct}%)`;
       }
     }
 
-    // 3. Trailing Stop
+    // 3. Trailing Stop — LONG: tracks highWaterMark, drops from HWM trigger exit
+    //                    SHORT: tracks lowWaterMark, rises from LWM trigger exit
     if (!exitReason && system.exitSignal.trailingStopPct && system.exitSignal.trailingStopPct > 0) {
       const trailingPct = system.exitSignal.trailingStopPct;
       const activationPct = system.exitSignal.trailingActivationPct ?? 0;
-      const highWaterChangePct = entryPrice > 0
-        ? ((position.highWaterMark - entryPrice) / entryPrice) * 100
-        : 0;
 
-      if (highWaterChangePct >= activationPct) {
-        const dropFromHWM = position.highWaterMark > 0
-          ? ((position.highWaterMark - currentPrice) / position.highWaterMark) * 100
+      if (isShort) {
+        // SHORT trailing: activated when price has dropped enough from entry
+        const lowWaterChangePct = entryPrice > 0
+          ? ((entryPrice - position.lowWaterMark) / entryPrice) * 100
           : 0;
 
-        if (dropFromHWM >= trailingPct) {
-          exitReason = `trailing_stop_hit (dropped ${dropFromHWM.toFixed(2)}% from HWM $${position.highWaterMark.toFixed(6)})`;
+        if (lowWaterChangePct >= activationPct) {
+          const riseFromLWM = position.lowWaterMark > 0
+            ? ((currentPrice - position.lowWaterMark) / position.lowWaterMark) * 100
+            : 0;
+
+          if (riseFromLWM >= trailingPct) {
+            exitReason = `trailing_stop_hit (rose ${riseFromLWM.toFixed(2)}% from LWM $${position.lowWaterMark.toFixed(6)})`;
+          }
+        }
+      } else {
+        // LONG trailing: activated when price has risen enough from entry
+        const highWaterChangePct = entryPrice > 0
+          ? ((position.highWaterMark - entryPrice) / entryPrice) * 100
+          : 0;
+
+        if (highWaterChangePct >= activationPct) {
+          const dropFromHWM = position.highWaterMark > 0
+            ? ((position.highWaterMark - currentPrice) / position.highWaterMark) * 100
+            : 0;
+
+          if (dropFromHWM >= trailingPct) {
+            exitReason = `trailing_stop_hit (dropped ${dropFromHWM.toFixed(2)}% from HWM $${position.highWaterMark.toFixed(6)})`;
+          }
         }
       }
     }
@@ -1365,18 +2036,30 @@ class PaperTradingEngine {
         const currentPrice = await this.fetchCurrentPriceFromDb(position.tokenAddress);
         if (currentPrice <= 0) continue;
 
-        // Actualizar posición con precio actual
+        // Update position with current price — direction-aware unrealized PnL
         position.currentPrice = currentPrice;
 
         const entryValue = position.quantity * position.entryPrice;
         const currentValue = position.quantity * currentPrice;
-        position.unrealizedPnl = Math.round((currentValue - entryValue) * 100) / 100;
+        const isShort = position.direction === 'SHORT';
+
+        position.unrealizedPnl = Math.round(
+          (isShort ? entryValue - currentValue : currentValue - entryValue) * 100
+        ) / 100;
         position.unrealizedPnlPct = entryValue > 0
-          ? Math.round(((currentValue - entryValue) / entryValue) * 10000) / 100
+          ? Math.round(
+              (isShort
+                ? ((entryValue - currentValue) / entryValue)
+                : ((currentValue - entryValue) / entryValue)) * 10000
+            ) / 100
           : 0;
 
+        // Track water marks for MFE/MAE and trailing stop
         if (currentPrice > position.highWaterMark) {
           position.highWaterMark = currentPrice;
+        }
+        if (currentPrice < position.lowWaterMark) {
+          position.lowWaterMark = currentPrice;
         }
 
         // Verificar condiciones de salida
@@ -1403,40 +2086,64 @@ class PaperTradingEngine {
 
     const currentPrice = position.currentPrice;
     const entryPrice = position.entryPrice;
+    const isShort = position.direction === 'SHORT';
+
+    // Direction-aware price change
     const priceChangePct = entryPrice > 0
-      ? ((currentPrice - entryPrice) / entryPrice) * 100
+      ? (isShort
+          ? ((entryPrice - currentPrice) / entryPrice) * 100  // SHORT: profit when price falls
+          : ((currentPrice - entryPrice) / entryPrice) * 100)  // LONG: profit when price rises
       : 0;
 
-    // 1. Stop Loss
+    // 1. Stop Loss — stopLossPct is positive, priceChangePct is direction-aware
     if (system.exitSignal.stopLossPct !== 0) {
-      const stopLossPct = system.exitSignal.stopLossPct;
-      if (stopLossPct < 0 && priceChangePct <= stopLossPct) {
-        return `stop_loss_hit (${priceChangePct.toFixed(2)}% <= ${stopLossPct}%)`;
+      const stopLossPct = Math.abs(system.exitSignal.stopLossPct);
+      if (priceChangePct <= -stopLossPct) {
+        return `stop_loss_hit (${priceChangePct.toFixed(2)}% <= -${stopLossPct}%)`;
       }
     }
 
-    // 2. Take Profit
+    // 2. Take Profit — direction-aware (priceChangePct already direction-aware)
     if (system.exitSignal.takeProfitPct !== 0 && system.exitSignal.takeProfitPct > 0) {
       if (priceChangePct >= system.exitSignal.takeProfitPct) {
         return `take_profit_hit (${priceChangePct.toFixed(2)}% >= ${system.exitSignal.takeProfitPct}%)`;
       }
     }
 
-    // 3. Trailing Stop
+    // 3. Trailing Stop — direction-aware
     if (system.exitSignal.trailingStopPct && system.exitSignal.trailingStopPct > 0) {
       const trailingPct = system.exitSignal.trailingStopPct;
       const activationPct = system.exitSignal.trailingActivationPct ?? 0;
-      const highWaterChangePct = entryPrice > 0
-        ? ((position.highWaterMark - entryPrice) / entryPrice) * 100
-        : 0;
 
-      if (highWaterChangePct >= activationPct) {
-        const dropFromHWM = position.highWaterMark > 0
-          ? ((position.highWaterMark - currentPrice) / position.highWaterMark) * 100
+      if (isShort) {
+        // SHORT trailing: track lowWaterMark, trail UP from lowest
+        const lowWaterChangePct = entryPrice > 0
+          ? ((entryPrice - position.lowWaterMark) / entryPrice) * 100
           : 0;
 
-        if (dropFromHWM >= trailingPct) {
-          return `trailing_stop_hit (dropped ${dropFromHWM.toFixed(2)}% from HWM $${position.highWaterMark.toFixed(6)})`;
+        if (lowWaterChangePct >= activationPct) {
+          const riseFromLWM = position.lowWaterMark > 0
+            ? ((currentPrice - position.lowWaterMark) / position.lowWaterMark) * 100
+            : 0;
+
+          if (riseFromLWM >= trailingPct) {
+            return `trailing_stop_hit (rose ${riseFromLWM.toFixed(2)}% from LWM $${position.lowWaterMark.toFixed(6)})`;
+          }
+        }
+      } else {
+        // LONG trailing: track highWaterMark, trail DOWN from highest
+        const highWaterChangePct = entryPrice > 0
+          ? ((position.highWaterMark - entryPrice) / entryPrice) * 100
+          : 0;
+
+        if (highWaterChangePct >= activationPct) {
+          const dropFromHWM = position.highWaterMark > 0
+            ? ((position.highWaterMark - currentPrice) / position.highWaterMark) * 100
+            : 0;
+
+          if (dropFromHWM >= trailingPct) {
+            return `trailing_stop_hit (dropped ${dropFromHWM.toFixed(2)}% from HWM $${position.highWaterMark.toFixed(6)})`;
+          }
         }
       }
     }
@@ -1522,7 +2229,11 @@ class PaperTradingEngine {
 
   private calculateMFE(position: PaperPosition): number {
     if (position.entryPrice <= 0) return 0;
-    return ((position.highWaterMark - position.entryPrice) / position.entryPrice) * 100;
+    // LONG: MFE = highest price above entry
+    // SHORT: MFE = lowest price below entry (most favorable)
+    return position.direction === 'SHORT'
+      ? ((position.entryPrice - position.lowWaterMark) / position.entryPrice) * 100
+      : ((position.highWaterMark - position.entryPrice) / position.entryPrice) * 100;
   }
 
   // ============================================================
@@ -1531,8 +2242,13 @@ class PaperTradingEngine {
 
   private calculateMAE(position: PaperPosition): number {
     if (position.entryPrice <= 0) return 0;
-    const pnlPct = position.unrealizedPnlPct;
-    return pnlPct < 0 ? Math.abs(pnlPct) : 0;
+    // LONG: MAE = lowest price below entry (adverse)
+    // SHORT: MAE = highest price above entry (adverse)
+    const maePct = position.direction === 'SHORT'
+      ? ((position.highWaterMark - position.entryPrice) / position.entryPrice) * 100
+      : ((position.entryPrice - position.lowWaterMark) / position.entryPrice) * -100;
+    // MAE is always returned as a negative number (adverse excursion)
+    return Math.min(0, maePct > 0 ? -maePct : maePct);
   }
 
   // ============================================================
@@ -1549,7 +2265,7 @@ class PaperTradingEngine {
 
     if (stdDev === 0) return 0;
 
-    return (avgReturn / stdDev) * Math.sqrt(5000);
+    return (avgReturn / stdDev) * Math.sqrt(365);
   }
 
   // ============================================================

@@ -537,7 +537,7 @@ export class HistoricalBackfillEngine {
               try {
                 await db.traderTransaction.upsert({
                   where: { txHash: (txn as { txHash: string }).txHash },
-                  create: txn as Parameters<typeof db.traderTransaction.create>[0]['data'],
+                  create: txn as any,
                   update: {},
                 });
               } catch {

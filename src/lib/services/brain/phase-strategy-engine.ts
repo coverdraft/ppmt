@@ -375,6 +375,8 @@ class PhaseStrategyEngine {
             volume24h: true,
             liquidity: true,
             priceChange24h: true,
+            priceUsd: true,
+            marketCap: true,
           },
         });
 
@@ -412,7 +414,7 @@ class PhaseStrategyEngine {
    * Calcula el score de match entre un token y una estrategia.
    */
   private calculateMatchScore(
-    token: { volume24h: number; liquidity: number; priceChange24h: number },
+    token: { volume24h: number; liquidity: number; priceChange24h: number; address: string; symbol: string; chain: string; priceUsd?: number; marketCap?: number },
     strategy: StageStrategy
   ): number {
     let score = 0;
@@ -444,7 +446,7 @@ class PhaseStrategyEngine {
    * Explica por qué un token matchea una estrategia.
    */
   private explainMatch(
-    token: { volume24h: number; liquidity: number; priceChange24h: number },
+    token: { volume24h: number; liquidity: number; priceChange24h: number; address: string; symbol: string; chain: string; priceUsd?: number; marketCap?: number },
     strategy: StageStrategy,
     phase: TokenPhase
   ): string {

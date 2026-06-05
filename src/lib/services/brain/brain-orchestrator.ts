@@ -46,6 +46,7 @@ import {
 import {
   detectBot,
   batchDetectBots,
+  analyticsToMetrics,
   type BotDetectionResult,
   type TraderMetrics,
 } from '@/lib/services/execution/bot-detection';
@@ -187,7 +188,7 @@ export function createEmptyTokenAnalysis(overrides?: Partial<TokenAnalysis>): To
     volatilityRegime: 'NORMAL',
     lifecyclePhase: 'GROWTH',
     lifecycleConfidence: 0.5,
-    tradingPhase: 'growth',
+    tradingPhase: 'GROWTH',
     isTransitioning: false,
     netBehaviorFlow: 'NEUTRAL',
     behaviorConfidence: 0.5,
@@ -395,33 +396,10 @@ export function buildTraderAnalyticsFromTransactions(
 }
 
 /**
- * Convert TraderAnalytics to TraderMetrics for bot detection
+ * Re-export analyticsToMetrics from bot-detection for backward compatibility.
+ * The canonical definition now lives in bot-detection.ts.
  */
-export function analyticsToMetrics(analytics: TraderAnalytics): TraderMetrics {
-  return {
-    totalTrades: analytics.totalTrades,
-    avgTimeBetweenTradesMin: analytics.avgTimeBetweenTradesMin,
-    consistencyScore: analytics.consistencyScore,
-    isActive247: analytics.isActive247,
-    isActiveAtNight: analytics.tradingHourPattern.slice(0, 6).some(h => h > 0.3) || 
-                     analytics.tradingHourPattern.slice(22).some(h => h > 0.3),
-    avgSlippageBps: 0, // Not in TraderAnalytics - would need transaction-level data
-    frontrunCount: analytics.frontrunCount,
-    sandwichCount: analytics.sandwichCount,
-    washTradeScore: analytics.washTradeScore,
-    copyTradeScore: analytics.copyTradeScore,
-    mevExtractionUsd: 0, // Not in TraderAnalytics
-    avgHoldTimeMin: analytics.avgHoldTimeMin,
-    tradingHourPattern: analytics.tradingHourPattern,
-    block0EntryCount: 0, // Not in TraderAnalytics - would need on-chain data
-    avgBlockToTrade: 0,  // Not in TraderAnalytics
-    priorityFeeUsd: 0,   // Not in TraderAnalytics
-    justInTimeCount: 0,  // Not in TraderAnalytics
-    multiHopCount: 0,    // Not in TraderAnalytics
-    sameTokenPairCount: 0, // Not in TraderAnalytics
-    selfTradeCount: 0,   // Not in TraderAnalytics
-  };
-}
+export { analyticsToMetrics } from '@/lib/services/execution/bot-detection';
 
 // ============================================================
 // MAIN ORCHESTRATOR
@@ -590,31 +568,35 @@ export async function analyzeToken(
   let whaleConfidence = 0;
   let smartMoneyFlow: TokenAnalysis['smartMoneyFlow'] = 'NEUTRAL';
   
+  // Fetch token from DB once — reused in PHASE 6 (operability) to avoid duplicate query
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let tokenDbRecord: any = null;
+  
   try {
     const { db } = await import('@/lib/db');
     
-    // Get token DNA for bot/whale info
-    const token = await db.token.findUnique({
+    // Get token DNA for bot/whale info (includes dna for phase 5)
+    tokenDbRecord = await db.token.findUnique({
       where: { address: tokenAddress },
       include: { dna: true },
     });
     
-    if (token) {
+    if (tokenDbRecord) {
       // Bot swarm from token data
-      const botPct = token.botActivityPct;
+      const botPct = tokenDbRecord.botActivityPct;
       if (botPct > 80) botSwarmLevel = 'CRITICAL';
       else if (botPct > 60) botSwarmLevel = 'HIGH';
       else if (botPct > 40) botSwarmLevel = 'MEDIUM';
       else if (botPct > 20) botSwarmLevel = 'LOW';
       
       // Smart money flow from token data
-      const smPct = token.smartMoneyPct;
+      const smPct = tokenDbRecord.smartMoneyPct;
       if (smPct > 30) smartMoneyFlow = 'INFLOW';
       else if (smPct < 10) smartMoneyFlow = 'OUTFLOW';
       
       // If we have DNA, get more detail
-      if (token.dna) {
-        const dna = token.dna;
+      if (tokenDbRecord.dna) {
+        const dna = tokenDbRecord.dna;
         if (dna.botActivityScore > 70) botSwarmLevel = 'HIGH';
         if (dna.mevPct > 30) dominantBotType = 'MEV_EXTRACTOR';
         else if (dna.sniperPct > 30) dominantBotType = 'SNIPER_BOT';
@@ -665,8 +647,8 @@ export async function analyzeToken(
   let minimumGainPct = 0;
   
   try {
-    const { db } = await import('@/lib/db');
-    const token = await db.token.findUnique({ where: { address: tokenAddress } });
+    // Reuse the token record fetched in PHASE 5 instead of querying again
+    const token = tokenDbRecord;
     
     if (token) {
       const operInput: OperabilityInput = {

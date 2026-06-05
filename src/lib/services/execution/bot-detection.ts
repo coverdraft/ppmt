@@ -7,6 +7,8 @@
  * Jito Tip Bots, and more.
  */
 
+import type { TraderAnalytics } from './wallet-profiler';
+
 export interface BotDetectionResult {
   isBot: boolean;
   botType: string | null;
@@ -475,4 +477,35 @@ export function getBotDetectionSummary(result: BotDetectionResult): string {
     .join('\n');
   
   return `Detected ${type} (${confidence}% confidence)\nEvidence:\n${evidence}`;
+}
+
+/**
+ * Convert TraderAnalytics to TraderMetrics for bot detection.
+ * This is the canonical converter — it maps wallet-profiler analytics
+ * into the TraderMetrics shape expected by detectBot().
+ */
+export function analyticsToMetrics(analytics: TraderAnalytics): TraderMetrics {
+  return {
+    totalTrades: analytics.totalTrades,
+    avgTimeBetweenTradesMin: analytics.avgTimeBetweenTradesMin,
+    consistencyScore: analytics.consistencyScore,
+    isActive247: analytics.isActive247,
+    isActiveAtNight: analytics.tradingHourPattern.slice(0, 6).some(h => h > 0.3) || 
+                     analytics.tradingHourPattern.slice(22).some(h => h > 0.3),
+    avgSlippageBps: 0, // Not in TraderAnalytics - would need transaction-level data
+    frontrunCount: analytics.frontrunCount,
+    sandwichCount: analytics.sandwichCount,
+    washTradeScore: analytics.washTradeScore,
+    copyTradeScore: analytics.copyTradeScore,
+    mevExtractionUsd: 0, // Not in TraderAnalytics
+    avgHoldTimeMin: analytics.avgHoldTimeMin,
+    tradingHourPattern: analytics.tradingHourPattern,
+    block0EntryCount: 0, // Not in TraderAnalytics - would need on-chain data
+    avgBlockToTrade: 0,  // Not in TraderAnalytics
+    priorityFeeUsd: 0,   // Not in TraderAnalytics
+    justInTimeCount: 0,  // Not in TraderAnalytics
+    multiHopCount: 0,    // Not in TraderAnalytics
+    sameTokenPairCount: 0, // Not in TraderAnalytics
+    selfTradeCount: 0,   // Not in TraderAnalytics
+  };
 }

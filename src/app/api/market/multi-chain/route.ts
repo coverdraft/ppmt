@@ -201,7 +201,7 @@ export async function GET(request: NextRequest) {
           return chains.size >= 2;
         })
         .map(([symbol, tokens]) => {
-          const chains = [...new Set(tokens.map(t => t.chain))];
+          const chains = [...new Set(tokens.map(t => t.chain))] as string[];
           const priceByChain: Record<string, number> = {};
           const volumeByChain: Record<string, number> = {};
 

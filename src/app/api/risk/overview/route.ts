@@ -88,12 +88,14 @@ export async function GET(request: NextRequest) {
     // Get open positions
     const openPositions = await db.paperTradingPosition.findMany({
       where: { status: 'OPEN', runId },
+      take: 50,
     });
 
     // Get closed trades (all for this session)
     const closedTrades = await db.paperTradingTrade.findMany({
       where: { position: { runId } },
       orderBy: { closedAt: 'asc' },
+      take: 500,
     });
 
     // ---- PORTFOLIO RISK ----
@@ -243,14 +245,24 @@ export async function GET(request: NextRequest) {
     }
 
     // ---- RISK CONTROLS ----
-    // Try to get from a TradingSystem if available, otherwise defaults
+    // Priority: RiskControlsConfig table > TradingSystem > defaults
     let maxPositionSizePct = 10;
     let maxPortfolioRiskPct = 25;
     let stopLossDefaultPct = 5;
     let dailyLossLimitPct = 10;
 
-    if (session.strategyName) {
-      try {
+    try {
+      const savedConfig = await db.riskControlsConfig.findFirst({
+        where: { userId: null },
+        orderBy: { updatedAt: 'desc' },
+      });
+      if (savedConfig) {
+        maxPositionSizePct = savedConfig.maxPositionSizePct;
+        maxPortfolioRiskPct = savedConfig.maxPortfolioRiskPct;
+        stopLossDefaultPct = savedConfig.stopLossDefaultPct;
+        dailyLossLimitPct = savedConfig.dailyLossLimitPct;
+      } else if (session.strategyName) {
+        // Fallback: try TradingSystem if no explicit config saved
         const system = await db.tradingSystem.findFirst({
           where: { name: session.strategyName },
         });
@@ -261,9 +273,9 @@ export async function GET(request: NextRequest) {
           // dailyLossLimitPct - not a direct field, derive from cash reserve
           dailyLossLimitPct = Math.min(system.cashReservePct, 15);
         }
-      } catch {
-        // Use defaults
       }
+    } catch {
+      // Use defaults
     }
 
     // Daily PnL

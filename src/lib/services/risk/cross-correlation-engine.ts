@@ -271,7 +271,8 @@ class CrossCorrelationEngine {
     const key = this.makeKey(input);
 
     try {
-      // Try to update existing record
+      // Use atomic upsert with increment to avoid read-modify-write race condition
+      // First, try to find the existing record to update the context counts atomically
       const existing = await db.feedbackMetrics.findFirst({
         where: {
           sourceType: 'cross_correlation',
@@ -280,26 +281,17 @@ class CrossCorrelationEngine {
         orderBy: { measuredAt: 'desc' },
       });
 
-      const context = JSON.stringify({
-        phase: input.phase,
-        archetype: input.dominantArchetype,
-        action: input.dominantAction,
-        pattern: input.dominantPattern,
-        patternSignal: input.patternSignal,
-        behaviorDirection: input.behaviorDirection,
-        outcome: actualOutcome,
-      });
-
       if (existing) {
         // Parse current counts and increment
         const currentContext = JSON.parse(existing.context || '{}');
         const counts: Record<Outcome, number> = currentContext.counts ?? { BULLISH: 0, BEARISH: 0, NEUTRAL: 0 };
         counts[actualOutcome] = (counts[actualOutcome] || 0) + 1;
 
+        // Use atomic increment for metricValue + full context update
         await db.feedbackMetrics.update({
           where: { id: existing.id },
           data: {
-            metricValue: existing.metricValue + 1,
+            metricValue: { increment: 1 },
             context: JSON.stringify({ ...currentContext, counts }),
             measuredAt: new Date(),
           },
@@ -428,8 +420,8 @@ class CrossCorrelationEngine {
 
       this.cacheLoaded = true;
     } catch {
-      // If DB fails, proceed with empty cache
-      this.cacheLoaded = true;
+      // If DB fails, proceed with empty cache but do NOT mark as loaded
+      // so we retry on next access
     }
   }
 
@@ -574,6 +566,12 @@ class CrossCorrelationEngine {
    * Evaluate pending cross-correlation observations whose time window has expired.
    * Compares predicted outcomes with actual price movements and updates the model.
    * Returns the number of observations evaluated.
+   *
+   * LIMITATION: This method compares predictions against token.priceChange24h
+   * regardless of the prediction's original timeframe. A prediction made for a
+   * 4h window is compared against 24h price change, which can misclassify results.
+   * TODO: Store the prediction timeframe in the signal metadata and compare against
+   * the corresponding timeframe's price change when available.
    */
   async evaluatePendingObservations(): Promise<number> {
     try {
@@ -589,8 +587,16 @@ class CrossCorrelationEngine {
       });
 
       let evaluated = 0;
+      const now = Date.now();
       for (const signal of pendingSignals) {
         try {
+          // Skip if the prediction was made less than 24h ago —
+          // priceChange24h hasn't had time to reflect the full prediction window
+          const signalAge = now - new Date(signal.createdAt).getTime();
+          if (signalAge < 24 * 60 * 60 * 1000) {
+            continue;
+          }
+
           // Get the current price to compare with prediction
           const token = await db.token.findFirst({
             where: { address: signal.tokenAddress ?? undefined },

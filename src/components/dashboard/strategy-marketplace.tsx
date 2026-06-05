@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback } from 'react';
+import React, { useState, useCallback } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -82,7 +82,7 @@ interface StrategyTemplate {
 // ============================================================
 
 function StarRating({ rating, size = 'sm' }: { rating: number; size?: 'sm' | 'md' }) {
-  const stars = [];
+  const stars: React.ReactElement[] = [];
   const fullStars = Math.floor(rating);
   const hasHalf = rating - fullStars >= 0.3;
 

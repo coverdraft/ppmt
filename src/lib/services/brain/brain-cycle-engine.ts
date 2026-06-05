@@ -660,8 +660,8 @@ class BrainCycleEngine {
       // === STEP 12: Auto-backfill for top tokens ===
       if (this.config.autoBackfill && operableAddresses.length > 0) {
         try {
-          // Backfill top 5 operable tokens (don't want to overload APIs)
-          await ohlcvPipeline.backfillTopTokens(Math.min(5, operableAddresses.length));
+          // Backfill up to 20 operable tokens prioritized by data freshness
+          await ohlcvPipeline.backfillTokensByPriority(Math.min(20, operableAddresses.length));
         } catch (error) {
           // Backfill is best-effort, don't count as error
         }

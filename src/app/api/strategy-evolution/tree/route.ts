@@ -192,6 +192,7 @@ export async function GET(request: NextRequest) {
     }
 
     const systems = await db.tradingSystem.findMany({
+      take: 100,
       orderBy: { createdAt: 'asc' },
       include: {
         backtests: {
@@ -284,7 +285,7 @@ export async function GET(request: NextRequest) {
         visited.add(currentParentId);
         generation++;
         const parentSystem = systemMap.get(currentParentId);
-        currentParentId = parentSystem?.parentSystemId || null;
+        currentParentId = (parentSystem as any)?.parentSystemId || null;
       }
 
       // Get parent name
@@ -306,7 +307,7 @@ export async function GET(request: NextRequest) {
         status: latestStatus,
         improvementPct: evoData?.improvementPct ?? 0,
         parentId: system.parentSystemId,
-        parentName: parentSystem?.name || null,
+        parentName: (parentSystem as any)?.name || null,
         evolutionType: evoData?.evolutionType || null,
         triggerMetric: evoData?.triggerMetric || null,
         category: system.category,

@@ -1106,7 +1106,7 @@ class AutonomousExecutionEngine {
             correlationSamples: pipelineResult.strategy?.correlationSamples ?? 0,
             dataReliabilityLevel: pipelineResult.strategy?.dataReliabilityLevel ?? 'INSUFFICIENT',
           }),
-          operationType: order.direction === 'LONG' ? 'SWING_LONG' : 'SCALP',
+          operationType: order.direction === 'LONG' ? 'SWING_LONG' : 'SWING_SHORT',
           timeframe: '5m',
           entryPrice: order.entryPrice,
           entryTime: order.createdAt,

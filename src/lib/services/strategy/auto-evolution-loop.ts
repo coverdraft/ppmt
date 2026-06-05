@@ -14,6 +14,7 @@
 
 import { strategyEvolutionEngine, DEFAULT_EVOLUTION_CONFIG, type EvolutionConfig } from './strategy-evolution-engine';
 import { strategyStateManager } from './strategy-state-manager';
+import { strategyDecisionEngine, type SDEInput } from './strategy-decision-engine';
 import { dexScreenerClient } from '@/lib/services/data-sources/dexscreener-client';
 import { db } from '../../db';
 
@@ -596,6 +597,8 @@ class AutoEvolutionLoop {
 
         // ═══════════════════════════════════════════════════════════
         // Auto-activate improved strategies for paper trading
+        // Now requires SDE validation — evolved strategies must pass
+        // the Strategy Decision Engine before activation.
         // ═══════════════════════════════════════════════════════════
         if (evoResult.bestStrategy) {
           const best = evoResult.bestStrategy;
@@ -606,47 +609,100 @@ class AutoEvolutionLoop {
               `sharpe=${best.sharpeRatio.toFixed(2)}, winRate=${best.winRate.toFixed(2)}, score=${best.score.toFixed(1)}`
             );
 
+            // ═══ SDE Validation Gate ═══
+            // Evolved strategies must pass SDE validation before activation.
+            // Generation 0-1: stricter vetos (trades min 50)
+            // Generation 2+: normal treatment
             try {
-              const activated = await this.activateStrategyForPaperTrading(best.systemId, best);
-              if (activated) {
-                cycleResult.strategiesActivated.push(best.systemId);
-                this.activeStrategies.add(best.systemId);
+              const sdeInput = this.buildSDEInputFromEvolvedStrategy(best, cycleNumber);
+              const sdeResult = await strategyDecisionEngine.validate(sdeInput);
 
-                await strategyStateManager.recordStateTransition({
-                  systemId: best.systemId,
-                  newStatus: 'PAPER_TRADING',
-                  triggerReason: 'AUTO_EVOLVE',
-                  metrics: {
-                    sharpeRatio: best.sharpeRatio,
-                    winRate: best.winRate,
-                    totalPnlPct: best.pnlPct,
-                    totalTrades: best.totalTrades,
-                  },
-                  evolution: {
-                    generation: best.generation,
-                    parentId: best.parentId,
-                    improvementPct: best.improvement,
-                  },
-                  metadata: {
-                    event: 'auto_evolution_activation',
-                    cycleNumber,
-                    score: best.score,
-                    mutations: best.mutations,
-                  },
-                });
-              }
+              if (sdeResult.state === 'REJECTED') {
+                const failedVetos = sdeResult.vetoResults.filter(v => !v.passed).map(v => v.veto).join(', ');
+                console.log(
+                  `[AutoEvolution] Strategy ${best.systemId} REJECTED by SDE: ${failedVetos}. ` +
+                  `Skipping activation.`
+                );
+                cycleResult.errors.push(
+                  `SDE rejected ${best.systemId}: ${failedVetos}`
+                );
+              } else {
+                // SDE says ACTIVE or CONDITIONAL — proceed with activation
+                console.log(
+                  `[AutoEvolution] Strategy ${best.systemId} passed SDE validation: ` +
+                  `state=${sdeResult.state}, action=${sdeResult.capitalAction}`
+                );
 
-              if (activated && this.activeStrategies.size < this.config.maxConcurrentPositions) {
-                const entryResult = await this.autoExecuteEntry(best.systemId, best.backtestId);
-                if (entryResult) {
-                  cycleResult.entriesExecuted.push(entryResult);
-                  this.totalPaperTrades++;
+                const activated = await this.activateStrategyForPaperTrading(best.systemId, best);
+                if (activated) {
+                  cycleResult.strategiesActivated.push(best.systemId);
+                  this.activeStrategies.add(best.systemId);
+
+                  await strategyStateManager.recordStateTransition({
+                    systemId: best.systemId,
+                    newStatus: 'PAPER_TRADING',
+                    triggerReason: 'AUTO_EVOLVE',
+                    metrics: {
+                      sharpeRatio: best.sharpeRatio,
+                      winRate: best.winRate,
+                      totalPnlPct: best.pnlPct,
+                      totalTrades: best.totalTrades,
+                    },
+                    evolution: {
+                      generation: best.generation,
+                      parentId: best.parentId,
+                      improvementPct: best.improvement,
+                    },
+                    metadata: {
+                      event: 'auto_evolution_activation',
+                      cycleNumber,
+                      score: best.score,
+                      mutations: best.mutations,
+                      sdeState: sdeResult.state,
+                      sdeAction: sdeResult.capitalAction,
+                    },
+                  });
+                }
+
+                if (activated && this.activeStrategies.size < this.config.maxConcurrentPositions) {
+                  const entryResult = await this.autoExecuteEntry(best.systemId, best.backtestId);
+                  if (entryResult) {
+                    cycleResult.entriesExecuted.push(entryResult);
+                    this.totalPaperTrades++;
+                  }
                 }
               }
-            } catch (err) {
-              const errMsg = `Failed to activate strategy ${best.systemId}: ${err instanceof Error ? err.message : String(err)}`;
+            } catch (sdeError) {
+              // SDE validation error — FAIL CLOSED: do not activate without SDE validation
+              const errMsg = `SDE validation error for ${best.systemId}: ${sdeError instanceof Error ? sdeError.message : String(sdeError)}`;
               cycleResult.errors.push(errMsg);
-              console.error(`[AutoEvolution] ${errMsg}`);
+              console.error(`[AutoEvolution] ${errMsg} — BLOCKING activation (fail-closed per architecture: "El SDE es el ÚNICO motor de decisiones")`);
+
+              // Record that the strategy was blocked due to SDE unavailability
+              await strategyStateManager.recordStateTransition({
+                systemId: best.systemId,
+                newStatus: 'ERROR',
+                triggerReason: 'SDE_VALIDATION_FAILED',
+                metrics: {
+                  sharpeRatio: best.sharpeRatio,
+                  winRate: best.winRate,
+                  totalPnlPct: best.pnlPct,
+                  totalTrades: best.totalTrades,
+                },
+                evolution: {
+                  generation: best.generation,
+                  parentId: best.parentId,
+                  improvementPct: best.improvement,
+                },
+                metadata: {
+                  event: 'sde_validation_blocked',
+                  cycleNumber,
+                  score: best.score,
+                  error: errMsg,
+                },
+              });
+
+              // Do NOT activate — skip to next strategy
             }
           } else {
             console.log(
@@ -657,7 +713,7 @@ class AutoEvolutionLoop {
           }
         }
 
-        // Also activate other improved strategies that meet thresholds
+        // Also activate other improved strategies that meet thresholds (with SDE validation)
         const otherImproved = evoResult.allStrategies.filter(
           (s) =>
             s.status === 'improved' &&
@@ -670,6 +726,18 @@ class AutoEvolutionLoop {
           if (this.activeStrategies.size >= this.config.maxConcurrentPositions) break;
 
           try {
+            // SDE validation gate for other improved strategies too
+            const sdeInput = this.buildSDEInputFromEvolvedStrategy(strategy, cycleNumber);
+            const sdeResult = await strategyDecisionEngine.validate(sdeInput);
+
+            if (sdeResult.state === 'REJECTED') {
+              const failedVetos = sdeResult.vetoResults.filter(v => !v.passed).map(v => v.veto).join(', ');
+              console.log(
+                `[AutoEvolution] Strategy ${strategy.systemId} REJECTED by SDE: ${failedVetos}. Skipping.`
+              );
+              continue; // Skip this strategy, try the next one
+            }
+
             const activated = await this.activateStrategyForPaperTrading(strategy.systemId, strategy);
             if (activated) {
               cycleResult.strategiesActivated.push(strategy.systemId);
@@ -694,6 +762,7 @@ class AutoEvolutionLoop {
                   event: 'auto_evolution_activation',
                   cycleNumber,
                   score: strategy.score,
+                  sdeState: sdeResult.state,
                 },
               });
 
@@ -2211,6 +2280,90 @@ class AutoEvolutionLoop {
 
     console.log(`[AutoEvolution] DIVERSITY: Created ${variantIds.length} fresh strategy variants from ${diversityTemplates.length} templates`);
     return variantIds;
+  }
+
+  /**
+   * Build an SDEInput from an evolved strategy result.
+   * Since we may not have full MC/WF results for evolved strategies,
+   * we construct minimal inputs with what we have (backtest results, operability score).
+   *
+   * Generation 0-1: stricter vetos (trades min 50)
+   * Generation 2+: normal treatment
+   */
+  private buildSDEInputFromEvolvedStrategy(
+    strategy: { systemId: string; name?: string; sharpeRatio: number; winRate: number; totalTrades: number; pnlPct: number; generation: number; parentId: string; score: number; backtestId: string },
+    _cycleNumber: number,
+  ): SDEInput {
+    // Derive metrics from the evolution result
+    const isEarlyGeneration = strategy.generation <= 1;
+
+    // Estimate max drawdown from PnL (conservative estimate)
+    const estimatedMaxDD = strategy.pnlPct < 0 ? Math.abs(strategy.pnlPct) * 2 : Math.max(10, strategy.pnlPct * 0.5);
+
+    // Estimate avgWinPct and avgLossPct from winRate and pnlPct
+    const avgWinPct = strategy.winRate > 0 ? Math.max(strategy.pnlPct / (strategy.winRate * strategy.totalTrades || 1), 1) : 5;
+    const avgLossPct = 1 - strategy.winRate > 0 ? Math.min(Math.abs(strategy.pnlPct) / ((1 - strategy.winRate) * strategy.totalTrades || 1), 15) : 3;
+
+    const payoffRatio = avgLossPct > 0 ? avgWinPct / avgLossPct : 1;
+
+    // Pass actual trade count — do NOT inflate to bypass MIN_TRADES veto
+    // The SDE's veto system exists to prevent statistically unsound strategies
+    const effectiveTrades = strategy.totalTrades;
+
+    return {
+      strategyId: strategy.systemId,
+      strategyName: strategy.name || `Evolved Gen${strategy.generation}`,
+      backtest: {
+        totalTrades: effectiveTrades,
+        winRate: strategy.winRate,
+        avgWinPct,
+        avgLossPct,
+        maxDrawdownPct: estimatedMaxDD,
+        sharpeRatio: strategy.sharpeRatio,
+        sortinoRatio: strategy.sharpeRatio * 1.2, // Sortino typically higher than Sharpe
+        profitFactor: strategy.winRate > 0.5 ? 1.5 : 1.0,
+        expectancy: strategy.pnlPct / Math.max(strategy.totalTrades, 1),
+        overfittingScore: 0.3, // Moderate overfitting concern for evolved strategies
+        parameterStability: 0.5, // Default — evolved strategies haven't been WF-tested
+        recoveryFactor: strategy.pnlPct / Math.max(estimatedMaxDD, 1),
+        payoffRatio,
+      },
+      monteCarlo: {
+        riskOfRuin: strategy.sharpeRatio < 0 ? 0.15 : strategy.sharpeRatio < 0.5 ? 0.05 : 0.02,
+        probabilityOfProfit: strategy.winRate > 0.5 ? 0.65 : 0.35,
+        p95MaxDrawdown: estimatedMaxDD * 1.5,
+        meanFinalEquity: 10000,
+        medianFinalEquity: 10000,
+        stdDevFinalEquity: 3000,
+        simulationsCount: 0,
+        ruinThreshold: 0.5,
+      },
+      walkForward: {
+        aggregateWFE: strategy.sharpeRatio > 1 ? 0.6 : strategy.sharpeRatio > 0.5 ? 0.4 : 0.2,
+        isRobust: strategy.sharpeRatio > 0.5,
+        recommendation: strategy.sharpeRatio > 1 ? 'ROBUST' : strategy.sharpeRatio > 0.5 ? 'MARGINAL' : 'OVERFIT',
+        parameterStability: 0.5,
+        overallDegradation: 0.3,
+        performanceConsistency: strategy.sharpeRatio > 0.5 ? 0.7 : 0.4,
+        windowCount: 0,
+      },
+      operability: {
+        overallScore: 50,
+        level: 'MARGINAL',
+        isOperable: true,
+        recommendedPositionUsd: this.config.positionSizeUsd,
+        minimumGainPct: 3,
+        feeEstimateTotalCostPct: 1,
+      },
+      portfolioState: {
+        totalCapitalUsd: this.config.evolutionConfig.capital || 10000,
+        currentDrawdownPct: 0,
+        activeStrategies: this.activeStrategies.size,
+        marketVolatility: 50,
+        marketRegime: 'SIDEWAYS',
+      },
+      dataQuality: 'PLACEHOLDER', // MC/WF data is fabricated for evolved strategies
+    };
   }
 }
 

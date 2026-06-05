@@ -30,7 +30,7 @@ import {
   Timer,
 } from 'lucide-react';
 import { toast } from 'sonner';
-import { useState, useMemo } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 
 // ============================================================
 // TYPES
@@ -412,9 +412,32 @@ export default function RiskManagementPanel() {
     return Math.min(Math.round(exposureScore + drawdownScore + concentrationScore + directionBias), 100);
   }, [data]);
 
-  // Initialize risk controls from data
-  useMemo(() => {
-    if (data?.riskControls) {
+  // Load persisted risk controls on mount
+  const { data: controlsData } = useQuery({
+    queryKey: ['risk-controls'],
+    queryFn: async () => {
+      try {
+        const res = await fetch('/api/risk/controls');
+        if (!res.ok) return null;
+        const json = await res.json();
+        return json.data as { maxPositionSizePct: number; maxPortfolioRiskPct: number; stopLossDefaultPct: number; dailyLossLimitPct: number } | null;
+      } catch {
+        return null;
+      }
+    },
+    staleTime: 30000,
+  });
+
+  // Initialize risk controls from persisted config (priority) or API data (fallback)
+  useEffect(() => {
+    if (controlsData) {
+      setRiskControls({
+        maxPositionSizePct: controlsData.maxPositionSizePct,
+        maxPortfolioRiskPct: controlsData.maxPortfolioRiskPct,
+        stopLossDefaultPct: controlsData.stopLossDefaultPct,
+        dailyLossLimitPct: controlsData.dailyLossLimitPct,
+      });
+    } else if (data?.riskControls) {
       setRiskControls({
         maxPositionSizePct: data.riskControls.maxPositionSizePct,
         maxPortfolioRiskPct: data.riskControls.maxPortfolioRiskPct,
@@ -422,19 +445,34 @@ export default function RiskManagementPanel() {
         dailyLossLimitPct: data.riskControls.dailyLossLimitPct,
       });
     }
-  }, [data?.riskControls]);
+  }, [controlsData, data?.riskControls]);
 
-  // Save controls mutation
+  // Save controls mutation — persists to /api/risk/controls
   const saveControlsMutation = useMutation({
     mutationFn: async () => {
-      // For now, just show success. In a full implementation,
-      // this would persist to a config store or TradingSystem
-      await new Promise((r) => setTimeout(r, 500));
-      return true;
+      const res = await fetch('/api/risk/controls', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          maxPositionSizePct: riskControls.maxPositionSizePct,
+          maxPortfolioRiskPct: riskControls.maxPortfolioRiskPct,
+          stopLossDefaultPct: riskControls.stopLossDefaultPct,
+          dailyLossLimitPct: riskControls.dailyLossLimitPct,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => null);
+        throw new Error(err?.error || 'Failed to save risk controls');
+      }
+      return await res.json();
     },
     onSuccess: () => {
       toast.success('Risk controls saved');
       queryClient.invalidateQueries({ queryKey: ['risk-overview'] });
+      queryClient.invalidateQueries({ queryKey: ['risk-controls'] });
+    },
+    onError: (error: Error) => {
+      toast.error(`Failed to save: ${error.message}`);
     },
   });
 

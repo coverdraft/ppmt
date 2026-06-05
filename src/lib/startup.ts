@@ -58,6 +58,8 @@ export async function triggerAutoStart(): Promise<{
     };
   } catch (error) {
     console.warn('[Startup] Auto-start check failed:', error);
+    // Reset so subsequent calls can retry
+    startupTriggered = false;
     return {
       autoStarted: false,
       wasPreviouslyRunning: false,

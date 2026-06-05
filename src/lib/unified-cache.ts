@@ -129,10 +129,11 @@ export class UnifiedCache {
   private memoryEstimate = 0;
 
   constructor(config?: Partial<CacheConfig>) {
-    this.config = { ...DEFAULT_CACHE_CONFIG, ...config };
-    if (this.config.sourceTtls === DEFAULT_CACHE_CONFIG.sourceTtls) {
-      this.config.sourceTtls = { ...DEFAULT_CACHE_CONFIG.sourceTtls };
-    }
+    this.config = {
+      ...DEFAULT_CACHE_CONFIG,
+      ...config,
+      sourceTtls: { ...DEFAULT_CACHE_CONFIG.sourceTtls, ...(config?.sourceTtls ?? {}) },
+    };
 
     // Run cleanup every 60 seconds
     this.cleanupTimer = setInterval(() => this.evictExpired(), 60_000);
@@ -416,7 +417,10 @@ export class UnifiedCache {
 
     // Try source prefix match
     if (source) {
-      const sourceMatch = this.config.sourceTtls[`${source}:${key.split(':').pop()}`];
+      const segments = key.split(':');
+      // Second segment is typically the type (e.g., "dexpaprika:price:SoL1...")
+      const typeSegment = segments.length >= 2 ? segments[1] : segments[0];
+      const sourceMatch = this.config.sourceTtls[`${source}:${typeSegment}`];
       if (sourceMatch !== undefined) return sourceMatch;
 
       // Try source alone

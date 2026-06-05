@@ -215,14 +215,16 @@ export function estimateFees(input: OperabilityInput): FeeEstimate {
   const swapFeePct = chainEcon.swapFeePct * 2; // Two swaps
   
   // Slippage estimation
-  // Model: slippage ≈ positionSize / (2 * sqrt(liquidity)) * volatilityFactor
-  const positionRatio = input.positionSizeUsd / (input.liquidityUsd || 1);
+  // Model: AMM-style slippage where position impact scales with position/liquidity ratio
   const volatilityFactor = Math.abs(input.priceChange24h) > 20 ? 2.0
     : Math.abs(input.priceChange24h) > 10 ? 1.5
     : 1.0;
-  
-  // Entry slippage + exit slippage
-  const slippagePct = positionRatio * 50 * volatilityFactor; // Empirical approximation
+
+  // Slippage estimate: positionRatio * (1 / sqrt(liquidityDepth)) * volatilityFactor
+  // Using a more conservative model: 0.5% base slippage per 1% of liquidity consumed
+  const liquidityDepth = Math.max(input.liquidityUsd, 1);
+  const positionImpactRatio = input.positionSizeUsd / liquidityDepth;
+  const slippagePct = positionImpactRatio * 10 * volatilityFactor; // 10x multiplier for AMM curve
   const slippageUsd = input.positionSizeUsd * (slippagePct / 100) * 2; // Round trip
   
   // Total
@@ -449,7 +451,7 @@ export function calculateOperabilityScore(input: OperabilityInput): OperabilityR
   );
   
   // 9. Is it operable?
-  const isOperable = overallScore >= 30 && 
+  const isOperable = overallScore >= 40 && 
     feeEstimate.totalCostPct < input.expectedGainPct &&
     input.liquidityUsd >= (CHAIN_ECONOMICS[input.chain] || CHAIN_ECONOMICS['SOL']).minLiquidityUsd;
   

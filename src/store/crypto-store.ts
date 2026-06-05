@@ -88,7 +88,7 @@ export interface MarketSummary {
   fearGreedIndex: number;
 }
 
-export type ActiveTab = 'dashboard' | 'signals' | 'dna-scanner' | 'charts' | 'pattern-builder' | 'heatmap' | 'trader-intel' | 'trading-systems' | 'backtesting' | 'big-data' | 'brain' | 'deep-analysis' | 'multi-chain';
+export type ActiveTab = 'dashboard' | 'charts' | 'multi-chain' | 'signals' | 'smart-money' | 'deep-analysis' | 'dna-scanner' | 'predictive' | 'brain' | 'strategy-lab' | 'backtesting' | 'paper-trading' | 'patterns' | 'kill-switches' | 'capital-allocation' | 'portfolio' | 'risk' | 'decisions' | 'export-import';
 
 export interface AlertSummary {
   id: string;

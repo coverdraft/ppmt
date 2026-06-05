@@ -24,7 +24,7 @@ export async function getCurrentUserId(): Promise<string> {
 
   if (existing) {
     _cachedDemoUserId = existing.id;
-    return _cachedDemoUserId;
+    return _cachedDemoUserId!;
   }
 
   // Auto-create demo user if it doesn't exist
@@ -41,7 +41,7 @@ export async function getCurrentUserId(): Promise<string> {
     });
     _cachedDemoUserId = newUser.id;
     console.log(`[Auth] Auto-created demo user: ${newUser.id}`);
-    return _cachedDemoUserId;
+    return _cachedDemoUserId!;
   } catch (createError) {
     // Race condition: another request might have created it between our find and create
     const retry = await db.user.findUnique({
@@ -50,7 +50,7 @@ export async function getCurrentUserId(): Promise<string> {
     });
     if (retry) {
       _cachedDemoUserId = retry.id;
-      return _cachedDemoUserId;
+      return _cachedDemoUserId!;
     }
     console.error('[Auth] CRITICAL: Cannot create or find demo user:', createError);
     throw new Error('Cannot initialize demo user');

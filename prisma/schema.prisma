@@ -1,9 +1,3 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -13,20 +7,1508 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// ============================================================
+// USER MODEL - Authentication & Multi-user
+// ============================================================
+
 model User {
-  id        String   @id @default(cuid())
-  email     String   @unique
-  name      String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id            String   @id @default(cuid())
+  email         String   @unique
+  name          String?
+  image         String?
+  role          String   @default("USER")  // "USER" | "ADMIN"
+  passwordHash  String   @default("")      // bcrypt hash for credentials provider
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  // Relations — user owns their data
+  tradingSystems       TradingSystem[]
+  backtestRuns         BacktestRun[]
+  paperTradingSessions PaperTradingSession[]
+  paperTradingPositions PaperTradingPosition[]
+  alertRules           AlertRule[]
+  alerts               Alert[]
+  webhookConfigs       WebhookConfig[]
+  strategyTemplates    StrategyTemplate[]  // User-created templates
+
+  @@map("users")
 }
 
-model Post {
-  id        String   @id @default(cuid())
-  title     String
-  content   String?
-  published Boolean  @default(false)
-  authorId  String
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+// ============================================================
+// TOKEN MODELS - Multi-chain token tracking
+// ============================================================
+
+model Token {
+  id              String   @id @default(cuid())
+  symbol          String
+  name            String
+  address         String   @unique
+  chain           String   @default("SOL")
+  priceUsd        Float    @default(0)
+  volume24h       Float    @default(0)
+  liquidity       Float    @default(0)
+  marketCap       Float    @default(0)
+  priceChange5m   Float    @default(0)
+  priceChange15m  Float    @default(0)
+  priceChange1h   Float    @default(0)
+  priceChange6h   Float    @default(0)
+  priceChange24h  Float    @default(0)
+  
+  // DEX Metadata
+  dexId           String?  // DexScreener pair ID
+  pairAddress     String?  // LP pair address
+  dex             String?  // raydium, uniswap, orca, jupiter, etc
+  pairUrl         String?  // Link to DEX page
+  
+  // Enriched Metrics
+  holderCount     Int      @default(0)
+  uniqueWallets24h Int     @default(0)
+  botActivityPct  Float    @default(0)  // % of volume from identified bots
+  smartMoneyPct   Float    @default(0)  // % of volume from smart money
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  dna             TokenDNA?
+  signals         Signal[]
+  candles         PriceCandle[]
+  lifecycleStates TokenLifecycleState[]
+}
+
+// ============================================================
+// TRADER INTELLIGENCE - Core wallet profiling system
+// ============================================================
+
+model Trader {
+  id              String   @id @default(cuid())
+  address         String   @unique
+  chain           String   @default("SOL")
+  ensName         String?  // ENS for ETH wallets
+  solName         String?  // .sol domain for Solana wallets
+  
+  // === CLASSIFICATION ===
+  primaryLabel    String   @default("UNKNOWN")
+  // Possible: SMART_MONEY, WHALE, SNIPER, BOT_MEV, BOT_SNIPER, BOT_COPY,
+  //           BOT_ARBITRAGE, BOT_LIQUIDATION, BOT_WASH, BOT_MAKER,
+  //           BOT_SCALPER, RETAIL, CREATOR, FUND, INFLUENCER, BRIDGE_HOPPER,
+  //           YIELD_FARMER, AIRDROP_HUNTER, NFT_FLIPPER, UNKNOWN
+  subLabels       String   @default("[]")  // JSON array of additional labels
+  labelConfidence Float    @default(0)     // 0-1 confidence in primary classification
+  
+  // === BOT DETECTION ===
+  isBot           Boolean  @default(false)
+  botType         String?
+  // Possible: MEV_EXTRACTOR, SNIPER_BOT, COPY_BOT, ARBITRAGE_BOT,
+  //           SANDWICH_BOT, WASH_TRADING_BOT, LIQUIDATION_BOT,
+  //           MARKET_MAKER_BOT, SCALPER_BOT, FRONT_RUN_BOT,
+  //           JUST_IN_TIME_BOT, JITO_BOT, MULTI_SIG_BOT
+  botConfidence   Float    @default(0)     // 0-1 confidence in bot classification
+  botDetectionSignals String @default("[]") // JSON: signals that triggered bot detection
+  botDetectionVersion String @default("1.0")
+  botFirstDetectedAt  DateTime?
+  
+  // === PERFORMANCE METRICS ===
+  totalTrades     Int      @default(0)
+  winRate         Float    @default(0)     // 0-1
+  avgPnl          Float    @default(0)     // average PnL per trade in USD
+  totalPnl        Float    @default(0)     // cumulative realized PnL in USD
+  avgHoldTimeMin  Float    @default(0)     // average hold time in minutes
+  avgTradeSizeUsd Float    @default(0)
+  largestTradeUsd Float    @default(0)
+  totalVolumeUsd  Float    @default(0)
+  maxDrawdown     Float    @default(0)     // worst peak-to-trough in USD
+  sharpeRatio     Float    @default(0)     // risk-adjusted return
+  profitFactor    Float    @default(0)     // gross profit / gross loss
+  
+  // === BEHAVIORAL METRICS ===
+  avgSlippageBps  Int      @default(0)     // average slippage in basis points
+  frontrunCount   Int      @default(0)     // times this wallet frontran others
+  frontrunByCount Int      @default(0)     // times this wallet was frontrun
+  sandwichCount   Int      @default(0)     // times involved in sandwich attacks
+  sandwichVictimCount Int  @default(0)     // times victim of sandwich
+  washTradeScore  Float    @default(0)     // 0-1, higher = more likely wash trading
+  copyTradeScore  Float    @default(0)     // 0-1, how much this wallet copies others
+  mevExtractionUsd Float   @default(0)     // total MEV extracted in USD
+  
+  // === TIMING PATTERNS ===
+  avgTimeBetweenTrades Float @default(0)   // minutes
+  tradingHourPattern   String @default("[]") // JSON: 24-element array, trade frequency per hour UTC
+  tradingDayPattern    String @default("[]") // JSON: 7-element array, trade frequency per day
+  isActiveAtNight      Boolean @default(false) // trades during off-hours (bot indicator)
+  isActive247          Boolean @default(false) // trades all hours consistently (strong bot signal)
+  consistencyScore     Float  @default(0)    // 0-1, how consistent the trading intervals are
+  
+  // === PORTFOLIO PROFILE ===
+  uniqueTokensTraded Int    @default(0)
+  avgPositionsAtOnce Int    @default(0)
+  maxPositionsAtOnce Int    @default(0)
+  preferredChains    String @default("[]") // JSON array of chains this trader uses
+  preferredDexes     String @default("[]") // JSON array of DEXes this trader uses
+  preferredTokenTypes String @default("[]") // JSON: MEME, DEFI, NFT, L1, L2, STABLE, BRIDGE
+  
+  // === SMART MONEY SPECIFIC ===
+  isSmartMoney      Boolean @default(false)
+  smartMoneyScore   Float   @default(0)    // 0-100 composite score
+  earlyEntryCount   Int     @default(0)    // times entered before token did 10x
+  avgEntryRank      Float   @default(0)    // average rank of entry (1 = first buyer)
+  avgExitMultiplier Float   @default(0)    // average multiplier at exit
+  topCallCount      Int     @default(0)    // number of profitable calls
+  worstCallCount    Int     @default(0)    // number of losing calls
+  
+  // === WHALE SPECIFIC ===
+  isWhale           Boolean @default(false)
+  whaleScore        Float   @default(0)    // 0-100 based on total holdings + influence
+  totalHoldingsUsd  Float   @default(0)
+  avgPositionUsd    Float   @default(0)
+  priceImpactAvg    Float   @default(0)    // average price impact of trades
+  
+  // === SNIPER SPECIFIC ===
+  isSniper          Boolean @default(false)
+  sniperScore       Float   @default(0)    // 0-100
+  avgBlockToTrade   Float   @default(0)    // average blocks between token creation and first trade
+  block0EntryCount  Int     @default(0)    // times bought in block 0 or 1 of a token
+  
+  // === RELATIONSHIPS & META ===
+  firstSeen        DateTime @default(now())
+  lastActive       DateTime @default(now())
+  lastAnalyzed     DateTime @default(now())
+  analysisVersion  Int      @default(1)
+  dataQuality      Float    @default(0)    // 0-1, how complete our data is for this trader
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  
+  // Relations
+  transactions     TraderTransaction[]
+  tokenHoldings    WalletTokenHolding[]
+  behaviorPatterns TraderBehaviorPattern[]
+  crossChainLinks  CrossChainWallet[]  @relation("PrimaryWallet")
+  linkedWallets    CrossChainWallet[]  @relation("LinkedWallet")
+  labelAssignments TraderLabelAssignment[]
+}
+
+model TraderTransaction {
+  id              String   @id @default(cuid())
+  traderId        String
+  txHash          String   @unique
+  blockNumber     Int?
+  blockTime       DateTime
+  
+  // Transaction Details
+  chain           String   @default("SOL")
+  dex             String?  // raydium, uniswap, orca, jupiter, meteora, etc
+  action          String   // BUY, SELL, TRANSFER, ADD_LIQUIDITY, REMOVE_LIQUIDITY, SWAP
+  tokenAddress    String   // token being traded
+  tokenSymbol     String?
+  quoteToken      String?  // SOL, USDC, ETH, WETH, USDT
+  amountIn        Float    @default(0)
+  amountOut       Float    @default(0)
+  priceUsd        Float    @default(0)
+  valueUsd        Float    @default(0)
+  
+  // === ANTI-MEV / BOT ANALYSIS ===
+  slippageBps     Int?     // actual slippage experienced in basis points
+  pnlUsd          Float?   // realized PnL if closing trade
+  isFrontrun      Boolean  @default(false)
+  isSandwich      Boolean  @default(false)
+  isWashTrade     Boolean  @default(false)
+  isJustInTime    Boolean  @default(false) // JIT liquidity provision
+  pairedTxHash    String?  // linked tx (e.g., other side of sandwich)
+  
+  // === GAS & FEES ===
+  gasUsed         Float?
+  gasPrice        Float?
+  priorityFee     Float?   // tip/priority fee (Jito tip on Solana, etc)
+  totalFeeUsd     Float?   // total cost including gas + fees
+  
+  // === TOKEN CONTEXT ===
+  tokenAgeAtTrade Float?   // minutes since token creation at time of trade
+  holderCountAtTrade Int?  // number of holders when this trade occurred
+  liquidityAtTrade Float?  // available liquidity when this trade occurred
+  
+  // Metadata
+  logIndex        Int?
+  metadata        String   @default("{}")
+  
+  trader          Trader   @relation(fields: [traderId], references: [id])
+  createdAt       DateTime @default(now())
+}
+
+model WalletTokenHolding {
+  id              String   @id @default(cuid())
+  traderId        String
+  tokenAddress    String
+  tokenSymbol     String?
+  chain           String   @default("SOL")
+  
+  balance         Float    @default(0)
+  valueUsd        Float    @default(0)
+  avgEntryPrice   Float    @default(0)
+  unrealizedPnl   Float    @default(0)
+  unrealizedPnlPct Float   @default(0)
+  
+  firstBuyAt      DateTime?
+  lastTradeAt     DateTime?
+  buyCount        Int      @default(0)
+  sellCount       Int      @default(0)
+  totalBoughtUsd  Float    @default(0)
+  totalSoldUsd    Float    @default(0)
+  
+  trader          Trader   @relation(fields: [traderId], references: [id])
+  updatedAt       DateTime @updatedAt
+}
+
+model TraderBehaviorPattern {
+  id              String   @id @default(cuid())
+  traderId        String
+  
+  pattern         String
+  // Possible: ACCUMULATOR, DUMPER, SCALPER, SWING_TRADER, DIAMOND_HANDS,
+  //           MOMENTUM_RIDER, CONTRARIAN, SNIPER_ENTRY, EXIT_SCAMMER,
+  //           WASH_TRADER, COPY_CAT, YIELD_FARMER, BRIDGE_HOPPER,
+  //           LIQUIDITY_PROVIDER, MEV_EXTRACTOR, SANDWICH_ATTACKER,
+  //           JUST_IN_TIME_LP, FLASH_LOAN_USER, AIRDROP_FARMER,
+  //           DEX_AGREGATOR_USER, JITO_TIP_USER, MULTI_HOP_SWAPPER
+  
+  confidence      Float    @default(0)  // 0-1
+  dataPoints      Int      @default(0) // number of trades this pattern is based on
+  firstObserved   DateTime @default(now())
+  lastObserved    DateTime @default(now())
+  metadata        String   @default("{}") // pattern-specific data
+  
+  trader          Trader   @relation(fields: [traderId], references: [id])
+}
+
+model CrossChainWallet {
+  id              String   @id @default(cuid())
+  primaryWalletId String
+  linkedWalletId  String
+  
+  primaryChain    String   // SOL, ETH, BASE, ARB, OP, MATIC, BSC
+  linkedChain     String
+  linkedAddress   String
+  
+  linkType        String   @default("SAME_ENTITY")
+  // Possible: SAME_ENTITY, LIKELY_LINKED, BRIDGE_USER, DEPOSIT_WALLET,
+  //           EXCHANGE_DEPOSIT, CONTRACT_DEPLOYER, MULTI_SIG_MEMBER
+  
+  linkConfidence  Float    @default(0) // 0-1
+  evidence        String   @default("[]") // JSON: bridge tx hashes, same EOA, etc
+  bridgeTxCount   Int      @default(0)
+  totalBridgedUsd Float    @default(0)
+  
+  primaryWallet   Trader   @relation("PrimaryWallet", fields: [primaryWalletId], references: [id])
+  linkedWallet    Trader   @relation("LinkedWallet", fields: [linkedWalletId], references: [id])
+  
+  createdAt       DateTime @default(now())
+}
+
+model TraderLabelAssignment {
+  id              String   @id @default(cuid())
+  traderId        String
+  label           String
+  // Same labels as Trader.primaryLabel plus custom community labels
+  
+  source          String   @default("ALGORITHM")
+  // Possible: ALGORITHM, MANUAL, COMMUNITY, ON_CHAIN_ANALYSIS,
+  //           SOCIAL_CORRELATION, BRIDGE_ANALYSIS, PATTERN_MATCHING,
+  //           THIRD_PARTY_API, WHITELIST
+  
+  confidence      Float    @default(0) // 0-1
+  evidence        String   @default("[]") // JSON: list of evidence items
+  assignedAt      DateTime @default(now())
+  expiresAt       DateTime? // labels can expire if not reinforced
+  
+  trader          Trader   @relation(fields: [traderId], references: [id])
+}
+
+// ============================================================
+// SIGNAL & ANALYSIS MODELS
+// ============================================================
+
+model Signal {
+  id          String   @id @default(cuid())
+  type        String   @default("CUSTOM")
+  tokenId     String
+  confidence  Int      @default(50)
+  priceTarget Float?
+  direction   String   @default("LONG")
+  description String   @default("")
+  metadata    String   @default("{}")
+  createdAt   DateTime @default(now())
+
+  token       Token    @relation(fields: [tokenId], references: [id])
+}
+
+model UserEvent {
+  id            String   @id @default(cuid())
+  eventType     String   @default("OPEN_POSITION")
+  tokenId       String?
+  walletAddress String?
+  entryPrice    Float?
+  stopLoss      Float?
+  takeProfit    Float?
+  pnl           Float?
+  createdAt     DateTime @default(now())
+}
+
+model PatternRule {
+  id              String   @id @default(cuid())
+  name            String
+  description     String   @default("")
+  category        String   @default("GENERAL")
+  conditions      String   @default("{}")
+  isActive        Boolean  @default(true)
+  backtestResults String   @default("{}")
+  winRate         Float    @default(0)
+  occurrences     Int      @default(0)
+  createdAt       DateTime @default(now())
+}
+
+model TokenDNA {
+  id           String   @id @default(cuid())
+  tokenId      String   @unique
+  
+  // Core DNA
+  liquidityDNA String   @default("[]")
+  walletDNA    String   @default("[]")
+  topologyDNA  String   @default("[]")
+  riskScore    Int      @default(50)
+  
+  // === ENRICHED TRADER INTELLIGENCE ===
+  botActivityScore   Float  @default(0)  // 0-100, percentage of trading from identified bots
+  smartMoneyScore    Float  @default(0)  // 0-100, smart money presence
+  retailScore        Float  @default(0)  // 0-100, retail dominance
+  whaleScore         Float  @default(0)  // 0-100, whale concentration
+  washTradeProb      Float  @default(0)  // 0-1, probability of wash trading
+  sniperPct          Float  @default(0)  // % of buyers who are known snipers
+  mevPct             Float  @default(0)  // % of volume from MEV bots
+  copyBotPct         Float  @default(0)  // % of volume from copy trading bots
+  
+  // Trader composition breakdown (JSON)
+  traderComposition  String @default("{}")
+  // { smartMoney: 12, whale: 3, bot_mev: 8, bot_sniper: 15, bot_copy: 5,
+  //   retail: 45, creator: 1, fund: 2, influencer: 1 }
+  
+  // Top wallet analysis (JSON)
+  topWallets         String @default("[]")
+  // [{ address, label, pnl, entryRank, holdTime }]
+  
+  createdAt    DateTime @default(now())
+
+  token        Token    @relation(fields: [tokenId], references: [id])
+}
+
+// ============================================================
+// BIG DATA PREDICTIVE ENGINE - Capa 0
+// ============================================================
+
+model PredictiveSignal {
+  id              String   @id @default(cuid())
+  signalType      String   // REGIME_CHANGE, BOT_SWARM, WHALE_MOVEMENT,
+                           // LIQUIDITY_DRAIN, CORRELATION_BREAK, ANOMALY,
+                           // CYCLE_POSITION, SECTOR_ROTATION, MEAN_REVERSION_ZONE,
+                           // SMART_MONEY_POSITIONING, VOLATILITY_REGIME
+  chain           String   @default("SOL")
+
+  tokenAddress    String?
+  sector          String?  // MEME, DEFI, L1, L2, NFT, BRIDGE, STABLE
+
+  prediction      String   @default("{}") // JSON: qué se predice
+  direction       String   @default("NEUTRAL")
+  confidence      Float    @default(0)    // 0-1
+  timeframe       String   @default("1h")
+  validUntil      DateTime?
+
+  evidence        String   @default("[]") // JSON: datos que soportan la pred
+  historicalHitRate Float  @default(0)    // % de veces que esta señal fue correcta
+  dataPointsUsed  Int      @default(0)
+
+  wasCorrect      Boolean?
+  actualOutcome   String?  // JSON: qué pasó realmente
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+// ============================================================
+// TRADING SYSTEMS LAB - Zona 1
+// ============================================================
+
+model TradingSystem {
+  id                String   @id @default(cuid())
+  name              String
+  description       String?
+  category          String   // ALPHA_HUNTER, SMART_MONEY, TECHNICAL,
+                             // DEFENSIVE, BOT_AWARE, DEEP_ANALYSIS,
+                             // MICRO_STRUCTURE, ADAPTIVE
+  icon              String   @default("🎯")
+
+  // Las 5 capas de configuración
+  assetFilter       String   @default("{}")   // JSON: filtro de activos
+  phaseConfig       String   @default("{}")   // JSON: fases habilitadas + config por fase
+  entrySignal       String   @default("{}")   // JSON: condiciones de entrada
+  executionConfig   String   @default("{}")   // JSON: cómo ejecutar
+  exitSignal        String   @default("{}")   // JSON: condiciones de salida
+
+  // Big Data context requirements
+  bigDataContext    String   @default("{}")   // JSON: regime, vol, bot swarm
+
+  // Temporalidad
+  primaryTimeframe  String   @default("1h")
+  confirmTimeframes String   @default("[]")
+
+  // Risk management
+  maxPositionPct    Float    @default(5)
+  maxOpenPositions  Int      @default(10)
+  stopLossPct       Float    @default(15)
+  takeProfitPct     Float    @default(40)
+  trailingStopPct   Float?
+  cashReservePct    Float    @default(20)
+
+  // Capital allocation
+  allocationMethod  String   @default("KELLY_MODIFIED")
+  allocationConfig  String   @default("{}")
+
+  // State
+  isActive          Boolean  @default(false)
+  isPaperTrading    Boolean  @default(false)
+  version           Int      @default(1)
+  parentSystemId    String?
+
+  // Auto-optimization
+  autoOptimize      Boolean  @default(false)
+  optimizationMethod String? // GRID, WALK_FORWARD, BAYESIAN, GENETIC, ENSEMBLE
+  optimizationFreq  String?  // DAILY, WEEKLY, MONTHLY
+
+  // Metrics (actualizadas por backtests)
+  totalBacktests    Int      @default(0)
+  bestSharpe        Float    @default(0)
+  bestWinRate       Float    @default(0)
+  bestPnlPct        Float    @default(0)
+  avgHoldTimeMin    Float    @default(0)
+
+  userId            String?  // Nullable for backward compat
+
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  // Relaciones
+  backtests         BacktestRun[]
+  operations        BacktestOperation[]
+  derivedSystems    TradingSystem[]  @relation("SystemDerivation")
+  parentSystem      TradingSystem?   @relation("SystemDerivation", fields: [parentSystemId], references: [id])
+  user              User?     @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+}
+
+// ============================================================
+// BACKTESTING ENGINE - Zona 2
+// ============================================================
+
+model BacktestRun {
+  id                String   @id @default(cuid())
+  systemId          String
+
+  mode              String   @default("HISTORICAL")  // HISTORICAL, PAPER, FORWARD
+  periodStart       DateTime
+  periodEnd         DateTime
+  initialCapital    Float
+  capitalAllocation String   @default("{}")
+  allocationMethod  String   @default("KELLY_MODIFIED")
+  strategyMeta      String   @default("{}")  // JSON: strategyName, category, timeframe, tokenAgeCategory, riskTolerance
+
+  // Results
+  finalCapital      Float    @default(0)
+  totalPnl          Float    @default(0)
+  totalPnlPct       Float    @default(0)
+  annualizedReturn  Float?
+  benchmarkReturn   Float?
+  alpha             Float?
+
+  totalTrades       Int      @default(0)
+  winTrades         Int      @default(0)
+  lossTrades        Int      @default(0)
+  winRate           Float    @default(0)
+
+  avgWin            Float    @default(0)
+  avgLoss           Float    @default(0)
+  profitFactor      Float    @default(0)
+  expectancy        Float    @default(0)
+
+  maxDrawdown       Float    @default(0)
+  maxDrawdownPct    Float    @default(0)
+  sharpeRatio       Float    @default(0)
+  sortinoRatio      Float?
+  calmarRatio       Float?
+  recoveryFactor    Float?
+
+  avgHoldTimeMin    Float    @default(0)
+  marketExposurePct Float    @default(0)
+
+  // Breakdowns
+  phaseResults      String   @default("{}")
+  timeframeResults  String   @default("{}")
+  operationTypeResults String @default("{}")
+  allocationMethodResults String @default("{}")
+
+  // Optimization
+  optimizationEnabled Boolean  @default(false)
+  optimizationMethod  String?
+  bestParameters    String?
+  optimizationScore Float?
+
+  // Anti-overfitting
+  inSampleScore     Float?
+  outOfSampleScore  Float?
+  walkForwardRatio  Float?
+
+  status            String   @default("PENDING")  // PENDING, RUNNING, COMPLETED, FAILED
+  progress          Float    @default(0)
+  startedAt         DateTime?
+  completedAt       DateTime?
+  errorLog          String?
+
+  userId            String?  // Nullable for backward compat
+
+  createdAt         DateTime @default(now())
+
+  system            TradingSystem  @relation(fields: [systemId], references: [id])
+  operations        BacktestOperation[]
+  user              User?     @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+}
+
+// ============================================================
+// PRICE CANDLES - Historical OHLCV Data Storage
+// ============================================================
+
+model PriceCandle {
+  id            String   @id @default(cuid())
+  tokenAddress  String
+  chain         String   @default("SOL")
+  timeframe     String   // "1m" | "5m" | "15m" | "1h" | "4h" | "1d"
+  timestamp     DateTime // UTC open time
+  open          Float
+  high          Float
+  low           Float
+  close         Float
+  volume        Float
+  trades        Int      @default(0)
+  source        String   @default("coingecko") // binance, coingecko, dexpaprika, database
+
+  createdAt     DateTime @default(now())
+
+  token         Token    @relation(fields: [tokenAddress], references: [address])
+
+  @@unique([tokenAddress, chain, timeframe, timestamp])
+  @@index([tokenAddress, timeframe, timestamp])
+  @@index([chain, timeframe, timestamp])
+}
+
+// ============================================================
+// TOKEN LIFECYCLE - Phase Detection & Tracking
+// ============================================================
+
+model TokenLifecycleState {
+  id                String   @id @default(cuid())
+  tokenAddress      String
+  chain             String   @default("SOL")
+
+  phase             String   // GENESIS | INCIPIENT | GROWTH | FOMO | DECLINE | LEGACY
+  phaseProbability  Float    @default(0) // 0-1 confidence
+  phaseDistribution String   @default("{}") // JSON: {genesis: 0.05, incipient: 0.1, ...}
+  transitionFrom    String?  // Previous phase if transitioning
+  transitionProb    Float?   // Transition probability
+
+  signals           String   @default("{}") // JSON: input signals and their scores
+  detectedAt        DateTime @default(now())
+
+  token             Token    @relation(fields: [tokenAddress], references: [address])
+
+  @@index([tokenAddress, detectedAt])
+  @@index([phase, detectedAt])
+}
+
+// ============================================================
+// TRADER BEHAVIOR MODEL - Behavioral Prediction Matrices
+// ============================================================
+
+model TraderBehaviorModel {
+  id            String   @id @default(cuid())
+  archetype     String   // SMART_MONEY | WHALE | SNIPER | RETAIL_FOMO |
+                         // RETAIL_HOLDER | SCALPER | DEGEN | CONTRARIAN
+  tokenPhase    String   // GENESIS | INCIPIENT | GROWTH | FOMO | DECLINE | LEGACY
+  action        String   // BUY | SELL | HOLD | ACCUMULATE | DISTRIBUTE | WATCH
+  probability   Float    @default(0) // 0-1 current estimated probability
+  intensity     Float    @default(0) // expected portfolio % commitment
+  duration      Float    @default(0) // expected duration in hours
+
+  observations  Int      @default(0) // number of real observations
+  confidence    Float    @default(0) // 0-1 statistical confidence
+  lastUpdated   DateTime @updatedAt
+
+  @@unique([archetype, tokenPhase, action])
+  @@index([archetype, tokenPhase])
+}
+
+// ============================================================
+// FEEDBACK METRICS - Continuous Learning System
+// ============================================================
+
+model FeedbackMetrics {
+  id            String   @id @default(cuid())
+  sourceType    String   // "signal" | "backtest" | "live_trade"
+  sourceId      String   // ID of the signal, backtest run, or trade
+  metricName    String   // "accuracy" | "brier_score" | "sharpe" | "win_rate" | ...
+  metricValue   Float
+  context       String   @default("{}") // JSON: phase, regime, token, conditions
+  period        String   @default("24h") // 1h | 4h | 24h | 7d | 30d
+  measuredAt    DateTime @default(now())
+
+  @@index([sourceType, metricName, measuredAt])
+  @@index([sourceType, sourceId])
+}
+
+// ============================================================
+// SYSTEM EVOLUTION - Trading System Auto-Refinement
+// ============================================================
+
+model SystemEvolution {
+  id              String    @id @default(cuid())
+  parentSystemId  String?
+  childSystemId   String
+  evolutionType   String    // "parameter_adjust" | "phase_specialize" | "hybrid_generate"
+  triggerMetric   String    // what metric triggered the evolution
+  triggerValue    Float     // the metric value that triggered it
+  improvementPct  Float     @default(0) // measured improvement in target metric
+  backtestId      String?
+  approvedAt      DateTime?
+  createdAt       DateTime  @default(now())
+
+  @@index([parentSystemId])
+  @@index([evolutionType])
+}
+
+// ============================================================
+// COMPARATIVE ANALYSIS - Model Comparison Framework
+// ============================================================
+
+model ComparativeAnalysis {
+  id              String   @id @default(cuid())
+  modelA          String   // system/model identifier
+  modelB          String   // system/model identifier
+  dimension       String   // "model_vs_model" | "phase_vs_phase" | "period_vs_period"
+  context         String   @default("{}") // JSON: phase, regime, timeframe, token set
+  metricsA        String   @default("{}") // JSON: {accuracy, sharpe, brier, ...}
+  metricsB        String   @default("{}") // JSON: {accuracy, sharpe, brier, ...}
+  winner          String?  // "A" | "B" | "tie"
+  confidenceDiff  Float    @default(0) // statistical significance
+  measuredAt      DateTime @default(now())
+
+  @@index([dimension, measuredAt])
+  @@index([modelA, modelB])
+}
+
+// ============================================================
+// BRAIN CYCLE - 24/7 Continuous Operation Tracking
+// ============================================================
+
+model BrainCycleRun {
+  id              String   @id @default(cuid())
+  cycleNumber     Int      @default(0)
+
+  // Cycle Configuration
+  capitalUsd      Float    @default(10)     // Current capital
+  initialCapitalUsd Float  @default(10)     // Starting capital for tracking compound growth
+  chain           String   @default("SOL")
+  scanLimit       Int      @default(20)     // How many tokens to scan per cycle
+
+  // Cycle Execution
+  status          String   @default("RUNNING")  // RUNNING, COMPLETED, FAILED, PAUSED
+  startedAt       DateTime @default(now())
+  completedAt     DateTime?
+
+  // Cycle Results
+  tokensScanned   Int      @default(0)
+  tokensOperable  Int      @default(0)
+  tokensTradeable Int      @default(0)
+
+  // Best picks from this cycle
+  topPicks        String   @default("[]")   // JSON: top system recommendations
+  operabilitySummary String @default("{}") // JSON: {premium: N, good: N, marginal: N, ...}
+
+  // Compound Growth Tracking
+  capitalBeforeCycle Float  @default(0)
+  capitalAfterCycle  Float  @default(0)
+  cyclePnlUsd        Float  @default(0)
+  cyclePnlPct        Float  @default(0)
+  cumulativeReturnPct Float @default(0)     // Total return since inception
+
+  // Phase distribution observed
+  phaseDistribution String @default("{}")   // JSON: {GENESIS: N, INCIPIENT: N, ...}
+
+  // Regime snapshot
+  dominantRegime  String   @default("SIDEWAYS")
+  regimeConfidence Float   @default(0)
+
+  // Errors
+  errorLog        String?
+
+  // Metadata
+  cycleDurationMs Int      @default(0)
+  createdAt       DateTime @default(now())
+
+  @@index([status, startedAt])
+  @@index([cycleNumber])
+}
+
+// ============================================================
+// OPERABILITY SNAPSHOT - Historical Operability Tracking
+// ============================================================
+
+model OperabilitySnapshot {
+  id              String   @id @default(cuid())
+  tokenAddress    String
+  symbol          String
+  chain           String   @default("SOL")
+
+  // Operability Scores
+  overallScore    Float    @default(0)
+  liquidityScore  Float    @default(0)
+  feeScore        Float    @default(0)
+  slippageScore   Float    @default(0)
+  healthScore     Float    @default(0)
+  marginScore     Float    @default(0)
+
+  // Fee breakdown at snapshot time
+  totalCostUsd    Float    @default(0)
+  totalCostPct    Float    @default(0)
+  slippagePct     Float    @default(0)
+  recommendedPositionUsd Float @default(0)
+
+  // Classification
+  operabilityLevel String  @default("UNOPERABLE")  // PREMIUM, GOOD, MARGINAL, RISKY, UNOPERABLE
+  isOperable       Boolean @default(false)
+  minimumGainPct   Float   @default(0)
+
+  // Context at snapshot time
+  priceUsd        Float    @default(0)
+  liquidityUsd    Float    @default(0)
+  volume24h       Float    @default(0)
+  marketCap       Float    @default(0)
+
+  // Associated cycle
+  cycleRunId      String?
+
+  // Warnings
+  warnings        String   @default("[]") // JSON array of warning strings
+
+  createdAt       DateTime @default(now())
+
+  @@index([tokenAddress, createdAt])
+  @@index([operabilityLevel, createdAt])
+  @@index([isOperable, createdAt])
+}
+
+// ============================================================
+// COMPOUND GROWTH TRACKER - Capital Evolution Over Time
+// ============================================================
+
+model CompoundGrowthTracker {
+  id              String   @id @default(cuid())
+
+  // Capital snapshot
+  capitalUsd      Float    @default(0)
+  initialCapitalUsd Float  @default(10)
+  totalReturnPct  Float    @default(0)     // Cumulative return %
+  totalPnlUsd     Float    @default(0)     // Cumulative PnL in USD
+
+  // Period metrics
+  periodPnlUsd    Float    @default(0)     // PnL in this period
+  periodReturnPct Float    @default(0)     // Return % in this period
+  periodTrades    Int      @default(0)
+  periodWins      Int      @default(0)
+  periodLosses    Int      @default(0)
+
+  // Fee awareness
+  totalFeesPaidUsd Float   @default(0)     // Cumulative fees paid
+  totalSlippageUsd Float   @default(0)     // Cumulative slippage cost
+  feeAdjustedPnlUsd Float  @default(0)     // PnL after fees
+  feeAdjustedReturnPct Float @default(0)    // Return % after fees
+
+  // Risk metrics
+  maxDrawdownPct  Float    @default(0)
+  sharpeRatio     Float    @default(0)
+  winRate         Float    @default(0)
+
+  // Compound rate
+  dailyCompoundRate Float   @default(0)     // Estimated daily compound rate
+  projectedAnnualReturn Float @default(0)   // Projected annualized return
+
+  // Time period
+  period          String   @default("1h")  // 1h, 4h, 24h, 7d, 30d
+  measuredAt      DateTime @default(now())
+
+  @@index([measuredAt])
+  @@index([period, measuredAt])
+}
+
+model BacktestOperation {
+  id                String   @id @default(cuid())
+  backtestId        String
+  systemId          String
+
+  tokenAddress      String
+  tokenSymbol       String?
+  chain             String
+  tokenPhase        String   // GENESIS, LAUNCH, EARLY, GROWTH, MATURE, ESTABLISHED, LEGACY
+  tokenAgeMinutes   Float
+
+  marketConditions  String   @default("{}")
+  tokenDnaSnapshot  String   @default("{}")
+  traderComposition String   @default("{}")
+  bigDataContext     String   @default("{}")
+
+  operationType     String   // SCALP, SWING_LONG, DCA_ENTRY, MOMENTUM_RIDE, etc.
+  timeframe         String
+
+  entryPrice        Float
+  entryTime         DateTime
+  entryReason       String   @default("{}")
+
+  exitPrice         Float?
+  exitTime          DateTime?
+  exitReason        String?  // TAKE_PROFIT, STOP_LOSS, TRAILING_STOP, SIGNAL_EXIT, TIMEOUT
+
+  quantity          Float
+  positionSizeUsd   Float
+  pnlUsd            Float?
+  pnlPct            Float?
+  holdTimeMin       Float?
+  maxFavorableExc   Float?
+  maxAdverseExc     Float?
+
+  capitalAllocPct   Float
+  allocationMethodUsed String?
+
+  createdAt         DateTime @default(now())
+
+  backtest          BacktestRun    @relation(fields: [backtestId], references: [id])
+  system            TradingSystem  @relation(fields: [systemId], references: [id])
+}
+
+// ============================================================
+// BRAIN PIPELINE - 6-Step Operational Engine Models
+// ============================================================
+
+model OperabilityScore {
+  id              String   @id @default(cuid())
+  tokenAddress    String
+  chain           String
+  score           Float    // 0-100, how operable after fees+slippage
+  feeImpactPct    Float    // estimated fee as % of position
+  slippageImpactPct Float  // estimated slippage as % of position
+  liquidityUsd    Float    // available liquidity
+  maxPositionUsd  Float    // max position size before moving market
+  volume24h       Float
+  spreadPct       Float    // bid-ask spread
+  isOperable      Boolean  // score >= threshold
+  reason          String?  // why not operable (if applicable)
+  cycleId         String?  // which brain cycle computed this
+  computedAt      DateTime @default(now())
+
+  @@index([tokenAddress, computedAt])
+  @@index([isOperable, score])
+  @@map("operability_scores")
+}
+
+model TradingCycle {
+  id              String   @id @default(cuid())
+  cycleNumber     Int
+  status          String   @default("RUNNING") // RUNNING, COMPLETED, FAILED
+  tokensScanned   Int      @default(0)
+  tokensOperable  Int      @default(0)
+  tokensMatched   Int      @default(0)
+  signalsGenerated Int     @default(0)
+  capitalBeforeUsd Float   @default(0)
+  capitalAfterUsd  Float   @default(0)
+  feesPaidUsd      Float   @default(0)
+  netGainUsd       Float   @default(0)
+  netGainPct       Float   @default(0)
+  startedAt       DateTime @default(now())
+  completedAt     DateTime?
+  error           String?
+
+  @@index([status, startedAt])
+  @@map("trading_cycles")
+}
+
+model CapitalState {
+  id              String   @id @default(cuid())
+  totalCapitalUsd Float
+  allocatedUsd    Float
+  availableUsd    Float
+  feesPaidTotalUsd Float  @default(0)
+  realizedPnlUsd   Float  @default(0)
+  unrealizedPnlUsd Float  @default(0)
+  compoundGrowthPct Float @default(0)
+  cycleCount      Int      @default(0)
+  updatedAt       DateTime @default(now())
+  updatedAtCycle  Int      @default(0)
+
+  @@map("capital_states")
+}
+
+// ============================================================
+// EXTRACTION & DATA JOBS
+// ============================================================
+
+model ExtractionJob {
+  id                String   @id @default(cuid())
+  type              String   // COINGECKO, DEXSCREENER, SQD, etc.
+  jobType           String   @default("FULL") // FULL, INCREMENTAL, BACKFILL
+  status            String   @default("PENDING") // PENDING, RUNNING, COMPLETED, FAILED
+  chain             String   @default("SOL")
+  startedAt         DateTime?
+  completedAt       DateTime?
+  error             String?
+  recordsProcessed  Int      @default(0)
+  tokensDiscovered  Int      @default(0)
+  candlesStored     Int      @default(0)
+  walletsProfiled   Int      @default(0)
+  transactionsStored Int     @default(0)
+  signalsGenerated  Int      @default(0)
+  protocolsStored   Int      @default(0)
+  sourcesUsed       String   @default("[]") // JSON array
+  durationMs        Int      @default(0)
+  errors            String   @default("[]") // JSON array
+  config            String   @default("{}") // JSON
+  metadata          String   @default("{}") // JSON
+
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@map("extraction_jobs")
+}
+
+model DataRetentionPolicy {
+  id                   String   @id @default(cuid())
+  dataType             String   @unique // SIGNALS, CANDLES, TRANSACTIONS, etc.
+  tableName            String   @default("") // DB table name
+  retentionDays        Int      @default(30)
+  hotDays              Int      @default(7)
+  warmDays             Int      @default(30)
+  coldDays             Int      @default(90)
+  archiveMethod        String   @default("DELETE") // DELETE, AGGREGATE, COMPRESS
+  compressionEnabled   Boolean  @default(true)
+  aggregationInterval  String?  // 1h, 1d, etc.
+  lastCleanupAt        DateTime?
+  lastArchivedAt       DateTime?
+  isActive             Boolean  @default(true)
+  lastArchiveStats     String   @default("{}") // JSON
+
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  @@map("data_retention_policies")
+}
+
+model ApiRateLimit {
+  id           String   @id @default(cuid())
+  service      String   @unique // COINGECKO, DEXSCREENER, etc.
+  maxRequests  Int      @default(300)
+  windowMs     Int      @default(60000)
+  currentCount Int      @default(0)
+  windowStart  DateTime @default(now())
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@map("api_rate_limits")
+}
+
+model DecisionLog {
+  id                     String   @id @default(cuid())
+  systemId               String?
+  tokenAddress           String?
+  chain                  String?
+  tokenSymbol            String?
+  decisionType           String   @default("SYSTEM_MATCH") // SYSTEM_MATCH, MANUAL, AUTO
+  decision               String   // BUY, SELL, HOLD, WAIT
+  recommendedSystem      String?  // System name
+  confidence             Float    @default(0)
+  dataQualityScore       Float    @default(0)
+  reasoning              String   @default("{}") // JSON
+  outcome                String?  // PROFIT, LOSS, NEUTRAL
+  pnlPct                 Float?
+  tokenPhaseAtDecision   String?
+  regimeAtDecision       String?
+  operabilityAtDecision  Float?
+  wasActedUpon           Boolean  @default(false)
+  realizedPnlPct         Float?
+  decisionWasCorrect     Boolean?
+  realizedPnlUsd         Float?
+  smartMoneySignal       String?
+  decidedAt              DateTime @default(now())
+
+  createdAt              DateTime @default(now())
+
+  @@map("decision_logs")
+}
+
+// ============================================================
+// SCHEDULER STATE - Persist Brain Scheduler State Across Restarts
+// ============================================================
+
+model SchedulerState {
+  id              String   @id @default(cuid())
+  status          String   @default("STOPPED")  // STOPPED, RUNNING, PAUSED, ERROR
+  config          String   @default("{}")       // JSON: SchedulerConfig
+  lastCycleNumber Int      @default(0)
+  totalCycles     Int      @default(0)
+  capitalUsd      Float    @default(10)
+  initialCapitalUsd Float  @default(10)
+  chain           String   @default("SOL")
+  scanLimit       Int      @default(250)
+  startedAt       DateTime?
+  stoppedAt       DateTime?
+  lastError       String?
+  taskStates      String   @default("{}")       // JSON: Map of task name -> lastRunAt, runCount, etc.
+  updatedAt       DateTime @updatedAt
+
+  @@map("scheduler_states")
+}
+
+model ProtocolData {
+  id          String   @id @default(cuid())
+  protocol          String
+  chain             String   @default("SOL")
+  slug              String   @default("")
+  slug_chain        String?  @unique
+  tvl               Float    @default(0)
+  tvlUsd            Float    @default(0)
+  volume24h         Float    @default(0)
+  fees24h           Float    @default(0)
+  metadata          String   @default("{}") // JSON
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@map("protocol_data")
+}
+
+// ============================================================
+// AI BEST STRATEGY - Strategy Optimizer Hall of Fame
+// ============================================================
+
+model AIBestStrategy {
+  id                String   @id @default(cuid())
+  strategyName      String
+  category          String
+  timeframe         String
+  tokenAgeCategory  String
+  riskTolerance     String
+  capitalAllocation Float    @default(0)
+  pnlPct            Float    @default(0)
+  pnlUsd            Float    @default(0)
+  sharpeRatio       Float    @default(0)
+  winRate           Float    @default(0)
+  maxDrawdownPct    Float    @default(0)
+  profitFactor      Float    @default(0)
+  totalTrades       Int      @default(0)
+  avgHoldTimeMin    Float    @default(0)
+  score             Float    @default(0)
+  backtestId        String?  @unique
+  isActive          Boolean  @default(false)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
+
+// ============================================================
+// STRATEGY STATE HISTORY - Real-time & Historical State Tracking
+// ============================================================
+
+model StrategyStateHistory {
+  id              String   @id @default(cuid())
+  systemId        String
+  
+  // State snapshot
+  status          String   // IDLE, BACKTESTING, PAPER_TRADING, LIVE, PAUSED, ERROR, EVOLVED
+  previousStatus  String?  // Previous status for tracking transitions
+  
+  // Metrics snapshot at this point in time
+  totalPnlUsd     Float    @default(0)
+  totalPnlPct     Float    @default(0)
+  sharpeRatio     Float    @default(0)
+  winRate         Float    @default(0)
+  totalTrades     Int      @default(0)
+  openPositions   Int      @default(0)
+  
+  // Context
+  triggerReason   String   // MANUAL, AUTO_BACKTEST, AUTO_EVOLVE, RISK_LIMIT, SCHEDULER
+  metadata        String   @default("{}") // JSON: additional context
+  
+  // Evolution tracking
+  generation      Int      @default(1)
+  parentId        String?
+  improvementPct  Float    @default(0)
+  
+  createdAt       DateTime @default(now())
+  
+  @@index([systemId, createdAt])
+  @@index([status, createdAt])
+  @@map("strategy_state_history")
+}
+
+// ============================================================
+// EVOLUTION CYCLE - Discrete Cycle Persistence for Auto-Evolution
+// ============================================================
+
+model EvolutionCycle {
+  id              String   @id @default(cuid())
+  cycleNumber     Int
+  runId           String   // Groups cycles from the same start command
+
+  // Cycle phases: SCAN, GENERATE, BACKTEST, EVALUATE, SAVE, EVOLVE
+  currentPhase    String   @default("SCAN")
+  status          String   @default("RUNNING")  // RUNNING, COMPLETED, FAILED
+
+  // SCAN phase results
+  tokensScanned   Int      @default(0)
+  topTokenAddresses String @default("[]")  // JSON: top token addresses found
+
+  // GENERATE phase results
+  variantsGenerated Int    @default(0)
+  variantIds      String   @default("[]")  // JSON: system IDs of generated variants
+
+  // BACKTEST phase results
+  backtestsRun    Int      @default(0)
+  backtestIds     String   @default("[]")  // JSON: backtest IDs
+
+  // EVALUATE phase results
+  bestScore       Float    @default(0)
+  bestSystemId    String?
+  bestBacktestId  String?
+  improvedCount   Int      @default(0)
+  degradedCount   Int      @default(0)
+  totalMutations  Int      @default(0)
+  evaluationResults String @default("{}")  // JSON: full evaluation data
+
+  // SAVE phase results (Hall of Fame)
+  strategiesSavedToHof Int  @default(0)
+  hofStrategyIds   String  @default("[]")  // JSON: AIBestStrategy IDs saved
+
+  // EVOLVE phase results (mutations for next cycle)
+  mutationsPrepared Int    @default(0)
+  nextCycleSeedIds String  @default("[]")  // JSON: system IDs to use as seeds for next cycle
+
+  // Paper trading activation
+  strategiesActivated String @default("[]")  // JSON: system IDs activated for paper trading
+  entriesExecuted    String @default("[]")  // JSON: trade IDs
+  exitsProcessed     String @default("[]")  // JSON: {backtestId, exitReason, pnlUsd}[]
+
+  // Error tracking
+  errors          String   @default("[]")  // JSON: string[]
+  errorLog        String?
+
+  // Timing
+  startedAt       DateTime @default(now())
+  completedAt     DateTime?
+  scanDurationMs  Int      @default(0)
+  generateDurationMs Int   @default(0)
+  backtestDurationMs Int   @default(0)
+  evaluateDurationMs Int   @default(0)
+  saveDurationMs  Int      @default(0)
+  evolveDurationMs Int     @default(0)
+  totalDurationMs Int      @default(0)
+
+  // Config snapshot
+  configSnapshot  String   @default("{}")  // JSON: AutoEvolutionConfig used
+
+  createdAt       DateTime @default(now())
+
+  @@index([runId, cycleNumber])
+  @@index([status, startedAt])
+  @@map("evolution_cycles")
+}
+
+
+// ============================================================
+// PAPER TRADING - Persistencia de posiciones y trades
+// ============================================================
+
+model PaperTradingPosition {
+  id          String   @id @default(cuid())
+  runId       String
+  tokenSymbol String
+  tokenAddress String?
+  chain       String
+  direction   String   @default("LONG")
+  entryPrice  Float
+  currentPrice Float   @default(0)
+  quantity    Float
+  stopLoss    Float?
+  takeProfit  Float?
+  trailingStopPct Float? @default(0)
+  trailingActivated Boolean @default(false)
+  highestPrice Float  @default(0)
+  lowestPrice Float  @default(0)
+  sizeUsd     Float
+  pnlUsd      Float   @default(0)
+  pnlPct      Float   @default(0)
+  mfe         Float   @default(0)
+  mae         Float   @default(0)
+  operabilityScore Float?
+  brainAnalysisJson String? @default("{}")
+  strategyName String?
+  status      String   @default("OPEN")
+  openedAt    DateTime @default(now())
+  closedAt    DateTime?
+  exitReason  String?
+  
+  userId      String?  // Nullable for backward compat
+
+  trades      PaperTradingTrade[]
+  user        User?     @relation(fields: [userId], references: [id])
+
+  @@index([status, runId])
+  @@index([runId])
+  @@index([userId])
+  @@map("paper_trading_positions")
+}
+
+model PaperTradingTrade {
+  id          String   @id @default(cuid())
+  positionId  String
+  tokenSymbol String
+  chain       String
+  direction   String
+  entryPrice  Float
+  exitPrice   Float
+  quantity    Float
+  sizeUsd     Float
+  pnlUsd      Float
+  pnlPct      Float
+  mfe         Float   @default(0)
+  mae         Float   @default(0)
+  exitReason  String?
+  operabilityScore Float?
+  brainAnalysisJson String? @default("{}")
+  strategyName String?
+  holdTimeMin Float?
+  openedAt    DateTime
+  closedAt    DateTime @default(now())
+  
+  position    PaperTradingPosition @relation(fields: [positionId], references: [id])
+  
+  @@index([positionId])
+  @@index([closedAt])
+  @@map("paper_trading_trades")
+}
+
+model PaperTradingSession {
+  id              String   @id @default(cuid())
+  status          String   @default("IDLE")
+  initialCapital  Float    @default(10)
+  currentCapital  Float    @default(10)
+  peakCapital     Float    @default(10)
+  chain           String   @default("SOL")
+  maxOpenPositions Int    @default(3)
+  scanIntervalMs  Int      @default(60000)
+  feesPct         Float    @default(0.3)
+  slippagePct     Float    @default(0.5)
+  minOperabilityScore Float @default(50)
+  autoFeedback    Boolean  @default(true)
+  totalTrades     Int      @default(0)
+  winningTrades   Int      @default(0)
+  totalPnlUsd     Float    @default(0)
+  strategyName    String?
+  startedAt       DateTime?
+  lastScanAt      DateTime?
+  lastPriceSyncAt DateTime?
+  userId          String?  // Nullable for backward compat
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  user            User?     @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@map("paper_trading_sessions")
+}
+
+// ============================================================
+// ALERT & NOTIFICATION SYSTEM - P4-A
+// ============================================================
+
+model AlertRule {
+  id          String   @id @default(cuid())
+  name        String
+  enabled     Boolean  @default(true)
+  category    String   // 'PRICE' | 'SIGNAL' | 'STRATEGY' | 'RISK' | 'SMART_MONEY' | 'SYSTEM'
+  condition   String   // JSON string with rule conditions
+  severity    String   @default("INFO")  // 'INFO' | 'WARNING' | 'CRITICAL'
+  channels    String   @default("[\"IN_APP\"]")  // JSON array
+  cooldownMin Int      @default(5)  // Min minutes between same-rule alerts
+  lastTriggeredAt DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  userId      String?  // Nullable for backward compat
+
+  alerts      Alert[]
+  user        User?     @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@map("alert_rules")
+}
+
+model Alert {
+  id          String   @id @default(cuid())
+  ruleId      String?
+  title       String
+  message     String
+  category    String   // 'PRICE' | 'SIGNAL' | 'STRATEGY' | 'RISK' | 'SMART_MONEY' | 'SYSTEM'
+  severity    String   @default("INFO")  // 'INFO' | 'WARNING' | 'CRITICAL'
+  isRead      Boolean  @default(false)
+  isDismissed Boolean  @default(false)
+  metadata    String?  // JSON string with extra data
+  linkTo      String?  // Navigation hint
+  createdAt   DateTime @default(now())
+  readAt      DateTime?
+  dismissedAt DateTime?
+
+  userId      String?  // Nullable for backward compat
+
+  rule        AlertRule? @relation(fields: [ruleId], references: [id])
+  user        User?     @relation(fields: [userId], references: [id])
+
+  @@index([isRead, createdAt])
+  @@index([category, severity])
+  @@index([isDismissed])
+  @@index([userId])
+  @@map("alerts")
+}
+
+model WebhookConfig {
+  id          String   @id @default(cuid())
+  name        String
+  url         String
+  secret      String?
+  events      String   @default("[]")  // JSON array of event categories
+  enabled     Boolean  @default(true)
+  lastDeliveryAt DateTime?
+  lastStatus  String?  // 'SUCCESS' | 'FAILED'
+  failureCount Int     @default(0)
+  userId      String?  // Nullable for backward compat
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user        User?     @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@map("webhook_configs")
+}
+
+// ============================================================
+// STRATEGY MARKETPLACE - Pre-built Strategy Templates
+// ============================================================
+
+model StrategyTemplate {
+  id              String   @id @default(cuid())
+  name            String
+  description     String
+  category        String   // "MOMENTUM" | "MEAN_REVERSION" | "BREAKOUT" | "SCALPING" | "SWING" | "ARBITRAGE" | "VOLUME" | "VOLATILITY"
+  difficulty      String   @default("INTERMEDIATE")  // "BEGINNER" | "INTERMEDIATE" | "ADVANCED"
+  author          String   @default("CryptoQuant")
+  tags            String   @default("[]")  // JSON array of tags
+  rating          Float    @default(0)
+  downloads       Int      @default(0)
+  isFeatured      Boolean  @default(false)
+  isBuiltIn       Boolean  @default(true)
+  
+  // Strategy configuration (JSON)
+  strategyConfig  String   // Full JSON of the strategy: indicators, entry/exit rules, risk management, timeframe
+  
+  // Expected performance metrics (from backtesting)
+  expectedWinRate     Float?    @default(0)
+  expectedProfitFactor Float?   @default(0)
+  expectedAvgTrades   Float?    @default(0)
+  expectedMaxDrawdown Float?    @default(0)
+  
+  // Applicable chains and tokens
+  applicableChains String   @default("[\"SOLANA\",\"ETHEREUM\",\"BASE\"]")
+  applicableTimeframes String @default("[\"1h\",\"4h\",\"1d\"]")
+  
+  userId      String?  // Nullable for backward compat; null = built-in template
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  user            User?     @relation(fields: [userId], references: [id])
+
+  @@index([category])
+  @@index([isFeatured])
+  @@index([difficulty])
+  @@index([userId])
+  @@map("strategy_templates")
+}
+
+// ============================================================
+// RISK CONTROLS CONFIG - Persistent risk control settings
+// ============================================================
+
+model RiskControlsConfig {
+  id                  String   @id @default(cuid())
+  maxPositionSizePct  Float    @default(10)
+  maxPortfolioRiskPct Float    @default(25)
+  stopLossDefaultPct  Float    @default(5)
+  dailyLossLimitPct   Float    @default(10)
+  userId              String?  // Nullable for global config
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@index([userId])
+  @@map("risk_controls_configs")
+}
+
+// ============================================================
+// STRATEGY DECISION ENGINE - Audit & Risk Budget (Sprint 1)
+// ============================================================
+
+model DecisionAudit {
+  id             String   @id @default(cuid())
+  strategyId     String
+  timestamp      DateTime @default(now())
+
+  inputs         String   // JSON: backtest, monteCarlo, walkForward, operability, paperTrading, portfolioState, riskProfile
+  processing     String   // JSON: vetoResults, scores, weightsUsed, signalQuality
+  decision       String   // JSON: StrategyDecision (state, capitalAction, signalQuality, scores, capitalRecommendation, recommendations)
+  configSnapshot String   // JSON: vetoThresholds, scoreWeights, riskProfile, sdeVersion
+  feedback       String?  // JSON: wasCorrect, realizedPnlPct, daysUntilReevaluation, feedbackDate (nullable until feedback received)
+
+  createdAt      DateTime @default(now())
+
+  @@index([strategyId, timestamp])
+  @@index([timestamp])
+  @@map("decision_audits")
+}
+
+model RiskBudget {
+  id                     String   @id @default(cuid())
+  maxPortfolioDrawdownPct Float   @default(20)
+  maxStrategyDrawdownPct Float   @default(30)
+  maxPositionLossPct     Float   @default(50)
+  maxConcentrationPct    Float   @default(15)
+  maxSectorPct           Float   @default(30)
+  maxChainPct            Float   @default(50)
+  maxCorrelatedPct       Float   @default(40)
+  maxDailyVaR            Float   @default(5)
+  riskProfile            String  @default("MODERATE") // CONSERVATIVE, MODERATE, AGGRESSIVE
+  updatedAt              DateTime @updatedAt
+
+  @@map("risk_budgets")
 }

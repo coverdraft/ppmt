@@ -160,7 +160,7 @@ class SmartMoneyTracker {
     const enrichedWallets: SmartMoneyWallet[] = [];
 
     for (const [traderId, txs] of traderTxMap) {
-      const trader = traderById.get(traderId);
+      const trader = traderById.get(traderId) as any;
       if (!trader) continue;
 
       // Skip bots — we want real smart money, not bots
@@ -227,31 +227,39 @@ class SmartMoneyTracker {
     const directionScore = netConfidence * 30;
     const signalStrength = Math.min(100, walletScore + valueScore + directionScore);
 
-    // 6. Store signal in DB
+    // 6. Store signal in DB — look up Token record for FK relation
     try {
-      await db.signal.create({
-        data: {
-          type: 'SMART_MONEY',
-          tokenId: tokenAddress,
-          confidence: Math.round(signalStrength),
-          direction: netDirection === 'ACCUMULATING' ? 'LONG' : netDirection === 'DISTRIBUTING' ? 'SHORT' : 'NEUTRAL',
-          description: `${enrichedWallets.length} SM wallets ${netDirection.toLowerCase()} in ${tokenSymbol || tokenAddress.slice(0, 8)}`,
-          metadata: JSON.stringify({
-            poolId,
-            chain,
-            netDirection,
-            netConfidence,
-            totalValueUsd: totalValue,
-            walletCount: enrichedWallets.length,
-            topWallets: enrichedWallets.slice(0, 5).map(w => ({
-              address: w.address,
-              netBuyValueUsd: w.netBuyValueUsd,
-              isKnown: w.isKnown,
-              label: w.label,
-            })),
-          }),
-        },
+      const tokenRecord = await db.token.findFirst({
+        where: { address: tokenAddress },
+        select: { id: true },
       });
+      if (!tokenRecord) {
+        console.warn(`[SmartMoneyTracker] Token not found in DB for address ${tokenAddress}, skipping signal creation`);
+      } else {
+        await db.signal.create({
+          data: {
+            type: 'SMART_MONEY',
+            tokenId: tokenRecord.id,
+            confidence: Math.round(signalStrength),
+            direction: netDirection === 'ACCUMULATING' ? 'LONG' : netDirection === 'DISTRIBUTING' ? 'SHORT' : 'NEUTRAL',
+            description: `${enrichedWallets.length} SM wallets ${netDirection.toLowerCase()} in ${tokenSymbol || tokenAddress.slice(0, 8)}`,
+            metadata: JSON.stringify({
+              poolId,
+              chain,
+              netDirection,
+              netConfidence,
+              totalValueUsd: totalValue,
+              walletCount: enrichedWallets.length,
+              topWallets: enrichedWallets.slice(0, 5).map(w => ({
+                address: w.address,
+                netBuyValueUsd: w.netBuyValueUsd,
+                isKnown: w.isKnown,
+                label: w.label,
+              })),
+            }),
+          },
+        });
+      }
     } catch {
       // Signal storage is best-effort
     }

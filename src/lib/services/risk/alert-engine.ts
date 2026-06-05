@@ -11,6 +11,7 @@
 
 import { db } from '@/lib/db';
 import { wsBridge } from '@/lib/ws-bridge';
+import { killSwitchService } from '@/lib/services/risk/kill-switch-service';
 
 // ============================================================
 // TYPES
@@ -147,8 +148,9 @@ class AlertEngine {
         case 'category_match':
           return event.category === condition.category;
         default:
-          // Default: always match if no specific type
-          return true;
+          // Unknown condition type — do NOT match by default, log warning
+          console.warn(`[AlertEngine] Unknown condition type: ${condition.type}, not matching`);
+          return false;
       }
     } catch {
       // If condition can't be parsed, don't match
@@ -218,6 +220,68 @@ class AlertEngine {
   }
 
   // ============================================================
+  // ESCALATION ENGINE
+  // ============================================================
+
+  /**
+   * Evaluate the severity level for a category based on recent alert frequency.
+   * Counts alerts in the last 60 minutes for the same category:
+   *   0-2 recent alerts → INFO
+   *   3-5 recent alerts → WARNING
+   *   6+ recent alerts → CRITICAL
+   * Falls back to INFO on DB errors (fail-safe).
+   */
+  async evaluateEscalation(category: AlertCategory, metadata: Record<string, unknown>): Promise<AlertSeverity> {
+    try {
+      const sixtyMinAgo = new Date(Date.now() - 60 * 60 * 1000);
+      const recentCount = await db.alert.count({
+        where: {
+          category,
+          createdAt: { gte: sixtyMinAgo },
+        },
+      });
+
+      if (recentCount >= 6) return 'CRITICAL';
+      if (recentCount >= 3) return 'WARNING';
+      return 'INFO';
+    } catch {
+      return 'INFO'; // Fail safe — default to INFO on DB errors
+    }
+  }
+
+  /**
+   * Escalate an alert event based on recent frequency, then process it.
+   * - Only escalates UP (never downgrades severity)
+   * - On CRITICAL + RISK/STRATEGY, triggers global auto-pause via kill switch
+   */
+  async escalateAndAlert(event: AlertEvent): Promise<AlertPayload | null> {
+    const escalatedSeverity = await this.evaluateEscalation(event.category, event.metadata || {});
+
+    // Only escalate UP, never down
+    const severityOrder: Record<AlertSeverity, number> = { INFO: 0, WARNING: 1, CRITICAL: 2 };
+    const currentSeverity = event.severity || 'INFO';
+    const finalSeverity: AlertSeverity = severityOrder[escalatedSeverity] > severityOrder[currentSeverity]
+      ? escalatedSeverity
+      : currentSeverity;
+
+    const escalatedEvent = { ...event, severity: finalSeverity };
+
+    const payload = await this.processEvent(escalatedEvent);
+
+    // AUTO_PAUSE on CRITICAL RISK/STRATEGY alerts
+    if (finalSeverity === 'CRITICAL' && (event.category === 'RISK' || event.category === 'STRATEGY')) {
+      try {
+        killSwitchService.setGlobalPause(true, `AUTO_ESCALATION: ${event.title} — ${event.message}`);
+        console.error(`[AlertEngine] AUTO_ESCALATION: Global pause triggered by CRITICAL ${event.category} alert: ${event.title}`);
+      } catch (err) {
+        console.error('[AlertEngine] Failed to auto-pause on escalation:', err);
+      }
+    }
+
+    return payload;
+  }
+
+  // ============================================================
   // CONVENIENCE METHODS
   // ============================================================
 
@@ -272,11 +336,25 @@ class AlertEngine {
     direction: string,
     pnl: number,
     reason: string,
+    positionSizeUsd?: number,
   ): Promise<AlertPayload | null> {
+    // Compute percentage-based PnL when position size is available;
+    // otherwise fall back to absolute dollar threshold with a documented limitation.
+    // NOTE: Using absolute dollar thresholds (e.g. pnl < -5) is position-size-dependent
+    // and unreliable — a $5 loss on a $10 position (50%) is far more severe than on a $1000
+    // position (0.5%). Prefer passing positionSizeUsd for accurate severity classification.
+    const pnlPct = positionSizeUsd && positionSizeUsd > 0
+      ? (pnl / positionSizeUsd) * 100
+      : null;
+
     const severity: AlertSeverity =
-      pnl < -5 ? 'CRITICAL' :
-      pnl < 0 ? 'WARNING' :
-      'INFO';
+      pnlPct !== null
+        ? pnlPct < -10 ? 'CRITICAL'    // >10% loss is critical
+        : pnlPct < 0  ? 'WARNING'      // any % loss is a warning
+        : 'INFO'
+        : pnl < -5  ? 'CRITICAL'       // Fallback: absolute dollar (LIMITATION: position-size-dependent)
+        : pnl < 0   ? 'WARNING'
+        : 'INFO';
 
     return this.processEvent({
       category: 'STRATEGY',
@@ -339,6 +417,26 @@ class AlertEngine {
       message: `${token} regime changed from ${oldRegime} to ${newRegime}`,
       severity: 'WARNING',
       metadata: { token, oldRegime, newRegime },
+    });
+  }
+
+  /**
+   * Alert when a kill switch is automatically triggered.
+   * Escalation: PORTFOLIO and STRATEGY are CRITICAL, POSITION is WARNING.
+   */
+  async onKillSwitchTriggered(
+    level: 'PORTFOLIO' | 'STRATEGY' | 'POSITION',
+    details: Record<string, unknown>,
+  ): Promise<AlertPayload | null> {
+    const severity: AlertSeverity = level === 'POSITION' ? 'WARNING' : 'CRITICAL';
+
+    return this.processEvent({
+      category: 'RISK',
+      title: `Kill Switch: ${level} Level`,
+      message: `Automatic kill switch triggered at ${level} level. ${JSON.stringify(details)}`,
+      severity,
+      metadata: { level, autoTriggered: true, ...details },
+      linkTo: 'trading-systems:paper-trading',
     });
   }
 

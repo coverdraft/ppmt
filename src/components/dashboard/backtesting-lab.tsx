@@ -8,6 +8,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Collapsible, CollapsibleTrigger, CollapsibleContent } from '@/components/ui/collapsible';
 import {
   Select,
   SelectContent,
@@ -38,6 +39,7 @@ import {
   Target,
   AlertTriangle,
   ChevronRight,
+  ChevronDown,
   Gauge,
   ArrowUpRight,
   ArrowDownRight,
@@ -48,6 +50,8 @@ import {
   Plus,
   AlertCircle,
   Info,
+  Dice5,
+  Route,
 } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -114,6 +118,7 @@ interface BacktestDetailData {
   completedAt: string | null;
   errorLog: string | null;
   autoBackfillAttempted?: boolean;
+  dataSource?: string;
   system: {
     id: string;
     name: string;
@@ -290,6 +295,29 @@ async function deleteBacktest(id: string): Promise<void> {
 }
 
 // ============================================================
+// DATA SOURCE BADGE
+// ============================================================
+
+function DataSourceBadge({ source }: { source: string }) {
+  const config: Record<string, { label: string; color: string; bg: string }> = {
+    binance:            { label: 'Binance',   color: 'text-emerald-400',  bg: 'bg-emerald-400/10' },
+    coingecko:          { label: 'CoinGecko', color: 'text-blue-400',     bg: 'bg-blue-400/10' },
+    coingecko_ondemand: { label: 'CoinGecko', color: 'text-blue-400',     bg: 'bg-blue-400/10' },
+    dexpaprika:         { label: 'DexPaprika', color: 'text-purple-400',  bg: 'bg-purple-400/10' },
+    database:           { label: 'Cached',    color: 'text-[#94a3b8]',    bg: 'bg-[#94a3b8]/10' },
+    database_fallback:  { label: 'Cached',    color: 'text-amber-400',    bg: 'bg-amber-400/10' },
+    auto_backfill:      { label: 'Auto-Backfill', color: 'text-cyan-400', bg: 'bg-cyan-400/10' },
+    none:               { label: 'No Source', color: 'text-red-400/60',   bg: 'bg-red-400/10' },
+  };
+  const c = config[source] || config.none;
+  return (
+    <span className={`text-[8px] font-mono px-1.5 py-0.5 rounded ${c.color} ${c.bg}`}>
+      {c.label}
+    </span>
+  );
+}
+
+// ============================================================
 // BACKTEST CARD
 // ============================================================
 
@@ -429,6 +457,9 @@ function BacktestDetailView({
 }) {
   const queryClient = useQueryClient();
 
+  const [mcOpen, setMcOpen] = useState(false);
+  const [wfOpen, setWfOpen] = useState(false);
+
   const {
     data: run,
     isLoading,
@@ -464,6 +495,59 @@ function BacktestDetailView({
     },
     onError: (err: Error) => {
       toast.error(err.message || 'Failed to delete backtest');
+    },
+  });
+
+  // Monte Carlo simulation mutation
+  const monteCarloMutation = useMutation({
+    mutationFn: async () => {
+      if (!run) throw new Error('No backtest data');
+      const res = await fetch('/api/risk/monte-carlo', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          systemId: run.systemId,
+          simulations: 1000,
+          initialCapital: run.initialCapital,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || 'Failed to run Monte Carlo');
+      return json.data;
+    },
+    onSuccess: () => {
+      toast.success('Monte Carlo simulation complete');
+      setMcOpen(true);
+    },
+    onError: (err: Error) => {
+      toast.error(err.message || 'Failed to run Monte Carlo');
+    },
+  });
+
+  // Walk-Forward analysis mutation
+  const walkForwardMutation = useMutation({
+    mutationFn: async () => {
+      if (!run) throw new Error('No backtest data');
+      const res = await fetch('/api/backtest/walk-forward', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          systemName: run.system.name,
+          startDate: run.periodStart,
+          endDate: run.periodEnd,
+          initialCapital: run.initialCapital,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || 'Failed to run Walk-Forward');
+      return json.data;
+    },
+    onSuccess: () => {
+      toast.success('Walk-Forward analysis complete');
+      setWfOpen(true);
+    },
+    onError: (err: Error) => {
+      toast.error(err.message || 'Failed to run Walk-Forward');
     },
   });
 
@@ -539,6 +623,7 @@ function BacktestDetailView({
           <Badge className={`text-[9px] h-5 px-1.5 font-mono border ${catColor.bg} ${catColor.text}`}>
             {run.system.category.replace(/_/g, ' ')}
           </Badge>
+          <DataSourceBadge source={run.dataSource || (run.autoBackfillAttempted ? 'auto_backfill' : 'none')} />
         </div>
         <div className="flex items-center gap-2">
           {run.status === 'PENDING' && (
@@ -555,6 +640,38 @@ function BacktestDetailView({
               )}
               Run Backtest
             </Button>
+          )}
+          {run.status === 'COMPLETED' && (
+            <>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 px-3 text-[10px] font-mono border-purple-500/30 text-purple-400 hover:bg-purple-500/10 hover:text-purple-300"
+                onClick={() => monteCarloMutation.mutate()}
+                disabled={monteCarloMutation.isPending}
+              >
+                {monteCarloMutation.isPending ? (
+                  <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                ) : (
+                  <Dice5 className="h-3 w-3 mr-1" />
+                )}
+                Monte Carlo
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 px-3 text-[10px] font-mono border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/10 hover:text-emerald-300"
+                onClick={() => walkForwardMutation.mutate()}
+                disabled={walkForwardMutation.isPending}
+              >
+                {walkForwardMutation.isPending ? (
+                  <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                ) : (
+                  <Route className="h-3 w-3 mr-1" />
+                )}
+                Walk-Forward
+              </Button>
+            </>
           )}
           {(run.status === 'COMPLETED' || run.status === 'FAILED') && (
             <Button
@@ -596,7 +713,7 @@ function BacktestDetailView({
                 <div>
                   <h3 className="text-[11px] font-mono text-cyan-400 uppercase tracking-wider mb-1">Auto-Backfill</h3>
                   <p className="text-[10px] font-mono text-cyan-300/70">
-                    Se intentó cargar datos OHLCV automáticamente. Ejecutando backtest con los datos disponibles.
+                    OHLCV data was automatically loaded. Running backtest with available data.
                   </p>
                 </div>
               </div>
@@ -638,15 +755,15 @@ function BacktestDetailView({
               <div className="flex items-start gap-3">
                 <AlertTriangle className="h-5 w-5 text-orange-400 shrink-0 mt-0.5" />
                 <div>
-                  <h3 className="text-[11px] font-mono text-orange-400 uppercase tracking-wider mb-2">No se ejecutaron operaciones</h3>
+                  <h3 className="text-[11px] font-mono text-orange-400 uppercase tracking-wider mb-2">No Trades Executed</h3>
                   <p className="text-[10px] font-mono text-orange-300/70 mb-1">
-                    Probablemente no hay datos OHLCV disponibles.
+                    OHLCV data is likely unavailable.
                   </p>
                   <p className="text-[10px] font-mono text-orange-300/70 mb-1">
-                    <span className="text-orange-400">Solución:</span> El auto-backfill ahora intenta cargar datos automáticamente.
+                    <span className="text-orange-400">Solution:</span> Auto-backfill now attempts to load data automatically.
                   </p>
                   <p className="text-[10px] font-mono text-orange-300/70">
-                    Intenta ejecutar el backtest de nuevo, o ejecuta <code className="text-orange-400 bg-orange-500/10 px-1 py-0.5 rounded">POST /api/seed</code> para cargar datos iniciales.
+                    Try running the backtest again, or run <code className="text-orange-400 bg-orange-500/10 px-1 py-0.5 rounded">POST /api/seed</code> to load initial data.
                   </p>
                 </div>
               </div>
@@ -855,8 +972,179 @@ function BacktestDetailView({
                   {run.completedAt ? new Date(run.completedAt).toLocaleString() : '—'}
                 </span>
               </div>
+              <div>
+                <span className="text-[9px] font-mono text-[#64748b] block">Data Source</span>
+                <DataSourceBadge source={run.dataSource || (run.autoBackfillAttempted ? 'auto_backfill' : 'none')} />
+              </div>
             </div>
           </div>
+
+          {/* Monte Carlo Results */}
+          {monteCarloMutation.data && (
+            <Collapsible open={mcOpen} onOpenChange={setMcOpen}>
+              <div className="bg-[#111827] border border-[#1e293b] rounded-lg overflow-hidden">
+                <CollapsibleTrigger asChild>
+                  <button className="w-full flex items-center justify-between p-4 hover:bg-[#1e293b]/50 transition-colors">
+                    <h3 className="text-[11px] font-mono text-[#94a3b8] uppercase tracking-wider flex items-center gap-2">
+                      <Dice5 className="h-3.5 w-3.5 text-purple-400" /> Monte Carlo Simulation
+                    </h3>
+                    <ChevronDown className={`h-4 w-4 text-[#64748b] transition-transform ${mcOpen ? 'rotate-180' : ''}`} />
+                  </button>
+                </CollapsibleTrigger>
+                <CollapsibleContent>
+                  <div className="px-4 pb-4 space-y-3 border-t border-[#1e293b] pt-3">
+                    <div className="grid grid-cols-3 gap-3">
+                      <div className="bg-[#0a0e17] border border-[#1e293b] rounded-lg p-3">
+                        <span className="text-[9px] font-mono text-[#64748b] block mb-1">Risk of Ruin</span>
+                        <span className={`mono-data text-lg font-bold ${
+                          monteCarloMutation.data.riskOfRuin < 0.01 ? 'text-emerald-400' :
+                          monteCarloMutation.data.riskOfRuin <= 0.05 ? 'text-yellow-400' :
+                          'text-red-400'
+                        }`}>
+                          {(monteCarloMutation.data.riskOfRuin * 100).toFixed(2)}%
+                        </span>
+                      </div>
+                      <div className="bg-[#0a0e17] border border-[#1e293b] rounded-lg p-3">
+                        <span className="text-[9px] font-mono text-[#64748b] block mb-1">Prob. of Profit</span>
+                        <span className={`mono-data text-lg font-bold ${
+                          monteCarloMutation.data.probabilityOfProfit >= 0.5 ? 'text-emerald-400' : 'text-red-400'
+                        }`}>
+                          {(monteCarloMutation.data.probabilityOfProfit * 100).toFixed(1)}%
+                        </span>
+                      </div>
+                      <div className="bg-[#0a0e17] border border-[#1e293b] rounded-lg p-3">
+                        <span className="text-[9px] font-mono text-[#64748b] block mb-1">P95 Max DD</span>
+                        <span className="mono-data text-lg font-bold text-red-400">
+                          {(monteCarloMutation.data.p95MaxDrawdown * 100).toFixed(1)}%
+                        </span>
+                      </div>
+                    </div>
+                    {monteCarloMutation.data.equityPercentiles && (
+                      <div className="bg-[#0a0e17] border border-[#1e293b] rounded-lg p-3">
+                        <span className="text-[9px] font-mono text-[#64748b] block mb-2">Equity Percentiles</span>
+                        <div className="grid grid-cols-5 gap-2">
+                          {Object.entries(monteCarloMutation.data.equityPercentiles).map(([pct, val]) => (
+                            <div key={pct} className="text-center">
+                              <span className="text-[8px] font-mono text-[#475569] block">P{pct}</span>
+                              <span className="mono-data text-[10px] font-bold text-[#94a3b8]">{formatCurrency(val as number)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    <div className="text-[9px] font-mono text-[#475569]">
+                      {monteCarloMutation.data.config?.simulations?.toLocaleString() ?? '1,000'} simulations ·
+                      Seed: {monteCarloMutation.data.config?.seed ?? 42} ·
+                      Trades: {monteCarloMutation.data.tradeCount ?? '—'}
+                    </div>
+                  </div>
+                </CollapsibleContent>
+              </div>
+            </Collapsible>
+          )}
+
+          {/* Walk-Forward Results */}
+          {walkForwardMutation.data && (
+            <Collapsible open={wfOpen} onOpenChange={setWfOpen}>
+              <div className="bg-[#111827] border border-[#1e293b] rounded-lg overflow-hidden">
+                <CollapsibleTrigger asChild>
+                  <button className="w-full flex items-center justify-between p-4 hover:bg-[#1e293b]/50 transition-colors">
+                    <h3 className="text-[11px] font-mono text-[#94a3b8] uppercase tracking-wider flex items-center gap-2">
+                      <Route className="h-3.5 w-3.5 text-emerald-400" /> Walk-Forward Analysis
+                    </h3>
+                    <ChevronDown className={`h-4 w-4 text-[#64748b] transition-transform ${wfOpen ? 'rotate-180' : ''}`} />
+                  </button>
+                </CollapsibleTrigger>
+                <CollapsibleContent>
+                  <div className="px-4 pb-4 space-y-3 border-t border-[#1e293b] pt-3">
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="bg-[#0a0e17] border border-[#1e293b] rounded-lg p-3">
+                        <span className="text-[9px] font-mono text-[#64748b] block mb-1">Aggregate WFE</span>
+                        <span className={`mono-data text-lg font-bold ${
+                          walkForwardMutation.data.aggregateWFE >= 0.5 ? 'text-emerald-400' :
+                          walkForwardMutation.data.aggregateWFE >= 0.3 ? 'text-yellow-400' :
+                          'text-red-400'
+                        }`}>
+                          {(walkForwardMutation.data.aggregateWFE * 100).toFixed(1)}%
+                        </span>
+                      </div>
+                      <div className="bg-[#0a0e17] border border-[#1e293b] rounded-lg p-3">
+                        <span className="text-[9px] font-mono text-[#64748b] block mb-1">Recommendation</span>
+                        <Badge className={`text-[9px] h-5 px-2 font-mono ${
+                          walkForwardMutation.data.recommendation === 'ROBUST' ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30' :
+                          walkForwardMutation.data.recommendation === 'MARGINAL' ? 'bg-yellow-500/15 text-yellow-400 border border-yellow-500/30' :
+                          'bg-red-500/15 text-red-400 border border-red-500/30'
+                        }`}>
+                          {walkForwardMutation.data.recommendation}
+                        </Badge>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-3 gap-3">
+                      <div className="bg-[#0a0e17] border border-[#1e293b] rounded-lg p-3">
+                        <span className="text-[9px] font-mono text-[#64748b] block mb-1">Param Stability</span>
+                        <span className="mono-data text-sm font-bold text-[#e2e8f0]">
+                          {((walkForwardMutation.data.parameterStability ?? 0) * 100).toFixed(1)}%
+                        </span>
+                      </div>
+                      <div className="bg-[#0a0e17] border border-[#1e293b] rounded-lg p-3">
+                        <span className="text-[9px] font-mono text-[#64748b] block mb-1">Avg In-Sample</span>
+                        <span className={`mono-data text-sm font-bold ${
+                          (walkForwardMutation.data.avgInSampleReturn ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'
+                        }`}>
+                          {formatPnl(walkForwardMutation.data.avgInSampleReturn ?? 0)}
+                        </span>
+                      </div>
+                      <div className="bg-[#0a0e17] border border-[#1e293b] rounded-lg p-3">
+                        <span className="text-[9px] font-mono text-[#64748b] block mb-1">Avg Out-of-Sample</span>
+                        <span className={`mono-data text-sm font-bold ${
+                          (walkForwardMutation.data.avgOutOfSampleReturn ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'
+                        }`}>
+                          {formatPnl(walkForwardMutation.data.avgOutOfSampleReturn ?? 0)}
+                        </span>
+                      </div>
+                    </div>
+                    {walkForwardMutation.data.windows && walkForwardMutation.data.windows.length > 0 && (
+                      <div className="bg-[#0a0e17] border border-[#1e293b] rounded-lg p-3">
+                        <span className="text-[9px] font-mono text-[#64748b] block mb-2">Windows ({walkForwardMutation.data.windows.length})</span>
+                        <div className="max-h-40 overflow-y-auto" style={{ scrollbarWidth: 'thin', scrollbarColor: '#2d3748 #0a0e17' }}>
+                          <table className="w-full text-[9px] font-mono">
+                            <thead>
+                              <tr className="text-[#475569] uppercase border-b border-[#1e293b]/50">
+                                <th className="py-1 px-1 text-left">#</th>
+                                <th className="py-1 px-1 text-right">WFE</th>
+                                <th className="py-1 px-1 text-right">In-Sample</th>
+                                <th className="py-1 px-1 text-right">OOS</th>
+                                <th className="py-1 px-1 text-right">Degrad.</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {walkForwardMutation.data.windows.map((w: { windowIndex: number; wfe: number; inSampleReturn: number | null; outOfSampleReturn: number | null; degradationPct: number }) => (
+                                <tr key={w.windowIndex} className="border-b border-[#1e293b]/30 hover:bg-[#111827]">
+                                  <td className="py-1 px-1 text-[#94a3b8]">{w.windowIndex + 1}</td>
+                                  <td className={`py-1 px-1 text-right font-bold ${w.wfe >= 0.5 ? 'text-emerald-400' : w.wfe >= 0.3 ? 'text-yellow-400' : 'text-red-400'}`}>
+                                    {(w.wfe * 100).toFixed(1)}%
+                                  </td>
+                                  <td className="py-1 px-1 text-right text-[#94a3b8]">
+                                    {w.inSampleReturn !== null ? formatPnl(w.inSampleReturn) : '—'}
+                                  </td>
+                                  <td className="py-1 px-1 text-right text-[#94a3b8]">
+                                    {w.outOfSampleReturn !== null ? formatPnl(w.outOfSampleReturn) : '—'}
+                                  </td>
+                                  <td className="py-1 px-1 text-right text-[#94a3b8]">
+                                    {(w.degradationPct * 100).toFixed(1)}%
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </CollapsibleContent>
+              </div>
+            </Collapsible>
+          )}
         </div>
       </ScrollArea>
     </motion.div>

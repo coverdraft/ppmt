@@ -76,6 +76,7 @@ export async function POST(request: NextRequest) {
     const { db } = await import('@/lib/db');
 
     const operations = await db.backtestOperation.findMany({
+      take: 1000,
       where: {
         systemId,
         pnlPct: { not: null }, // only closed trades with a PnL

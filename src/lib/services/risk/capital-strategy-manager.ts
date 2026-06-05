@@ -1,6 +1,22 @@
 /**
  * Capital Strategy Manager - CryptoQuant Terminal
  *
+ * @deprecated This module is being absorbed by the Strategy Decision Engine (SDE).
+ * New code should use `strategyDecisionEngine` from
+ * `@/lib/services/strategy/strategy-decision-engine` instead.
+ *
+ * The SDE provides a unified decision pipeline with:
+ * - Veto-first validation (hard constraints before scores)
+ * - Composite scoring (robustness, overfitting, stability)
+ * - Signal quality assessment (STRONG/ADEQUATE/WEAK)
+ * - Strategy state + capital action (ACTIVE/CONDITIONAL/PAUSED/REJECTED)
+ * - Dynamic allocation method selection (5 methods)
+ * - Full decision audit trail
+ *
+ * This file remains functional for backward compatibility with
+ * brain-cycle-engine.ts and brain/route.ts during Sprint 1-2.
+ * Full migration to SDE will be completed in Sprint 3 (Capital Allocation Pipeline).
+ *
  * EL CEREBRO DEL CAPITAL: Decide automáticamente:
  *
  * 1. CUÁNTAS estrategias usar (1 concentrada vs múltiples diversificadas)
@@ -382,8 +398,8 @@ class CapitalStrategyManager {
     else if (growthPct > 20) score += 18;
     else if (growthPct > 5) score += 10;
     else if (growthPct > 0) score += 5;
-    else if (growthPct < -10) score -= 10;
     else if (growthPct < -25) score -= 20;
+    else if (growthPct < -10) score -= 10;
 
     // Drawdown penalty (0-25 points)
     if (drawdown < 5) score += 25;
@@ -397,8 +413,8 @@ class CapitalStrategyManager {
     if (streak > 5) score += 15;
     else if (streak > 3) score += 10;
     else if (streak > 0) score += 5;
-    else if (streak < -3) score -= 10;
     else if (streak < -5) score -= 15;
+    else if (streak < -3) score -= 10;
 
     // Capital size factor (0-10 points)
     if (capitalUsd >= 1000) score += 10;
@@ -635,8 +651,8 @@ class CapitalStrategyManager {
       signals,
       historicalTrades: {
         winRate: this.getOverallWinRate(),
-        avgWin: 0.15, // 15% average win
-        avgLoss: 0.08, // 8% average loss
+        avgWin: this.getHistoricalAvgWin(),
+        avgLoss: this.getHistoricalAvgLoss(),
         totalTrades: Math.max(1, this.learningState.totalCyclesCompleted),
       },
       volatility: 0.6, // Crypto volatility
@@ -690,15 +706,17 @@ class CapitalStrategyManager {
   // ============================================================
 
   private selectAllocationMethod(mode: StrategyMode, capitalUsd: number): AllocationMethod {
+    // Only v1 active methods: KELLY_MODIFIED, RISK_PARITY, VOLATILITY_TARGETING, MAX_DRAWDOWN_CONTROL, EQUAL_WEIGHT
+    // Deprecated methods (FIXED_AMOUNT, SCORE_BASED, META_ALLOCATION) replaced per architecture spec
     switch (mode) {
       case 'CONCENTRATED':
-        return capitalUsd < 50 ? 'FIXED_AMOUNT' : 'KELLY_MODIFIED';
+        return capitalUsd < 50 ? 'EQUAL_WEIGHT' : 'KELLY_MODIFIED';
       case 'ULTRA_CONSERVATIVE':
         return 'MAX_DRAWDOWN_CONTROL';
       case 'DUAL':
-        return capitalUsd < 100 ? 'SCORE_BASED' : 'KELLY_MODIFIED';
+        return 'KELLY_MODIFIED';
       case 'DIVERSIFIED':
-        return capitalUsd < 500 ? 'RISK_PARITY' : 'META_ALLOCATION';
+        return 'RISK_PARITY';
       default:
         return 'EQUAL_WEIGHT';
     }
@@ -817,6 +835,22 @@ class CapitalStrategyManager {
     return weightedWinRate;
   }
 
+  /** Compute average win from historical strategy performance, or use default. */
+  private getHistoricalAvgWin(): number {
+    const perfs = Object.values(this.learningState.strategyPerformance);
+    const winningStrategies = perfs.filter(p => p.cyclesUsed > 0 && p.avgPnlPct > 0);
+    if (winningStrategies.length === 0) return 0.15; // Default 15%
+    return winningStrategies.reduce((s, p) => s + p.avgPnlPct, 0) / winningStrategies.length / 100;
+  }
+
+  /** Compute average loss from historical strategy performance, or use default. */
+  private getHistoricalAvgLoss(): number {
+    const perfs = Object.values(this.learningState.strategyPerformance);
+    const losingStrategies = perfs.filter(p => p.cyclesUsed > 0 && p.avgPnlPct < 0);
+    if (losingStrategies.length === 0) return 0.08; // Default 8%
+    return Math.abs(losingStrategies.reduce((s, p) => s + p.avgPnlPct, 0) / losingStrategies.length / 100);
+  }
+
   private getAllocationReason(
     strategy: StrategyInfo,
     mode: StrategyMode,
@@ -861,6 +895,11 @@ class CapitalStrategyManager {
       // Adjust position size based on confidence
       const confidenceMultiplier = 0.5 + allocation.confidenceScore; // 0.5x to 1.45x
       allocation.positionSizeUsd = Math.round(allocation.positionSizeUsd * confidenceMultiplier * 100) / 100;
+      // Clamp: position size cannot exceed capitalUsd / maxPositions
+      if (allocation.maxPositions > 0) {
+        const maxPerPosition = allocation.capitalUsd / allocation.maxPositions;
+        allocation.positionSizeUsd = Math.min(allocation.positionSizeUsd, maxPerPosition);
+      }
     }
   }
 
@@ -886,10 +925,16 @@ class CapitalStrategyManager {
       }
     }
 
-    // Update drawdown
-    this.learningState.currentDrawdownPct = result.cumulativeReturnPct < 0
-      ? Math.abs(result.cumulativeReturnPct)
-      : 0;
+    // Drawdown is measured from peak capital, not cumulative return
+    const currentCapitalUsd = (this.learningState.peakCapitalUsd || 0) * (1 + result.cumulativeReturnPct / 100);
+    if (currentCapitalUsd > (this.learningState.peakCapitalUsd || 0)) {
+      this.learningState.peakCapitalUsd = currentCapitalUsd;
+      this.learningState.currentDrawdownPct = 0;
+    } else {
+      this.learningState.currentDrawdownPct = this.learningState.peakCapitalUsd > 0
+        ? ((this.learningState.peakCapitalUsd - currentCapitalUsd) / this.learningState.peakCapitalUsd) * 100
+        : 0;
+    }
 
     // Update strategy performance from top picks
     for (const pick of result.topPicks) {
@@ -1016,17 +1061,28 @@ class CapitalStrategyManager {
       });
 
       if (stored) {
-        const loaded = JSON.parse(stored.prediction as string) as CapitalLearningState;
+        const parsed = JSON.parse(stored.prediction as string) as CapitalLearningState;
+
+        // Deserialize Date strings back to Date objects in strategyPerformance
+        if (parsed.strategyPerformance) {
+          for (const key of Object.keys(parsed.strategyPerformance)) {
+            const sp = parsed.strategyPerformance[key];
+            if (sp.lastUsedAt && typeof sp.lastUsedAt === 'string') {
+              sp.lastUsedAt = new Date(sp.lastUsedAt);
+            }
+          }
+        }
+
         this.learningState = {
           ...this.learningState,
-          ...loaded,
+          ...parsed,
           // Ensure numeric fields are valid
-          winStreak: loaded.winStreak || 0,
-          currentDrawdownPct: loaded.currentDrawdownPct || 0,
-          totalCyclesCompleted: loaded.totalCyclesCompleted || 0,
-          peakCapitalUsd: loaded.peakCapitalUsd || this.learningState.initialCapitalUsd,
-          feedbackAdjustments: loaded.feedbackAdjustments || this.learningState.feedbackAdjustments,
-          strategyPerformance: loaded.strategyPerformance || {},
+          winStreak: parsed.winStreak || 0,
+          currentDrawdownPct: parsed.currentDrawdownPct || 0,
+          totalCyclesCompleted: parsed.totalCyclesCompleted || 0,
+          peakCapitalUsd: parsed.peakCapitalUsd || this.learningState.initialCapitalUsd,
+          feedbackAdjustments: parsed.feedbackAdjustments || this.learningState.feedbackAdjustments,
+          strategyPerformance: parsed.strategyPerformance || {},
         };
       }
     } catch (error) {

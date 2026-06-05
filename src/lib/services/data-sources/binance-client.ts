@@ -164,8 +164,17 @@ class BinanceClient {
           });
 
           if (res.status === 429) {
-            console.warn('[Binance] Rate limited (429), backing off...');
-            // Binance rate limit: wait and return empty (caller should retry)
+            // Retry with exponential backoff (1s, 3s, 9s)
+            for (let attempt = 0; attempt < 3; attempt++) {
+              const delayMs = 1000 * Math.pow(3, attempt);
+              await new Promise(resolve => setTimeout(resolve, delayMs));
+              const retryResponse = await fetch(url);
+              if (retryResponse.ok) {
+                return retryResponse.json();
+              }
+              if (retryResponse.status !== 429) break;
+            }
+            console.warn('[Binance] Rate limit exceeded after retries');
             return [];
           }
 
@@ -180,16 +189,16 @@ class BinanceClient {
 
           return data.map((k: any[]) => ({
             openTime: k[0],
-            open: parseFloat(k[1]),
-            high: parseFloat(k[2]),
-            low: parseFloat(k[3]),
-            close: parseFloat(k[4]),
-            volume: parseFloat(k[5]),
+            open: parseFloat(k[1]) || 0,
+            high: parseFloat(k[2]) || 0,
+            low: parseFloat(k[3]) || 0,
+            close: parseFloat(k[4]) || 0,
+            volume: parseFloat(k[5]) || 0,
             closeTime: k[6],
-            quoteVolume: parseFloat(k[7]),
+            quoteVolume: parseFloat(k[7]) || 0,
             trades: k[8],
-            takerBuyBaseVolume: parseFloat(k[9]),
-            takerBuyQuoteVolume: parseFloat(k[10]),
+            takerBuyBaseVolume: parseFloat(k[9]) || 0,
+            takerBuyQuoteVolume: parseFloat(k[10]) || 0,
           }));
         } catch (error) {
           console.warn(`[Binance] Klines fetch failed for ${symbol}:`, error instanceof Error ? error.message : String(error));
@@ -356,14 +365,14 @@ class BinanceClient {
           const data = await res.json();
           return {
             symbol: data.symbol,
-            priceChange: parseFloat(data.priceChange),
-            priceChangePercent: parseFloat(data.priceChangePercent),
-            weightedAvgPrice: parseFloat(data.weightedAvgPrice),
-            lastPrice: parseFloat(data.lastPrice),
-            volume: parseFloat(data.volume),
-            quoteVolume: parseFloat(data.quoteVolume),
-            highPrice: parseFloat(data.highPrice),
-            lowPrice: parseFloat(data.lowPrice),
+            priceChange: parseFloat(data.priceChange) || 0,
+            priceChangePercent: parseFloat(data.priceChangePercent) || 0,
+            weightedAvgPrice: parseFloat(data.weightedAvgPrice) || 0,
+            lastPrice: parseFloat(data.lastPrice) || 0,
+            volume: parseFloat(data.volume) || 0,
+            quoteVolume: parseFloat(data.quoteVolume) || 0,
+            highPrice: parseFloat(data.highPrice) || 0,
+            lowPrice: parseFloat(data.lowPrice) || 0,
             count: data.count,
           };
         } catch {
@@ -401,6 +410,9 @@ class BinanceClient {
       console.log(`[Binance] Symbol map loaded: ${this.symbolMap.size} tokens`);
     } catch (error) {
       console.warn('[Binance] Failed to load symbol map:', error instanceof Error ? error.message : String(error));
+      // Reset state so next call retries — without this, the map never recovers
+      this.symbolMapLoaded = false;
+      this.symbolMapPromise = null;
     }
   }
 

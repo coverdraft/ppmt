@@ -44,6 +44,7 @@ export async function GET(request: NextRequest) {
 
     const tradingSystems = await db.tradingSystem.findMany({
       where,
+      take: 100,
       include: {
         _count: {
           select: { backtests: true },

@@ -15,6 +15,23 @@
 import { db } from '../../db';
 
 // ============================================================
+// SEEDED PRNG — Same LCG as Monte Carlo (reproducible evolution)
+// ============================================================
+
+const LCG_A = 1_664_525;
+const LCG_C = 1_013_904_223;
+const LCG_M = 2 ** 32;
+
+class SeededPRNG {
+  private state: number;
+  constructor(seed: number) { this.state = seed >>> 0; }
+  next(): number {
+    this.state = ((LCG_A * this.state + LCG_C) >>> 0) % LCG_M;
+    return this.state / LCG_M;
+  }
+}
+
+// ============================================================
 // TYPES
 // ============================================================
 
@@ -35,6 +52,8 @@ export interface EvolutionConfig {
   earlyStopPatience?: number;
   /** Enable adaptive mutation rate (decrease when stalled) */
   adaptiveMutation?: boolean;
+  /** Seed for the PRNG — same seed + same data = same evolution (default: 42) */
+  seed?: number;
 }
 
 export interface EvolvedStrategy {
@@ -81,6 +100,7 @@ export const DEFAULT_EVOLUTION_CONFIG: EvolutionConfig = {
   capital: 10000,
   earlyStopPatience: 3,
   adaptiveMutation: true,
+  seed: 42,
 };
 
 // ============================================================
@@ -98,19 +118,21 @@ interface MutableParams {
 }
 
 /**
- * Mutate strategy parameters with controlled randomness.
- * Each parameter has a bounded mutation range.
+ * Mutate strategy parameters with controlled, reproducible randomness.
+ * Uses seeded PRNG (same LCG as Monte Carlo) instead of Math.random()
+ * to ensure reproducible evolution runs for a given seed.
  */
 function mutateParams(
   params: MutableParams,
   mutationRate: number,
+  rng: SeededPRNG,
 ): { mutated: MutableParams; changes: string[] } {
   const changes: string[] = [];
   const mutated = { ...params };
 
   // Take Profit: mutate by ±mutationRate * current value, clamped [5, 200]
-  if (Math.random() < 0.6) {
-    const delta = mutated.takeProfit * mutationRate * (Math.random() * 2 - 1);
+  if (rng.next() < 0.6) {
+    const delta = mutated.takeProfit * mutationRate * (rng.next() * 2 - 1);
     const newVal = Math.round(Math.max(5, Math.min(200, mutated.takeProfit + delta)));
     if (newVal !== mutated.takeProfit) {
       changes.push(`TP: ${mutated.takeProfit}% → ${newVal}%`);
@@ -119,8 +141,8 @@ function mutateParams(
   }
 
   // Stop Loss: mutate by ±mutationRate * current value, clamped [2, 50]
-  if (Math.random() < 0.6) {
-    const delta = mutated.stopLoss * mutationRate * (Math.random() * 2 - 1);
+  if (rng.next() < 0.6) {
+    const delta = mutated.stopLoss * mutationRate * (rng.next() * 2 - 1);
     const newVal = Math.round(Math.max(2, Math.min(50, mutated.stopLoss + delta)));
     if (newVal !== mutated.stopLoss) {
       changes.push(`SL: ${mutated.stopLoss}% → ${newVal}%`);
@@ -129,8 +151,8 @@ function mutateParams(
   }
 
   // Position Size: mutate by ±mutationRate, clamped [1, 20]
-  if (Math.random() < 0.4) {
-    const delta = mutated.positionSizePct * mutationRate * (Math.random() * 2 - 1);
+  if (rng.next() < 0.4) {
+    const delta = mutated.positionSizePct * mutationRate * (rng.next() * 2 - 1);
     const newVal = Math.round(Math.max(1, Math.min(20, mutated.positionSizePct + delta)));
     if (newVal !== mutated.positionSizePct) {
       changes.push(`Size: ${mutated.positionSizePct}% → ${newVal}%`);
@@ -139,8 +161,8 @@ function mutateParams(
   }
 
   // Trailing Stop: mutate by ±mutationRate, clamped [5, 80]
-  if (Math.random() < 0.3) {
-    const delta = mutated.trailingStopPct * mutationRate * (Math.random() * 2 - 1);
+  if (rng.next() < 0.3) {
+    const delta = mutated.trailingStopPct * mutationRate * (rng.next() * 2 - 1);
     const newVal = Math.round(Math.max(5, Math.min(80, mutated.trailingStopPct + delta)));
     if (newVal !== mutated.trailingStopPct) {
       changes.push(`Trail: ${mutated.trailingStopPct}% → ${newVal}%`);
@@ -149,8 +171,8 @@ function mutateParams(
   }
 
   // Confidence Threshold: mutate by ±10, clamped [30, 95]
-  if (Math.random() < 0.3) {
-    const delta = 10 * mutationRate * (Math.random() * 2 - 1);
+  if (rng.next() < 0.3) {
+    const delta = 10 * mutationRate * (rng.next() * 2 - 1);
     const newVal = Math.round(Math.max(30, Math.min(95, mutated.confidenceThreshold + delta)));
     if (newVal !== mutated.confidenceThreshold) {
       changes.push(`Conf: ${mutated.confidenceThreshold}% → ${newVal}%`);
@@ -159,8 +181,8 @@ function mutateParams(
   }
 
   // Max Concurrent: mutate by ±2, clamped [1, 10]
-  if (Math.random() < 0.2) {
-    const delta = Math.round(2 * mutationRate * (Math.random() * 2 - 1));
+  if (rng.next() < 0.2) {
+    const delta = Math.round(2 * mutationRate * (rng.next() * 2 - 1));
     const newVal = Math.max(1, Math.min(10, mutated.maxConcurrentTrades + delta));
     if (newVal !== mutated.maxConcurrentTrades) {
       changes.push(`Concurrent: ${mutated.maxConcurrentTrades} → ${newVal}`);
@@ -238,6 +260,9 @@ export class StrategyEvolutionEngine {
     let totalMutations = 0;
     let improved = 0;
     let degraded = 0;
+
+    // Seeded PRNG for reproducible evolution
+    const rng = new SeededPRNG(config.seed ?? 42);
 
     // Dynamic imports
     const bteModule = await import('@/lib/services/backtesting/backtesting-engine');
@@ -390,7 +415,7 @@ export class StrategyEvolutionEngine {
         if (!parentInfo) continue;
 
         // Mutate parameters (use adaptive mutation rate)
-        const { mutated, changes } = mutateParams(parentInfo.params, currentMutationRate);
+        const { mutated, changes } = mutateParams(parentInfo.params, currentMutationRate, rng);
         if (changes.length === 0) continue; // No mutation happened
 
         totalMutations++;
@@ -401,7 +426,7 @@ export class StrategyEvolutionEngine {
           const evolvedSystem = await db.tradingSystem.create({
             data: {
               name: `${parentSystem.name} [Gen${iteration + 1}]`,
-              category: parentSystem.category as 'ALPHA_HUNTER',
+              category: parentSystem.category,
               icon: parentSystem.icon,
               assetFilter: parentSystem.assetFilter,
               phaseConfig: parentSystem.phaseConfig,
@@ -443,9 +468,9 @@ export class StrategyEvolutionEngine {
               periodStart,
               periodEnd,
               initialCapital,
-              allocationMethod: 'KELLY_MODIFIED',
+              allocationMethod: parentSystem.allocationMethod || 'KELLY_MODIFIED',
               capitalAllocation: JSON.stringify({
-                method: 'KELLY_MODIFIED',
+                method: parentSystem.allocationMethod || 'KELLY_MODIFIED',
                 initialCapital,
               }),
               strategyMeta: JSON.stringify({
@@ -514,9 +539,9 @@ export class StrategyEvolutionEngine {
                   systemId: evolvedSystem.id,
                   tokenAddress: trade.tokenAddress,
                   tokenSymbol: trade.symbol,
-                  chain: 'eth',
+                  chain: parentSystem.chain || 'SOL',
                   tokenPhase: trade.phase,
-                  tokenAgeMinutes: 0,
+                  tokenAgeMinutes: trade.entryTime ? Math.max(0, Math.round((Date.now() - new Date(trade.entryTime).getTime()) / 60000)) : 0,
                   marketConditions: JSON.stringify({ generation: iteration + 1 }),
                   tokenDnaSnapshot: JSON.stringify({}),
                   traderComposition: JSON.stringify({}),
@@ -875,9 +900,9 @@ export class StrategyEvolutionEngine {
     // Update the backtest run
     const btRun = await db.backtestRun.findUnique({ where: { id: backtestId } });
     if (btRun) {
-      const currentPnl = (btRun.totalPnl || 0) + netPnl;
-      const currentTrades = (btRun.totalTrades || 0) + 1;
-      const currentWins = netPnl > 0 ? (btRun.winTrades || 0) + 1 : (btRun.winTrades || 0);
+      const currentPnl = (btRun.totalPnl ?? 0) + netPnl;
+      const currentTrades = (btRun.totalTrades ?? 0) + 1;
+      const currentWins = netPnl > 0 ? (btRun.winTrades ?? 0) + 1 : (btRun.winTrades ?? 0);
 
       await db.backtestRun.update({
         where: { id: backtestId },

@@ -108,6 +108,13 @@ const DEFAULT_TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h', '1d'] as const;
 /** Timeframes for live candle ingestion */
 const LIVE_TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h', '1d'] as const;
 
+/** Map timeframe string → period in minutes */
+const TIMEFRAME_MINUTES: Record<string, number> = {
+  '1m': 1, '3m': 3, '5m': 5, '15m': 15, '30m': 30,
+  '1h': 60, '2h': 120, '4h': 240, '6h': 360, '12h': 720,
+  '1d': 1440, '1w': 10080,
+};
+
 /** Map internal timeframes to CoinGecko OHLCV days parameter.
  * CoinGecko only supports specific day values.
  * Candle granularity depends on days selected:
@@ -428,8 +435,8 @@ export class OHLCVPipeline {
         await this.delay(INTER_REQUEST_DELAY);
       }
 
-      // Step 3: Try DexPaprika for additional coverage (especially for non-Solana chains)
-      if (chain !== 'SOL') {
+      // Step 3: Try DexPaprika for additional coverage (all chains including Solana)
+      {
         try {
           const dpResult = await this.backfillFromDexPaprika(tokenAddress, chain, sourceTfs);
           if (dpResult.candlesStored > 0) {
@@ -533,22 +540,22 @@ export class OHLCVPipeline {
     let oldestCandle: Date | null = null;
     let newestCandle: Date | null = null;
 
+    // Determine the actual timeframe from CoinGecko upfront (needed outside try block for return)
+    const actualTf = COINGECKO_DAYS_TO_TF[days] ?? internalTf;
+
     try {
       // Fetch OHLCV from CoinGecko
       const candles = await this.fetchCoinGeckoOHLCV(tokenAddress, chain, days);
 
       if (candles.length === 0) {
         return {
-          timeframe: internalTf,
+          timeframe: actualTf,
           candlesFetched: 0,
           candlesStored: 0,
           oldestCandle: null,
           newestCandle: null,
         };
       }
-
-      // Determine the actual timeframe from CoinGecko
-      const actualTf = COINGECKO_DAYS_TO_TF[days] ?? internalTf;
 
       for (const item of candles) {
         const candleTs = new Date(item.timestamp);
@@ -595,7 +602,7 @@ export class OHLCVPipeline {
     }
 
     return {
-      timeframe: internalTf,
+      timeframe: actualTf,
       candlesFetched,
       candlesStored,
       oldestCandle,
@@ -960,7 +967,7 @@ export class OHLCVPipeline {
    * Backfill OHLCV data for the top N tokens by 24h volume.
    * Processes tokens sequentially to respect API rate limits.
    */
-  async backfillTopTokens(limit = 20): Promise<BatchBackfillResult> {
+  async backfillTopTokens(limit = 100): Promise<BatchBackfillResult> {
     const startTime = Date.now();
     const results = new Map<string, BackfillResult>();
     const failedTokens: string[] = [];
@@ -1001,6 +1008,135 @@ export class OHLCVPipeline {
   }
 
   // ----------------------------------------------------------
+  // 2b. backfillTokensByPriority
+  // ----------------------------------------------------------
+
+  /**
+   * Backfill OHLCV data prioritizing tokens that need it most:
+   *   1. Tokens with ZERO candles (never been backfilled)
+   *   2. Tokens with stale candles (most recent candle older than 1 hour)
+   *   3. Remaining tokens by 24h volume
+   *
+   * This ensures new/rising tokens below the top-N volume threshold still
+   * get candle data for regime detection, pattern scans, and charting.
+   */
+  async backfillTokensByPriority(limit = 20): Promise<BatchBackfillResult> {
+    const startTime = Date.now();
+    const results = new Map<string, BackfillResult>();
+    const failedTokens: string[] = [];
+    let totalCandlesStored = 0;
+
+    const STALE_THRESHOLD = new Date(Date.now() - 60 * 60 * 1000); // 1 hour ago
+
+    // --- Priority 1: Tokens with ZERO candles ---
+    const tokensWithZeroCandles = await db.token.findMany({
+      where: {
+        volume24h: { gt: 0 },
+        candles: { none: {} },
+      },
+      orderBy: { volume24h: 'desc' },
+      take: limit,
+      select: { address: true, chain: true },
+    });
+
+    // --- Priority 2: Tokens with stale candles (newest candle older than 1 hour) ---
+    const remainingAfterP1 = limit - tokensWithZeroCandles.length;
+    let tokensWithStaleCandles: { address: string; chain: string }[] = [];
+
+    if (remainingAfterP1 > 0) {
+      // Query tokens whose most recent candle is older than the stale threshold
+      const staleTokenAddresses = await db.$queryRaw<Array<{ tokenAddress: string }>>`
+        SELECT pc."tokenAddress"
+        FROM "PriceCandle" pc
+        INNER JOIN (
+          SELECT "tokenAddress", MAX("timestamp") AS latest_ts
+          FROM "PriceCandle"
+          GROUP BY "tokenAddress"
+        ) latest ON pc."tokenAddress" = latest."tokenAddress" AND pc."timestamp" = latest.latest_ts
+        WHERE latest.latest_ts < ${STALE_THRESHOLD}
+        ORDER BY latest.latest_ts ASC
+        LIMIT ${remainingAfterP1}
+      `;
+      const staleAddresses = staleTokenAddresses.map(r => r.tokenAddress);
+
+      if (staleAddresses.length > 0) {
+        tokensWithStaleCandles = await db.token.findMany({
+          where: {
+            address: { in: staleAddresses },
+            volume24h: { gt: 0 },
+          },
+          orderBy: { volume24h: 'desc' },
+          select: { address: true, chain: true },
+        });
+      }
+    }
+
+    // --- Priority 3: Remaining tokens by volume (excluding already selected) ---
+    const remainingAfterP2 = remainingAfterP1 - tokensWithStaleCandles.length;
+    let tokensByVolume: { address: string; chain: string }[] = [];
+
+    if (remainingAfterP2 > 0) {
+      const alreadySelected = new Set([
+        ...tokensWithZeroCandles.map(t => t.address),
+        ...tokensWithStaleCandles.map(t => t.address),
+      ]);
+
+      tokensByVolume = await db.token.findMany({
+        where: {
+          volume24h: { gt: 0 },
+          ...(alreadySelected.size > 0
+            ? { address: { notIn: Array.from(alreadySelected) } }
+            : {}),
+        },
+        orderBy: { volume24h: 'desc' },
+        take: remainingAfterP2,
+        select: { address: true, chain: true },
+      });
+    }
+
+    // Combine with priority ordering: zero candles → stale → volume
+    const prioritizedTokens = [
+      ...tokensWithZeroCandles,
+      ...tokensWithStaleCandles,
+      ...tokensByVolume,
+    ];
+
+    console.log(
+      `[ohlcv-pipeline] backfillTokensByPriority: ` +
+      `${tokensWithZeroCandles.length} zero-candle, ` +
+      `${tokensWithStaleCandles.length} stale, ` +
+      `${tokensByVolume.length} by-volume ` +
+      `(total ${prioritizedTokens.length}, limit ${limit})`,
+    );
+
+    // Process tokens sequentially to respect API rate limits
+    for (const token of prioritizedTokens) {
+      try {
+        const result = await this.backfillToken(token.address, token.chain);
+        results.set(token.address, result);
+        totalCandlesStored += result.totalStored;
+      } catch (err) {
+        console.error(
+          `[ohlcv-pipeline] backfill failed for ${token.address}:`,
+          err,
+        );
+        failedTokens.push(token.address);
+      }
+
+      // Delay between tokens to avoid rate limits
+      await this.delay(INTER_REQUEST_DELAY * 2);
+    }
+
+    return {
+      totalTokens: prioritizedTokens.length,
+      results,
+      totalCandlesStored,
+      failedTokens,
+      duration: Date.now() - startTime,
+    };
+  }
+
+  // ----------------------------------------------------------
   // 3. ingestLiveCandle
   // ----------------------------------------------------------
 
@@ -1018,48 +1154,28 @@ export class OHLCVPipeline {
     for (const tf of LIVE_TIMEFRAMES) {
       const candleTs = this.floorToPeriod(timestamp, tf);
 
-      try {
-        const existing = await db.priceCandle.findUnique({
-          where: {
-            tokenAddress_chain_timeframe_timestamp: {
-              tokenAddress,
-              chain,
-              timeframe: tf,
-              timestamp: candleTs,
-            },
-          },
-        });
+      // Estimate per-candle volume: distribute 24h volume proportionally.
+      // E.g. for 30m candles, each candle ≈ volume24h / 48
+      const candlePeriodMin = TIMEFRAME_MINUTES[tf] ?? 30;
+      const estimatedCandleVolume = volume24h > 0
+        ? volume24h / (24 * 60 / candlePeriodMin)
+        : 0;
 
-        if (existing) {
-          // Update existing candle
-          await db.priceCandle.update({
-            where: { id: existing.id },
-            data: {
-              high: Math.max(existing.high, priceUsd),
-              low: Math.min(existing.low, priceUsd),
-              close: priceUsd,
-              volume: existing.volume + volume24h * 0.001,
-              trades: existing.trades + 1,
-            },
-          });
-        } else {
-          // Create new candle with open = high = low = close = price
-          await db.priceCandle.create({
-            data: {
-              tokenAddress,
-              chain,
-              timeframe: tf,
-              timestamp: candleTs,
-              open: priceUsd,
-              high: priceUsd,
-              low: priceUsd,
-              close: priceUsd,
-              volume: volume24h * 0.001,
-              trades: 1,
-              source: 'internal',
-            },
-          });
-        }
+      try {
+        // Use raw SQL for atomic upsert with MAX/MIN for high/low
+        // This prevents the race condition where concurrent ticks overwrite high/low incorrectly
+        // NOTE: SQLite does NOT support GREATEST/LEAST — use MAX/MIN scalar functions instead
+        //       (MAX/MIN as scalar 2-arg functions are supported since SQLite 3.35+)
+        await db.$executeRaw`
+          INSERT INTO "PriceCandle" ("tokenAddress", "chain", "timeframe", "timestamp", "open", "high", "low", "close", "volume", "trades", "source")
+          VALUES (${tokenAddress}, ${chain}, ${tf}, ${candleTs}, ${priceUsd}, ${priceUsd}, ${priceUsd}, ${priceUsd}, ${estimatedCandleVolume}, 1, 'internal')
+          ON CONFLICT ("tokenAddress", "chain", "timeframe", "timestamp") DO UPDATE SET
+            "high" = MAX("PriceCandle"."high", ${priceUsd}),
+            "low" = MIN("PriceCandle"."low", ${priceUsd}),
+            "close" = ${priceUsd},
+            "volume" = "PriceCandle"."volume" + ${estimatedCandleVolume},
+            "trades" = "PriceCandle"."trades" + 1
+        `;
       } catch (err) {
         console.warn(
           `[ohlcv-pipeline] ingestLiveCandle upsert failed for ${tokenAddress} ${tf}:`,

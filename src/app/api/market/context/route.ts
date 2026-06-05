@@ -646,6 +646,7 @@ export async function GET() {
 
     const [dbTokens, signalsMap, liveDex] = await Promise.all([
       db.token.findMany({
+        take: 500,
         select: {
           chain: true,
           priceChange1h: true,
@@ -716,7 +717,7 @@ export async function GET() {
     // Compute all market context metrics (with signal cross-validation)
     // ---------------------------------------------------------
 
-    const chains = [...new Set(dbTokens.map((t) => t.chain.toUpperCase()))];
+    const chains = [...new Set(dbTokens.map((t) => t.chain.toUpperCase()))] as string[];
 
     const totalSignalCount = await db.predictiveSignal.count({
       where: {
@@ -763,6 +764,7 @@ export async function GET() {
 
       const [dbTokens, signalsMap] = await Promise.all([
         dbFallback.token.findMany({
+          take: 500,
           select: {
             chain: true,
             priceChange1h: true,
@@ -777,7 +779,7 @@ export async function GET() {
         fetchSignalsByTypes(signalTypes, 20),
       ]);
 
-      const chains = [...new Set(dbTokens.map((t) => t.chain.toUpperCase()))];
+      const chains = [...new Set(dbTokens.map((t) => t.chain.toUpperCase()))] as string[];
 
       const signalBreakdown: Record<string, number> = {};
       for (const [type, sigs] of Object.entries(signalsMap)) {

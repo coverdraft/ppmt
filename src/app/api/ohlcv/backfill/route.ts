@@ -70,7 +70,7 @@ function normalizeDays(days: number): number {
 }
 
 // ── Default parameters ─────────────────────────────────────
-const DEFAULT_LIMIT = 20;
+const DEFAULT_LIMIT = 50;
 const DEFAULT_TIMEFRAMES = ['30m', '4h', '1d'];
 const DEFAULT_DAYS = 30;
 
@@ -137,7 +137,7 @@ export async function POST(request: NextRequest) {
       });
 
       // Build a map for quick lookup
-      const dbTokenMap = new Map(dbTokens.map((t) => [t.address, t.chain]));
+      const dbTokenMap = new Map<string, string>(dbTokens.map((t) => [t.address, t.chain as string]));
 
       tokensToBackfill = tokenAddresses.map((addr) => ({
         address: addr,
@@ -348,7 +348,7 @@ export async function GET() {
       select: { address: true, symbol: true, chain: true },
     });
 
-    const tokenInfoMap = new Map(tokenInfo.map((t) => [t.address, t]));
+    const tokenInfoMap = new Map<string, { symbol: string; chain: string }>(tokenInfo.map((t) => [t.address, t as { symbol: string; chain: string }]));
 
     const topTokensByCandleCount = topTokenCandles.map((entry) => {
       const info = tokenInfoMap.get(entry.tokenAddress);

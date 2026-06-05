@@ -18,6 +18,7 @@ export type TriggerReason =
   | 'AUTO_BACKTEST'
   | 'AUTO_EVOLVE'
   | 'RISK_LIMIT'
+  | 'SDE_VALIDATION_FAILED'
   | 'SCHEDULER';
 
 export interface StateTransitionInput {
@@ -208,12 +209,28 @@ class StrategyStateManager {
     // Get current state for each system
     const results: StrategyWithState[] = [];
 
+    // --- Batch query to avoid N+1 ---
+    // Previously, this loop did findFirst + findMany per system (2 DB queries per system).
+    // Now we fetch all states at once and group by systemId in memory.
+    const systemIds = systems.map(s => s.id);
+    const allStates = await db.strategyStateHistory.findMany({
+      where: { systemId: { in: systemIds } },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    // Group by systemId, preserving desc order (latest first)
+    const statesBySystem = new Map<string, typeof allStates>();
+    for (const state of allStates) {
+      const arr = statesBySystem.get(state.systemId) ?? [];
+      arr.push(state);
+      statesBySystem.set(state.systemId, arr);
+    }
+
     for (const system of systems) {
-      // Get latest state
-      const latestState = await db.strategyStateHistory.findFirst({
-        where: { systemId: system.id },
-        orderBy: { createdAt: 'desc' },
-      });
+      const systemStates = statesBySystem.get(system.id) ?? [];
+
+      // Get latest state (first in desc-ordered array)
+      const latestState = systemStates[0] ?? null;
 
       // Determine derived status from TradingSystem fields if no state history
       const derivedStatus = this.deriveStatus(system);
@@ -222,12 +239,8 @@ class StrategyStateManager {
       const effectiveStatus = latestState?.status || derivedStatus;
       if (status && effectiveStatus !== status) continue;
 
-      // Get recent history (last 10)
-      const stateHistory = await db.strategyStateHistory.findMany({
-        where: { systemId: system.id },
-        orderBy: { createdAt: 'desc' },
-        take: 10,
-      });
+      // Get recent history (last 10 from the pre-fetched array)
+      const stateHistory = systemStates.slice(0, 10);
 
       results.push({
         id: system.id,
@@ -308,12 +321,25 @@ class StrategyStateManager {
     const statusCounts: Record<string, number> = {};
     const avgTimeInState: Record<string, number> = {};
 
+    // --- Batch query to avoid N+1 ---
+    // Previously: findFirst per system in a loop. Now: single query, group in memory.
+    const systemIds = allSystems.map(s => s.id);
+    const allLatestStates = await db.strategyStateHistory.findMany({
+      where: { systemId: { in: systemIds } },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    // Group by systemId and take latest per system
+    const latestBySystem = new Map<string, typeof allLatestStates[0]>();
+    for (const state of allLatestStates) {
+      if (!latestBySystem.has(state.systemId)) {
+        latestBySystem.set(state.systemId, state);
+      }
+    }
+
     // Count statuses
     for (const system of allSystems) {
-      const latestState = await db.strategyStateHistory.findFirst({
-        where: { systemId: system.id },
-        orderBy: { createdAt: 'desc' },
-      });
+      const latestState = latestBySystem.get(system.id) ?? null;
 
       const status = latestState?.status || this.deriveStatus(system);
       statusCounts[status] = (statusCounts[status] || 0) + 1;
@@ -545,6 +571,37 @@ class StrategyStateManager {
       metadata: { event: 'scheduler_action', reason },
     });
   }
+
+  /**
+   * Batch helper: fetch latest state for multiple systems in a single query.
+   * Useful for callers that need to check the current state of many systems
+   * without triggering N+1 queries.
+   *
+   * Returns a Map of systemId → latest StrategyStateHistory record.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async batchGetLatestStates(systemIds: string[]): Promise<Map<string, any>> {
+    if (systemIds.length === 0) return new Map();
+
+    const allStates = await db.strategyStateHistory.findMany({
+      where: { systemId: { in: systemIds } },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const latestBySystem = new Map<string, any>();
+    for (const state of allStates) {
+      if (!latestBySystem.has(state.systemId)) {
+        latestBySystem.set(state.systemId, state);
+      }
+    }
+    return latestBySystem;
+  }
+
+  // TODO: onBacktestComplete() still does a findFirst per systemId call.
+  // If called in a batch loop (e.g. after running multiple backtests),
+  // this becomes N+1. Consider adding a batchOnBacktestComplete() method
+  // that pre-fetches states for all systemIds and reuses them.
 }
 
 // Singleton instance

@@ -857,11 +857,13 @@ export default function BrainControl() {
                   setActionLoading('startall');
                   try {
                     const res = await fetch('/api/brain/start-all', { method: 'POST' });
-                    const data = await res.json();
-                    if (data.success) {
+                    const result = await res.json();
+                    if (!res.ok) {
+                      setError(result.error || result.message || 'Start All failed');
+                    } else if (result.success) {
                       setError(null);
                     } else {
-                      setError(data.message || 'Start All partially failed');
+                      setError(result.message || 'Start All partially failed');
                     }
                   } catch (err: any) {
                     setError(err.message || 'Start All failed');
@@ -914,9 +916,10 @@ export default function BrainControl() {
                 onClick={() => {
                   // Navigate to signals tab to show unvalidated signals
                   try {
-                    const { useCryptoStore } = require('@/store/crypto-store');
-                    const state = useCryptoStore.getState?.();
-                    if (state?.setActiveTab) state.setActiveTab('signals');
+                    import('@/store/crypto-store').then(({ useCryptoStore }) => {
+                      const state = useCryptoStore.getState?.();
+                      if (state?.setActiveTab) state.setActiveTab('signals');
+                    }).catch(() => { /* store not available */ });
                   } catch { /* store not available */ }
                 }}
                 className="h-7 px-3 text-[10px] font-mono bg-yellow-600/20 text-yellow-400 border border-yellow-500/30 hover:bg-yellow-600/30 hover:text-yellow-300"

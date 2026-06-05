@@ -1,5 +1,5 @@
 @import "tailwindcss";
-@import "tw-animate-css";
+@import "./tw-animate.css";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -45,71 +45,37 @@
 
 :root {
   --radius: 0.625rem;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --chart-1: oklch(0.646 0.222 41.116);
-  --chart-2: oklch(0.6 0.118 184.704);
-  --chart-3: oklch(0.398 0.07 227.392);
-  --chart-4: oklch(0.828 0.189 84.429);
-  --chart-5: oklch(0.769 0.188 70.08);
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
-}
-
-.dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
-  --chart-1: oklch(0.488 0.243 264.376);
-  --chart-2: oklch(0.696 0.17 162.48);
-  --chart-3: oklch(0.769 0.188 70.08);
-  --chart-4: oklch(0.627 0.265 303.9);
-  --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+  --background: #0a0e17;
+  --foreground: #e2e8f0;
+  --card: #111827;
+  --card-foreground: #e2e8f0;
+  --popover: #111827;
+  --popover-foreground: #e2e8f0;
+  --primary: #3b82f6;
+  --primary-foreground: #0a0e17;
+  --secondary: #1a1f2e;
+  --secondary-foreground: #e2e8f0;
+  --muted: #1a1f2e;
+  --muted-foreground: #94a3b8;
+  --accent: #1e293b;
+  --accent-foreground: #e2e8f0;
+  --destructive: #ef4444;
+  --border: #1e293b;
+  --input: #1e293b;
+  --ring: #3b82f6;
+  --chart-1: #3b82f6;
+  --chart-2: #22d3ee;
+  --chart-3: #10b981;
+  --chart-4: #f59e0b;
+  --chart-5: #ef4444;
+  --sidebar: #0d1117;
+  --sidebar-foreground: #e2e8f0;
+  --sidebar-primary: #3b82f6;
+  --sidebar-primary-foreground: #0a0e17;
+  --sidebar-accent: #1a1f2e;
+  --sidebar-accent-foreground: #e2e8f0;
+  --sidebar-border: #1e293b;
+  --sidebar-ring: #3b82f6;
 }
 
 @layer base {
@@ -118,5 +84,492 @@
   }
   body {
     @apply bg-background text-foreground;
+    font-family: var(--font-geist-sans), system-ui, sans-serif;
+    overflow: hidden;
   }
+  /* Ensure terminal fills entire viewport */
+  html, body {
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    background: #0a0e17;
+  }
+  #__next, #root {
+    height: 100%;
+  }
+}
+
+/* ============================================================
+   BLOOMBERG TERMINAL CUSTOM SCROLLBAR
+   ============================================================ */
+
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #2d3748;
+  border-radius: 2px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #4a5568;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Firefox scrollbar */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #2d3748 transparent;
+}
+
+/* ============================================================
+   MONOSPACE DATA STYLING
+   ============================================================ */
+
+.mono-data {
+  font-family: var(--font-geist-mono), 'JetBrains Mono', 'Fira Code', monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ============================================================
+   GLOW EFFECTS - Bloomberg Terminal Style
+   ============================================================ */
+
+.blue-glow {
+  text-shadow: 0 0 8px rgba(59, 130, 246, 0.6), 0 0 16px rgba(59, 130, 246, 0.2);
+}
+
+.blue-glow-box {
+  box-shadow: 0 0 8px rgba(59, 130, 246, 0.3), inset 0 0 8px rgba(59, 130, 246, 0.05);
+}
+
+.green-glow {
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.3);
+}
+
+.green-glow-text {
+  text-shadow: 0 0 6px rgba(16, 185, 129, 0.5), 0 0 12px rgba(16, 185, 129, 0.15);
+}
+
+.red-glow {
+  box-shadow: 0 0 8px rgba(239, 68, 68, 0.3);
+}
+
+.red-glow-text {
+  text-shadow: 0 0 6px rgba(239, 68, 68, 0.5), 0 0 12px rgba(239, 68, 68, 0.15);
+}
+
+.gold-glow {
+  text-shadow: 0 0 8px rgba(212, 175, 55, 0.6), 0 0 16px rgba(212, 175, 55, 0.2);
+}
+
+.gold-glow-box {
+  box-shadow: 0 0 8px rgba(212, 175, 55, 0.3), inset 0 0 8px rgba(212, 175, 55, 0.05);
+}
+
+.cyan-glow {
+  box-shadow: 0 0 10px rgba(34, 211, 238, 0.3), 0 0 20px rgba(34, 211, 238, 0.1);
+}
+
+/* ============================================================
+   PULSE ANIMATIONS
+   ============================================================ */
+
+@keyframes live-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.live-pulse {
+  animation: live-pulse 2s ease-in-out infinite;
+}
+
+@keyframes glow-pulse {
+  0%, 100% { box-shadow: 0 0 4px rgba(59, 130, 246, 0.3); }
+  50% { box-shadow: 0 0 12px rgba(59, 130, 246, 0.6); }
+}
+
+.glow-pulse {
+  animation: glow-pulse 3s ease-in-out infinite;
+}
+
+/* ============================================================
+   SIGNAL CARD ENTRANCE ANIMATION
+   ============================================================ */
+
+@keyframes slide-in {
+  from {
+    opacity: 0;
+    transform: translateX(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.signal-enter {
+  animation: slide-in 0.3s ease-out;
+}
+
+/* ============================================================
+   SHIMMER EFFECT FOR LOADING
+   ============================================================ */
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.shimmer {
+  background: linear-gradient(90deg, transparent 0%, rgba(59, 130, 246, 0.05) 50%, transparent 100%);
+  background-size: 200% 100%;
+  animation: shimmer 2s ease-in-out infinite;
+}
+
+/* ============================================================
+   DATA FADE-IN ANIMATION
+   ============================================================ */
+
+@keyframes data-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.data-fade-in {
+  animation: data-fade-in 0.2s ease-out;
+}
+
+/* ============================================================
+   NUMBER TRANSITION (count up/down feel)
+   ============================================================ */
+
+@keyframes number-flash {
+  0% { color: #e2e8f0; }
+  15% { color: #3b82f6; }
+  100% { color: #e2e8f0; }
+}
+
+.number-flash {
+  animation: number-flash 0.6s ease-out;
+}
+
+/* Positive number highlight */
+@keyframes number-flash-green {
+  0% { color: #10b981; }
+  15% { color: #34d399; text-shadow: 0 0 8px rgba(16, 185, 129, 0.6); }
+  100% { color: #10b981; text-shadow: none; }
+}
+
+.number-flash-green {
+  animation: number-flash-green 0.6s ease-out;
+}
+
+/* Negative number highlight */
+@keyframes number-flash-red {
+  0% { color: #ef4444; }
+  15% { color: #f87171; text-shadow: 0 0 8px rgba(239, 68, 68, 0.6); }
+  100% { color: #ef4444; text-shadow: none; }
+}
+
+.number-flash-red {
+  animation: number-flash-red 0.6s ease-out;
+}
+
+/* ============================================================
+   TICKER STRIP / MARQUEE
+   ============================================================ */
+
+@keyframes ticker-scroll {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+
+.ticker-scroll {
+  animation: ticker-scroll 60s linear infinite;
+}
+
+.ticker-scroll:hover {
+  animation-play-state: paused;
+}
+
+/* ============================================================
+   SUBTLE SCAN-LINE EFFECT (Bloomberg terminal aesthetic)
+   ============================================================ */
+
+.terminal-scanlines::before {
+  content: '';
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 9999;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0, 0, 0, 0.015) 2px,
+    rgba(0, 0, 0, 0.015) 4px
+  );
+}
+
+/* ============================================================
+   ROW HIGHLIGHT (Bloomberg row hover)
+   ============================================================ */
+
+.terminal-row {
+  transition: background-color 0.1s ease;
+}
+
+.terminal-row:hover {
+  background-color: rgba(59, 130, 246, 0.04) !important;
+}
+
+.terminal-row-selected {
+  background-color: rgba(59, 130, 246, 0.08) !important;
+  border-left: 2px solid #3b82f6;
+}
+
+/* ============================================================
+   COMPACT STATUS BAR
+   ============================================================ */
+
+.status-bar {
+  font-family: var(--font-geist-mono), 'JetBrains Mono', monospace;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  background: #080b12;
+  border-top: 1px solid #1e293b;
+}
+
+/* ============================================================
+   SIDEBAR NAV STYLES
+   ============================================================ */
+
+.sidebar-nav-item {
+  transition: all 0.15s ease;
+  position: relative;
+  border-left: 2px solid transparent;
+}
+
+.sidebar-nav-item:hover {
+  background-color: rgba(59, 130, 246, 0.06);
+  border-left-color: rgba(59, 130, 246, 0.3);
+}
+
+.sidebar-nav-item.active {
+  background-color: rgba(59, 130, 246, 0.1);
+  border-left-color: #3b82f6;
+}
+
+.sidebar-nav-item.active .nav-icon {
+  color: #3b82f6;
+  filter: drop-shadow(0 0 4px rgba(59, 130, 246, 0.4));
+}
+
+.sidebar-nav-item.active .nav-label {
+  color: #f1f5f9;
+}
+
+/* ============================================================
+   GRADIENT BORDERS
+   ============================================================ */
+
+.gradient-border {
+  position: relative;
+}
+
+.gradient-border::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, #3b82f680, transparent);
+}
+
+/* ============================================================
+   CUSTOM SELECTION
+   ============================================================ */
+
+::selection {
+  background: rgba(59, 130, 246, 0.3);
+  color: #f1f5f9;
+}
+
+/* ============================================================
+   CHAIN BADGE COLORS
+   ============================================================ */
+
+.chain-sol { color: #9945FF; }
+.chain-eth { color: #627eea; }
+.chain-base { color: #0052FF; }
+.chain-arb { color: #28A0F0; }
+.chain-bsc { color: #F3BA2F; }
+
+/* ============================================================
+   SPARKLINE SVG PATH ANIMATION
+   ============================================================ */
+
+@keyframes sparkline-draw {
+  from { stroke-dashoffset: 200; }
+  to { stroke-dashoffset: 0; }
+}
+
+.sparkline-path {
+  stroke-dasharray: 200;
+  animation: sparkline-draw 1s ease-out forwards;
+}
+
+/* ============================================================
+   COMPACT CARD HOVER
+   ============================================================ */
+
+.intel-card {
+  transition: all 0.2s ease;
+  border: 1px solid #1e293b;
+}
+
+.intel-card:hover {
+  border-color: #2d3748;
+  box-shadow: 0 0 12px rgba(59, 130, 246, 0.06);
+}
+
+/* ============================================================
+   DATA SOURCE INDICATOR DOT
+   ============================================================ */
+
+.data-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.data-dot-live {
+  background: #10b981;
+  box-shadow: 0 0 4px rgba(16, 185, 129, 0.5);
+}
+
+.data-dot-db {
+  background: #f59e0b;
+  box-shadow: 0 0 4px rgba(245, 158, 11, 0.5);
+}
+
+.data-dot-offline {
+  background: #64748b;
+}
+
+/* ============================================================
+   QUICK START GUIDE
+   ============================================================ */
+
+.quick-start-step {
+  transition: all 0.2s ease;
+}
+
+.quick-start-step:hover {
+  transform: translateX(4px);
+}
+
+/* ============================================================
+   SECTION TRANSITION
+   ============================================================ */
+
+@keyframes section-enter {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.section-enter {
+  animation: section-enter 0.25s ease-out;
+}
+
+/* ============================================================
+   METRIC CARD HOVER
+   ============================================================ */
+
+.metric-card {
+  transition: all 0.2s ease;
+}
+
+.metric-card:hover {
+  border-color: #2d3748;
+  box-shadow: 0 0 16px rgba(59, 130, 246, 0.08);
+  transform: translateY(-1px);
+}
+
+/* ============================================================
+   BRAIN STATUS INDICATOR
+   ============================================================ */
+
+@keyframes brain-pulse {
+  0%, 100% { box-shadow: 0 0 4px rgba(16, 185, 129, 0.3), inset 0 0 4px rgba(16, 185, 129, 0.1); }
+  50% { box-shadow: 0 0 12px rgba(16, 185, 129, 0.6), inset 0 0 8px rgba(16, 185, 129, 0.2); }
+}
+
+.brain-active {
+  animation: brain-pulse 2s ease-in-out infinite;
+}
+
+/* ============================================================
+   SIDEBAR COLLAPSE/EXPAND
+   ============================================================ */
+
+.sidebar-collapsed {
+  width: 48px;
+}
+
+.sidebar-expanded {
+  width: 180px;
+}
+
+/* ============================================================
+   DATA-DENSE TABLE
+   ============================================================ */
+
+.data-table th {
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 9px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #475569;
+  padding: 4px 6px;
+  white-space: nowrap;
+}
+
+.data-table td {
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 10px;
+  padding: 3px 6px;
+  white-space: nowrap;
+}
+
+.data-table tr {
+  border-bottom: 1px solid #1e293b33;
+  transition: background-color 0.1s;
 }

@@ -347,10 +347,11 @@ export class WalkForwardEngine {
         // No edge in either period
         window.wfe = 0;
       } else {
-        // Negative train return: if test is also negative, WFE is the ratio
-        // (less negative is better). If test is positive, that's actually
-        // a negative WFE (system reversed behavior).
-        window.wfe = testReturn / trainReturn;
+        // WFE is only meaningful for positive IS returns.
+        // Negative IS returns make the ratio misleading (e.g. -10/-50 = 0.2
+        // would falsely suggest 20% efficiency). Set to 0 — cannot compute
+        // meaningful efficiency from negative in-sample returns.
+        window.wfe = 0;
       }
 
       // Clamp WFE to [-10, 10] to prevent extreme outliers from skewing

@@ -276,8 +276,7 @@ async function runScan(result: SyncResult): Promise<void> {
           let botDetectionResult: import('@/lib/services/execution/bot-detection').BotDetectionResult | null = null;
           try {
             const { detectBot, analyticsToMetrics } = await import('@/lib/services/execution/bot-detection');
-            const { analyticsToMetrics: toMetrics } = await import('@/lib/services/brain/brain-orchestrator');
-            const metrics = toMetrics(swapAnalytics);
+            const metrics = analyticsToMetrics(swapAnalytics);
             botDetectionResult = detectBot(metrics);
           } catch {
             // Fall back to simple heuristic from wallet-profiler

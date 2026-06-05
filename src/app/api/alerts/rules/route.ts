@@ -5,6 +5,7 @@ import { db } from '@/lib/db';
 export async function GET() {
   try {
     const rules = await db.alertRule.findMany({
+      take: 100,
       orderBy: { createdAt: 'desc' },
     });
 

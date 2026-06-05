@@ -97,8 +97,8 @@ export interface TradeRecord {
   quantity: number;    // token quantity
   pnl: number;        // net PnL in USD (after fees)
   pnlPct: number;     // net PnL as percentage
-  mfe: number;        // max favorable excursion (pct)
-  mae: number;        // max adverse excursion (pct)
+  mfe: number;        // max favorable excursion (pct) — highest price above entry
+  mae: number;        // max adverse excursion (pct) — lowest price below entry (negative)
   holdTimeMin: number;
   exitReason: string;
   phase: TokenPhase;
@@ -106,6 +106,12 @@ export interface TradeRecord {
   entryBarIndex: number;
   /** Bar index at exit (-1 if still open) */
   exitBarIndex: number;
+
+  // ---- Intra-trade tracking (updated bar-by-bar while position is open) ----
+  /** Highest price reached since entry — used for trailing stop + MFE */
+  peakHighSinceEntry: number;
+  /** Lowest price reached since entry — used for MAE (low water mark) */
+  troughLowSinceEntry: number;
 }
 
 export interface EquityPoint {
@@ -420,18 +426,18 @@ export function generateEquityCurve(
 
 /**
  * Calculate monthly returns from an equity curve.
- * Returns a map of "YYYY-MM" → return percentage.
+ * Returns a map of "YYYY-MM" → return percentage AND a detailed month map
+ * with starting/ending equity for each month.
  */
 export function calculateMonthlyReturns(
   equityCurve: EquityPoint[],
-): Record<string, number> {
+): { monthly: Record<string, number>; monthMap: Record<string, { first: number; last: number }> } {
   const monthly: Record<string, number> = {};
-
-  if (equityCurve.length === 0) return monthly;
-
-  // Group equity points by month
   const monthMap: Record<string, { first: number; last: number }> = {};
 
+  if (equityCurve.length === 0) return { monthly, monthMap };
+
+  // Group equity points by month
   for (const point of equityCurve) {
     const d = new Date(point.timestamp);
     const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
@@ -449,7 +455,7 @@ export function calculateMonthlyReturns(
       : 0;
   }
 
-  return monthly;
+  return { monthly, monthMap };
 }
 
 // ============================================================
@@ -459,17 +465,30 @@ export function calculateMonthlyReturns(
 /**
  * Simulate a single trade from entry to exit.
  * Calculates PnL, MFE, MAE, and hold time.
+ *
+ * MFE (Max Favorable Excursion): The maximum unrealized profit reached
+ * during the trade, measured as the highest price above entry.
+ *
+ * MAE (Max Adverse Excursion): The maximum unrealized loss reached
+ * during the trade, measured as the lowest price below entry (negative).
+ *
+ * If `intraTradeBars` is provided, MFE/MAE are computed from the actual
+ * high/low of every bar in the trade. Otherwise, falls back to entry vs exit.
  */
 export function simulateTrade(
   entry: { price: number; time: Date; size: number },
   exit: { price: number; time: Date },
   feesPct: number,
+  intraTradeBars?: OHLCVBar[],
+  direction: 'LONG' | 'SHORT' = 'LONG',
 ): {
   pnl: number;
   pnlPct: number;
   mfe: number;
   mae: number;
   holdTimeMin: number;
+  peakHigh: number;
+  troughLow: number;
 } {
   const holdTimeMs = exit.time.getTime() - entry.time.getTime();
   const holdTimeMin = Math.max(0, Math.round(holdTimeMs / 60000));
@@ -478,8 +497,12 @@ export function simulateTrade(
   const quantity = entry.size / entry.price;
   const exitValue = quantity * exit.price;
 
-  // Gross PnL
-  const grossPnl = exitValue - entryCost;
+  // Gross PnL — direction-aware
+  // LONG: profit when exit > entry (price rises)
+  // SHORT: profit when entry > exit (price falls)
+  const grossPnl = direction === 'SHORT'
+    ? entryCost - exitValue
+    : exitValue - entryCost;
 
   // Fees: pay on entry and exit
   const entryFee = entryCost * feesPct;
@@ -490,13 +513,41 @@ export function simulateTrade(
   const pnl = grossPnl - totalFees;
   const pnlPct = entryCost !== 0 ? (pnl / entryCost) * 100 : 0;
 
-  // MFE/MAE approximation based on entry vs exit
-  // In a real backtest these would be calculated from intra-trade price movement
-  const priceChange = (exit.price - entry.price) / entry.price;
-  const mfe = priceChange > 0 ? priceChange * 100 : 0; // Approximation
-  const mae = priceChange < 0 ? priceChange * 100 : 0; // Approximation
+  // MFE/MAE calculation using intra-trade bar data (accurate)
+  let peakHigh = entry.price;
+  let troughLow = entry.price;
 
-  return { pnl, pnlPct, mfe, mae, holdTimeMin };
+  if (intraTradeBars && intraTradeBars.length > 0) {
+    // Scan every bar between entry and exit to find true peak and trough
+    for (const bar of intraTradeBars) {
+      if (bar.high > peakHigh) peakHigh = bar.high;
+      if (bar.low < troughLow) troughLow = bar.low;
+    }
+  } else {
+    // Fallback: use exit price only (less accurate but better than nothing)
+    peakHigh = Math.max(entry.price, exit.price);
+    troughLow = Math.min(entry.price, exit.price);
+  }
+
+  // MFE: max % price moved in our favor from entry (always >= 0)
+  // For LONG: highest price above entry = (peakHigh - entry) / entry * 100
+  // For SHORT: lowest price below entry = (entry - troughLow) / entry * 100
+  const mfe = entry.price > 0
+    ? (direction === 'SHORT'
+      ? ((entry.price - troughLow) / entry.price) * 100
+      : ((peakHigh - entry.price) / entry.price) * 100)
+    : 0;
+
+  // MAE: max % price moved against us from entry (always <= 0)
+  // For LONG: lowest price below entry = (troughLow - entry) / entry * 100 (negative)
+  // For SHORT: highest price above entry = (peakHigh - entry) / entry * 100 (positive, negate)
+  const mae = entry.price > 0
+    ? (direction === 'SHORT'
+      ? -((peakHigh - entry.price) / entry.price) * 100
+      : ((troughLow - entry.price) / entry.price) * 100)
+    : 0;
+
+  return { pnl, pnlPct, mfe: Math.max(0, mfe), mae: Math.min(0, mae), holdTimeMin, peakHigh, troughLow };
 }
 
 /**
@@ -512,22 +563,39 @@ export function applyStopLossTakeProfit(
   tp: number,
   high: number,
   low: number,
+  direction: 'LONG' | 'SHORT' = 'LONG',
 ): { exitPrice: number; reason: string } {
-  // Long position logic (entry price is buy price)
-  const slPrice = entry * (1 + sl / 100); // sl is negative, e.g. -8
-  const tpPrice = entry * (1 + tp / 100); // tp is positive, e.g. 30
-
   let slHit = false;
   let tpHit = false;
+  let slPrice: number;
+  let tpPrice: number;
 
-  // Check if SL was hit (price went below SL level)
-  if (sl < 0 && low <= slPrice) {
-    slHit = true;
-  }
+  if (direction === 'SHORT') {
+    // SHORT: loss when price rises above entry, profit when price falls below
+    slPrice = entry * (1 + Math.abs(sl) / 100); // SL above entry (e.g. entry * 1.08)
+    tpPrice = entry * (1 - tp / 100);            // TP below entry (e.g. entry * 0.70)
 
-  // Check if TP was hit (price went above TP level)
-  if (tp > 0 && high >= tpPrice) {
-    tpHit = true;
+    // SL hit when price goes ABOVE entry
+    if (sl < 0 && high >= slPrice) {
+      slHit = true;
+    }
+    // TP hit when price goes BELOW entry
+    if (tp > 0 && low <= tpPrice) {
+      tpHit = true;
+    }
+  } else {
+    // LONG: loss when price falls below entry, profit when price rises above
+    slPrice = entry * (1 + sl / 100); // sl is negative, e.g. -8 → entry * 0.92
+    tpPrice = entry * (1 + tp / 100); // tp is positive, e.g. 30 → entry * 1.30
+
+    // SL hit when price goes BELOW entry
+    if (sl < 0 && low <= slPrice) {
+      slHit = true;
+    }
+    // TP hit when price goes ABOVE entry
+    if (tp > 0 && high >= tpPrice) {
+      tpHit = true;
+    }
   }
 
   // Both could be hit in the same bar — SL takes priority (conservative)
@@ -686,11 +754,13 @@ function evaluateExitSignal(
 ): { shouldExit: boolean; exitPrice: number; reason: string } {
   const entry = position.entryPrice;
 
+  const isShort = position.direction === 'SHORT';
+
   // 1. Stop Loss check
   const slPct = system.exitSignal.stopLossPct;
   if (slPct !== 0 && slPct < 0) {
     const slResult = applyStopLossTakeProfit(
-      entry, slPct, 0, currentBar.high, currentBar.low,
+      entry, slPct, 0, currentBar.high, currentBar.low, position.direction,
     );
     if (slResult.reason === 'stop_loss') {
       return { shouldExit: true, exitPrice: slResult.exitPrice, reason: 'stop_loss' };
@@ -701,7 +771,7 @@ function evaluateExitSignal(
   const tpPct = system.exitSignal.takeProfitPct;
   if (tpPct > 0) {
     const tpResult = applyStopLossTakeProfit(
-      entry, 0, tpPct, currentBar.high, currentBar.low,
+      entry, 0, tpPct, currentBar.high, currentBar.low, position.direction,
     );
     if (tpResult.reason === 'take_profit') {
       return { shouldExit: true, exitPrice: tpResult.exitPrice, reason: 'take_profit' };
@@ -710,17 +780,30 @@ function evaluateExitSignal(
 
   // 3. Trailing Stop check
   if (system.exitSignal.trailingStopPct && system.exitSignal.trailingStopPct > 0) {
-    const currentPnlPct = ((currentBar.close - entry) / entry) * 100;
+    // Direction-aware PnL calculation
+    const currentPnlPct = isShort
+      ? ((entry - currentBar.close) / entry) * 100
+      : ((currentBar.close - entry) / entry) * 100;
 
     // Check if trailing stop is activated
     const activationPct = system.exitSignal.trailingActivationPct ?? system.exitSignal.trailingStopPct;
     if (currentPnlPct >= activationPct) {
-      // Calculate trailing level from highest point since entry
-      const highSinceEntry = currentBar.high; // Simplified — would track in real impl
-      const trailingLevel = highSinceEntry * (1 - system.exitSignal.trailingStopPct / 100);
+      if (isShort) {
+        // SHORT trailing stop: track the LOWEST price (most favorable), trail UP
+        const lowSinceEntry = position.troughLowSinceEntry;
+        const trailingLevel = lowSinceEntry * (1 + system.exitSignal.trailingStopPct / 100);
 
-      if (currentBar.low <= trailingLevel) {
-        return { shouldExit: true, exitPrice: trailingLevel, reason: 'trailing_stop' };
+        if (currentBar.high >= trailingLevel) {
+          return { shouldExit: true, exitPrice: trailingLevel, reason: 'trailing_stop' };
+        }
+      } else {
+        // LONG trailing stop: track the HIGHEST price (most favorable), trail DOWN
+        const highSinceEntry = position.peakHighSinceEntry;
+        const trailingLevel = highSinceEntry * (1 - system.exitSignal.trailingStopPct / 100);
+
+        if (currentBar.low <= trailingLevel) {
+          return { shouldExit: true, exitPrice: trailingLevel, reason: 'trailing_stop' };
+        }
       }
     }
   }
@@ -816,6 +899,20 @@ export class BacktestingEngine {
         const prevBars = relevantBars.slice(Math.max(0, i - 30), i);
         const metrics = token.metricsPerBar?.[i];
 
+        // ---- Update intra-trade tracking for ALL open positions (before exit checks) ----
+        // This ensures MFE/MAE and trailing stop use the full bar history, not just
+        // the exit bar. Peak/trough are updated BEFORE exit signal evaluation so that
+        // the trailing stop can react to the current bar's high/low.
+        for (const openPos of openPositions) {
+          if (openPos.tokenAddress !== token.tokenAddress) continue;
+          if (bar.high > openPos.peakHighSinceEntry) {
+            openPos.peakHighSinceEntry = bar.high;
+          }
+          if (bar.low < openPos.troughLowSinceEntry) {
+            openPos.troughLowSinceEntry = bar.low;
+          }
+        }
+
         // ---- Check exit signals for open positions ----
         const positionsToClose: number[] = []; // indices in openPositions
 
@@ -823,9 +920,11 @@ export class BacktestingEngine {
           const pos = openPositions[p];
           if (pos.tokenAddress !== token.tokenAddress) continue;
 
-          // Calculate current unrealized PnL for drawdown check
-          const unrealizedPnl = (bar.close - pos.entryPrice) * pos.quantity;
-          const currentEquityWithUnrealized = equity + unrealizedPnl;
+          // Calculate current unrealized PnL for drawdown check (direction-aware)
+          const posUnrealizedPnl = pos.direction === 'SHORT'
+            ? (pos.entryPrice - bar.close) * pos.quantity
+            : (bar.close - pos.entryPrice) * pos.quantity;
+          const currentEquityWithUnrealized = equity + posUnrealizedPnl;
 
           const exitEval = evaluateExitSignal(
             pos,
@@ -836,22 +935,38 @@ export class BacktestingEngine {
           );
 
           if (exitEval.shouldExit) {
-            // Close the position
-            const exitPrice = exitEval.exitPrice * (1 - (config.applySlippage ? config.slippagePct / 100 : 0));
+            // Close the position — direction-aware PnL and slippage
+            // LONG exit (sell): slippage makes exit price LOWER (unfavorable)
+            // SHORT exit (buy to cover): slippage makes exit price HIGHER (unfavorable)
+            const exitSlippageMultiplier = config.applySlippage
+              ? (pos.direction === 'SHORT'
+                  ? 1 + config.slippagePct / 100
+                  : 1 - config.slippagePct / 100)
+              : 1;
+            const exitPrice = exitEval.exitPrice * exitSlippageMultiplier;
             const exitValue = pos.quantity * exitPrice;
             const entryFee = pos.size * config.feesPct;
             const exitFee = exitValue * config.feesPct;
-            const grossPnl = exitValue - pos.size;
+            const grossPnl = pos.direction === 'SHORT'
+              ? pos.size - exitValue   // SHORT: profit when price falls
+              : exitValue - pos.size;  // LONG: profit when price rises
             const netPnl = grossPnl - entryFee - exitFee;
             const pnlPct = pos.size !== 0 ? (netPnl / pos.size) * 100 : 0;
 
-            // Calculate MFE/MAE from the trade
-            const priceRange = bar.high - bar.low;
+            // MFE/MAE from tracked intra-trade peak and trough — direction-aware
+            // LONG:  MFE = peakHigh - entry (price rose in our favor)
+            //        MAE = troughLow - entry (price fell against us, negative)
+            // SHORT: MFE = entry - troughLow (price fell in our favor)
+            //        MAE = -(peakHigh - entry) (price rose against us, negative)
             const mfe = pos.entryPrice !== 0
-              ? ((bar.high - pos.entryPrice) / pos.entryPrice) * 100
+              ? (pos.direction === 'SHORT'
+                ? ((pos.entryPrice - pos.troughLowSinceEntry) / pos.entryPrice) * 100
+                : ((pos.peakHighSinceEntry - pos.entryPrice) / pos.entryPrice) * 100)
               : 0;
             const mae = pos.entryPrice !== 0
-              ? ((bar.low - pos.entryPrice) / pos.entryPrice) * 100
+              ? (pos.direction === 'SHORT'
+                ? -((pos.peakHighSinceEntry - pos.entryPrice) / pos.entryPrice) * 100
+                : ((pos.troughLowSinceEntry - pos.entryPrice) / pos.entryPrice) * 100)
               : 0;
 
             pos.exitPrice = exitPrice;
@@ -891,7 +1006,15 @@ export class BacktestingEngine {
             );
 
             if (positionSize > 0) {
-              const entryPrice = bar.close * (1 + (config.applySlippage ? config.slippagePct / 100 : 0));
+              // Entry slippage — direction-aware
+              // LONG entry (buy): slippage makes entry price HIGHER (unfavorable)
+              // SHORT entry (sell): slippage makes entry price LOWER (unfavorable)
+              const entrySlippageMultiplier = config.applySlippage
+                ? (entryEval.direction === 'SHORT'
+                    ? 1 - config.slippagePct / 100
+                    : 1 + config.slippagePct / 100)
+                : 1;
+              const entryPrice = bar.close * entrySlippageMultiplier;
               const quantity = positionSize / entryPrice;
 
               tradeCounter++;
@@ -915,6 +1038,9 @@ export class BacktestingEngine {
                 phase: token.phase,
                 entryBarIndex: i,
                 exitBarIndex: -1,
+                // Intra-trade tracking: initialize with entry bar data
+                peakHighSinceEntry: bar.high,   // Start with current bar's high
+                troughLowSinceEntry: bar.low,    // Start with current bar's low
               };
 
               openPositions.push(trade);
@@ -924,7 +1050,11 @@ export class BacktestingEngine {
 
         // ---- Update equity curve ----
         const unrealizedPnl = openPositions.reduce((s, p) => {
-          return s + (bar.close - p.entryPrice) * p.quantity;
+          // Direction-aware unrealized PnL
+          const pPnl = p.direction === 'SHORT'
+            ? (p.entryPrice - bar.close) * p.quantity
+            : (bar.close - p.entryPrice) * p.quantity;
+          return s + pPnl;
         }, 0);
 
         const currentEquity = equity + unrealizedPnl;
@@ -968,16 +1098,31 @@ export class BacktestingEngine {
         const exitValue = pos.quantity * exitPrice;
         const entryFee = pos.size * config.feesPct;
         const exitFee = exitValue * config.feesPct;
-        const grossPnl = exitValue - pos.size;
+        // Direction-aware gross PnL
+        const grossPnl = pos.direction === 'SHORT'
+          ? pos.size - exitValue   // SHORT: profit when price falls
+          : exitValue - pos.size;  // LONG: profit when price rises
         const netPnl = grossPnl - entryFee - exitFee;
         const pnlPct = pos.size !== 0 ? (netPnl / pos.size) * 100 : 0;
+
+        // Direction-aware MFE/MAE from tracked intra-trade peak and trough
+        const mfe = pos.entryPrice !== 0
+          ? (pos.direction === 'SHORT'
+            ? ((pos.entryPrice - pos.troughLowSinceEntry) / pos.entryPrice) * 100
+            : ((pos.peakHighSinceEntry - pos.entryPrice) / pos.entryPrice) * 100)
+          : 0;
+        const mae = pos.entryPrice !== 0
+          ? (pos.direction === 'SHORT'
+            ? -((pos.peakHighSinceEntry - pos.entryPrice) / pos.entryPrice) * 100
+            : ((pos.troughLowSinceEntry - pos.entryPrice) / pos.entryPrice) * 100)
+          : 0;
 
         pos.exitPrice = exitPrice;
         pos.exitTime = new Date(lastBar.timestamp);
         pos.pnl = netPnl;
         pos.pnlPct = pnlPct;
-        pos.mfe = 0;
-        pos.mae = 0;
+        pos.mfe = Math.max(0, mfe);
+        pos.mae = Math.min(0, mae);
         pos.holdTimeMin = Math.max(0, Math.round((lastBar.timestamp - pos.entryTime.getTime()) / 60000));
         pos.exitReason = 'backtest_end';
         pos.exitBarIndex = -1;
@@ -1030,19 +1175,20 @@ export class BacktestingEngine {
     const recoveryFactor = calculateRecoveryFactor(equity - config.initialCapital, ddResult.maxDrawdown);
     const expectancy = calculateExpectancy(winRate, avgWinPct, avgLossPct);
 
-    // Monthly returns
-    const monthlyReturns = calculateMonthlyReturns(equityCurve);
+    // Monthly returns — now with real starting/ending equity
+    const { monthly: monthlyReturns, monthMap } = calculateMonthlyReturns(equityCurve);
     const monthlyReturnDetails: MonthlyReturn[] = Object.entries(monthlyReturns).map(
       ([month, returnPct]) => {
         const monthTrades = closedTrades.filter((t) => {
           const m = `${t.entryTime.getFullYear()}-${String(t.entryTime.getMonth() + 1).padStart(2, '0')}`;
           return m === month;
         });
+        const monthData = monthMap[month];
         return {
           month,
           returnPct,
-          startingEquity: 0, // Simplified
-          endingEquity: 0,
+          startingEquity: monthData?.first ?? 0,
+          endingEquity: monthData?.last ?? 0,
           tradesCount: monthTrades.length,
         };
       },
@@ -1112,7 +1258,7 @@ export class BacktestingEngine {
 
       trades: closedTrades,
       equityCurve,
-      drawdownCurve: equityCurve, // Same curve with drawdown data
+      drawdownCurve: equityCurve.map((p) => ({ ...p })), // Independent copy with drawdown data
       monthlyReturns,
       monthlyReturnDetails,
       phaseBreakdown,

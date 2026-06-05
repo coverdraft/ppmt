@@ -363,7 +363,7 @@ export const KNOWN_ROUTERS: DexRouterConfig[] = [
   {
     protocol: 'uniswap_v4',
     chain: 'ethereum',
-    routerAddress: '0x66a9893cC07D91D95644AEDD05bL71e5306A7a8f', // TODO: verify V4 address
+    routerAddress: '0x66a9893cC07D91D95644AEDD05b171e5306A7a8f', // TODO: verify V4 address
     version: '4',
     supportedFeatures: ['SWAP_EXACT_IN', 'SWAP_EXACT_OUT', 'MULTI_HOP', 'CONCENTRATED_LIQUIDITY', 'HOOKS'],
   },

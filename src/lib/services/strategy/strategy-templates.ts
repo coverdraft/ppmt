@@ -637,55 +637,63 @@ export async function seedTemplates(): Promise<{ seeded: number; skipped: number
  */
 export const CATEGORY_META: Record<
   TemplateCategory,
-  { label: string; icon: string; color: string; gradient: string }
+  { label: string; icon: string; color: string; gradient: string; bg: string }
 > = {
   MOMENTUM: {
     label: 'Momentum',
     icon: '🚀',
     color: 'text-orange-400',
     gradient: 'from-orange-500/20 to-red-500/20',
+    bg: 'bg-orange-500/15',
   },
   MEAN_REVERSION: {
     label: 'Mean Reversion',
     icon: '🔄',
     color: 'text-cyan-400',
     gradient: 'from-cyan-500/20 to-teal-500/20',
+    bg: 'bg-cyan-500/15',
   },
   BREAKOUT: {
     label: 'Breakout',
     icon: '💥',
     color: 'text-yellow-400',
     gradient: 'from-yellow-500/20 to-amber-500/20',
+    bg: 'bg-yellow-500/15',
   },
   SCALPING: {
     label: 'Scalping',
     icon: '⚡',
     color: 'text-pink-400',
     gradient: 'from-pink-500/20 to-rose-500/20',
+    bg: 'bg-pink-500/15',
   },
   SWING: {
     label: 'Swing',
     icon: '🏄',
     color: 'text-emerald-400',
     gradient: 'from-emerald-500/20 to-green-500/20',
+    bg: 'bg-emerald-500/15',
   },
   ARBITRAGE: {
     label: 'Arbitrage',
     icon: '⚖️',
     color: 'text-violet-400',
     gradient: 'from-violet-500/20 to-purple-500/20',
+    bg: 'bg-violet-500/15',
   },
   VOLUME: {
     label: 'Volume',
     icon: '📊',
     color: 'text-blue-400',
     gradient: 'from-blue-500/20 to-sky-500/20',
+    bg: 'bg-blue-500/15',
   },
   VOLATILITY: {
     label: 'Volatility',
     icon: '🌪️',
     color: 'text-amber-400',
     gradient: 'from-amber-500/20 to-orange-500/20',
+    bg: 'bg-amber-500/15',
   },
 };
 

@@ -10,3 +10,7 @@ export * from './pattern-compression-pipeline';
 export * from './phase-strategy-engine';
 export * from './scheduler-persistence';
 export * from './token-lifecycle-engine';
+
+// meta-model-engine exports TokenPhase which conflicts with token-lifecycle-engine
+// Import directly: import { MetaModelEngine } from './meta-model-engine'
+export { metaModelEngine, type EngineReport, type EngineMetrics, type PredictionContext, type PredictionOutcome } from './meta-model-engine';

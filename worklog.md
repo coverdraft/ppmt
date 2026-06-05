@@ -710,3 +710,25 @@ Stage Summary:
 - 3 paradigm shifts implemented: sequential→event-driven, token→portfolio, monolithic→FeatureStore
 - Risk flow now: Signal → RiskPreFilter → Decision → PortfolioIntel → ExecutionCost → Execution
 - Build compiles cleanly with zero new TypeScript errors
+---
+Task ID: 1
+Agent: Main Agent
+Task: Sync cryptoquant-terminal to /home/z/my-project/ for browser preview and fix TypeScript errors
+
+Work Log:
+- Verified GitHub repo is fully synced (78 commits, up to date with origin/main)
+- Diagnosed that the app was running in /home/z/cryptoquant-terminal/ but the preview proxy serves from /home/z/my-project/
+- Synced all source code, prisma schema, database, and config files from cryptoquant-terminal to my-project
+- Installed all 771 npm dependencies
+- Generated Prisma client and verified DB
+- Built successfully with `npm run build`
+- Fixed 3 TypeScript errors: (1) variable used before declaration in decision-dashboard.tsx, (2) duplicate object properties in kill-switch-panel.tsx, (3) unknown→ReactNode type in portfolio-view.tsx
+- Pushed fixes to GitHub (commit 737f49c)
+- Added README.md with setup instructions (commit 3f6bd46)
+- Server verified: HTTP 200, 9205 bytes, title "CryptoQuant Terminal — Professional Crypto Analytics"
+
+Stage Summary:
+- App is fully functional and accessible via preview URL
+- GitHub repo has all latest code including bug fixes
+- README added for easy local setup
+- Server runs correctly on port 3000

@@ -241,7 +241,7 @@ function computeMaxDrawdown(equityCurve: number[]): number {
  * We assume riskFreeRate = 0 and use sample std deviation (n-1).
  * If std dev is 0, Sharpe is 0 (not Infinity, to avoid skewing averages).
  */
-function computeSharpeRatio(returns: number[]): number {
+function computeSharpeRatio(returns: number[], configPeriodDays?: number): number {
   if (returns.length < 2) return 0;
 
   const n = returns.length;
@@ -251,7 +251,13 @@ function computeSharpeRatio(returns: number[]): number {
   const stdDev = Math.sqrt(variance);
 
   if (stdDev < 1e-12) return 0;
-  return mean / stdDev;
+  const rawSharpe = mean / stdDev;
+
+  const tradesPerYear = returns.length > 0 && configPeriodDays && configPeriodDays > 0
+    ? (returns.length / configPeriodDays) * 252
+    : 252;
+  const annualizedSharpe = rawSharpe * Math.sqrt(tradesPerYear);
+  return annualizedSharpe;
 }
 
 /**
@@ -360,7 +366,14 @@ function runSinglePath(
     if (dd > maxDD) maxDD = dd;
 
     // Check ruin
-    if (equity <= ruinLevel) hitRuin = true;
+    if (equity <= ruinLevel) {
+      hitRuin = true;
+      // Zero out remaining returns for Sharpe calculation
+      for (let j = i + 1; j < tradeCopy.length; j++) {
+        returns[j] = 0;
+      }
+      break;
+    }
 
     // Win/loss tracking
     if (pnlPct > 0) {
@@ -486,9 +499,12 @@ export class MonteCarloSimulator {
     // --- Compute aggregate statistics ---
     const meanFinalEquity =
       finalEquities.reduce((s, e) => s + e, 0) / fullConfig.simulations;
+    // Guard against division by zero when simulations < 2
     const variance =
-      finalEquities.reduce((s, e) => s + (e - meanFinalEquity) ** 2, 0) /
-      (fullConfig.simulations - 1);
+      fullConfig.simulations >= 2
+        ? finalEquities.reduce((s, e) => s + (e - meanFinalEquity) ** 2, 0) /
+          (fullConfig.simulations - 1)
+        : 0;
     const stdDevFinalEquity = Math.sqrt(Math.max(variance, 0));
 
     // --- Build confidence intervals ---
@@ -597,7 +613,7 @@ export class MonteCarloSimulator {
 
       for (let sim = 0; sim < simulations; sim++) {
         // Box-Muller transform for normal distribution
-        const u1 = Math.max(rng.next(), 1e-10); // avoid log(0)
+        const u1 = 1 - rng.next(); // avoid log(0) bias
         const u2 = rng.next();
         const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
 
