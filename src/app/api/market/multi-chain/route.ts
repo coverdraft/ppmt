@@ -106,28 +106,25 @@ function dexPairToToken(pair: DexScreenerPair) {
   };
 }
 
-/** Fetch tokens from DexScreener for chains that have insufficient DB data */
+/** Fetch tokens from DexScreener for chains that have insufficient DB data.
+ *  Uses getTopChainTokens() which searches for popular token names on each chain,
+ *  providing much better results than searching by chain name alone.
+ */
 async function enrichFromDexScreener(
   chainsNeedingEnrichment: string[],
 ): Promise<typeof normalizedTokens> {
   const enriched: typeof normalizedTokens = [];
 
   for (const chainKey of chainsNeedingEnrichment) {
-    const query = CHAIN_TO_DEXSCREENER_QUERY[chainKey];
-    if (!query) continue;
+    const dexChain = CHAIN_TO_DEXSCREENER_QUERY[chainKey];
+    if (!dexChain) continue;
 
     try {
-      console.log(`[/api/market/multi-chain] Enriching ${chainKey} from DexScreener (query: "${query}")`);
-      const pairs = await dexScreenerClient.searchTokenByName(query);
-      // Filter to only pairs on this chain
-      const chainNorm = dexScreenerClient.normalizeChain(query);
-      const filtered = pairs.filter(p => dexScreenerClient.normalizeChain(p.chainId) === chainNorm);
+      console.log(`[/api/market/multi-chain] Enriching ${chainKey} from DexScreener (chain: "${dexChain}")`);
+      // Use getTopChainTokens which searches for popular token symbols per chain
+      const pairs = await dexScreenerClient.getTopChainTokens(dexChain, 30);
 
-      // Sort by volume, take top 20
-      filtered.sort((a, b) => (b.volume?.h24 || 0) - (a.volume?.h24 || 0));
-      const topPairs = filtered.slice(0, 20);
-
-      for (const pair of topPairs) {
+      for (const pair of pairs) {
         const token = dexPairToToken(pair);
         if (SUPPORTED_CHAINS.includes(token.chain)) {
           enriched.push(token as any);
