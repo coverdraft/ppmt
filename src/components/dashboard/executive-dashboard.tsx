@@ -32,7 +32,6 @@ import {
   Clock,
 } from 'lucide-react';
 import { useDashboardLevel } from './dashboard-level-provider';
-import { useCryptoStore } from '@/store/crypto-store';
 
 // ============================================================
 // TYPES
@@ -144,11 +143,71 @@ interface SignalItem {
   createdAt: string;
 }
 
-interface MarketSummary {
-  btcPrice: number;
-  ethPrice: number;
-  totalMarketCap: number;
-  fearGreedIndex: number;
+type MarketRegime = 'TRENDING_BULL' | 'TRENDING_BEAR' | 'RANGING' | 'ACCUMULATION' | 'DISTRIBUTION' | 'PANIC' | 'EUPHORIA';
+
+interface RegimeAssessment {
+  regime: MarketRegime;
+  confidence: number;
+  transitionProbabilities: Record<string, number>;
+  durationEstimate: 'hours' | 'days' | 'weeks';
+  keyIndicators: Array<{ name: string; value: number; signal: 'BULLISH' | 'BEARISH' | 'NEUTRAL' }>;
+  lastChangedAt: string;
+  assessedAt: string;
+}
+
+interface EngineReport {
+  engineName: string;
+  overall: {
+    accuracy: number;
+    brierScore: number;
+    hitRate: number;
+    falsePositiveRate: number;
+    sampleSize: number;
+  };
+  rolling: { d7: number; d30: number; d90: number };
+  contextual: { byRegime: Record<string, unknown>; byPhase: Record<string, unknown> };
+  currentWeight: number;
+  weightChange: number;
+}
+
+interface RankedOpportunity {
+  tokenAddress: string;
+  chain: string;
+  direction: 'LONG' | 'SHORT';
+  confidence: number;
+  strategyName: string;
+  expectedReturn: number;
+  expectedVol: number;
+  operabilityScore: number;
+  regimeFit: number;
+  tokenPhase?: string;
+  regime?: string;
+  liquidityUsd?: number;
+  volume24h?: number;
+  alphaScore: number;
+  rank: number;
+  scoreBreakdown: {
+    signalStrength: number;
+    riskAdjustedReturn: number;
+    operability: number;
+    portfolioFit: number;
+    regimeAlignment: number;
+    composite: number;
+  };
+  suggestedAllocationPct: number;
+}
+
+interface PortfolioIntelligence {
+  portfolioVolatility: number;
+  var95: number;
+  var99: number;
+  historicalVar95: number | null;
+  cvar95: number;
+  diversificationRatio: number;
+  hhi: number;
+  maxDrawdownEstimate: number;
+  timeHorizonDays: number;
+  computedAt: string;
 }
 
 // ============================================================
@@ -261,29 +320,10 @@ function getHealthLabel(score: number): string {
 }
 
 // ============================================================
-// MARKET REGIME COMPUTATION
+// MARKET REGIME CONFIG
 // ============================================================
 
-type MarketRegime = 'TRENDING_BULL' | 'TRENDING_BEAR' | 'RANGING' | 'ACCUMULATION' | 'DISTRIBUTION' | 'PANIC';
-
-function computeMarketRegime(marketSummary: MarketSummary | null): {
-  regime: MarketRegime;
-  confidence: number;
-  lastChanged: string;
-} {
-  if (!marketSummary) {
-    return { regime: 'RANGING', confidence: 50, lastChanged: new Date().toISOString() };
-  }
-
-  const fgi = marketSummary.fearGreedIndex ?? 50;
-  // Simple heuristic based on fear/greed + price data
-  if (fgi >= 75) return { regime: 'TRENDING_BULL', confidence: 60 + Math.min(40, fgi - 75), lastChanged: new Date().toISOString() };
-  if (fgi >= 55) return { regime: 'ACCUMULATION', confidence: 55 + (fgi - 55) * 2, lastChanged: new Date().toISOString() };
-  if (fgi >= 45) return { regime: 'RANGING', confidence: 60, lastChanged: new Date().toISOString() };
-  if (fgi >= 25) return { regime: 'DISTRIBUTION', confidence: 55 + (45 - fgi) * 2, lastChanged: new Date().toISOString() };
-  if (fgi >= 15) return { regime: 'TRENDING_BEAR', confidence: 60 + (25 - fgi) * 2, lastChanged: new Date().toISOString() };
-  return { regime: 'PANIC', confidence: 80 + Math.min(20, 15 - fgi), lastChanged: new Date().toISOString() };
-}
+// MarketRegime type moved to TYPES section above
 
 function getRegimeConfig(regime: MarketRegime) {
   switch (regime) {
@@ -299,6 +339,8 @@ function getRegimeConfig(regime: MarketRegime) {
       return { color: '#f97316', bg: 'bg-orange-500/10', border: 'border-orange-500/30', icon: TrendingDown, label: 'Distribution' };
     case 'PANIC':
       return { color: '#ef4444', bg: 'bg-red-500/10', border: 'border-red-500/30', icon: AlertTriangle, label: 'Panic' };
+    case 'EUPHORIA':
+      return { color: '#a855f7', bg: 'bg-purple-500/10', border: 'border-purple-500/30', icon: Zap, label: 'Euphoria' };
   }
 }
 
@@ -381,7 +423,6 @@ function TrafficLight({ status, label }: { status: 'green' | 'yellow' | 'orange'
 
 export function ExecutiveDashboard() {
   const { setLevel } = useDashboardLevel();
-  const marketSummary = useCryptoStore((s) => s.marketSummary);
   const [alertsExpanded, setAlertsExpanded] = useState(false);
 
   // ---- Data fetching ----
@@ -496,12 +537,111 @@ export function ExecutiveDashboard() {
     staleTime: 30000,
   });
 
+  // ---- NEW: Real backend API calls ----
+
+  const { data: regimeData, isLoading: regimeLoading } = useQuery({
+    queryKey: ['executive-regime-assess'],
+    queryFn: async () => {
+      try {
+        const res = await fetch('/api/regime/assess');
+        if (!res.ok) return null;
+        const json = await res.json();
+        return json.data as RegimeAssessment | null;
+      } catch {
+        return null;
+      }
+    },
+    refetchInterval: 30000,
+    staleTime: 15000,
+  });
+
+  const { data: metaModelData, isLoading: metaModelLoading } = useQuery({
+    queryKey: ['executive-meta-model-report'],
+    queryFn: async () => {
+      try {
+        const res = await fetch('/api/meta-model/report');
+        if (!res.ok) return null;
+        const json = await res.json();
+        return (json.data || []) as EngineReport[];
+      } catch {
+        return null;
+      }
+    },
+    refetchInterval: 60000,
+    staleTime: 30000,
+  });
+
+  const { data: alphaRankingData, isLoading: alphaLoading } = useQuery({
+    queryKey: ['executive-alpha-ranking'],
+    queryFn: async () => {
+      try {
+        const res = await fetch('/api/alpha/ranking?n=3');
+        if (!res.ok) return null;
+        const json = await res.json();
+        return (json.data || []) as RankedOpportunity[];
+      } catch {
+        return null;
+      }
+    },
+    refetchInterval: 30000,
+    staleTime: 15000,
+  });
+
+  const { data: portfolioIntelligenceData, isLoading: intelLoading } = useQuery({
+    queryKey: ['executive-portfolio-intelligence'],
+    queryFn: async () => {
+      try {
+        const res = await fetch('/api/portfolio/intelligence');
+        if (!res.ok) return null;
+        const json = await res.json();
+        return json.data as PortfolioIntelligence | null;
+      } catch {
+        return null;
+      }
+    },
+    refetchInterval: 30000,
+    staleTime: 15000,
+  });
+
   // ---- Computed values ----
 
   const healthScore = useMemo(() => computeHealthScore(portfolioStats ?? null), [portfolioStats]);
-  const marketRegime = useMemo(() => computeMarketRegime(marketSummary), [marketSummary]);
+
+  // Market regime from backend API (with fallback)
+  const marketRegime = useMemo(() => {
+    if (regimeData) {
+      return {
+        regime: regimeData.regime as MarketRegime,
+        confidence: Math.round(regimeData.confidence * 100), // API returns 0-1, display as 0-100
+        lastChanged: regimeData.lastChangedAt,
+        keyIndicators: regimeData.keyIndicators,
+        durationEstimate: regimeData.durationEstimate,
+        transitionProbabilities: regimeData.transitionProbabilities,
+        assessedAt: regimeData.assessedAt,
+      };
+    }
+    // Fallback if API hasn't loaded yet
+    return {
+      regime: 'RANGING' as MarketRegime,
+      confidence: 50,
+      lastChanged: new Date().toISOString(),
+      keyIndicators: [] as RegimeAssessment['keyIndicators'],
+      durationEstimate: 'days' as const,
+      transitionProbabilities: {} as Record<string, number>,
+      assessedAt: new Date().toISOString(),
+    };
+  }, [regimeData]);
   const regimeConfig = getRegimeConfig(marketRegime.regime);
   const RegimeIcon = regimeConfig.icon;
+
+  // Meta-model summary
+  const metaModelSummary = useMemo(() => {
+    if (!metaModelData || metaModelData.length === 0) return null;
+    const avgAccuracy = metaModelData.reduce((s, e) => s + e.overall.accuracy, 0) / metaModelData.length;
+    const topEngine = [...metaModelData].sort((a, b) => b.rolling.d30 - a.rolling.d30)[0];
+    const weakEngines = metaModelData.filter(e => e.rolling.d30 < 0.5);
+    return { avgAccuracy, topEngine, weakEngines, engines: metaModelData };
+  }, [metaModelData]);
 
   // Kill switch status
   const killSwitchActive = !!(capitalDashboard?.killSwitchStatus?.globalPause || capitalDashboard?.killSwitchStatus?.portfolioDDTriggered);
@@ -540,7 +680,7 @@ export function ExecutiveDashboard() {
   // Event dots for chart
   const eventPoints = useMemo(() => chartData.filter(d => d.hasEvent), [chartData]);
 
-  // Top opportunities from signals
+  // Top opportunities from signals (fallback)
   const topOpportunities = useMemo(() => {
     if (!signalsData?.length) return [];
     return signalsData
@@ -548,6 +688,12 @@ export function ExecutiveDashboard() {
       .sort((a, b) => b.confidence - a.confidence)
       .slice(0, 3);
   }, [signalsData]);
+
+  // Alpha highlights from /api/alpha/ranking (primary)
+  const alphaHighlights = useMemo(() => {
+    if (!alphaRankingData || alphaRankingData.length === 0) return [];
+    return alphaRankingData.slice(0, 3);
+  }, [alphaRankingData]);
 
   // Alert counts by severity
   const alertCounts = useMemo(() => {
@@ -627,30 +773,65 @@ export function ExecutiveDashboard() {
 
         {/* ---- Market Regime + Risk Status ---- */}
         <div className="flex flex-col gap-4">
-          {/* Market Regime Badge */}
-          <div className={`bg-[#0d1117] border rounded-lg p-4 ${regimeConfig.border}`}>
+          {/* Market Regime Badge — from /api/regime/assess */}
+          <div className={`bg-[#0d1117] border rounded-lg p-4 ${regimeLoading ? 'border-[#1e293b] animate-pulse' : regimeConfig.border}`}>
             <div className="flex items-center gap-2 mb-3">
               <Crosshair className="h-4 w-4 text-[#3b82f6]" />
               <span className="text-[11px] font-mono text-[#64748b] uppercase tracking-wider">Market Regime</span>
+              {regimeLoading && <span className="text-[8px] font-mono text-[#475569] ml-auto">loading…</span>}
             </div>
-            <div className="flex items-center gap-3">
-              <div className={`flex items-center justify-center w-10 h-10 rounded-lg ${regimeConfig.bg}`}>
-                <RegimeIcon className="h-5 w-5" style={{ color: regimeConfig.color }} />
-              </div>
-              <div>
-                <div className="text-lg font-bold font-mono" style={{ color: regimeConfig.color }}>
-                  {regimeConfig.label}
-                </div>
-                <div className="flex items-center gap-2 mt-0.5">
-                  <span className="text-[10px] font-mono text-[#94a3b8]">
-                    Confidence: <span className="font-bold" style={{ color: regimeConfig.color }}>{marketRegime.confidence.toFixed(0)}%</span>
-                  </span>
+            {regimeLoading && !regimeData ? (
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-lg bg-[#1e293b]" />
+                <div className="space-y-2">
+                  <div className="h-5 w-28 rounded bg-[#1e293b]" />
+                  <div className="h-3 w-20 rounded bg-[#1e293b]" />
                 </div>
               </div>
-            </div>
+            ) : (
+              <>
+                <div className="flex items-center gap-3">
+                  <div className={`flex items-center justify-center w-10 h-10 rounded-lg ${regimeConfig.bg}`}>
+                    <RegimeIcon className="h-5 w-5" style={{ color: regimeConfig.color }} />
+                  </div>
+                  <div>
+                    <div className="text-lg font-bold font-mono" style={{ color: regimeConfig.color }}>
+                      {regimeConfig.label}
+                    </div>
+                    <div className="flex items-center gap-3 mt-0.5">
+                      <span className="text-[10px] font-mono text-[#94a3b8]">
+                        Confidence: <span className="font-bold" style={{ color: regimeConfig.color }}>{marketRegime.confidence.toFixed(0)}%</span>
+                      </span>
+                      <span className="text-[10px] font-mono text-[#475569]">
+                        Duration: <span className="font-bold text-[#94a3b8]">{marketRegime.durationEstimate}</span>
+                      </span>
+                    </div>
+                  </div>
+                </div>
+                {/* Key indicators from backend */}
+                {marketRegime.keyIndicators.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5 mt-2">
+                    {marketRegime.keyIndicators.slice(0, 4).map((ki, i) => (
+                      <span
+                        key={`ki-${i}`}
+                        className={`text-[8px] font-mono px-1.5 py-0.5 rounded ${
+                          ki.signal === 'BULLISH' ? 'bg-emerald-500/10 text-emerald-400' :
+                          ki.signal === 'BEARISH' ? 'bg-red-500/10 text-red-400' :
+                          'bg-[#1e293b] text-[#94a3b8]'
+                        }`}
+                      >
+                        {ki.name.replace(/_/g, ' ')}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
             <div className="flex items-center gap-1 mt-2">
               <Clock className="h-3 w-3 text-[#475569]" />
-              <span className="text-[9px] font-mono text-[#475569]">Updated {timeAgo(marketRegime.lastChanged)}</span>
+              <span className="text-[9px] font-mono text-[#475569]">
+                {regimeData ? `Assessed ${timeAgo(marketRegime.assessedAt)}` : 'Updated —'}
+              </span>
             </div>
           </div>
 
@@ -772,7 +953,187 @@ export function ExecutiveDashboard() {
         </div>
       </div>
 
-      {/* Bottom Row: Equity Curve + Opportunities + Alerts */}
+      {/* Middle Row: Meta-Model Summary + Portfolio Intelligence Quick Check */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {/* ---- Meta-Model Summary — from /api/meta-model/report ---- */}
+        <div className="bg-[#0d1117] border border-[#1e293b] rounded-lg p-4">
+          <div className="flex items-center gap-2 mb-3">
+            <Activity className="h-4 w-4 text-[#3b82f6]" />
+            <span className="text-[11px] font-mono text-[#64748b] uppercase tracking-wider">Meta-Model Summary</span>
+            {metaModelLoading && <span className="text-[8px] font-mono text-[#475569] ml-auto">loading…</span>}
+          </div>
+          {metaModelLoading && !metaModelData ? (
+            <div className="space-y-2">
+              <div className="h-4 w-full rounded bg-[#1e293b]" />
+              <div className="h-4 w-3/4 rounded bg-[#1e293b]" />
+              <div className="h-4 w-1/2 rounded bg-[#1e293b]" />
+            </div>
+          ) : metaModelSummary ? (
+            <div className="space-y-3">
+              {/* Ensemble accuracy */}
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-mono text-[#94a3b8]">Ensemble Accuracy</span>
+                <span className="text-[12px] font-mono font-bold text-[#e2e8f0]">
+                  {(metaModelSummary.avgAccuracy * 100).toFixed(1)}%
+                </span>
+              </div>
+              {/* Accuracy bar */}
+              <div className="h-1.5 bg-[#1e293b] rounded-full overflow-hidden">
+                <div
+                  className="h-full rounded-full transition-all duration-700"
+                  style={{
+                    width: `${Math.min(metaModelSummary.avgAccuracy * 100, 100)}%`,
+                    backgroundColor: getHealthColor(metaModelSummary.avgAccuracy * 100),
+                  }}
+                />
+              </div>
+              {/* Top engine */}
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] font-mono text-[#94a3b8]">Top Engine (30d)</span>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[11px] font-mono font-bold text-emerald-400">
+                    {metaModelSummary.topEngine.engineName}
+                  </span>
+                  <span className="text-[9px] font-mono text-[#475569]">
+                    {(metaModelSummary.topEngine.rolling.d30 * 100).toFixed(0)}%
+                  </span>
+                </div>
+              </div>
+              {/* Weak engines / flagged for retraining */}
+              {metaModelSummary.weakEngines.length > 0 ? (
+                <div className="mt-1">
+                  <div className="flex items-center gap-1.5 mb-1">
+                    <AlertTriangle className="h-3 w-3 text-amber-400" />
+                    <span className="text-[9px] font-mono text-amber-400 uppercase">Flagged for Retraining</span>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {metaModelSummary.weakEngines.map(eng => (
+                      <span key={eng.engineName} className="text-[8px] font-mono px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/30 text-amber-400">
+                        {eng.engineName} <span className="text-[#64748b]">{(eng.rolling.d30 * 100).toFixed(0)}%</span>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div className="flex items-center gap-1.5">
+                  <ShieldCheck className="h-3 w-3 text-emerald-400" />
+                  <span className="text-[9px] font-mono text-emerald-400">All engines performing above threshold</span>
+                </div>
+              )}
+              {/* Engine weights mini-chart */}
+              <div className="pt-2 border-t border-[#1e293b]">
+                <span className="text-[9px] font-mono text-[#475569] uppercase">Engine Weights</span>
+                <div className="mt-1.5 space-y-1">
+                  {metaModelSummary.engines.slice(0, 5).map(eng => (
+                    <div key={eng.engineName} className="flex items-center gap-2">
+                      <span className="text-[8px] font-mono text-[#475569] w-24 shrink-0 truncate">{eng.engineName}</span>
+                      <div className="flex-1 h-1 bg-[#1e293b] rounded-full overflow-hidden">
+                        <div
+                          className="h-full rounded-full bg-[#3b82f6] transition-all duration-700"
+                          style={{ width: `${Math.min(eng.currentWeight * 100, 100)}%` }}
+                        />
+                      </div>
+                      <span className="text-[8px] font-mono w-8 text-right text-[#94a3b8]">
+                        {(eng.currentWeight * 100).toFixed(0)}%
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="text-center py-4">
+              <Activity className="h-5 w-5 text-[#2d3748] mx-auto mb-1" />
+              <span className="text-[10px] font-mono text-[#475569]">Meta-model data unavailable</span>
+            </div>
+          )}
+        </div>
+
+        {/* ---- Portfolio Intelligence Quick Check — from /api/portfolio/intelligence ---- */}
+        <div className="bg-[#0d1117] border border-[#1e293b] rounded-lg p-4">
+          <div className="flex items-center gap-2 mb-3">
+            <ShieldAlert className="h-4 w-4 text-cyan-400" />
+            <span className="text-[11px] font-mono text-[#64748b] uppercase tracking-wider">Portfolio Intelligence</span>
+            {intelLoading && <span className="text-[8px] font-mono text-[#475569] ml-auto">loading…</span>}
+          </div>
+          {intelLoading && !portfolioIntelligenceData ? (
+            <div className="space-y-2">
+              <div className="h-4 w-full rounded bg-[#1e293b]" />
+              <div className="h-4 w-3/4 rounded bg-[#1e293b]" />
+              <div className="h-4 w-1/2 rounded bg-[#1e293b]" />
+            </div>
+          ) : portfolioIntelligenceData ? (
+            <div className="space-y-3">
+              {/* VaR row */}
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <span className="text-[9px] font-mono text-[#475569] uppercase">VaR 95</span>
+                  <div className="text-[13px] font-bold font-mono text-amber-400">{formatUsd(portfolioIntelligenceData.var95)}</div>
+                </div>
+                <div>
+                  <span className="text-[9px] font-mono text-[#475569] uppercase">CVaR 95</span>
+                  <div className="text-[13px] font-bold font-mono text-orange-400">{formatUsd(portfolioIntelligenceData.cvar95)}</div>
+                </div>
+                <div>
+                  <span className="text-[9px] font-mono text-[#475569] uppercase">Volatility</span>
+                  <div className="text-[13px] font-bold font-mono text-[#e2e8f0]">{(portfolioIntelligenceData.portfolioVolatility * 100).toFixed(1)}%</div>
+                </div>
+              </div>
+              {/* Diversification & Concentration */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <span className="text-[9px] font-mono text-[#475569] uppercase">Diversification Ratio</span>
+                  <div className={`text-[13px] font-bold font-mono ${
+                    portfolioIntelligenceData.diversificationRatio >= 1 ? 'text-emerald-400' :
+                    portfolioIntelligenceData.diversificationRatio >= 0.5 ? 'text-yellow-400' : 'text-red-400'
+                  }`}>
+                    {portfolioIntelligenceData.diversificationRatio.toFixed(2)}
+                  </div>
+                </div>
+                <div>
+                  <span className="text-[9px] font-mono text-[#475569] uppercase">HHI Concentration</span>
+                  <div className={`text-[13px] font-bold font-mono ${
+                    portfolioIntelligenceData.hhi <= 0.2 ? 'text-emerald-400' :
+                    portfolioIntelligenceData.hhi <= 0.4 ? 'text-yellow-400' : 'text-red-400'
+                  }`}>
+                    {portfolioIntelligenceData.hhi.toFixed(3)}
+                  </div>
+                </div>
+              </div>
+              {/* Max DD Estimate */}
+              <div>
+                <span className="text-[9px] font-mono text-[#475569] uppercase">Max DD Estimate ({portfolioIntelligenceData.timeHorizonDays}d)</span>
+                <div className="flex items-center gap-2 mt-0.5">
+                  <div className="flex-1 h-1.5 bg-[#1e293b] rounded-full overflow-hidden">
+                    <div
+                      className="h-full rounded-full transition-all duration-700"
+                      style={{
+                        width: `${Math.min(portfolioIntelligenceData.maxDrawdownEstimate * 100, 100)}%`,
+                        backgroundColor: getHealthColor(100 - portfolioIntelligenceData.maxDrawdownEstimate * 500),
+                      }}
+                    />
+                  </div>
+                  <span className="text-[10px] font-mono font-bold" style={{ color: getHealthColor(100 - portfolioIntelligenceData.maxDrawdownEstimate * 500) }}>
+                    {(portfolioIntelligenceData.maxDrawdownEstimate * 100).toFixed(1)}%
+                  </span>
+                </div>
+              </div>
+              {/* Computed at */}
+              <div className="flex items-center gap-1 pt-1 border-t border-[#1e293b]">
+                <Clock className="h-3 w-3 text-[#475569]" />
+                <span className="text-[9px] font-mono text-[#475569]">Computed {timeAgo(portfolioIntelligenceData.computedAt)}</span>
+              </div>
+            </div>
+          ) : (
+            <div className="text-center py-4">
+              <ShieldAlert className="h-5 w-5 text-[#2d3748] mx-auto mb-1" />
+              <span className="text-[10px] font-mono text-[#475569]">Intelligence data unavailable</span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Bottom Row: Equity Curve + Alpha Highlights + Alerts */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 flex-1 min-h-0">
         {/* ---- Equity Curve ---- */}
         <div className="bg-[#0d1117] border border-[#1e293b] rounded-lg p-4 lg:col-span-2 flex flex-col min-h-[280px]">
@@ -853,15 +1214,80 @@ export function ExecutiveDashboard() {
           </div>
         </div>
 
-        {/* ---- Right Column: Opportunities + Alerts ---- */}
+        {/* ---- Right Column: Alpha Highlights + Alerts ---- */}
         <div className="flex flex-col gap-4 min-h-0">
-          {/* Top 3 Opportunities */}
+          {/* Alpha Highlights — from /api/alpha/ranking */}
           <div className="bg-[#0d1117] border border-[#1e293b] rounded-lg p-4">
             <div className="flex items-center gap-2 mb-3">
               <Crosshair className="h-4 w-4 text-emerald-400" />
-              <span className="text-[11px] font-mono text-[#64748b] uppercase tracking-wider">Top Opportunities</span>
+              <span className="text-[11px] font-mono text-[#64748b] uppercase tracking-wider">Alpha Highlights</span>
+              {alphaLoading && <span className="text-[8px] font-mono text-[#475569] ml-auto">loading…</span>}
             </div>
-            {topOpportunities.length > 0 ? (
+            {alphaLoading && !alphaRankingData ? (
+              <div className="space-y-2">
+                <div className="h-10 w-full rounded bg-[#1e293b]" />
+                <div className="h-10 w-full rounded bg-[#1e293b]" />
+                <div className="h-10 w-full rounded bg-[#1e293b]" />
+              </div>
+            ) : alphaHighlights.length > 0 ? (
+              <div className="space-y-2">
+                {alphaHighlights.map((opp) => (
+                  <div
+                    key={`alpha-${opp.rank}`}
+                    className="flex items-center gap-2 p-2 rounded-md bg-[#0a0e17] border border-[#1e293b] hover:border-[#3b82f6]/30 transition-colors"
+                  >
+                    <span className="text-[9px] font-mono text-[#475569] w-4 shrink-0">#{opp.rank}</span>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[11px] font-mono font-bold text-[#e2e8f0] truncate">
+                          {opp.tokenAddress ? opp.tokenAddress.slice(0, 6) + '…' : 'N/A'}
+                        </span>
+                        <span className={`text-[9px] font-mono font-bold px-1 py-0.5 rounded ${
+                          opp.direction === 'LONG'
+                            ? 'bg-emerald-500/10 text-emerald-400'
+                            : 'bg-red-500/10 text-red-400'
+                        }`}>
+                          {opp.direction}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2 mt-0.5">
+                        <span className="text-[9px] font-mono text-amber-400">
+                          α {(opp.alphaScore * 100).toFixed(0)}
+                        </span>
+                        <span className="text-[9px] font-mono text-[#475569]">
+                          {opp.chain || ''}
+                        </span>
+                        {opp.expectedReturn != null && (
+                          <span className="text-[9px] font-mono text-emerald-400">
+                            +{(opp.expectedReturn * 100).toFixed(1)}%
+                          </span>
+                        )}
+                      </div>
+                      {opp.suggestedAllocationPct > 0 && (
+                        <div className="mt-1">
+                          <div className="h-1 bg-[#1e293b] rounded-full overflow-hidden">
+                            <div
+                              className="h-full rounded-full bg-emerald-500/60"
+                              style={{ width: `${Math.min(opp.suggestedAllocationPct, 100)}%` }}
+                            />
+                          </div>
+                          <span className="text-[8px] font-mono text-[#475569]">
+                            Alloc: {opp.suggestedAllocationPct.toFixed(1)}%
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+                <button
+                  onClick={() => setLevel('professional')}
+                  className="w-full text-[10px] font-mono text-[#3b82f6] hover:text-[#60a5fa] transition-colors mt-1"
+                >
+                  View All Rankings →
+                </button>
+              </div>
+            ) : topOpportunities.length > 0 ? (
+              /* Fallback to signals data if alpha ranking is empty */
               <div className="space-y-2">
                 {topOpportunities.map((opp, i) => (
                   <div
@@ -901,7 +1327,7 @@ export function ExecutiveDashboard() {
             ) : (
               <div className="text-center py-4">
                 <Zap className="h-5 w-5 text-[#2d3748] mx-auto mb-1" />
-                <span className="text-[10px] font-mono text-[#475569]">No high-confidence signals</span>
+                <span className="text-[10px] font-mono text-[#475569]">No alpha opportunities</span>
               </div>
             )}
           </div>

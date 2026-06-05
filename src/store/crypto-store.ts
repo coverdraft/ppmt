@@ -88,7 +88,7 @@ export interface MarketSummary {
   fearGreedIndex: number;
 }
 
-export type ActiveTab = 'dashboard' | 'charts' | 'multi-chain' | 'signals' | 'smart-money' | 'deep-analysis' | 'dna-scanner' | 'predictive' | 'brain' | 'strategy-lab' | 'backtesting' | 'paper-trading' | 'patterns' | 'kill-switches' | 'capital-allocation' | 'portfolio' | 'risk' | 'decisions' | 'export-import';
+export type ActiveTab = 'dashboard' | 'charts' | 'multi-chain' | 'signals' | 'smart-money' | 'deep-analysis' | 'dna-scanner' | 'predictive' | 'brain' | 'strategy-lab' | 'backtesting' | 'paper-trading' | 'patterns' | 'kill-switches' | 'capital-allocation' | 'portfolio' | 'risk' | 'decisions' | 'export-import' | 'risk-pre-filter' | 'portfolio-intelligence' | 'execution-cost' | 'market-regime' | 'meta-model' | 'alpha-ranking' | 'event-bus';
 
 export interface AlertSummary {
   id: string;
@@ -103,6 +103,106 @@ export interface AlertSummary {
 }
 
 export type TraderIntelFilter = 'ALL' | 'BOTS' | 'SMART_MONEY' | 'WHALES' | 'SNIPERS';
+
+export interface ImpactAnalysisResult {
+  approved: boolean;
+  impactScore: number;
+  riskContribution: number;
+  diversificationDelta: number;
+  varDelta: number;
+  correlationWithExisting: number;
+  recommendations: string[];
+}
+
+export interface StressTestScenarioResult {
+  scenarioId: string;
+  scenarioName: string;
+  portfolioImpactUsd: number;
+  portfolioImpactPct: number;
+  positionImpacts: Record<string, number>;
+  recoveryDaysEstimate: number;
+}
+
+export interface StressTestResult {
+  scenarioResults: StressTestScenarioResult[];
+  worstCase: StressTestScenarioResult | null;
+  averageImpactPct: number;
+  computedAt: string;
+}
+
+export interface OptimizationResult {
+  weights: Record<string, number>;
+  expectedReturn: number;
+  expectedVol: number;
+  sharpeRatio: number;
+  method: string;
+}
+
+export interface PortfolioIntelligenceState {
+  impactResult: ImpactAnalysisResult | null;
+  impactLoading: boolean;
+  stressResult: StressTestResult | null;
+  stressLoading: boolean;
+  optimizationResult: OptimizationResult | null;
+  optimizationLoading: boolean;
+  currentWeights: Record<string, number>;
+}
+
+export interface ExecutionCostResult {
+  totalCostPct: number;
+  slippagePct: number;
+  marketImpactPct: number;
+  feePct: number;
+  networkFeePct: number;
+  estimatedTimeSec: number;
+  recommendation: {
+    orderType: string;
+    timeHorizon: string;
+    splitCount?: number;
+  };
+}
+
+export interface ExecutionLogEntry {
+  id: string;
+  time: string;
+  token: string;
+  side: 'BUY' | 'SELL';
+  size: number;
+  estimatedCost: number;
+  actualCost: number | null;
+}
+
+export interface EventBusEvent {
+  id: string;
+  type: string;
+  source: string;
+  priority: 'SYNC' | 'SEMI_SYNC' | 'ASYNC';
+  payload: string;
+  timestamp: number;
+}
+
+export interface MarketRegimeData {
+  regime: string;
+  confidence: number;
+  transitionProbabilities: Record<string, number>;
+  durationEstimate: 'hours' | 'days' | 'weeks';
+  keyIndicators: { name: string; value: number; signal: 'BULLISH' | 'BEARISH' | 'NEUTRAL' }[];
+  lastChangedAt: string;
+  assessedAt: string;
+}
+
+export interface PreFilterCheckResult {
+  name: string;
+  passed: boolean;
+  reason?: string;
+}
+
+export interface PreFilterResult {
+  passed: boolean;
+  checks: PreFilterCheckResult[];
+  riskScore: number;
+  reason?: string;
+}
 
 interface CryptoStore {
   // Tokens
@@ -154,12 +254,45 @@ interface CryptoStore {
   selectedTraderId: string | null;
   setSelectedTraderId: (id: string | null) => void;
 
+  // Execution Cost
+  executionCost: ExecutionCostResult | null;
+  setExecutionCost: (result: ExecutionCostResult | null) => void;
+  executionLog: ExecutionLogEntry[];
+  addExecutionLog: (entry: ExecutionLogEntry) => void;
+
   // Alerts
   alerts: AlertSummary[];
   addAlert: (alert: AlertSummary) => void;
   unreadAlertCount: number;
   markAlertRead: (id: string) => void;
   clearAlerts: () => void;
+
+  // Risk Pre-Filter
+  riskPreFilterResult: PreFilterResult | null;
+  riskPreFilterLoading: boolean;
+  setRiskPreFilterResult: (result: PreFilterResult | null) => void;
+  setRiskPreFilterLoading: (loading: boolean) => void;
+  autoPreFilterEnabled: boolean;
+  setAutoPreFilterEnabled: (enabled: boolean) => void;
+
+  // Event Bus
+  eventBusEvents: EventBusEvent[];
+  eventBusConnected: boolean;
+  addEventBusEvent: (event: EventBusEvent) => void;
+  setEventBusEvents: (events: EventBusEvent[]) => void;
+  setEventBusConnected: (connected: boolean) => void;
+  clearEventBusEvents: () => void;
+
+  // Market Regime
+  marketRegime: MarketRegimeData | null;
+  setMarketRegime: (data: MarketRegimeData | null) => void;
+  marketRegimeLoading: boolean;
+  setMarketRegimeLoading: (loading: boolean) => void;
+
+  // Portfolio Intelligence
+  portfolioIntelligence: PortfolioIntelligenceState;
+  setPortfolioIntelligence: (state: Partial<PortfolioIntelligenceState>) => void;
+  clearPortfolioIntelligence: () => void;
 }
 
 export const useCryptoStore = create<CryptoStore>((set) => ({
@@ -230,6 +363,15 @@ export const useCryptoStore = create<CryptoStore>((set) => ({
   selectedTraderId: null,
   setSelectedTraderId: (id) => set({ selectedTraderId: id }),
 
+  // Execution Cost
+  executionCost: null,
+  setExecutionCost: (result) => set({ executionCost: result }),
+  executionLog: [],
+  addExecutionLog: (entry) =>
+    set((state) => ({
+      executionLog: [entry, ...state.executionLog].slice(0, 5),
+    })),
+
   // Alerts
   alerts: [],
   addAlert: (alert) =>
@@ -248,4 +390,56 @@ export const useCryptoStore = create<CryptoStore>((set) => ({
       return { alerts, unreadAlertCount };
     }),
   clearAlerts: () => set({ alerts: [], unreadAlertCount: 0 }),
+
+  // Risk Pre-Filter
+  riskPreFilterResult: null,
+  riskPreFilterLoading: false,
+  setRiskPreFilterResult: (result) => set({ riskPreFilterResult: result }),
+  setRiskPreFilterLoading: (loading) => set({ riskPreFilterLoading: loading }),
+  autoPreFilterEnabled: false,
+  setAutoPreFilterEnabled: (enabled) => set({ autoPreFilterEnabled: enabled }),
+
+  // Event Bus
+  eventBusEvents: [],
+  eventBusConnected: false,
+  addEventBusEvent: (event) =>
+    set((state) => ({
+      eventBusEvents: [...state.eventBusEvents, event].slice(-200),
+    })),
+  setEventBusEvents: (events) => set({ eventBusEvents: events.slice(-200) }),
+  setEventBusConnected: (connected) => set({ eventBusConnected: connected }),
+  clearEventBusEvents: () => set({ eventBusEvents: [] }),
+
+  // Market Regime
+  marketRegime: null,
+  setMarketRegime: (data) => set({ marketRegime: data }),
+  marketRegimeLoading: false,
+  setMarketRegimeLoading: (loading) => set({ marketRegimeLoading: loading }),
+
+  // Portfolio Intelligence
+  portfolioIntelligence: {
+    impactResult: null,
+    impactLoading: false,
+    stressResult: null,
+    stressLoading: false,
+    optimizationResult: null,
+    optimizationLoading: false,
+    currentWeights: {},
+  },
+  setPortfolioIntelligence: (partial) =>
+    set((state) => ({
+      portfolioIntelligence: { ...state.portfolioIntelligence, ...partial },
+    })),
+  clearPortfolioIntelligence: () =>
+    set({
+      portfolioIntelligence: {
+        impactResult: null,
+        impactLoading: false,
+        stressResult: null,
+        stressLoading: false,
+        optimizationResult: null,
+        optimizationLoading: false,
+        currentWeights: {},
+      },
+    }),
 }));

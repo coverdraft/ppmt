@@ -35,6 +35,7 @@ import {
   LayoutDashboard,
   Briefcase,
   Code2,
+  Trophy,
 } from 'lucide-react';
 import { UserProvider, useUser } from '@/components/auth/user-provider';
 import { DashboardLevelProvider, useDashboardLevel, type DashboardLevel } from '@/components/dashboard/dashboard-level-provider';
@@ -83,6 +84,27 @@ const ExportImportPanel = dynamic(() => import('@/components/dashboard/export-im
 // Executive Dashboard
 const ExecutiveDashboard = dynamic(() => import('@/components/dashboard/executive-dashboard').then(m => ({ default: m.ExecutiveDashboard })), { ssr: false, loading: loadingFallback });
 
+// Execution Cost Panel
+const ExecutionCostPanel = dynamic(() => import('@/components/dashboard/execution-cost-panel').then(m => ({ default: m.ExecutionCostPanel })), { ssr: false, loading: loadingFallback });
+
+// Meta-Model Panel
+const MetaModelPanel = dynamic(() => import('@/components/dashboard/meta-model-panel').then(m => ({ default: m.MetaModelPanel })), { ssr: false, loading: loadingFallback });
+
+// Alpha Ranking Panel
+const AlphaRankingPanel = dynamic(() => import('@/components/dashboard/alpha-ranking-panel').then(m => ({ default: m.AlphaRankingPanel })), { ssr: false, loading: loadingFallback });
+
+// Risk Pre-Filter Panel
+const RiskPreFilterPanel = dynamic(() => import('@/components/dashboard/risk-pre-filter-panel').then(m => ({ default: m.RiskPreFilterPanel })), { ssr: false, loading: loadingFallback });
+
+// Portfolio Intelligence Panel
+const PortfolioIntelligencePanel = dynamic(() => import('@/components/dashboard/portfolio-intelligence-panel').then(m => ({ default: m.PortfolioIntelligencePanel })), { ssr: false, loading: loadingFallback });
+
+// Market Regime Panel
+const MarketRegimePanel = dynamic(() => import('@/components/dashboard/market-regime-panel').then(m => ({ default: m.MarketRegimePanel })), { ssr: false, loading: loadingFallback });
+
+// Event Bus Panel
+const EventBusPanel = dynamic(() => import('@/components/dashboard/event-bus-panel').then(m => ({ default: m.EventBusPanel })), { ssr: false, loading: loadingFallback });
+
 // ============================================================
 // SIDEBAR NAVIGATION CONFIG
 // ============================================================
@@ -103,8 +125,8 @@ interface NavGroup {
 }
 
 // Tabs visible at each dashboard level
-const PROFESSIONAL_HIDDEN_TABS: ActiveTab[] = ['brain', 'dna-scanner', 'predictive', 'patterns', 'export-import'];
-const ENGINEER_ONLY_TABS: ActiveTab[] = [];
+const PROFESSIONAL_HIDDEN_TABS: ActiveTab[] = ['dna-scanner', 'predictive', 'patterns', 'export-import', 'event-bus'];
+const ENGINEER_ONLY_TABS: ActiveTab[] = ['event-bus'];
 
 function getFilteredNavGroups(level: DashboardLevel): NavGroup[] {
   const allGroups: NavGroup[] = [
@@ -116,6 +138,7 @@ function getFilteredNavGroups(level: DashboardLevel): NavGroup[] {
         { id: 'dashboard', label: 'Dashboard', icon: BarChart3, shortcut: '1', description: 'Live token feed & prices' },
         { id: 'charts', label: 'Charts', icon: CandlestickChart, shortcut: '2', description: 'OHLCV candlestick charts' },
         { id: 'multi-chain', label: 'Multi-Chain', icon: Globe, shortcut: '3', description: 'Cross-chain comparison & ranking' },
+        { id: 'market-regime', label: 'Market Regime', icon: Activity, shortcut: 'g', description: 'Regime detection & HMM analysis' },
       ],
     },
     {
@@ -125,10 +148,27 @@ function getFilteredNavGroups(level: DashboardLevel): NavGroup[] {
       items: [
         { id: 'signals', label: 'Signals', icon: Radio, shortcut: '4', description: 'Live signal feed' },
         { id: 'brain', label: 'Brain', icon: Brain, shortcut: '5', description: 'Control center' },
+        { id: 'meta-model', label: 'Meta-Model', icon: Layers, shortcut: 'm', description: 'Engine performance & weights' },
+        { id: 'alpha-ranking', label: 'Alpha Rank', icon: Trophy, shortcut: 'a', description: 'Top alpha opportunities' },
         { id: 'smart-money', label: 'Smart Money', icon: Eye, shortcut: '6', description: 'Trader intelligence' },
-        { id: 'deep-analysis', label: 'Deep Analysis', icon: Layers, shortcut: '7', description: 'Deep token analysis' },
+        { id: 'deep-analysis', label: 'Deep Analysis', icon: Sparkles, shortcut: '7', description: 'Deep token analysis' },
         { id: 'dna-scanner', label: 'DNA Scanner', icon: Dna, shortcut: '8', description: 'Token DNA analysis' },
         { id: 'predictive', label: 'Predictive', icon: Zap, shortcut: '9', description: 'AI predictions' },
+      ],
+    },
+    {
+      id: 'risk-portfolio',
+      label: 'RISK & PORTFOLIO',
+      emoji: '🛡️',
+      items: [
+        { id: 'risk-pre-filter', label: 'Pre-Filter', icon: Shield, shortcut: 'f', description: 'Risk pre-filter for signals' },
+        { id: 'kill-switches', label: 'Kill Switches', icon: ShieldAlert, shortcut: 'r', description: 'Emergency kill switches' },
+        { id: 'risk', label: 'Risk', icon: Shield, shortcut: 'u', description: 'Risk management & simulation' },
+        { id: 'portfolio', label: 'Portfolio', icon: PieChart, shortcut: 'y', description: 'Portfolio view' },
+        { id: 'portfolio-intelligence', label: 'Portfolio AI', icon: Briefcase, shortcut: 'b', description: 'Impact analysis & optimization' },
+        { id: 'capital-allocation', label: 'Capital Alloc', icon: DollarSign, shortcut: 't', description: 'Capital allocation dashboard' },
+        { id: 'decisions', label: 'SDE Decisions', icon: Gavel, shortcut: 'i', description: 'Strategic decision engine' },
+        { id: 'execution-cost', label: 'Exec Cost', icon: DollarSign, shortcut: 'p', description: 'Execution cost estimator' },
       ],
     },
     {
@@ -143,22 +183,11 @@ function getFilteredNavGroups(level: DashboardLevel): NavGroup[] {
       ],
     },
     {
-      id: 'risk-portfolio',
-      label: 'RISK & PORTFOLIO',
-      emoji: '🛡️',
-      items: [
-        { id: 'kill-switches', label: 'Kill Switches', icon: ShieldAlert, shortcut: 'r', description: 'Emergency kill switches' },
-        { id: 'capital-allocation', label: 'Capital Alloc', icon: DollarSign, shortcut: 't', description: 'Capital allocation dashboard' },
-        { id: 'portfolio', label: 'Portfolio', icon: PieChart, shortcut: 'y', description: 'Portfolio view' },
-        { id: 'risk', label: 'Risk', icon: Shield, shortcut: 'u', description: 'Risk management & simulation' },
-        { id: 'decisions', label: 'SDE Decisions', icon: Gavel, shortcut: 'i', description: 'Strategic decision engine' },
-      ],
-    },
-    {
-      id: 'tools',
-      label: 'TOOLS',
+      id: 'system',
+      label: 'SYSTEM',
       emoji: '🔧',
       items: [
+        { id: 'event-bus', label: 'Event Bus', icon: Radio, shortcut: 'v', description: 'Real-time event monitor' },
         { id: 'export-import', label: 'Export/Import', icon: ArrowRightLeft, shortcut: 'o', description: 'Export & import data' },
       ],
     },
@@ -183,21 +212,28 @@ const ALL_NAV_ITEMS_FLAT: NavItem[] = [
   { id: 'dashboard', label: 'Dashboard', icon: BarChart3, shortcut: '1', description: '' },
   { id: 'charts', label: 'Charts', icon: CandlestickChart, shortcut: '2', description: '' },
   { id: 'multi-chain', label: 'Multi-Chain', icon: Globe, shortcut: '3', description: '' },
+  { id: 'market-regime', label: 'Market Regime', icon: Activity, shortcut: 'g', description: '' },
   { id: 'signals', label: 'Signals', icon: Radio, shortcut: '4', description: '' },
   { id: 'brain', label: 'Brain', icon: Brain, shortcut: '5', description: '' },
+  { id: 'meta-model', label: 'Meta-Model', icon: Layers, shortcut: 'm', description: '' },
+  { id: 'alpha-ranking', label: 'Alpha Rank', icon: Trophy, shortcut: 'a', description: '' },
   { id: 'smart-money', label: 'Smart Money', icon: Eye, shortcut: '6', description: '' },
-  { id: 'deep-analysis', label: 'Deep Analysis', icon: Layers, shortcut: '7', description: '' },
+  { id: 'deep-analysis', label: 'Deep Analysis', icon: Sparkles, shortcut: '7', description: '' },
   { id: 'dna-scanner', label: 'DNA Scanner', icon: Dna, shortcut: '8', description: '' },
   { id: 'predictive', label: 'Predictive', icon: Zap, shortcut: '9', description: '' },
+  { id: 'risk-pre-filter', label: 'Pre-Filter', icon: Shield, shortcut: 'f', description: '' },
+  { id: 'kill-switches', label: 'Kill Switches', icon: ShieldAlert, shortcut: 'r', description: '' },
+  { id: 'risk', label: 'Risk', icon: Shield, shortcut: 'u', description: '' },
+  { id: 'portfolio', label: 'Portfolio', icon: PieChart, shortcut: 'y', description: '' },
+  { id: 'portfolio-intelligence', label: 'Portfolio AI', icon: Briefcase, shortcut: 'b', description: '' },
+  { id: 'capital-allocation', label: 'Capital Alloc', icon: DollarSign, shortcut: 't', description: '' },
+  { id: 'decisions', label: 'SDE Decisions', icon: Gavel, shortcut: 'i', description: '' },
+  { id: 'execution-cost', label: 'Exec Cost', icon: DollarSign, shortcut: 'p', description: '' },
   { id: 'strategy-lab', label: 'Strategy Lab', icon: FlaskConical, shortcut: '0', description: '' },
   { id: 'backtesting', label: 'Backtesting', icon: TestTube, shortcut: 'q', description: '' },
   { id: 'paper-trading', label: 'Paper Trading', icon: Wallet, shortcut: 'w', description: '' },
   { id: 'patterns', label: 'Patterns', icon: Puzzle, shortcut: 'e', description: '' },
-  { id: 'kill-switches', label: 'Kill Switches', icon: ShieldAlert, shortcut: 'r', description: '' },
-  { id: 'capital-allocation', label: 'Capital Alloc', icon: DollarSign, shortcut: 't', description: '' },
-  { id: 'portfolio', label: 'Portfolio', icon: PieChart, shortcut: 'y', description: '' },
-  { id: 'risk', label: 'Risk', icon: Shield, shortcut: 'u', description: '' },
-  { id: 'decisions', label: 'SDE Decisions', icon: Gavel, shortcut: 'i', description: '' },
+  { id: 'event-bus', label: 'Event Bus', icon: Radio, shortcut: 'v', description: '' },
   { id: 'export-import', label: 'Export/Import', icon: ArrowRightLeft, shortcut: 'o', description: '' },
 ];
 
@@ -797,6 +833,17 @@ function MainContent() {
         <ExportImportPanel />
       </div>
     ),
+    'execution-cost': (
+      <div className="flex-1 min-h-0 h-full">
+        <ExecutionCostPanel />
+      </div>
+    ),
+    'risk-pre-filter': <div className="flex-1 min-h-0 h-full"><RiskPreFilterPanel /></div>,
+    'portfolio-intelligence': <div className="flex-1 min-h-0 h-full"><PortfolioIntelligencePanel /></div>,
+    'market-regime': <div className="flex-1 min-h-0 h-full"><MarketRegimePanel /></div>,
+    'meta-model': <div className="flex-1 min-h-0 h-full"><MetaModelPanel /></div>,
+    'alpha-ranking': <div className="flex-1 min-h-0 h-full"><AlphaRankingPanel /></div>,
+    'event-bus': <div className="flex-1 min-h-0 h-full"><EventBusPanel /></div>,
   };
 
   return (
