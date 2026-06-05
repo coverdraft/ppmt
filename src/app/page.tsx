@@ -39,6 +39,8 @@ import {
 } from 'lucide-react';
 import { UserProvider, useUser } from '@/components/auth/user-provider';
 import { DashboardLevelProvider, useDashboardLevel, type DashboardLevel } from '@/components/dashboard/dashboard-level-provider';
+import { OperationModeProvider, useOperationMode } from '@/components/dashboard/operation-mode-provider';
+import { ModeSwitcher, WorkflowStepperCompact, WorkflowGuidePanel } from '@/components/dashboard/workflow-stepper';
 
 // ============================================================
 // DYNAMIC IMPORTS — Code-split all tab components
@@ -459,7 +461,17 @@ function TopBar() {
         )}
       </div>
 
-      {/* Center-Right: Dashboard Level Selector */}
+      {/* Center-Right: Workflow Stepper */}
+      <WorkflowStepperCompact />
+
+      <div className="h-4 w-px bg-[#1e293b]" />
+
+      {/* Mode Switcher */}
+      <ModeSwitcher />
+
+      <div className="h-4 w-px bg-[#1e293b]" />
+
+      {/* Dashboard Level Selector */}
       <DashboardLevelSelector />
 
       {/* Right: Notifications + User Menu + Time */}
@@ -561,6 +573,8 @@ function Sidebar() {
 
   const navGroups = getFilteredNavGroups(level);
 
+  const { mode, currentStep } = useOperationMode();
+
   // Don't render sidebar for executive level
   if (level === 'executive') return null;
 
@@ -591,6 +605,7 @@ function Sidebar() {
             {group.items.map((item) => {
               const Icon = item.icon;
               const isActive = activeTab === item.id;
+              const isWorkflowStep = currentStep?.targetTab === item.id;
               return (
                 <button
                   key={item.id}
@@ -598,15 +613,22 @@ function Sidebar() {
                   className={`sidebar-nav-item w-full flex items-center gap-2 px-3 py-2 text-left ${
                     isActive ? 'active' : ''
                   }`}
-                  title={`${item.label} (${item.shortcut})`}
+                  title={`${item.label} (${item.shortcut})${isWorkflowStep ? ' — Paso actual' : ''}`}
                 >
-                  <Icon className={`nav-icon h-4 w-4 shrink-0 ${
-                    isActive ? 'text-[#3b82f6]' : 'text-[#64748b]'
-                  }`} />
+                  <div className="relative">
+                    <Icon className={`nav-icon h-4 w-4 shrink-0 ${
+                      isActive ? 'text-[#3b82f6]' : isWorkflowStep ? (mode === 'research' ? 'text-cyan-400' : 'text-amber-400') : 'text-[#64748b]'
+                    }`} />
+                    {isWorkflowStep && !isActive && (
+                      <div className={`absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full ${
+                        mode === 'research' ? 'bg-cyan-400' : 'bg-amber-400'
+                      }`} />
+                    )}
+                  </div>
                   {!collapsed && (
                     <div className="flex flex-col min-w-0">
                       <span className={`nav-label text-[11px] font-medium truncate ${
-                        isActive ? 'text-[#f1f5f9]' : 'text-[#94a3b8]'
+                        isActive ? 'text-[#f1f5f9]' : isWorkflowStep ? (mode === 'research' ? 'text-cyan-300' : 'text-amber-300') : 'text-[#94a3b8]'
                       }`}>
                         {item.label}
                       </span>
@@ -614,9 +636,9 @@ function Sidebar() {
                   )}
                   {!collapsed && (
                     <span className={`ml-auto text-[8px] font-mono ${
-                      isActive ? 'text-[#3b82f6]/60' : 'text-[#475569]'
+                      isActive ? 'text-[#3b82f6]/60' : isWorkflowStep ? (mode === 'research' ? 'text-cyan-500/60' : 'text-amber-500/60') : 'text-[#475569]'
                     }`}>
-                      {item.shortcut}
+                      {isWorkflowStep ? '▸' : item.shortcut}
                     </span>
                   )}
                 </button>
@@ -649,12 +671,14 @@ function Sidebar() {
 // ============================================================
 
 function QuickStartGuide() {
-  const steps = [
-    { icon: Brain, label: 'Start the Brain', desc: 'Go to Brain tab and click Start to begin automated analysis' },
-    { icon: BarChart3, label: 'Browse Token Flow', desc: 'Monitor live token prices and market movements' },
-    { icon: Radio, label: 'Watch Signals', desc: 'Get real-time trading signals from multiple sources' },
-    { icon: Dna, label: 'Scan DNA', desc: 'Select a token and analyze its DNA risk profile' },
-  ];
+  const { mode, steps, currentStepIndex, goToStep, currentStep, isStepCompleted, progressPct } = useOperationMode();
+  const setActiveTab = useCryptoStore((s) => s.setActiveTab);
+
+  const modeColor = mode === 'research' ? 'cyan' : 'amber';
+  const modeLabel = mode === 'research' ? 'INVESTIGACIÓN' : 'OPERACIÓN';
+  const modeDesc = mode === 'research'
+    ? 'Pipeline de backtesting y validación — investiga, diseña, valida y optimiza estrategias con datos históricos'
+    : 'Pipeline de ejecución y trading — selecciona estrategias validadas, paper trade y ejecuta en vivo';
 
   return (
     <motion.div
@@ -668,30 +692,92 @@ function QuickStartGuide() {
           <Sparkles className="h-5 w-5 text-[#3b82f6]" />
           <h1 className="text-xl font-bold text-[#f1f5f9] font-mono">CryptoQuant Terminal</h1>
         </div>
+        <div className="flex items-center gap-2 mb-2">
+          <span className={`font-mono text-[10px] font-bold tracking-wider px-2 py-0.5 rounded ${
+            mode === 'research' ? 'bg-cyan-500/10 text-cyan-400 border border-cyan-500/30' : 'bg-amber-500/10 text-amber-400 border border-amber-500/30'
+          }`}>
+            MODO {modeLabel}
+          </span>
+          <span className="font-mono text-[9px] text-[#64748b]">
+            Paso {currentStepIndex + 1} de {steps.length} — {Math.round(progressPct)}% completado
+          </span>
+        </div>
         <p className="text-sm text-[#94a3b8] max-w-xl">
-          Professional-grade crypto analytics. Real-time signals, DNA risk scanning, smart money tracking, and AI-powered predictions — all in one terminal.
+          {modeDesc}
         </p>
       </div>
 
-      {/* Quick Start Steps */}
+      {/* Workflow Steps */}
       <div className="px-6 pb-4">
-        <h2 className="text-[11px] font-mono text-[#64748b] uppercase tracking-wider mb-3">Quick Start</h2>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+        <h2 className="text-[11px] font-mono text-[#64748b] uppercase tracking-wider mb-3">
+          Pipeline: {mode === 'research' ? 'Investigación → Backtesting' : 'Operación → Ejecución'}
+        </h2>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
           {steps.map((step, i) => {
-            const Icon = step.icon;
+            const isCurrent = i === currentStepIndex;
+            const isDone = isStepCompleted(step.id);
+            const isPast = i < currentStepIndex;
+
             return (
               <div
-                key={i}
-                className="quick-start-step bg-[#111827] border border-[#1e293b] rounded-lg p-4 cursor-pointer hover:border-[#3b82f6]/30 transition-all"
+                key={step.id}
+                onClick={() => {
+                  goToStep(i);
+                  setActiveTab(step.targetTab as ActiveTab);
+                }}
+                className={`quick-start-step bg-[#111827] rounded-lg p-4 cursor-pointer transition-all ${
+                  isCurrent
+                    ? mode === 'research'
+                      ? 'border-2 border-cyan-500/50 shadow-lg shadow-cyan-500/10'
+                      : 'border-2 border-amber-500/50 shadow-lg shadow-amber-500/10'
+                    : isDone
+                    ? 'border border-emerald-500/30 hover:border-emerald-500/50'
+                    : 'border border-[#1e293b] hover:border-[#3b82f6]/30'
+                }`}
               >
                 <div className="flex items-center gap-2 mb-2">
-                  <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-[#3b82f6]/10 border border-[#3b82f6]/20">
-                    <Icon className="h-4 w-4 text-[#3b82f6]" />
+                  <div className={`flex items-center justify-center w-8 h-8 rounded-lg border ${
+                    isDone
+                      ? 'bg-emerald-500/10 border-emerald-500/30'
+                      : isCurrent
+                      ? mode === 'research'
+                        ? 'bg-cyan-500/10 border-cyan-500/30'
+                        : 'bg-amber-500/10 border-amber-500/30'
+                      : 'bg-[#1e293b] border-[#334155]'
+                  }`}>
+                    {isDone ? (
+                      <Check className="h-4 w-4 text-emerald-400" />
+                    ) : (
+                      <span className="text-sm">{step.icon}</span>
+                    )}
                   </div>
-                  <span className="text-[9px] font-mono text-[#3b82f6]/60">STEP {i + 1}</span>
+                  <div className="flex flex-col">
+                    <span className={`text-[9px] font-mono ${
+                      isCurrent
+                        ? mode === 'research' ? 'text-cyan-400' : 'text-amber-400'
+                        : isDone
+                        ? 'text-emerald-400'
+                        : 'text-[#475569]'
+                    }`}>
+                      PASO {i + 1}
+                    </span>
+                    <span className={`text-[10px] font-bold ${
+                      isCurrent ? 'text-[#f1f5f9]' : isDone ? 'text-emerald-300' : 'text-[#94a3b8]'
+                    }`}>
+                      {step.label}
+                    </span>
+                  </div>
                 </div>
-                <h3 className="text-sm font-bold text-[#f1f5f9] mb-1">{step.label}</h3>
-                <p className="text-[11px] text-[#94a3b8] leading-relaxed">{step.desc}</p>
+                <p className="text-[10px] text-[#64748b] leading-relaxed">{step.description}</p>
+                {isCurrent && (
+                  <div className="mt-2 pt-2 border-t border-[#1e293b]">
+                    <span className={`text-[8px] font-mono font-bold ${
+                      mode === 'research' ? 'text-cyan-500' : 'text-amber-500'
+                    }`}>
+                      ▸ PASO ACTUAL — Haz click para ir
+                    </span>
+                  </div>
+                )}
               </div>
             );
           })}
@@ -892,6 +978,9 @@ function DashboardContent() {
 
       {/* Bottom Status Bar */}
       <DataStatusBar />
+
+      {/* Workflow Guide Panel (floating, toggleable) */}
+      <WorkflowGuidePanel />
     </div>
   );
 }
@@ -904,11 +993,13 @@ export default function HomePage() {
   return (
     <UserProvider>
       <DashboardLevelProvider>
-        <WebSocketProvider>
-          <SimulationProvider>
-            <DashboardContent />
-          </SimulationProvider>
-        </WebSocketProvider>
+        <OperationModeProvider>
+          <WebSocketProvider>
+            <SimulationProvider>
+              <DashboardContent />
+            </SimulationProvider>
+          </WebSocketProvider>
+        </OperationModeProvider>
       </DashboardLevelProvider>
     </UserProvider>
   );
