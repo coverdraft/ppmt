@@ -1,8 +1,8 @@
 'use client';
 
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useMemo, useCallback, useRef } from 'react';
 import { useCryptoStore, type TraderIntelFilter } from '@/store/crypto-store';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -297,6 +297,7 @@ function DarkTooltip({ active, payload, label: lbl }: { active?: boolean; payloa
 // ============================================================
 
 export function TraderIntelligencePanel() {
+  const queryClient = useQueryClient();
   const traderIntelFilter = useCryptoStore((s) => s.traderIntelFilter);
   const setTraderIntelFilter = useCryptoStore((s) => s.setTraderIntelFilter);
   const [chainFilter, setChainFilter] = useState<string>('ALL');
@@ -306,6 +307,14 @@ export function TraderIntelligencePanel() {
   const [sortDesc, setSortDesc] = useState(true);
   const [syncStatus, setSyncStatus] = useState<'idle' | 'syncing' | 'done' | 'error'>('idle');
   const [syncMessage, setSyncMessage] = useState('');
+  const syncPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Helper: refetch all trader queries
+  const refetchTraders = useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: ['traders'] });
+    queryClient.invalidateQueries({ queryKey: ['bot-stats'] });
+    queryClient.invalidateQueries({ queryKey: ['trader-detail'] });
+  }, [queryClient]);
 
   // Sync smart money wallets from DexScreener/DexPaprika
   const handleSyncTraders = useCallback(async () => {
@@ -320,32 +329,42 @@ export function TraderIntelligencePanel() {
       });
       const data = await res.json();
       if (data.success) {
+        const discovered = data.result?.walletsDiscovered || data.result?.tradersCreated || 0;
         setSyncStatus('done');
-        setSyncMessage('Sync started — wallets being profiled in background');
-        // Also seed traders if none exist
-        const seedRes = await fetch('/api/seed', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'traders' }),
-        });
-        const seedData = await seedRes.json();
-        if (seedData.success) {
-          setSyncMessage('Trader sync + seed started — refresh in 30s');
+        if (discovered > 0) {
+          setSyncMessage(`Synced ${discovered} wallets — refreshing data...`);
+        } else {
+          setSyncMessage('Sync complete — no new wallets found. Try seeding tokens first.');
         }
+        // Refetch trader data immediately after sync
+        await refetchTraders();
+
+        // If sync returned 0 wallets, it might still be running in background
+        // Poll for updates every 10s for 2 minutes
+        if (syncPollRef.current) clearInterval(syncPollRef.current);
+        let pollCount = 0;
+        syncPollRef.current = setInterval(async () => {
+          pollCount++;
+          if (pollCount > 12) { // 12 * 10s = 2 minutes max
+            if (syncPollRef.current) clearInterval(syncPollRef.current);
+            return;
+          }
+          await refetchTraders();
+        }, 10000);
       } else {
         setSyncStatus('error');
-        setSyncMessage(data.error || 'Sync failed');
+        setSyncMessage(data.error || 'Sync failed — try again');
       }
     } catch {
       setSyncStatus('error');
       setSyncMessage('Network error — try again');
     }
     setTimeout(() => setSyncStatus('idle'), 8000);
-  }, [syncStatus]);
+  }, [syncStatus, refetchTraders]);
 
   // Fetch traders from API
-  const { data: tradersData } = useQuery({
-    queryKey: ['traders', traderIntelFilter, chainFilter],
+  const { data: tradersData, isLoading: tradersLoading } = useQuery({
+    queryKey: ['traders', traderIntelFilter, chainFilter, sortField, sortDesc],
     queryFn: async () => {
       try {
         const params = new URLSearchParams();
@@ -365,6 +384,7 @@ export function TraderIntelligencePanel() {
       }
     },
     staleTime: 15000,
+    refetchInterval: 60000, // Auto-refetch every 60s to pick up sync results
   });
 
   // Fetch bot stats

@@ -1,6 +1,6 @@
 'use client';
 
-import { useCryptoStore, type SignalData } from '@/store/crypto-store';
+import { useCryptoStore } from '@/store/crypto-store';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { useState, useMemo } from 'react';

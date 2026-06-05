@@ -140,7 +140,6 @@ export function MetaModelPanel() {
   const [timeRange, setTimeRange] = useState<'7d' | '30d'>('7d');
   const [rebalancing, setRebalancing] = useState(false);
   const setMetaModelReport = useCryptoStore((s) => s.setMetaModelReport);
-  const metaModelReport = useCryptoStore((s) => s.metaModelReport);
 
   // Fetch data
   const { data: apiData, isLoading, refetch } = useQuery({
@@ -197,9 +196,15 @@ export function MetaModelPanel() {
     };
   }, [apiData]);
 
-  // Sync to Zustand store
+  // Sync to Zustand store (with safety check)
   useEffect(() => {
-    setMetaModelReport(transformedReport);
+    try {
+      if (typeof setMetaModelReport === 'function') {
+        setMetaModelReport(transformedReport);
+      }
+    } catch (err) {
+      console.warn('[MetaModelPanel] Failed to sync report to store:', err);
+    }
   }, [transformedReport, setMetaModelReport]);
 
   const report = transformedReport;
