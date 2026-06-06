@@ -1053,3 +1053,25 @@ Stage Summary:
 - MultiChainScreener optionally enriches chain summaries with activity scores
 - Sparkline rendering fixed for sparse data
 - TypeScript errors resolved in multi-chain route
+---
+Task ID: 1
+Agent: main
+Task: Fix all broken CryptoQuant Terminal panels
+
+Work Log:
+- Diagnosed Turbopack panic error causing GET / 500
+- Changed dev script from Turbopack to webpack (package.json)
+- Fixed Smart Money panel: subLabels JSON parsing, auto-sync retry, error handling
+- Fixed Meta-Model panel: API error handling, retry logic, error state UI
+- Fixed Predictive section: auto-gen retry, prominent CTA, Send-to-Backtesting button
+- Fixed Multi-Chain Scanner: retry logic, enhanced error states
+- Added missing useCryptoStore import in big-data-predictive.tsx
+- Verified production build passes successfully
+- Tested API endpoints: /api/predictive returns real data from DB
+
+Stage Summary:
+- All 6 critical issues fixed
+- Build passes: ✓ Compiled successfully
+- Dev server works with webpack (no more Turbopack panic)
+- API endpoints tested and returning data
+- Key change: `npm run dev` now uses `--webpack` flag
