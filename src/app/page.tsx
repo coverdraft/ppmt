@@ -1,6 +1,5 @@
 'use client';
 
-import dynamic from 'next/dynamic';
 import { useCryptoStore, type ActiveTab } from '@/store/crypto-store';
 import { useEffect, useCallback, useState, useRef } from 'react';
 import { useQuery } from '@tanstack/react-query';
@@ -43,70 +42,45 @@ import { DashboardLevelProvider, useDashboardLevel, type DashboardLevel } from '
 import { OperationModeProvider, useOperationMode } from '@/components/dashboard/operation-mode-provider';
 import { ModeSwitcher, WorkflowStepperCompact, WorkflowGuidePanel } from '@/components/dashboard/workflow-stepper';
 
-// ============================================================
-// DYNAMIC IMPORTS — Code-split all tab components
-// ============================================================
+// Providers — static imports (they wrap the whole app, must be eagerly loaded)
+import { WebSocketProvider } from '@/components/dashboard/websocket-provider';
+import { SimulationProvider } from '@/components/dashboard/simulation-provider';
 
-const loadingFallback = () => (
-  <div className="flex items-center justify-center h-64 text-muted-foreground">Loading...</div>
-);
-
-const TokenFlow = dynamic(() => import('@/components/dashboard/token-flow').then(m => ({ default: m.TokenFlow })), { ssr: false, loading: loadingFallback });
-const SignalCenter = dynamic(() => import('@/components/dashboard/signal-center').then(m => ({ default: m.SignalCenter })), { ssr: false, loading: loadingFallback });
-const DNAScanner = dynamic(() => import('@/components/dashboard/dna-scanner').then(m => ({ default: m.DNAScanner })), { ssr: false, loading: loadingFallback });
-const PatternBuilder = dynamic(() => import('@/components/dashboard/pattern-builder').then(m => ({ default: m.PatternBuilder })), { ssr: false, loading: loadingFallback });
-const IntelligenceModules = dynamic(() => import('@/components/dashboard/intelligence-modules').then(m => ({ default: m.IntelligenceModules })), { ssr: false, loading: loadingFallback });
-const TraderIntelligencePanel = dynamic(() => import('@/components/dashboard/trader-intelligence').then(m => ({ default: m.TraderIntelligencePanel })), { ssr: false, loading: loadingFallback });
-
-// Default exports (used directly in main tabs)
-const BacktestingLab = dynamic(() => import('@/components/dashboard/backtesting-lab'), { ssr: false, loading: loadingFallback });
-const BigDataPredictive = dynamic(() => import('@/components/dashboard/big-data-predictive'), { ssr: false, loading: loadingFallback });
-const BrainControl = dynamic(() => import('@/components/dashboard/brain-control'), { ssr: false, loading: loadingFallback });
-const MultiChainDashboard = dynamic(() => import('@/components/dashboard/multi-chain-dashboard'), { ssr: false, loading: loadingFallback });
-
-const OHLCVChart = dynamic(() => import('@/components/dashboard/ohlcv-chart').then(m => ({ default: m.OHLCVChart })), { ssr: false, loading: loadingFallback });
-const WebSocketProvider = dynamic(() => import('@/components/dashboard/websocket-provider').then(m => ({ default: m.WebSocketProvider })), { ssr: false, loading: loadingFallback });
-const SimulationProvider = dynamic(() => import('@/components/dashboard/simulation-provider').then(m => ({ default: m.SimulationProvider })), { ssr: false, loading: loadingFallback });
-const DataStatusBar = dynamic(() => import('@/components/dashboard/data-status-bar').then(m => ({ default: m.DataStatusBar })), { ssr: false, loading: loadingFallback });
-const DeepAnalysisPanel = dynamic(() => import('@/components/dashboard/deep-analysis-panel').then(m => ({ default: m.DeepAnalysisPanel })), { ssr: false, loading: loadingFallback });
-const NotificationCenter = dynamic(() => import('@/components/dashboard/notification-center').then(m => ({ default: m.NotificationCenter })), { ssr: false, loading: loadingFallback });
-const HeaderBar = dynamic(() => import('@/components/dashboard/header-bar').then(m => ({ default: m.HeaderBar })), { ssr: false, loading: loadingFallback });
-
-// Strategy Lab sub-tabs — also lazy loaded
-const StrategyLabContent = dynamic(() => import('@/components/dashboard/strategy-lab-content'), { ssr: false, loading: loadingFallback });
-
-// Promoted top-level tabs
-const KillSwitchPanel = dynamic(() => import('@/components/dashboard/kill-switch-panel'), { ssr: false, loading: loadingFallback });
-const AllocationDashboard = dynamic(() => import('@/components/dashboard/allocation-dashboard'), { ssr: false, loading: loadingFallback });
-const PortfolioView = dynamic(() => import('@/components/dashboard/portfolio-view'), { ssr: false, loading: loadingFallback });
-const DecisionDashboard = dynamic(() => import('@/components/dashboard/decision-dashboard'), { ssr: false, loading: loadingFallback });
-const RiskDashboard = dynamic(() => import('@/components/dashboard/risk-dashboard'), { ssr: false, loading: loadingFallback });
-const PaperTradingPanel = dynamic(() => import('@/components/dashboard/paper-trading-panel'), { ssr: false, loading: loadingFallback });
-const ExportImportPanel = dynamic(() => import('@/components/dashboard/export-import-panel'), { ssr: false, loading: loadingFallback });
-
-// Executive Dashboard
-const ExecutiveDashboard = dynamic(() => import('@/components/dashboard/executive-dashboard').then(m => ({ default: m.ExecutiveDashboard })), { ssr: false, loading: loadingFallback });
-
-// Execution Cost Panel
-const ExecutionCostPanel = dynamic(() => import('@/components/dashboard/execution-cost-panel').then(m => ({ default: m.ExecutionCostPanel })), { ssr: false, loading: loadingFallback });
-
-// Meta-Model Panel
-const MetaModelPanel = dynamic(() => import('@/components/dashboard/meta-model-panel').then(m => ({ default: m.MetaModelPanel })), { ssr: false, loading: loadingFallback });
-
-// Alpha Ranking Panel
-const AlphaRankingPanel = dynamic(() => import('@/components/dashboard/alpha-ranking-panel').then(m => ({ default: m.AlphaRankingPanel })), { ssr: false, loading: loadingFallback });
-
-// Risk Pre-Filter Panel
-const RiskPreFilterPanel = dynamic(() => import('@/components/dashboard/risk-pre-filter-panel').then(m => ({ default: m.RiskPreFilterPanel })), { ssr: false, loading: loadingFallback });
-
-// Portfolio Intelligence Panel
-const PortfolioIntelligencePanel = dynamic(() => import('@/components/dashboard/portfolio-intelligence-panel').then(m => ({ default: m.PortfolioIntelligencePanel })), { ssr: false, loading: loadingFallback });
-
-// Market Regime Panel
-const MarketRegimePanel = dynamic(() => import('@/components/dashboard/market-regime-panel').then(m => ({ default: m.MarketRegimePanel })), { ssr: false, loading: loadingFallback });
-
-// Event Bus Panel
-const EventBusPanel = dynamic(() => import('@/components/dashboard/event-bus-panel').then(m => ({ default: m.EventBusPanel })), { ssr: false, loading: loadingFallback });
+// Dynamic imports — extracted to lazy-tabs.ts to prevent Turbopack panic
+// (26 dynamic() calls in a single file causes "Failed to write app endpoint /page")
+import {
+  TokenFlow,
+  SignalCenter,
+  DNAScanner,
+  PatternBuilder,
+  IntelligenceModules,
+  TraderIntelligencePanel,
+  BacktestingLab,
+  BigDataPredictive,
+  BrainControl,
+  MultiChainDashboard,
+  OHLCVChart,
+  DataStatusBar,
+  DeepAnalysisPanel,
+  NotificationCenter,
+  HeaderBar,
+  StrategyLabContent,
+  KillSwitchPanel,
+  AllocationDashboard,
+  PortfolioView,
+  DecisionDashboard,
+  RiskDashboard,
+  PaperTradingPanel,
+  ExportImportPanel,
+  ExecutiveDashboard,
+  ExecutionCostPanel,
+  MetaModelPanel,
+  AlphaRankingPanel,
+  RiskPreFilterPanel,
+  PortfolioIntelligencePanel,
+  MarketRegimePanel,
+  EventBusPanel,
+} from '@/components/dashboard/lazy-tabs';
 
 // ============================================================
 // SIDEBAR NAVIGATION CONFIG
