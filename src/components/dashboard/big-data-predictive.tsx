@@ -1119,10 +1119,18 @@ export default function BigDataPredictive() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chains, signalTypes }),
       });
-      if (!res.ok) throw new Error('Failed to generate');
+      if (!res.ok) {
+        const json = await res.json().catch(() => null);
+        throw new Error(json?.error || `Failed to generate (HTTP ${res.status})`);
+      }
       return res.json() as Promise<{ data: GenerateSignalResponse }>;
     },
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['predictive-signals'] });
+    },
+    // Always refetch signals after mutation settles, even on error — the POST
+    // may have partially succeeded and created some signals before failing.
+    onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ['predictive-signals'] });
     },
   });

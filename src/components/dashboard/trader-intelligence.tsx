@@ -322,12 +322,16 @@ export function TraderIntelligencePanel() {
         throw new Error(`HTTP ${res.status}`);
       }
       const data = await res.json();
-      if (data.success) {
+      if (data.status === 'started') {
         setSyncStatus('done');
-        setSyncMessage(`Sync complete — ${data.totalTraders || 0} traders discovered`);
-      } else {
+        const lastTotal = data.lastResult?.totalTraders || 0;
+        setSyncMessage(data.message || `Sync started — ${lastTotal} traders from last sync`);
+      } else if (data.error) {
         setSyncStatus('error');
         setSyncMessage(data.error || 'Sync failed — click retry');
+      } else {
+        setSyncStatus('error');
+        setSyncMessage('Unexpected response — click retry');
       }
     } catch (err) {
       setSyncStatus('error');
@@ -393,6 +397,8 @@ export function TraderIntelligencePanel() {
       }
     },
     staleTime: 15000,
+    // Refetch every 30s so newly synced traders appear without manual refresh
+    refetchInterval: 30000,
   });
 
   // Fetch bot stats

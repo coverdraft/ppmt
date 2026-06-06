@@ -204,58 +204,49 @@ export default function PaperTradingPanel() {
   });
 
   // Fetch paper trading status
-  const { data: paperData, isLoading } = useQuery({
+  const { data: paperData, isLoading, isError: isStatusError } = useQuery({
     queryKey: ['paper-trading-status'],
     queryFn: async () => {
-      try {
-        const res = await fetch('/api/paper-trading');
-        if (!res.ok) return null;
-        const json = await res.json();
-        return json.data as {
-          stats: PaperTradingStats;
-          openPositions: PaperPosition[];
-          recentTrades: PaperTradeRecord[];
-        } | null;
-      } catch {
-        return null;
-      }
+      const res = await fetch('/api/paper-trading');
+      if (!res.ok) throw new Error(`Status fetch failed (${res.status})`);
+      const json = await res.json();
+      return json.data as {
+        stats: PaperTradingStats;
+        openPositions: PaperPosition[];
+        recentTrades: PaperTradeRecord[];
+      } | null;
     },
     staleTime: 10000,
     refetchInterval: 15000,
+    retry: 2,
   });
 
   // Fetch full trade history
-  const { data: tradesData } = useQuery({
+  const { data: tradesData, isError: isTradesError } = useQuery({
     queryKey: ['paper-trading-trades'],
     queryFn: async () => {
-      try {
-        const res = await fetch('/api/paper-trading/trades');
-        if (!res.ok) return null;
-        const json = await res.json();
-        return json as { data: PaperTradeRecord[]; total: number } | null;
-      } catch {
-        return null;
-      }
+      const res = await fetch('/api/paper-trading/trades');
+      if (!res.ok) throw new Error(`Trades fetch failed (${res.status})`);
+      const json = await res.json();
+      return json as { data: PaperTradeRecord[]; total: number } | null;
     },
     staleTime: 10000,
     refetchInterval: 10000,
+    retry: 2,
   });
 
   // Fetch open positions
-  const { data: positionsData } = useQuery({
+  const { data: positionsData, isError: isPositionsError } = useQuery({
     queryKey: ['paper-trading-positions'],
     queryFn: async () => {
-      try {
-        const res = await fetch('/api/paper-trading/positions');
-        if (!res.ok) return null;
-        const json = await res.json();
-        return json as { data: PaperPosition[] } | null;
-      } catch {
-        return null;
-      }
+      const res = await fetch('/api/paper-trading/positions');
+      if (!res.ok) throw new Error(`Positions fetch failed (${res.status})`);
+      const json = await res.json();
+      return json as { data: PaperPosition[] } | null;
     },
     staleTime: 10000,
     refetchInterval: 10000,
+    retry: 2,
   });
 
   const stats = paperData?.stats;

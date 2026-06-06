@@ -209,9 +209,14 @@ export function MetaModelPanel() {
   }, [apiData]);
 
   // Sync to Zustand store
+  // Use getState() directly to avoid selector returning undefined in some
+  // Zustand v5 + React 19 edge cases (see: "setMetaModelReport is not a function")
   useEffect(() => {
-    setMetaModelReport(transformedReport);
-  }, [transformedReport, setMetaModelReport]);
+    const fn = useCryptoStore.getState().setMetaModelReport;
+    if (typeof fn === 'function') {
+      fn(transformedReport);
+    }
+  }, [transformedReport]);
 
   const report = transformedReport;
 
