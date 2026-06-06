@@ -33,6 +33,7 @@ import {
   RefreshCw,
 } from 'lucide-react';
 import { formatVolume, formatPrice, formatPct } from '@/lib/format';
+import { ChainHeatmap } from './chain-heatmap';
 
 // ============================================================
 // TYPES
@@ -484,6 +485,13 @@ export default function MultiChainDashboard() {
       </div>
 
       {/* ============================================================ */}
+      {/* A2. CHAIN HEATMAP */}
+      {/* ============================================================ */}
+      <div className="px-3 pt-2">
+        <ChainHeatmap />
+      </div>
+
+      {/* ============================================================ */}
       {/* B. CHAIN COMPARISON BAR CHART + C. CROSS-CHAIN TABLE */}
       {/* ============================================================ */}
       <div className="flex-1 flex flex-col lg:flex-row gap-2 px-3 pt-2 min-h-0">
@@ -667,11 +675,10 @@ export default function MultiChainDashboard() {
                 const meta = CHAIN_META[entry.chain];
                 const isPositive = entry.avgChange24h >= 0;
 
-                // Generate pseudo-sparkline from avg change (use top tokens' changes as a proxy)
-                const sparkData = entry.topTokens.map(t => t.priceChange24h);
-                if (sparkData.length < 2) {
-                  sparkData.push(0, entry.avgChange24h);
-                }
+                // Generate sparkline from top tokens' 24h price changes
+                const sparkData = entry.topTokens.length >= 2
+                  ? entry.topTokens.map(t => t.priceChange24h)
+                  : [];
 
                 return (
                   <div
@@ -728,14 +735,16 @@ export default function MultiChainDashboard() {
                     </div>
 
                     {/* Sparkline */}
-                    <div className="hidden sm:block w-16 shrink-0">
-                      <MiniSparkline
-                        data={sparkData}
-                        color={isPositive ? '#34d399' : '#f87171'}
-                        width={60}
-                        height={18}
-                      />
-                    </div>
+                    {sparkData.length >= 2 && (
+                      <div className="hidden sm:block w-16 shrink-0">
+                        <MiniSparkline
+                          data={sparkData}
+                          color={isPositive ? '#34d399' : '#f87171'}
+                          width={60}
+                          height={18}
+                        />
+                      </div>
+                    )}
 
                     {/* Top 3 Tokens */}
                     <div className="flex-1 flex items-center gap-1 min-w-0 overflow-hidden">

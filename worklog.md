@@ -811,3 +811,245 @@ Stage Summary:
 - Multi-Chain Dashboard returns data for all 8 chains (SOL: 83 tokens, ETH: 21, BASE: 19, BSC: 28, MATIC: 24, ARB: 8, OP: 5, AVAX: 4+enrichment)
 - Meta-Model API returns 12 engines with accuracy/weight data
 - All other panels (AlphaRanking, MarketRegime, EventBus, RiskPreFilter, PortfolioIntelligence, ExecutionCost) verified as using valid store properties
+
+---
+Task ID: 7
+Agent: Sub Agent (general-purpose)
+Task: Fix Multi-Chain Scanner — Decoupled/Broken (ChainHeatmap orphan, MultiChainScreener dead code, MiniSparkline fake data)
+
+Work Log:
+- Read worklog.md for context on prior task history
+- Read chain-heatmap.tsx (347 lines) — confirmed export: named export `ChainHeatmap`, no props, self-contained with its own useQuery for token data
+- Read multi-chain-dashboard.tsx (770 lines) — confirmed ChainHeatmap is never imported; structure: Header → Chain Overview Cards → Bar Chart + Cross-Chain Table → Chain Ranking
+- Read API route multi-chain/route.ts (380 lines) — confirmed MultiChainScreener is never imported; route does all aggregation inline
+- Read multichain-screener.ts (559 lines) — confirmed class with getChainHealth() method returning ChainHealth[] with activityScore and isActive fields
+- Verified dexPaprikaClient singleton export exists for MultiChainScreener instantiation
+
+Fix 1: Integrated ChainHeatmap into MultiChainDashboard
+- Added import: `import { ChainHeatmap } from './chain-heatmap';`
+- Inserted ChainHeatmap section between Chain Overview Cards (Section A) and Chain Comparison Bar Chart (Section B+C)
+- Wrapped in `<div className="px-3 pt-2"><ChainHeatmap /></div>`
+
+Fix 2: Wired MultiChainScreener into API route
+- Added imports: `MultiChainScreener`, `ChainHealth` type, `dexPaprikaClient` singleton
+- Added architectural comment explaining why full screening is not wired (latency) and pointing to potential /api/market/screener endpoint
+- Added `?includeHealth=true` query parameter parsing
+- Extended ChainSummary interface with optional `activityScore` and `isActive` fields
+- Extended MultiChainResponse interface with optional `chainHealth` field
+- Added Section 5 (optional): Chain Health Scoring — when includeHealth=true:
+  - Instantiates MultiChainScreener with dexPaprikaClient
+  - Calls getChainHealth() to get per-chain activity scores
+  - Maps DexPaprika network IDs to canonical chain keys via normalizeChainKey
+  - Enriches chainSummary entries with activityScore and isActive
+  - Includes chainHealth array in response
+  - Wrapped in try/catch: fails open (proceeds without health data on error)
+
+Fix 3: Fixed MiniSparkline fallback data
+- Changed fake data generation:
+  Before: `sparkData.push(0, entry.avgChange24h)` when < 2 points (creates misleading 2-point fake trend)
+  After: `const sparkData = entry.topTokens.length >= 2 ? entry.topTokens.map(t => t.priceChange24h) : []`
+- Added conditional render: sparkline only renders when `sparkData.length >= 2`
+  Before: always rendered (MiniSparkline returns null for < 2, but container div still shown)
+  After: `{sparkData.length >= 2 && (<div>...</div>)}`
+
+Verification:
+- lint check: 0 new errors in modified files (pre-existing errors in data-ingestion.ts, event-bus.ts, etc. are unrelated)
+- tsc --noEmit: 0 new errors in modified files (pre-existing errors in multi-chain/route.ts lines 117/130/131 are from DexScreenerPair type mismatch, unrelated)
+- No errors in multi-chain-dashboard.tsx or chain-heatmap.tsx
+
+Stage Summary:
+- Files modified: 2 (multi-chain-dashboard.tsx, multi-chain/route.ts)
+- Fix 1: ChainHeatmap no longer orphan — now rendered as Section A2 in dashboard between overview cards and bar chart
+- Fix 2: MultiChainScreener no longer dead code — wired via ?includeHealth=true for optional chain health scoring with fail-open pattern
+- Fix 3: MiniSparkline no longer generates fake 2-point trends — empty data renders no sparkline instead of misleading visual
+- Build status: No new TypeScript errors
+
+---
+Task ID: 3
+Agent: Sub Agent (general-purpose)
+Task: Fix Smart Money Panel - Wallets Don't Load
+
+Work Log:
+- Read worklog.md for context on prior tasks (Tasks 1-7, fix-arch-gaps, 2-a through 5-c)
+- Read dexpaprika-client.ts to understand SmartMoneySwap and DexPaprikaSwap types
+- Read trader-intelligence.tsx to understand panel component structure
+- Read smart-money-sync/route.ts to understand sync flow
+- Discovered that DexPaprika API has a `/networks/{chain}/pools/{poolId}/transactions` endpoint that returns REAL on-chain swap data with wallet addresses (sender/recipient fields)
+- Verified the endpoint works for Solana, Base, Arbitrum, BSC chains via API testing
+
+Fix 1: Implemented getPoolSwaps() and trackSmartMoney() in dexpaprika-client.ts
+- Added DexPaprikaTransactionsResponse and DexPaprikaTransaction interfaces to match API response
+- Implemented getPoolSwaps() to call `/networks/{chain}/pools/{poolId}/transactions?limit={limit}` with caching (15s TTL)
+- Added mapDexPaprikaTransactionToSwap() to convert API response to DexPaprikaSwap format
+  - Determines buy/sell from amount_0 sign (negative = pool sends base token = user buys base)
+  - Maps sender to maker field (wallet address)
+  - Computes valueUsd from volume × price_usd
+- Implemented getWalletSwaps() to filter pool swaps by wallet address
+- Implemented trackSmartMoney() to:
+  - Call getPoolSwaps() to get recent swaps
+  - Group swaps by wallet address (maker field)
+  - Filter by minSwapCount (default 2) and minValueUsd (default $100)
+  - Compute buy/sell counts, net USD value, average size per wallet
+  - Sort by absolute net buy value descending
+  - Return SmartMoneySwap[] with full swap details per wallet
+
+Fix 2: Added auto-sync on mount in trader-intelligence.tsx
+- Added useEffect, useRef imports
+- Created autoSyncRef to prevent multiple triggers
+- Added useEffect that runs once on mount:
+  - Waits 1.5s for initial traders query to complete
+  - Checks /api/traders?limit=1 to see if any traders exist
+  - If no traders found, calls handleSyncTraders() automatically
+  - If the check fails, calls handleSyncTraders() anyway (fail-open)
+
+Fix 3: Enhanced smart-money-sync API route fallback logic
+- Existing fallback: if trackSmartMoney() returns empty, try getPoolSwaps() directly
+- New Attempt 1: Try getPoolSwaps() with existing poolId (DexScreener pair address)
+  - Group swaps by wallet, convert to SmartMoneySwap structure
+- New Attempt 2: If still empty, discover DexPaprika pools for the token
+  - Search DexPaprika for the token by symbol/address
+  - For each discovered pool, try getPoolSwaps() with the correct DexPaprika pool ID
+  - Group swaps by wallet, convert to SmartMoneySwap structure
+  - Stop after first pool that returns data
+
+Stage Summary:
+- Files modified: 3
+  - src/lib/services/data-sources/dexpaprika-client.ts (getPoolSwaps, trackSmartMoney, getWalletSwaps, mapDexPaprikaTransactionToSwap, new interfaces)
+  - src/components/dashboard/trader-intelligence.tsx (auto-sync useEffect on mount)
+  - src/app/api/smart-money-sync/route.ts (3-attempt fallback logic with DexPaprika pool discovery)
+- Key discovery: DexPaprika API `/networks/{chain}/pools/{poolId}/transactions` returns real on-chain swap data with wallet addresses for Solana, Base, Arbitrum, BSC
+- No TypeScript errors introduced (verified via tsc --noEmit)
+- No new lint errors (verified via bun run lint)
+- Build status: Clean
+
+---
+Task ID: 2-predictive
+Agent: Main Agent
+Task: Fix Predictive Section — Signals Don't Appear (4 root causes)
+
+Work Log:
+- Read worklog.md for context on prior work
+- Read src/app/api/predictive/route.ts (639 lines) — identified all 4 issues
+- Read src/components/dashboard/big-data-predictive.tsx (~1388 lines) — identified component-level issues
+- Read prisma/schema.prisma — confirmed PredictiveSignal has `direction String @default("NEUTRAL")` field
+- Read dexscreener-client.ts — confirmed DexScreenerClient.getTopChainTokens() API for auto-seeding
+
+- Fix 1: Auto-seed data when DB is empty in POST /api/predictive
+  - Changed `const [tokens, traders]` to `let [tokens, traders]` to allow reassignment
+  - Added auto-seed block after token/trader fetch: if tokens.length === 0
+    - Lazy imports dexScreenerClient from @/lib/services/data-sources/dexscreener-client
+    - Iterates chains ['solana', 'ethereum', 'base'], fetching up to 15 pairs per chain
+    - Upserts each token to DB using db.token.upsert() with DexScreener pair data
+    - Waits 1s for DB writes to settle
+    - Re-fetches tokens from DB after seeding
+    - Wrapped in try/catch — seed failures log error but don't crash the endpoint
+  - Chain name normalization: 'solana' → 'SOL', 'ethereum' → 'ETH', etc.
+
+- Fix 2: Set direction field on PredictiveSignal creation
+  - Added `direction: inferDirectionFromPrediction(result.prediction)` to db.predictiveSignal.create()
+  - Added `inferDirectionFromPrediction()` helper function (~45 lines) that:
+    - Checks prediction.direction (ACCUMULATING → BULLISH, DISTRIBUTING → BEARISH, UP/DOWN mapping)
+    - Checks prediction.netDirection (INFLOW → BULLISH, OUTFLOW → BEARISH)
+    - Checks prediction.toRegime (BULL → BULLISH, BEAR → BEARISH)
+    - Checks prediction.trend (ACCUMULATING/STABLE → BULLISH, DRAINING/CRITICAL_DRAIN → BEARISH)
+    - Checks prediction.anomalyScore (> 0.7 → BEARISH)
+    - Checks prediction.cyclePhase (EXPANSION → BULLISH, CONTRACTION → BEARISH)
+    - Checks prediction.current volatility regime (EXTREME/HIGH → BEARISH, LOW → BULLISH)
+    - Returns 'NEUTRAL' as default fallback
+
+- Fix 3: Add auto-generate on mount + pipeline connection info to component
+  - Added `useEffect` and `useRef` imports to big-data-predictive.tsx
+  - Added `ArrowRight` import from lucide-react (was missing, only ArrowRightLeft existed)
+  - Added `hasAutoGenerated` ref to prevent re-triggering
+  - Added useEffect that auto-runs handleRunFullAnalysis() on first mount when signals are empty
+    - Guards: !hasAutoGenerated.current && !signalsLoading && signals.length === 0 && !generateMutation.isPending
+    - Sets hasAutoGenerated.current = true to prevent re-trigger
+  - Added "Signal Pipeline" info section between MarketContextPanel and SignalControls:
+    - Gold Zap icon + "Signal Pipeline" header
+    - Pipeline flow: Predictive Signals → Backtesting → Monte Carlo → Risk Assessment → Paper Trading
+    - ArrowRight icons connecting each step
+    - Description text: "Signals feed into the RESEARCH pipeline (6 steps) → validates through backtesting, Monte Carlo simulation, walk-forward analysis, then risk assessment before paper trading execution."
+    - Dark theme styling consistent with rest of component
+
+- Fix 4: Fix typo DRITICAL_DRAIN → CRITICAL_DRAIN
+  - Line 494 in PredictionDataDisplay: changed 'DRITICAL_DRAIN' to 'CRITICAL_DRAIN' in the string color mapping array
+
+- TypeScript verification: 0 errors in modified files (verified via npx tsc --noEmit | rg "predictive/route|big-data-predictive")
+- Lint verification: 0 errors in modified files (verified via bun run lint | rg "predictive|big-data-predictive")
+- GET /api/predictive endpoint verified working (returns 200 with existing signals including direction field)
+
+Stage Summary:
+- Files modified: 2
+  - src/app/api/predictive/route.ts (639 → 754 lines, +115 lines)
+  - src/components/dashboard/big-data-predictive.tsx (1388 → 1421 lines, +33 lines)
+- Fix 1: Auto-seed from DexScreener when DB empty (3 chains, 15 pairs each, upsert pattern)
+- Fix 2: inferDirectionFromPrediction() — 8-factor direction inference for BULLISH/BEARISH/NEUTRAL
+- Fix 3: Auto-generate on mount + Signal Pipeline visualization with backtesting→Monte Carlo→Risk→Paper Trading flow
+- Fix 4: Typo fix DRITICAL_DRAIN → CRITICAL_DRAIN
+- Build status: No new TypeScript or lint errors
+---
+Task ID: 2
+Agent: Main Agent + full-stack-developer subagent
+Task: Fix Predictive Section - signals don't appear, direction field missing, no pipeline connection
+
+Work Log:
+- Analyzed predictive panel component (big-data-predictive.tsx, 1388 lines) and API route (route.ts)
+- Found root cause: POST /api/predictive depended on heavy lazy imports (big-data-engine, ohlcv-pipeline, token-lifecycle-engine, behavioral-model-engine) that caused OOM crashes
+- Fixed POST route: removed heavy module imports, kept inline heuristics in generateSignalFromEngine()
+- Added auto-seed logic: when tokens.length === 0, fetches from DexScreener and upserts to DB
+- Added direction field: inferDirectionFromPrediction() helper infers BULLISH/BEARISH/NEUTRAL from prediction data
+- Added auto-generate on mount: useEffect triggers handleRunFullAnalysis() when signals are empty
+- Added Signal Pipeline info section showing: Predictive Signals → Backtesting → Monte Carlo → Risk Assessment → Paper Trading
+- Fixed typo: DRITICAL_DRAIN → CRITICAL_DRAIN
+
+Stage Summary:
+- Predictive API now generates signals successfully (tested: 6 signals for SOL+ETH)
+- Direction field properly populated (BEARISH, BULLISH, NEUTRAL)
+- Auto-seed works when DB is empty
+- Pipeline connection info added to UI
+---
+Task ID: 3
+Agent: Main Agent + full-stack-developer subagent
+Task: Fix Smart Money Panel - DexPaprika stub, auto-sync
+
+Work Log:
+- Implemented DexPaprika trackSmartMoney() using real getPoolSwaps() API endpoint (/networks/{chain}/pools/{poolId}/transactions)
+- Added mapDexPaprikaTransactionToSwap() helper for transaction-to-swap conversion
+- Added auto-sync on mount in TraderIntelligencePanel: checks if traders exist, auto-triggers sync if empty
+- Enhanced smart-money-sync API with 3-attempt fallback: trackSmartMoney → getPoolSwaps → pool discovery via DexPaprika search
+
+Stage Summary:
+- DexPaprika trackSmartMoney() now returns real wallet data from on-chain swaps
+- Auto-sync triggers on first load when no traders exist
+- Fallback logic ensures multiple attempts to discover wallets
+---
+Task ID: 4
+Agent: Main Agent
+Task: Fix Meta-Model Panel - setMetaModelReport is not a function
+
+Work Log:
+- Verified the fix was already in place in crypto-store.ts (lines 470-472)
+- setMetaModelReport action exists and works correctly
+- API tested: GET /api/meta-model/report returns 12 engines
+- Restarted dev server to clear any stale module cache
+
+Stage Summary:
+- Meta-Model panel fix confirmed working - setMetaModelReport exists in Zustand store
+- API returns 12 engine reports with accuracy/brier/hitRate data
+---
+Task ID: 5
+Agent: Main Agent + full-stack-developer subagent
+Task: Fix Multi-Chain Scanner - integrate ChainHeatmap, wire MultiChainScreener
+
+Work Log:
+- Integrated ChainHeatmap component into MultiChainDashboard as section A2
+- Added ?includeHealth=true parameter to multi-chain API using MultiChainScreener.getChainHealth()
+- Fixed MiniSparkline fallback: empty array instead of fake 2-point trends
+- Added NormalizedToken interface to replace typeof references
+- Fixed DexScreener m15 field error (doesn't exist in API)
+
+Stage Summary:
+- ChainHeatmap now visible in Multi-Chain Dashboard
+- MultiChainScreener optionally enriches chain summaries with activity scores
+- Sparkline rendering fixed for sparse data
+- TypeScript errors resolved in multi-chain route

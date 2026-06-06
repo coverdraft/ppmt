@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import { useCryptoStore, type TraderIntelFilter } from '@/store/crypto-store';
 import { useQuery } from '@tanstack/react-query';
 import { Badge } from '@/components/ui/badge';
@@ -342,6 +342,31 @@ export function TraderIntelligencePanel() {
     }
     setTimeout(() => setSyncStatus('idle'), 8000);
   }, [syncStatus]);
+
+  // Auto-sync on mount if no traders exist
+  const autoSyncRef = useRef(false);
+  useEffect(() => {
+    if (autoSyncRef.current) return;
+    autoSyncRef.current = true;
+
+    // Wait a brief moment for initial query to complete, then auto-sync
+    // if the DB has no traders yet
+    const timer = setTimeout(async () => {
+      try {
+        // Quick check if any traders exist in the DB
+        const res = await fetch('/api/traders?limit=1');
+        const data = await res.json();
+        const hasTraders = data?.traders?.length > 0;
+        if (!hasTraders) {
+          handleSyncTraders();
+        }
+      } catch {
+        // If the check fails, try syncing anyway
+        handleSyncTraders();
+      }
+    }, 1500);
+    return () => clearTimeout(timer);
+  }, []);
 
   // Fetch traders from API
   const { data: tradersData } = useQuery({

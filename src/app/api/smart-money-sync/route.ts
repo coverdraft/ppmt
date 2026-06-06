@@ -200,13 +200,14 @@ async function runScan(result: SyncResult): Promise<void> {
         100,  // min $100 per swap
       );
 
-      // If trackSmartMoney returns empty (requires on-chain data not available),
-      // fall back to simulated pool swaps to still discover wallet addresses
+      // If trackSmartMoney returns empty, the poolId might not match DexPaprika's format.
+      // Try discovering the correct DexPaprika pool for this token, then retry.
       if (smartMoneySwaps.length === 0) {
+        // Attempt 1: Try getPoolSwaps directly with the existing poolId
         const poolSwaps = await dexPaprikaClient.getPoolSwaps(dpChain, poolId, 50);
 
         if (poolSwaps.length > 0) {
-          // Group simulated swaps by wallet address (maker field)
+          // Got swap data — group by wallet and convert to SmartMoneySwap structure
           const walletMap = new Map<string, typeof poolSwaps>();
 
           for (const swap of poolSwaps) {
@@ -218,7 +219,6 @@ async function runScan(result: SyncResult): Promise<void> {
             walletMap.set(wallet, existing);
           }
 
-          // Convert grouped swaps to SmartMoneySwap-like structure
           smartMoneySwaps = Array.from(walletMap.entries())
             .filter(([, swaps]) => swaps.length >= 1)
             .map(([wallet, swaps]) => {
@@ -241,6 +241,63 @@ async function runScan(result: SyncResult): Promise<void> {
                 averageSizeUsd: totalValueUsd / swaps.length,
               };
             });
+        }
+
+        // Attempt 2: If still empty, discover DexPaprika pools for this token
+        // and try with the correct DexPaprika pool ID
+        if (smartMoneySwaps.length === 0) {
+          try {
+            // Search DexPaprika for this token to find its pools
+            const searchResults = await dexPaprikaClient.searchPools({
+              query: token.symbol || token.address,
+              chain: dpChain,
+              limit: 3,
+            });
+
+            for (const pool of searchResults) {
+              if (smartMoneySwaps.length > 0) break; // Already found data
+
+              const dpPoolSwaps = await dexPaprikaClient.getPoolSwaps(pool.chain, pool.id, 50);
+              if (dpPoolSwaps.length === 0) continue;
+
+              // Group by wallet
+              const walletMap = new Map<string, typeof dpPoolSwaps>();
+              for (const swap of dpPoolSwaps) {
+                const wallet = swap.maker;
+                if (!wallet) continue;
+                const existing = walletMap.get(wallet) || [];
+                existing.push(swap);
+                walletMap.set(wallet, existing);
+              }
+
+              smartMoneySwaps = Array.from(walletMap.entries())
+                .filter(([, swaps]) => swaps.length >= 1)
+                .map(([wallet, swaps]) => {
+                  const buySwaps = swaps.filter(s => s.type === 'buy');
+                  const sellSwaps = swaps.filter(s => s.type === 'sell');
+                  const netBuyValueUsd = buySwaps.reduce((s, sw) => s + sw.valueUsd, 0)
+                    - sellSwaps.reduce((s, sw) => s + sw.valueUsd, 0);
+                  const totalValueUsd = swaps.reduce((s, sw) => s + sw.valueUsd, 0);
+
+                  return {
+                    wallet,
+                    poolId: pool.id,
+                    chain: pool.chain,
+                    swaps,
+                    netBuyAmount: 0,
+                    netBuyValueUsd,
+                    firstSwapAt: new Date(Math.min(...swaps.map(s => new Date(s.timestamp).getTime()))),
+                    lastSwapAt: new Date(Math.max(...swaps.map(s => new Date(s.timestamp).getTime()))),
+                    swapCount: swaps.length,
+                    averageSizeUsd: totalValueUsd / swaps.length,
+                  };
+                });
+            }
+          } catch (poolSearchErr) {
+            console.warn(
+              `[SmartMoneySync] DexPaprika pool discovery failed for ${token.symbol}: ${String(poolSearchErr)}`,
+            );
+          }
         }
       }
 

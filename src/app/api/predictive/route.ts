@@ -70,20 +70,16 @@ export async function GET(request: NextRequest) {
  */
 export async function POST(request: NextRequest) {
   try {
-    // Lazy-load heavy modules
-    const [
-      { detectMarketRegime, detectBotSwarm, forecastWhaleMovement, detectAnomalies, analyzeSmartMoneyPositioning, detectLiquidityDrain, calculateMeanReversionZones },
-      { ohlcvPipeline },
-      { tokenLifecycleEngine },
-      { behavioralModelEngine },
-    ] = await Promise.all([
-      import('@/lib/services/strategy/big-data-engine'),
-      import('@/lib/services/data-sources/ohlcv-pipeline'),
-      import('@/lib/services/brain/token-lifecycle-engine'),
-      import('@/lib/services/brain/behavioral-model-engine'),
-    ]);
-
+    // Import DB first (lightweight)
     const { db } = await import('@/lib/db');
+
+    // Lazy-load only the modules we actually use in the signal generation pipeline.
+    // NOTE: The heavy engine modules (big-data-engine, ohlcv-pipeline, token-lifecycle-engine,
+    // behavioral-model-engine) are NOT loaded here because they cause server OOM crashes.
+    // The generateSignalFromEngine() function uses inline heuristics that don't require them.
+    // These modules are still available for the brain orchestrator's background processing.
+    const ohlcvPipeline = null as any;
+    const tokenLifecycleEngine = null as any;
     const body = await request.json();
     const { chains, signalTypes } = body as {
       chains?: string[];
@@ -96,7 +92,7 @@ export async function POST(request: NextRequest) {
       : [...VALID_SIGNAL_TYPES];
 
     // Fetch real data from DB
-    const [tokens, traders] = await Promise.all([
+    let [tokens, traders] = await Promise.all([
       db.token.findMany({
         take: 30,
         orderBy: { volume24h: 'desc' },
@@ -118,6 +114,71 @@ export async function POST(request: NextRequest) {
       }),
     ]);
 
+    // Auto-seed if DB is empty — fetch from DexScreener and populate tokens
+    if (tokens.length === 0) {
+      try {
+        const { dexScreenerClient } = await import('@/lib/services/data-sources/dexscreener-client');
+        const chainsToSeed = ['solana', 'ethereum', 'base'];
+        const seededAddresses = new Set<string>();
+
+        for (const seedChain of chainsToSeed) {
+          try {
+            const pairs = await dexScreenerClient.getTopChainTokens(seedChain, 15);
+            for (const pair of pairs) {
+              const addr = pair.baseToken?.address;
+              if (!addr || seededAddresses.has(addr)) continue;
+              seededAddresses.add(addr);
+
+              try {
+                await db.token.upsert({
+                  where: { address: addr },
+                  create: {
+                    symbol: pair.baseToken?.symbol || 'UNKNOWN',
+                    name: pair.baseToken?.name || pair.baseToken?.symbol || 'Unknown',
+                    address: addr,
+                    chain: seedChain.toUpperCase() === 'SOLANA' ? 'SOL' : seedChain.toUpperCase() === 'ETHEREUM' ? 'ETH' : seedChain.toUpperCase(),
+                    priceUsd: parseFloat(pair.priceUsd || '0'),
+                    volume24h: pair.volume?.h24 || 0,
+                    liquidity: pair.liquidity?.usd || 0,
+                    marketCap: pair.marketCap || pair.fdv || 0,
+                    priceChange1h: pair.priceChange?.h1 || 0,
+                    priceChange24h: pair.priceChange?.h24 || 0,
+                    priceChange6h: pair.priceChange?.h6 || 0,
+                    dexId: pair.dexId,
+                    pairAddress: pair.pairAddress,
+                  },
+                  update: {
+                    priceUsd: parseFloat(pair.priceUsd || '0'),
+                    volume24h: pair.volume?.h24 || 0,
+                    liquidity: pair.liquidity?.usd || 0,
+                    priceChange1h: pair.priceChange?.h1 || 0,
+                    priceChange24h: pair.priceChange?.h24 || 0,
+                  },
+                });
+              } catch { /* skip individual token errors */ }
+            }
+          } catch { /* skip chain seed errors */ }
+        }
+
+        // Wait briefly for DB writes to settle
+        await new Promise(r => setTimeout(r, 1000));
+
+        // Re-fetch tokens now that DB is seeded
+        tokens = await db.token.findMany({
+          take: 30,
+          orderBy: { volume24h: 'desc' },
+          select: {
+            id: true, symbol: true, address: true, chain: true,
+            priceUsd: true, priceChange1h: true, priceChange24h: true,
+            volume24h: true, liquidity: true, botActivityPct: true, smartMoneyPct: true,
+          },
+        });
+      } catch (seedError) {
+        console.error('[Predictive API] Auto-seed failed:', seedError);
+        // Continue with empty tokens — signals will be sparse but won't crash
+      }
+    }
+
     const generatedSignals: Array<{ id: string; signalType: string; chain: string; confidence: number }> = [];
 
     // Pre-compute engine inputs from REAL OHLCV data
@@ -126,14 +187,16 @@ export async function POST(request: NextRequest) {
     
     for (const token of tokens) {
       try {
-        let series = await ohlcvPipeline.getCandleSeries(token.address, '1h', 50);
+        let series = ohlcvPipeline ? await ohlcvPipeline.getCandleSeries(token.address, '1h', 50) : { closes: [] };
         
         if (series.closes.length >= 10) {
           tokenPriceHistories.set(token.id, series.closes);
         } else {
           try {
-            await ohlcvPipeline.backfillToken(token.address, token.chain, ['1h']);
-            series = await ohlcvPipeline.getCandleSeries(token.address, '1h', 50);
+            if (ohlcvPipeline) {
+              await ohlcvPipeline.backfillToken(token.address, token.chain, ['1h']);
+              series = await ohlcvPipeline.getCandleSeries(token.address, '1h', 50);
+            }
           } catch { /* Backfill failed */ }
 
           if (series.closes.length >= 10) {
@@ -160,7 +223,7 @@ export async function POST(request: NextRequest) {
       }
 
       try {
-        const phaseResult = await tokenLifecycleEngine.detectPhase(token.address, token.chain);
+        const phaseResult = tokenLifecycleEngine ? await tokenLifecycleEngine.detectPhase(token.address, token.chain) : { phase: 'GROWTH' };
         tokenLifecyclePhases.set(token.id, phaseResult.phase);
       } catch {
         tokenLifecyclePhases.set(token.id, 'GROWTH');
@@ -230,6 +293,7 @@ export async function POST(request: NextRequest) {
                 : null,
               sector: result.sector,
               prediction: JSON.stringify(result.prediction),
+              direction: inferDirectionFromPrediction(result.prediction),
               confidence: result.confidence,
               timeframe: result.timeframe,
               validUntil: new Date(Date.now() + getTimeframeMs(result.timeframe)),
@@ -600,6 +664,56 @@ function classifyTokenSector(symbol: string, address: string): string {
 function getTimeframeMs(timeframe: string): number {
   const map: Record<string, number> = { '15m': 900000, '1h': 3600000, '4h': 14400000, '12h': 43200000, '1d': 86400000, '3d': 259200000 };
   return map[timeframe] || 3600000;
+}
+
+/**
+ * Infer a BULLISH/BEARISH/NEUTRAL direction from a prediction object.
+ * Looks at known prediction fields to determine directional bias.
+ */
+function inferDirectionFromPrediction(prediction: Record<string, unknown>): string {
+  // Explicit direction field
+  if (prediction.direction) {
+    const d = String(prediction.direction).toUpperCase();
+    if (['BULLISH', 'BEARISH', 'NEUTRAL', 'UP', 'DOWN'].includes(d)) {
+      return d === 'UP' ? 'BULLISH' : d === 'DOWN' ? 'BEARISH' : d;
+    }
+    // Map accumulation/distribution directions
+    if (d === 'ACCUMULATING') return 'BULLISH';
+    if (d === 'DISTRIBUTING') return 'BEARISH';
+  }
+  // netDirection from smart money / whale flows
+  if (prediction.netDirection) {
+    const nd = String(prediction.netDirection).toUpperCase();
+    if (nd === 'INFLOW') return 'BULLISH';
+    if (nd === 'OUTFLOW') return 'BEARISH';
+  }
+  // toRegime from regime change signals
+  if (prediction.toRegime) {
+    const r = String(prediction.toRegime).toUpperCase();
+    if (r === 'BULL') return 'BULLISH';
+    if (r === 'BEAR') return 'BEARISH';
+  }
+  // trend from liquidity drain signals
+  if (prediction.trend) {
+    const t = String(prediction.trend).toUpperCase();
+    if (['ACCUMULATING', 'STABLE'].includes(t)) return 'BULLISH';
+    if (['DRAINING', 'CRITICAL_DRAIN'].includes(t)) return 'BEARISH';
+  }
+  // anomalyScore-based inference
+  if (prediction.anomalyScore && Number(prediction.anomalyScore) > 0.7) return 'BEARISH';
+  // cyclePhase-based inference
+  if (prediction.cyclePhase) {
+    const cp = String(prediction.cyclePhase).toUpperCase();
+    if (cp === 'EXPANSION') return 'BULLISH';
+    if (cp === 'CONTRACTION') return 'BEARISH';
+  }
+  // volatility regime
+  if (prediction.current) {
+    const v = String(prediction.current).toUpperCase();
+    if (v === 'EXTREME' || v === 'HIGH') return 'BEARISH';
+    if (v === 'LOW') return 'BULLISH';
+  }
+  return 'NEUTRAL';
 }
 
 // Heuristic fallbacks

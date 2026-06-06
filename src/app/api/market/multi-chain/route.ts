@@ -3,6 +3,15 @@ import { db } from '@/lib/db';
 import { normalizeChain, getChainVariants } from '@/lib/format';
 import { dexScreenerClient, type DexScreenerPair } from '@/lib/services/data-sources/dexscreener-client';
 
+// MultiChainScreener provides chain health/activity scoring via DexPaprika.
+// Used when ?includeHealth=true is passed to enrich chain summaries with activity scores.
+// Full token screening (screenAllChains / screenChain) is also available from this service
+// for cross-chain token discovery, but is intentionally not wired here to avoid latency
+// on the dashboard's primary data path. Consider adding a dedicated /api/market/screener
+// endpoint if on-demand screening is needed.
+import { MultiChainScreener, type ChainHealth } from '@/lib/services/data-sources/multichain-screener';
+import { dexPaprikaClient } from '@/lib/services/data-sources/dexpaprika-client';
+
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
@@ -10,12 +19,33 @@ export const dynamic = 'force-dynamic';
 // TYPES
 // ============================================================
 
+interface NormalizedToken {
+  id: string;
+  symbol: string;
+  name: string;
+  chain: string;
+  priceUsd: number;
+  volume24h: number;
+  marketCap: number;
+  liquidity: number;
+  priceChange5m: number;
+  priceChange15m: number;
+  priceChange1h: number;
+  priceChange6h: number;
+  priceChange24h: number;
+  [key: string]: unknown;
+}
+
 interface ChainSummary {
   tokenCount: number;
   totalVolume24h: number;
   avgPriceChange24h: number;
   topGainer: { symbol: string; priceChange24h: number; priceUsd: number } | null;
   topLoser: { symbol: string; priceChange24h: number; priceUsd: number } | null;
+  /** Populated when ?includeHealth=true — activity score from MultiChainScreener */
+  activityScore?: number;
+  /** Populated when ?includeHealth=true — whether chain is considered active */
+  isActive?: boolean;
 }
 
 interface CrossChainToken {
@@ -50,6 +80,8 @@ interface MultiChainResponse {
   crossChainTokens: CrossChainToken[];
   topTokensByChain: Record<string, TopTokenEntry[]>;
   chainRanking: ChainRankingEntry[];
+  /** Populated when ?includeHealth=true — per-chain health from MultiChainScreener */
+  chainHealth?: ChainHealth[];
 }
 
 // ============================================================
@@ -99,7 +131,7 @@ function dexPairToToken(pair: DexScreenerPair) {
     marketCap: pair.marketCap || pair.fdv || 0,
     liquidity: pair.liquidity?.usd || 0,
     priceChange5m: pair.priceChange?.m5 || 0,
-    priceChange15m: pair.priceChange?.m15 || 0,
+    priceChange15m: 0, // DexScreener doesn't provide 15m data
     priceChange1h: pair.priceChange?.h1 || 0,
     priceChange6h: pair.priceChange?.h6 || 0,
     priceChange24h: pair.priceChange?.h24 || 0,
@@ -112,8 +144,8 @@ function dexPairToToken(pair: DexScreenerPair) {
  */
 async function enrichFromDexScreener(
   chainsNeedingEnrichment: string[],
-): Promise<typeof normalizedTokens> {
-  const enriched: typeof normalizedTokens = [];
+): Promise<NormalizedToken[]> {
+  const enriched: NormalizedToken[] = [];
 
   for (const chainKey of chainsNeedingEnrichment) {
     const dexChain = CHAIN_TO_DEXSCREENER_QUERY[chainKey];
@@ -127,7 +159,7 @@ async function enrichFromDexScreener(
       for (const pair of pairs) {
         const token = dexPairToToken(pair);
         if (SUPPORTED_CHAINS.includes(token.chain)) {
-          enriched.push(token as any);
+          enriched.push(token as NormalizedToken);
         }
       }
     } catch (err) {
@@ -150,6 +182,7 @@ export async function GET(request: NextRequest) {
   const metric = sp.get('metric') || 'volume';  // volume | marketCap | priceChange | trades
   const topN = Math.min(Math.max(parseInt(sp.get('topN') || '10', 10), 1), 50);
   const includeCrossChain = sp.get('includeCrossChain') !== 'false';
+  const includeHealth = sp.get('includeHealth') === 'true';
 
   // Determine which chains to include
   const requestedChains = chainsParam
@@ -204,7 +237,7 @@ export async function GET(request: NextRequest) {
       for (const token of enriched) {
         const key = `${token.symbol.toUpperCase()}-${token.chain}`;
         if (!existingKeys.has(key)) {
-          normalizedTokens.push(token);
+          normalizedTokens.push(token as typeof normalizedTokens[number]);
           existingKeys.add(key);
         }
       }
@@ -218,7 +251,7 @@ export async function GET(request: NextRequest) {
     // 1. CHAIN SUMMARY
     // ============================================================
     const chainSummary: Record<string, ChainSummary> = {};
-    const tokensByChain: Record<string, typeof normalizedTokens> = {};
+    const tokensByChain: Record<string, NormalizedToken[]> = {};
 
     for (const chain of requestedChains) {
       const tokens = normalizedTokens.filter(t => t.chain === chain);
@@ -291,7 +324,7 @@ export async function GET(request: NextRequest) {
 
     if (includeCrossChain) {
       // Group all tokens by uppercase symbol
-      const symbolMap: Record<string, typeof normalizedTokens> = {};
+      const symbolMap: Record<string, NormalizedToken[]> = {};
       for (const token of normalizedTokens) {
         const sym = token.symbol.toUpperCase();
         if (!symbolMap[sym]) symbolMap[sym] = [];
@@ -353,12 +386,43 @@ export async function GET(request: NextRequest) {
       .sort((a, b) => b.totalVolume24h - a.totalVolume24h)
       .map((entry, i) => ({ ...entry, rank: i + 1 }));
 
+    // ============================================================
+    // 5. OPTIONAL: CHAIN HEALTH SCORING (MultiChainScreener)
+    // ============================================================
+    let chainHealth: ChainHealth[] | undefined;
+    if (includeHealth) {
+      try {
+        const screener = new MultiChainScreener(dexPaprikaClient);
+        chainHealth = await screener.getChainHealth();
+
+        // Enrich chain summaries with activity scores
+        const healthMap: Record<string, ChainHealth> = {};
+        for (const h of chainHealth) {
+          // Map DexPaprika network IDs to our canonical chain keys
+          const mappedKey = normalizeChainKey(h.networkId);
+          healthMap[mappedKey] = h;
+        }
+
+        for (const chain of requestedChains) {
+          const health = healthMap[chain];
+          if (health && chainSummary[chain]) {
+            chainSummary[chain].activityScore = health.activityScore;
+            chainSummary[chain].isActive = health.isActive;
+          }
+        }
+      } catch (err) {
+        console.warn('[/api/market/multi-chain] Chain health scoring failed:', err);
+        // Fail open — proceed without health data
+      }
+    }
+
     // Build response
     const response: MultiChainResponse = {
       chainSummary,
       crossChainTokens,
       topTokensByChain,
       chainRanking,
+      ...(chainHealth ? { chainHealth } : {}),
     };
 
     return NextResponse.json({

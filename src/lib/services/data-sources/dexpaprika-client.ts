@@ -240,6 +240,39 @@ interface DexPaprikaSearchToken {
   price_usd_change: number | string | null;
 }
 
+/** DexPaprika /transactions response shape */
+interface DexPaprikaTransactionsResponse {
+  transactions: DexPaprikaTransaction[];
+}
+
+/** Individual transaction from DexPaprika /transactions */
+interface DexPaprikaTransaction {
+  id: string;
+  log_index: number;
+  transaction_index: number;
+  factory_id: string;
+  pool_id: string;
+  chain: string;
+  sender: string;
+  recipient: string;
+  token_0: string;
+  token_0_symbol: string;
+  token_1: string;
+  token_1_symbol: string;
+  amount_0: number;
+  amount_1: number;
+  volume_0: number;
+  volume_1: number;
+  price_0: number;
+  price_1: number;
+  price_0_usd: number;
+  price_1_usd: number;
+  created_at_block_number: number;
+  created_at_block_hash?: string;
+  created_at: string;
+  canonical_chain?: boolean;
+}
+
 /** DexScreener pair type — re-exported from canonical client */
 export type { DexScreenerPair } from './dexscreener-client';
 
@@ -519,42 +552,63 @@ export class DexPaprikaClient {
   }
 
   // ----------------------------------------------------------
-  // SWAPS (simulated from DexScreener txn data)
+  // SWAPS (from DexPaprika /transactions API)
   // ----------------------------------------------------------
 
   /**
    * Get recent swaps for a pool.
-   * NOTE: Neither DexPaprika nor DexScreener provides individual swap data
-   * with real wallet addresses. Previously generated simulated/fake wallet
-   * addresses which polluted the Trader DB with garbage data.
-   * Now returns empty array. For real swap data, use:
-   *   - Etherscan API (Ethereum) — already integrated
-   *   - Helius API (Solana) — future integration
-   *   - Direct RPC on-chain indexing
+   * Uses DexPaprika's /networks/{chain}/pools/{poolId}/transactions endpoint
+   * which returns real on-chain swap data with wallet addresses.
+   *
+   * Supports: Solana, Base, Arbitrum, BSC, Ethereum, and other DexPaprika networks.
    */
   async getPoolSwaps(
-    _chain: string,
-    _poolId: string,
-    _limit = 50,
+    chain: string,
+    poolId: string,
+    limit = 50,
   ): Promise<DexPaprikaSwap[]> {
-    // Real swap data with wallet addresses requires on-chain indexing.
-    // Returning empty to prevent fake wallets from polluting the DB.
-    return [];
+    const dpChain = this.toDexPaprikaChain(chain);
+    const key = cacheKeyWithChain(SOURCE, 'pool-swaps', dpChain, `${poolId}:${limit}`);
+
+    return unifiedCache.getOrFetch(
+      key,
+      async () => {
+        try {
+          const data = await this.fetchDexPaprika<DexPaprikaTransactionsResponse>(
+            `/networks/${dpChain}/pools/${poolId}/transactions?limit=${limit}`
+          );
+
+          if (!data || !data.transactions || data.transactions.length === 0) return [];
+
+          return data.transactions
+            .filter(tx => tx.sender && tx.id)
+            .map(tx => this.mapDexPaprikaTransactionToSwap(tx));
+        } catch (error) {
+          // Pool transactions may not be available for all pools
+          console.warn(`[DexPaprika] getPoolSwaps failed for ${dpChain}/${poolId}:`, error);
+          return [];
+        }
+      },
+      SOURCE,
+      15_000, // 15s TTL for swaps (fresh data needed)
+    );
   }
 
   /**
    * Get swaps for a specific wallet in a pool.
-   * NOTE: Wallet-level swap data is not available via DexPaprika or DexScreener.
-   * Returns empty array - use on-chain RPC for real wallet data.
+   * Filters the pool's transaction list for swaps involving the given wallet.
    */
   async getWalletSwaps(
-    _chain: string,
-    _poolId: string,
-    _walletAddress: string,
-    _limit = 50,
+    chain: string,
+    poolId: string,
+    walletAddress: string,
+    limit = 50,
   ): Promise<DexPaprikaSwap[]> {
-    // Wallet-level swap data requires on-chain indexing (Helius, Etherscan, etc.)
-    return [];
+    const allSwaps = await this.getPoolSwaps(chain, poolId, Math.min(limit * 3, 200));
+    const walletLower = walletAddress.toLowerCase();
+    return allSwaps
+      .filter(s => s.maker.toLowerCase() === walletLower)
+      .slice(0, limit);
   }
 
   // ----------------------------------------------------------
@@ -905,28 +959,104 @@ export class DexPaprikaClient {
   }
 
   // ----------------------------------------------------------
-  // SMART MONEY TRACKING (requires on-chain data)
+  // SMART MONEY TRACKING (using DexPaprika /transactions API)
   // ----------------------------------------------------------
 
   /**
    * Track smart money activity in a pool.
-   * NOTE: Smart money tracking requires on-chain data with wallet addresses,
-   * which is NOT available from DexPaprika or DexScreener APIs.
-   * Returns empty array. For real smart money tracking, integrate:
-   *   - Helius API (Solana enhanced transactions)
-   *   - Etherscan API (Ethereum transaction history)
-   *   - On-chain indexing via RPC
+   * Uses DexPaprika's /transactions endpoint to get real swap data with
+   * wallet addresses, then groups by wallet to identify active traders.
+   *
+   * Smart money criteria:
+   *   - Minimum swap count (default 2)
+   *   - Minimum net value in USD (default $100)
+   *
+   * Results sorted by absolute net buy value (descending).
    */
   async trackSmartMoney(
-    _chain: string,
-    _poolId: string,
-    _minSwapCount = 2,
-    _minValueUsd = 100,
+    chain: string,
+    poolId: string,
+    minSwapCount = 2,
+    minValueUsd = 100,
   ): Promise<SmartMoneySwap[]> {
-    // Smart money tracking requires on-chain wallet-level data
-    // which is not available from DexPaprika or DexScreener.
-    // Use Helius/Etherscan/RPC for real implementation.
-    return [];
+    try {
+      // Get recent swaps from the pool using the /transactions endpoint
+      const swaps = await this.getPoolSwaps(chain, poolId, 50);
+      if (!swaps || swaps.length === 0) return [];
+
+      // Group swaps by wallet address (maker field)
+      const walletMap = new Map<string, {
+        address: string;
+        buyCount: number;
+        sellCount: number;
+        totalBuyUsd: number;
+        totalSellUsd: number;
+        swaps: DexPaprikaSwap[];
+      }>();
+
+      for (const swap of swaps) {
+        const addr = swap.maker;
+        if (!addr) continue;
+
+        if (!walletMap.has(addr)) {
+          walletMap.set(addr, {
+            address: addr,
+            buyCount: 0,
+            sellCount: 0,
+            totalBuyUsd: 0,
+            totalSellUsd: 0,
+            swaps: [],
+          });
+        }
+        const w = walletMap.get(addr)!;
+        w.swaps.push(swap);
+
+        const isBuy = swap.type === 'buy';
+        const valueUsd = swap.valueUsd || 0;
+
+        if (isBuy) {
+          w.buyCount++;
+          w.totalBuyUsd += valueUsd;
+        } else {
+          w.sellCount++;
+          w.totalSellUsd += valueUsd;
+        }
+      }
+
+      // Filter wallets that meet minimum criteria and build results
+      const results: SmartMoneySwap[] = [];
+      for (const [_, wallet] of walletMap) {
+        const totalSwaps = wallet.buyCount + wallet.sellCount;
+        if (totalSwaps < minSwapCount) continue;
+
+        const netBuyValueUsd = wallet.totalBuyUsd - wallet.totalSellUsd;
+        if (Math.abs(netBuyValueUsd) < minValueUsd) continue;
+
+        const netBuyAmount = 0; // Cannot determine exact token amount from swap summary
+        const totalValueUsd = wallet.totalBuyUsd + wallet.totalSellUsd;
+        const timestamps = wallet.swaps.map(s => new Date(s.timestamp).getTime()).filter(t => !isNaN(t));
+
+        results.push({
+          wallet: wallet.address,
+          poolId,
+          chain,
+          swaps: wallet.swaps,
+          netBuyAmount,
+          netBuyValueUsd,
+          firstSwapAt: new Date(timestamps.length > 0 ? Math.min(...timestamps) : Date.now()),
+          lastSwapAt: new Date(timestamps.length > 0 ? Math.max(...timestamps) : Date.now()),
+          swapCount: totalSwaps,
+          averageSizeUsd: totalSwaps > 0 ? totalValueUsd / totalSwaps : 0,
+        });
+      }
+
+      // Sort by absolute net value descending
+      results.sort((a, b) => Math.abs(b.netBuyValueUsd) - Math.abs(a.netBuyValueUsd));
+      return results;
+    } catch (error) {
+      console.error('[DexPaprika] trackSmartMoney error:', error);
+      return [];
+    }
   }
 
   // ----------------------------------------------------------
@@ -1111,6 +1241,58 @@ export class DexPaprikaClient {
       marketCap: 0, // Not provided by DexPaprika search
       liquidity: typeof t.liquidity_usd === 'number' ? t.liquidity_usd : parseFloat(String(t.liquidity_usd ?? '0')) || 0,
       fdv: 0, // Not provided by DexPaprika search
+    };
+  }
+
+  /** Map a DexPaprika /transactions response to our DexPaprikaSwap type */
+  private mapDexPaprikaTransactionToSwap(tx: DexPaprikaTransaction): DexPaprikaSwap {
+    // Determine buy/sell based on amount signs:
+    // In DexPaprika, amount_0 > 0 means the pool received token_0 (someone sold token_0)
+    // amount_0 < 0 means the pool sent token_0 (someone bought token_0)
+    // We consider token_0 as the "base" token.
+    // If the user (sender) is buying the base token: they send quote (token_1) and receive base (token_0)
+    // From the pool's perspective: amount_0 < 0 (pool sends base), amount_1 > 0 (pool receives quote)
+    // So: amount_0 < 0 → buy of token_0 by the sender
+    const isBuy = tx.amount_0 < 0;
+
+    // Determine which token the sender is sending in and receiving out
+    const tokenIn = isBuy
+      ? { address: tx.token_1, symbol: tx.token_1_symbol }
+      : { address: tx.token_0, symbol: tx.token_0_symbol };
+    const tokenOut = isBuy
+      ? { address: tx.token_0, symbol: tx.token_0_symbol }
+      : { address: tx.token_1, symbol: tx.token_1_symbol };
+
+    // Amount in = the amount the sender sends (absolute value)
+    const amountIn = isBuy
+      ? String(Math.abs(tx.volume_1))
+      : String(Math.abs(tx.volume_0));
+    const amountOut = isBuy
+      ? String(Math.abs(tx.volume_0))
+      : String(Math.abs(tx.volume_1));
+
+    // Value in USD: use the USD price of the sent token times volume
+    const valueUsd = isBuy
+      ? Math.abs(tx.volume_1) * (tx.price_1_usd || 0)
+      : Math.abs(tx.volume_0) * (tx.price_0_usd || 0);
+
+    // Price per unit of the token being acquired
+    const priceUsd = isBuy
+      ? (tx.price_0_usd || 0)
+      : (tx.price_1_usd || 0);
+
+    return {
+      txnHash: tx.id,
+      blockNumber: tx.created_at_block_number,
+      timestamp: tx.created_at,
+      maker: tx.sender,
+      amountIn,
+      amountOut,
+      tokenIn,
+      tokenOut,
+      type: isBuy ? 'buy' : 'sell',
+      valueUsd,
+      priceUsd,
     };
   }
 
