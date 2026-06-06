@@ -51,7 +51,6 @@ import {
   Tooltip,
   ResponsiveContainer,
   ReferenceLine,
-  Bar,
 } from 'recharts';
 
 // ============================================================

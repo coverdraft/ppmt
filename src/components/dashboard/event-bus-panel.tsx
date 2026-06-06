@@ -552,6 +552,7 @@ export function EventBusPanel() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const eventCountRef = useRef(0);
   const eventsThisMinuteRef = useRef<EventBusEvent[]>([]);
+  const seenIdsRef = useRef(new Set<string>());
 
   // Poll for events from API every 2 seconds
   useEffect(() => {
@@ -586,10 +587,10 @@ export function EventBusPanel() {
           );
 
           // Merge with store events (API events supplement the store)
-          // Only add events we don't already have
-          const existingIds = new Set(eventBusEvents.map((ev) => ev.id));
-          const newApiEvents = apiEvents.filter((e) => !existingIds.has(e.id));
+          // Only add events we don't already have (using ref to avoid stale closure)
+          const newApiEvents = apiEvents.filter((e) => !seenIdsRef.current.has(e.id));
           for (const ev of newApiEvents) {
+            seenIdsRef.current.add(ev.id);
             addEventBusEvent(ev);
           }
         }

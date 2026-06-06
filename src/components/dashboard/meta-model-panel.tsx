@@ -140,7 +140,6 @@ export function MetaModelPanel() {
   const [timeRange, setTimeRange] = useState<'7d' | '30d'>('7d');
   const [rebalancing, setRebalancing] = useState(false);
   const setMetaModelReport = useCryptoStore((s) => s.setMetaModelReport);
-  const metaModelReport = useCryptoStore((s) => s.metaModelReport);
 
   // Fetch data
   const { data: apiData, isLoading, isError, refetch } = useQuery({
@@ -212,9 +211,13 @@ export function MetaModelPanel() {
   // Use getState() directly to avoid selector returning undefined in some
   // Zustand v5 + React 19 edge cases (see: "setMetaModelReport is not a function")
   useEffect(() => {
-    const fn = useCryptoStore.getState().setMetaModelReport;
-    if (typeof fn === 'function') {
-      fn(transformedReport);
+    try {
+      const fn = useCryptoStore.getState().setMetaModelReport;
+      if (typeof fn === 'function') {
+        fn(transformedReport);
+      }
+    } catch (err) {
+      console.warn('[MetaModelPanel] Failed to sync report to store:', err);
     }
   }, [transformedReport]);
 

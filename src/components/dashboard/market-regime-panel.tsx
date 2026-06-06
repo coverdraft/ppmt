@@ -340,7 +340,6 @@ export default function MarketRegimePanel() {
   const {
     marketRegime,
     setMarketRegime,
-    marketRegimeLoading,
     setMarketRegimeLoading,
   } = useCryptoStore();
 
@@ -349,7 +348,7 @@ export default function MarketRegimePanel() {
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // ---- FETCH REGIME DATA via useQuery ----
-  const { refetch: refetchRegime, error: queryError } = useQuery({
+  const { refetch: refetchRegime, error: queryError, isFetching } = useQuery({
     queryKey: ['regime-assess'],
     queryFn: async () => {
       const res = await fetch('/api/regime/assess');
@@ -370,8 +369,8 @@ export default function MarketRegimePanel() {
 
   // Sync loading state from query
   useEffect(() => {
-    setMarketRegimeLoading(false);
-  }, [marketRegime, setMarketRegimeLoading]);
+    setMarketRegimeLoading(isFetching);
+  }, [isFetching, setMarketRegimeLoading]);
 
   // Countdown timer
   useEffect(() => {
@@ -472,7 +471,7 @@ export default function MarketRegimePanel() {
   // RENDER: LOADING STATE
   // ============================================================
 
-  if (marketRegimeLoading && !marketRegime) {
+  if (isFetching && !marketRegime) {
     return (
       <div className="flex flex-col h-full bg-[#0a0e17]">
         <div className="flex items-center gap-2.5 px-4 py-2 bg-[#0d1117] border-b border-[#1e293b] shrink-0">
@@ -562,10 +561,10 @@ export default function MarketRegimePanel() {
               variant="ghost"
               size="sm"
               onClick={() => refetchRegime()}
-              disabled={marketRegimeLoading}
+              disabled={isFetching}
               className="h-6 text-[9px] font-mono px-2 text-[#94a3b8] hover:text-cyan-400 hover:bg-cyan-500/10"
             >
-              {marketRegimeLoading ? (
+              {isFetching ? (
                 <Loader2 className="h-3 w-3 animate-spin" />
               ) : (
                 <RefreshCw className="h-3 w-3 mr-1" />
