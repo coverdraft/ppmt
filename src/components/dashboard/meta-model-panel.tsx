@@ -143,16 +143,27 @@ export function MetaModelPanel() {
   const metaModelReport = useCryptoStore((s) => s.metaModelReport);
 
   // Fetch data
-  const { data: apiData, isLoading, refetch } = useQuery({
+  const { data: apiData, isLoading, isError, refetch } = useQuery({
     queryKey: ['meta-model-report'],
     queryFn: async () => {
-      const res = await fetch('/api/meta-model/report');
-      if (!res.ok) throw new Error('Failed to fetch meta-model report');
-      const json = await res.json();
-      return json.data as ApiEngineReport[] | null;
+      try {
+        const res = await fetch('/api/meta-model/report');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = await res.json();
+        // Handle both { data: [...] } and { data: null, error: '...' } responses
+        if (json.error && !json.data) {
+          console.warn('[MetaModelPanel] API returned error:', json.error);
+          return null;
+        }
+        return (json.data ?? null) as ApiEngineReport[] | null;
+      } catch (err) {
+        console.warn('[MetaModelPanel] Fetch failed:', err);
+        return null;
+      }
     },
     refetchInterval: 30000,
     staleTime: 15000,
+    retry: 2,
   });
 
   // Transform API data into store format
@@ -273,6 +284,25 @@ export function MetaModelPanel() {
         <div className="flex flex-col items-center gap-3">
           <Brain className="h-8 w-8 text-[#d4af37] animate-pulse" />
           <span className="text-[#64748b] font-mono text-sm">Loading Meta-Model Report...</span>
+        </div>
+      </div>
+    );
+  }
+
+  // Error state — API unreachable or returned error
+  if (isError && !report) {
+    return (
+      <div className="flex items-center justify-center h-full bg-[#0a0e17] border border-[#1e293b] rounded-lg">
+        <div className="flex flex-col items-center gap-3 p-6 text-center">
+          <Brain className="h-8 w-8 text-[#475569]" />
+          <span className="text-[#64748b] font-mono text-sm">Meta-Model API Unavailable</span>
+          <span className="text-[#475569] font-mono text-xs">The meta-model engine could not be reached. Data will populate once the engine initializes.</span>
+          <button
+            onClick={() => refetch()}
+            className="mt-2 px-3 py-1.5 bg-[#d4af37]/10 text-[#d4af37] border border-[#d4af37]/30 rounded text-[10px] font-mono hover:bg-[#d4af37]/20 transition-colors"
+          >
+            Retry
+          </button>
         </div>
       </div>
     );

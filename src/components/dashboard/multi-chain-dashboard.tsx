@@ -138,18 +138,22 @@ export default function MultiChainDashboard() {
   const [seedError, setSeedError] = useState<string | null>(null);
 
   // Fetch multi-chain data
-  const { data: apiResponse, isLoading, isError, refetch } = useQuery({
+  const { data: apiResponse, isLoading, isError, error, refetch } = useQuery({
     queryKey: ['multi-chain', selectedChains.join(',')],
     queryFn: async () => {
       const chainsParam = selectedChains.length > 0 ? selectedChains.join(',').toLowerCase() : '';
       const url = `/api/market/multi-chain?chains=${chainsParam}&topN=10&includeCrossChain=true`;
       const res = await fetch(url);
-      if (!res.ok) throw new Error('Failed to fetch');
+      if (!res.ok) {
+        const json = await res.json().catch(() => null);
+        throw new Error(json?.error || `HTTP ${res.status}`);
+      }
       const json = await res.json();
       return json.data as MultiChainData | null;
     },
     refetchInterval: 60_000,
     staleTime: 30_000,
+    retry: 2,
   });
 
   const data = apiResponse;
@@ -280,21 +284,32 @@ export default function MultiChainDashboard() {
 
   if (isError || !filteredData) {
     return (
-      <div className="flex flex-col items-center justify-center h-full bg-[#0d1117] border border-[#1e293b] rounded-lg gap-3 px-4">
+      <div className="flex flex-col items-center justify-center h-full bg-[#0d1117] border border-[#1e293b] rounded-lg gap-3 px-6 py-8">
         <Layers className="h-8 w-8 text-[#475569]" />
         <span className="font-mono text-[11px] text-[#64748b]">Unable to load multi-chain data</span>
-        <span className="font-mono text-[9px] text-[#475569]">The database may be empty or the API is unreachable</span>
-        <Button
-          onClick={handleSeed}
-          disabled={isSeeding}
-          className="mt-2 bg-[#3b82f6] hover:bg-[#3b82f6]/80 text-white font-mono text-[11px] h-8 px-4"
-        >
-          {isSeeding ? (
-            <><Loader2 className="h-3 w-3 mr-1.5 animate-spin" /> Seeding...</>
-          ) : (
-            <><Database className="h-3 w-3 mr-1.5" /> Load Data</>
-          )}
-        </Button>
+        <span className="font-mono text-[9px] text-[#475569] text-center max-w-sm">
+          {error instanceof Error ? error.message : 'The database may be empty or the API is unreachable'}
+        </span>
+        <div className="flex items-center gap-2 mt-1">
+          <Button
+            onClick={() => refetch()}
+            variant="ghost"
+            className="font-mono text-[11px] h-8 px-4 text-[#94a3b8] hover:text-[#e2e8f0]"
+          >
+            <RefreshCw className="h-3 w-3 mr-1.5" /> Retry
+          </Button>
+          <Button
+            onClick={handleSeed}
+            disabled={isSeeding}
+            className="bg-[#d4af37]/20 hover:bg-[#d4af37]/30 text-[#d4af37] font-mono text-[11px] h-8 px-4 border border-[#d4af37]/30"
+          >
+            {isSeeding ? (
+              <><Loader2 className="h-3 w-3 mr-1.5 animate-spin" /> Seeding...</>
+            ) : (
+              <><Database className="h-3 w-3 mr-1.5" /> Load Data</>
+            )}
+          </Button>
+        </div>
         {seedError && (
           <span className="font-mono text-[9px] text-red-400">{seedError}</span>
         )}

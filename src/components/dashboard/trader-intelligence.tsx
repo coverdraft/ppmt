@@ -318,33 +318,31 @@ export function TraderIntelligencePanel() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'full' }),
       });
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
       const data = await res.json();
       if (data.success) {
         setSyncStatus('done');
-        setSyncMessage('Sync started — wallets being profiled in background');
-        // Also seed traders if none exist
-        const seedRes = await fetch('/api/seed', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'traders' }),
-        });
-        const seedData = await seedRes.json();
-        if (seedData.success) {
-          setSyncMessage('Trader sync + seed started — refresh in 30s');
-        }
+        setSyncMessage(`Sync complete — ${data.totalTraders || 0} traders discovered`);
       } else {
         setSyncStatus('error');
-        setSyncMessage(data.error || 'Sync failed');
+        setSyncMessage(data.error || 'Sync failed — click retry');
       }
-    } catch {
+    } catch (err) {
       setSyncStatus('error');
-      setSyncMessage('Network error — try again');
+      setSyncMessage(err instanceof Error ? `${err.message} — click retry` : 'Network error — click retry');
     }
-    setTimeout(() => setSyncStatus('idle'), 8000);
+    // Keep status visible longer so user can see result
+    setTimeout(() => setSyncStatus('idle'), 12000);
   }, [syncStatus]);
 
   // Auto-sync on mount if no traders exist
+  // Uses a retry-capable approach: if the first auto-sync fails, the user can
+  // still click the "Sync Traders" button. The autoSyncRef prevents infinite loops
+  // but allows manual retry.
   const autoSyncRef = useRef(false);
+  const autoSyncRetryCount = useRef(0);
   useEffect(() => {
     if (autoSyncRef.current) return;
     autoSyncRef.current = true;
@@ -355,14 +353,19 @@ export function TraderIntelligencePanel() {
       try {
         // Quick check if any traders exist in the DB
         const res = await fetch('/api/traders?limit=1');
+        if (!res.ok) throw new Error('API error');
         const data = await res.json();
         const hasTraders = data?.traders?.length > 0;
-        if (!hasTraders) {
+        if (!hasTraders && autoSyncRetryCount.current < 2) {
+          autoSyncRetryCount.current++;
           handleSyncTraders();
         }
       } catch {
-        // If the check fails, try syncing anyway
-        handleSyncTraders();
+        // If the check fails, try syncing anyway (up to 2 retries)
+        if (autoSyncRetryCount.current < 2) {
+          autoSyncRetryCount.current++;
+          handleSyncTraders();
+        }
       }
     }, 1500);
     return () => clearTimeout(timer);
@@ -468,7 +471,23 @@ export function TraderIntelligencePanel() {
         totalTransactions: trader._count?.transactions || 0,
         totalHoldings: trader._count?.tokenHoldings || 0,
       };
-      return { ...trader, derived } as TraderDetail;
+      // Ensure subLabels is always an array (DB stores as JSON string)
+      const safeTrader = {
+        ...trader,
+        subLabels: typeof trader.subLabels === 'string'
+          ? (() => { try { return JSON.parse(trader.subLabels || '[]'); } catch { return []; } })()
+          : Array.isArray(trader.subLabels) ? trader.subLabels : [],
+        botDetectionSignals: typeof trader.botDetectionSignals === 'string'
+          ? (() => { try { return JSON.parse(trader.botDetectionSignals || '[]'); } catch { return []; } })()
+          : Array.isArray(trader.botDetectionSignals) ? trader.botDetectionSignals : [],
+        tradingHourPattern: typeof trader.tradingHourPattern === 'string'
+          ? (() => { try { return JSON.parse(trader.tradingHourPattern || '[]'); } catch { return new Array(24).fill(0); } })()
+          : Array.isArray(trader.tradingHourPattern) ? trader.tradingHourPattern : new Array(24).fill(0),
+        behaviorPatterns: Array.isArray(trader.behaviorPatterns) ? trader.behaviorPatterns : [],
+        crossChainLinks: Array.isArray(trader.crossChainLinks) ? trader.crossChainLinks : [],
+        transactions: Array.isArray(trader.transactions) ? trader.transactions : [],
+      };
+      return { ...safeTrader, derived } as TraderDetail;
     }
     if (!selectedTraderId) return null;
     return null;
