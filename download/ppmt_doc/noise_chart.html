@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { width: 900px; height: 440px; background: #fafbfc; font-family: 'Segoe UI', system-ui, sans-serif; display: flex; justify-content: center; align-items: center; }
+.container { width: 860px; height: 420px; position: relative; }
+.title { font-size: 18px; font-weight: 700; color: #1c1e1f; text-align: center; letter-spacing: 0.5px; }
+.subtitle { font-size: 11px; color: #72797c; text-align: center; margin-top: 4px; margin-bottom: 16px; }
+canvas { display: block; margin: 0 auto; }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="title">Relacion Patrones vs Senal Utilizable</div>
+  <div class="subtitle">El punto optimo esta en 5M de patrones. A partir de 10M la ganancia es marginal.</div>
+  <canvas id="chart" width="820" height="340"></canvas>
+</div>
+<script>
+const canvas = document.getElementById('chart');
+const ctx = canvas.getContext('2d');
+const W = 820, H = 340;
+const pad = { left: 70, right: 40, top: 30, bottom: 60 };
+const plotW = W - pad.left - pad.right;
+const plotH = H - pad.top - pad.bottom;
+
+// Data points
+const data = [
+  { patterns: 100, signal: 52, noise: 48, label: '100K' },
+  { patterns: 500, signal: 56, noise: 44, label: '500K' },
+  { patterns: 2000, signal: 60, noise: 40, label: '2M' },
+  { patterns: 5000, signal: 62, noise: 38, label: '5M' },
+  { patterns: 10000, signal: 64, noise: 36, label: '10M' },
+  { patterns: 20000, signal: 65, noise: 35, label: '20M' },
+  { patterns: 50000, signal: 66, noise: 34, label: '50M' },
+  { patterns: 100000, signal: 66, noise: 34, label: '100M' },
+];
+
+const maxPatterns = 100000;
+const minSignal = 30, maxSignal = 80;
+
+function xPos(p) { return pad.left + (Math.log10(p) / Math.log10(maxPatterns)) * plotW; }
+function yPos(v) { return pad.top + plotH - ((v - minSignal) / (maxSignal - minSignal)) * plotH; }
+
+// Grid
+ctx.strokeStyle = '#e0e2e4';
+ctx.lineWidth = 0.5;
+for (let v = 30; v <= 80; v += 10) {
+  const y = yPos(v);
+  ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(W - pad.right, y); ctx.stroke();
+  ctx.fillStyle = '#72797c'; ctx.font = '11px sans-serif'; ctx.textAlign = 'right';
+  ctx.fillText(v + '%', pad.left - 10, y + 4);
+}
+
+// X axis labels
+data.forEach(d => {
+  const x = xPos(d.patterns);
+  ctx.fillStyle = '#72797c'; ctx.font = '11px sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText(d.label, x, H - pad.bottom + 20);
+  ctx.strokeStyle = '#e8eaec'; ctx.lineWidth = 0.5;
+  ctx.beginPath(); ctx.moveTo(x, pad.top); ctx.lineTo(x, H - pad.bottom); ctx.stroke();
+});
+
+// Axes labels
+ctx.fillStyle = '#42545d'; ctx.font = '12px sans-serif'; ctx.textAlign = 'center';
+ctx.fillText('Numero de Patrones', W / 2, H - 8);
+ctx.save(); ctx.translate(16, H / 2); ctx.rotate(-Math.PI / 2);
+ctx.fillText('Senal / Ruido (%)', 0, 0); ctx.restore();
+
+// Signal line (smooth)
+ctx.strokeStyle = '#57869d'; ctx.lineWidth = 3;
+ctx.beginPath();
+data.forEach((d, i) => {
+  const x = xPos(d.patterns), y = yPos(d.signal);
+  if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+});
+ctx.stroke();
+
+// Signal area fill
+ctx.fillStyle = 'rgba(87,134,157,0.1)';
+ctx.beginPath();
+ctx.moveTo(xPos(data[0].patterns), yPos(data[0].signal));
+data.forEach(d => ctx.lineTo(xPos(d.patterns), yPos(d.signal)));
+ctx.lineTo(xPos(data[data.length-1].patterns), H - pad.bottom);
+ctx.lineTo(xPos(data[0].patterns), H - pad.bottom);
+ctx.closePath(); ctx.fill();
+
+// Noise line
+ctx.strokeStyle = '#874c47'; ctx.lineWidth = 2; ctx.setLineDash([6, 4]);
+ctx.beginPath();
+data.forEach((d, i) => {
+  const x = xPos(d.patterns), y = yPos(d.noise);
+  if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+});
+ctx.stroke();
+ctx.setLineDash([]);
+
+// Data points
+data.forEach(d => {
+  const x = xPos(d.patterns), y = yPos(d.signal);
+  ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2);
+  ctx.fillStyle = d.patterns === 5000 ? '#d32542' : '#57869d';
+  ctx.fill(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke();
+});
+
+// Optimal point marker
+const optX = xPos(5000), optY = yPos(62);
+ctx.strokeStyle = '#d32542'; ctx.lineWidth = 1.5; ctx.setLineDash([4, 4]);
+ctx.beginPath(); ctx.moveTo(optX, pad.top); ctx.lineTo(optX, H - pad.bottom); ctx.stroke();
+ctx.setLineDash([]);
+
+// Optimal annotation
+ctx.fillStyle = '#d32542'; ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'left';
+ctx.fillText('PUNTO OPTIMO', optX + 10, optY - 20);
+ctx.font = '11px sans-serif'; ctx.fillStyle = '#42545d';
+ctx.fillText('5M patrones: 62% senal', optX + 10, optY - 4);
+ctx.fillText('56-58% win rate direccional', optX + 10, optY + 12);
+ctx.fillText('Diminishing returns > 10M', optX + 10, optY + 28);
+
+// Legend
+const lx = W - pad.right - 170, ly = pad.top + 10;
+ctx.fillStyle = '#57869d'; ctx.fillRect(lx, ly, 16, 3);
+ctx.fillStyle = '#1c1e1f'; ctx.font = '11px sans-serif'; ctx.textAlign = 'left';
+ctx.fillText('Senal utilizable', lx + 22, ly + 5);
+ctx.strokeStyle = '#874c47'; ctx.lineWidth = 2; ctx.setLineDash([6, 4]);
+ctx.beginPath(); ctx.moveTo(lx, ly + 20); ctx.lineTo(lx + 16, ly + 20); ctx.stroke();
+ctx.setLineDash([]);
+ctx.fillText('Ruido residual', lx + 22, ly + 24);
+ctx.beginPath(); ctx.arc(lx + 8, ly + 38, 5, 0, Math.PI * 2); ctx.fillStyle = '#d32542'; ctx.fill();
+ctx.fillStyle = '#1c1e1f'; ctx.fillText('Punto optimo', lx + 22, ly + 42);
+
+// Plateau zone
+ctx.fillStyle = 'rgba(210,37,66,0.05)';
+const plateauStart = xPos(10000);
+ctx.fillRect(plateauStart, pad.top, W - pad.right - plateauStart, plotH);
+ctx.fillStyle = '#d32542'; ctx.font = '10px sans-serif'; ctx.textAlign = 'center';
+ctx.fillText('ZONA PLATEAU', (plateauStart + W - pad.right) / 2, pad.top + 15);
+</script>
+</body>
+</html>

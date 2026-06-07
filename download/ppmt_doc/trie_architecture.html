@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { width: 900px; height: 520px; background: #fafbfc; font-family: 'Segoe UI', system-ui, sans-serif; display: flex; justify-content: center; align-items: center; }
+.container { width: 860px; height: 500px; position: relative; }
+.title { font-size: 18px; font-weight: 700; color: #1c1e1f; margin-bottom: 16px; text-align: center; letter-spacing: 0.5px; }
+/* Trie nodes */
+.node { position: absolute; border-radius: 8px; display: flex; flex-direction: column; align-items: center; justify-content: center; font-size: 12px; font-weight: 600; color: #fff; }
+.node .symbol { font-size: 16px; font-weight: 700; }
+.node .label { font-size: 9px; opacity: 0.8; margin-top: 2px; }
+/* Level 0 - root */
+.node.root { width: 72px; height: 52px; background: #42545d; left: 394px; top: 30px; border-radius: 50%; }
+.node.root .symbol { font-size: 20px; }
+/* Level 1 */
+.node.l1 { width: 64px; height: 46px; background: #5c727d; }
+.node.l1a { left: 170px; top: 120px; }
+.node.l1b { left: 398px; top: 120px; }
+.node.l1c { left: 626px; top: 120px; }
+/* Level 2 */
+.node.l2 { width: 56px; height: 42px; background: #57869d; }
+.node.l2a1 { left: 90px; top: 210px; }
+.node.l2a2 { left: 210px; top: 210px; }
+.node.l2b1 { left: 350px; top: 210px; }
+.node.l2b2 { left: 470px; top: 210px; }
+.node.l2c1 { left: 600px; top: 210px; }
+.node.l2c2 { left: 720px; top: 210px; }
+/* Level 3 - leaf */
+.node.leaf { width: 52px; height: 38px; background: #d32542; border-radius: 6px; }
+.node.lf1 { left: 50px; top: 300px; }
+.node.lf2 { left: 150px; top: 300px; }
+.node.lf3 { left: 280px; top: 300px; }
+.node.lf4 { left: 410px; top: 300px; }
+.node.lf5 { left: 530px; top: 300px; }
+.node.lf6 { left: 660px; top: 300px; }
+.node.lf7 { left: 770px; top: 300px; }
+/* SVG arrows */
+svg.arrows { position: absolute; top: 0; left: 0; width: 860px; height: 500px; pointer-events: none; }
+.arrow { stroke: #72797c; stroke-width: 1.5; fill: none; marker-end: url(#arrowhead); }
+/* Annotation boxes */
+.anno { position: absolute; background: #eeeff0; border: 1px solid #c5d4db; border-radius: 6px; padding: 8px 12px; font-size: 10px; color: #1c1e1f; line-height: 1.5; }
+.anno .anno-title { font-weight: 700; font-size: 11px; color: #42545d; margin-bottom: 3px; }
+.anno1 { left: 30px; top: 380px; width: 220px; }
+.anno2 { left: 280px; top: 380px; width: 240px; }
+.anno3 { left: 560px; top: 380px; width: 260px; }
+.badge { display: inline-block; background: #d32542; color: #fff; font-size: 9px; padding: 1px 6px; border-radius: 3px; font-weight: 600; }
+.badge.blue { background: #57869d; }
+.badge.green { background: #427352; }
+/* Time label */
+.time-label { position: absolute; font-size: 11px; color: #72797c; font-style: italic; }
+.tl1 { left: 460px; top: 72px; }
+.tl2 { left: 460px; top: 165px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="title">PPMT - Progressive Pattern Matching Trie</div>
+  <svg class="arrows">
+    <defs><marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#72797c"/></marker></defs>
+    <!-- Root to L1 -->
+    <line x1="415" y1="82" x2="202" y2="120" class="arrow"/>
+    <line x1="430" y1="82" x2="430" y2="120" class="arrow"/>
+    <line x1="445" y1="82" x2="658" y2="120" class="arrow"/>
+    <!-- L1 to L2 -->
+    <line x1="195" y1="166" x2="118" y2="210" class="arrow"/>
+    <line x1="210" y1="166" x2="238" y2="210" class="arrow"/>
+    <line x1="423" y1="166" x2="378" y2="210" class="arrow"/>
+    <line x1="438" y1="166" x2="498" y2="210" class="arrow"/>
+    <line x1="651" y1="166" x2="628" y2="210" class="arrow"/>
+    <line x1="666" y1="166" x2="746" y2="210" class="arrow"/>
+    <!-- L2 to Leaf -->
+    <line x1="110" y1="252" x2="76" y2="300" class="arrow"/>
+    <line x1="125" y1="252" x2="176" y2="300" class="arrow"/>
+    <line x1="305" y1="252" x2="306" y2="300" class="arrow"/>
+    <line x1="435" y1="252" x2="436" y2="300" class="arrow"/>
+    <line x1="555" y1="252" x2="556" y2="300" class="arrow"/>
+    <line x1="685" y1="252" x2="686" y2="300" class="arrow"/>
+    <line x1="748" y1="252" x2="796" y2="300" class="arrow"/>
+  </svg>
+  <div class="node root"><span class="symbol">Root</span><span class="label">O(1)</span></div>
+  <div class="node l1 l1a"><span class="symbol">A</span><span class="label">SAX a</span></div>
+  <div class="node l1 l1b"><span class="symbol">B</span><span class="label">SAX b</span></div>
+  <div class="node l1 l1c"><span class="symbol">C</span><span class="label">SAX c</span></div>
+  <div class="node l2 l2a1"><span class="symbol">A</span></div>
+  <div class="node l2 l2a2"><span class="symbol">D</span></div>
+  <div class="node l2 l2b1"><span class="symbol">B</span></div>
+  <div class="node l2 l2b2"><span class="symbol">E</span></div>
+  <div class="node l2 l2c1"><span class="symbol">C</span></div>
+  <div class="node l2 l2c2"><span class="symbol">F</span></div>
+  <div class="node leaf lf1"><span class="symbol">P1</span></div>
+  <div class="node leaf lf2"><span class="symbol">P2</span></div>
+  <div class="node leaf lf3"><span class="symbol">P3</span></div>
+  <div class="node leaf lf4"><span class="symbol">P4</span></div>
+  <div class="node leaf lf5"><span class="symbol">P5</span></div>
+  <div class="node leaf lf6"><span class="symbol">P6</span></div>
+  <div class="node leaf lf7"><span class="symbol">P7</span></div>
+  <div class="time-label tl1">0.06 us/nivel</div>
+  <div class="time-label tl2">Sub-microsegundo por nivel</div>
+  <div class="anno anno1">
+    <div class="anno-title"><span class="badge">Capa 1</span> Busqueda O(k)</div>
+    Cada nivel del Trie = 1 SAX symbol. Busqueda = descender k niveles. Tiempo independiente del total de patrones almacenados.
+  </div>
+  <div class="anno anno2">
+    <div class="anno-title"><span class="badge blue">Capa 2</span> SAX Symbolization</div>
+    Series continuas se discretizan en symbols (A-Z). Cada vela = 1 symbol. Permite almacenamiento compacto y busqueda eficiente.
+  </div>
+  <div class="anno anno3">
+    <div class="anno-title"><span class="badge green">Capa 3</span> Delta Encoding</div>
+    Solo se almacena el cambio respecto al pattern anterior. Compresion 10-20x vs datos crudos. Los nodos hoja contienen metadatos del pattern match.
+  </div>
+</div>
+</body>
+</html>
