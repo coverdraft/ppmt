@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { width: 920px; height: 720px; background: #fafbfc; font-family: 'Segoe UI', system-ui, sans-serif; display: flex; justify-content: center; align-items: center; }
+.container { width: 900px; height: 700px; position: relative; }
+.title { font-size: 17px; font-weight: 700; color: #1c1e1f; text-align: center; letter-spacing: 0.5px; }
+.subtitle { font-size: 11px; color: #72797c; text-align: center; margin-top: 3px; margin-bottom: 10px; }
+
+/* Timeline row */
+.timeline { position: absolute; top: 50px; left: 20px; width: 860px; height: 60px; display: flex; align-items: center; }
+.tl-label { font-size: 10px; color: #72797c; font-weight: 600; margin-right: 8px; }
+.tl-bar { flex: 1; height: 6px; background: #e0e3e5; border-radius: 3px; position: relative; }
+.tl-trigger { position: absolute; left: 20%; top: -8px; width: 3px; height: 22px; background: #d32542; border-radius: 2px; }
+.tl-trigger-label { position: absolute; left: 20%; top: -24px; font-size: 9px; font-weight: 700; color: #d32542; transform: translateX(-50%); white-space: nowrap; }
+.tl-end { position: absolute; right: 5%; top: -8px; width: 3px; height: 22px; background: #427352; border-radius: 2px; }
+.tl-end-label { position: absolute; right: 5%; top: -24px; font-size: 9px; font-weight: 700; color: #427352; transform: translateX(-50%); white-space: nowrap; }
+.tl-entry { position: absolute; left: 20%; top: 18px; font-size: 9px; color: #d32542; font-weight: 600; }
+.tl-remaining { position: absolute; left: 24%; right: 7%; top: 12px; height: 4px; background: rgba(66, 115, 82, 0.3); border-radius: 2px; }
+.tl-remaining-label { position: absolute; left: 60%; top: 18px; font-size: 9px; color: #427352; font-weight: 600; transform: translateX(-50%); }
+
+/* Block cards */
+.block-row { position: absolute; left: 20px; width: 860px; display: flex; gap: 10px; }
+.block-row.r1 { top: 125px; }
+.block-row.r2 { top: 340px; }
+
+.block-card { flex: 1; border-radius: 8px; padding: 10px 12px; position: relative; }
+.block-card.known { background: #f0f4f0; border: 1.5px solid #427352; }
+.block-card.unknown { background: #fef5f6; border: 1.5px solid #d32542; }
+.block-card.current { background: #eef5f9; border: 1.5px solid #57869d; }
+
+.bc-tag { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.bc-name { font-size: 13px; font-weight: 700; }
+.bc-known .bc-name { color: #427352; }
+.bc-unknown .bc-name { color: #d32542; }
+.bc-current .bc-name { color: #57869d; }
+.bc-badge { font-size: 8px; font-weight: 700; padding: 1px 6px; border-radius: 3px; color: #fff; }
+.bc-badge.green { background: #427352; }
+.bc-badge.red { background: #d32542; }
+.bc-badge.blue { background: #57869d; }
+
+.bc-meta { font-size: 9.5px; color: #42545d; line-height: 1.6; }
+.bc-meta b { color: #1c1e1f; }
+
+.bc-direction { margin-top: 6px; padding: 3px 8px; border-radius: 4px; font-size: 10px; font-weight: 700; display: inline-block; }
+.bc-dir-up { background: #e8f5e9; color: #2e7d32; }
+.bc-dir-down { background: #fde8e8; color: #c62828; }
+.bc-dir-exit { background: #fff3e0; color: #e65100; }
+
+/* Flow arrows */
+.flow-section { position: absolute; top: 275px; left: 20px; width: 860px; text-align: center; }
+.flow-label { font-size: 11px; font-weight: 700; color: #1c1e1f; margin-bottom: 4px; }
+.flow-desc { font-size: 10px; color: #72797c; }
+
+/* Decision box */
+.decision { position: absolute; top: 530px; left: 20px; width: 860px; background: #1c1e1f; border-radius: 10px; padding: 14px 20px; display: flex; gap: 20px; }
+.dec-col { flex: 1; }
+.dec-col .dc-title { font-size: 11px; font-weight: 700; margin-bottom: 4px; }
+.dec-col .dc-title.green { color: #427352; }
+.dec-col .dc-title.red { color: #d32542; }
+.dec-col .dc-title.purple { color: #904fbe; }
+.dec-col .dc-text { font-size: 9.5px; color: #c5d4db; line-height: 1.5; }
+
+/* Speed box */
+.speed-box { position: absolute; top: 620px; left: 20px; width: 860px; background: #42545d; border-radius: 8px; padding: 10px 20px; display: flex; align-items: center; justify-content: space-between; }
+.speed-label { font-size: 11px; color: #c5d4db; font-weight: 600; }
+.speed-val { font-size: 14px; color: #d32542; font-weight: 900; }
+.speed-note { font-size: 9px; color: #72797c; }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="title">Block Lifecycle Metadata: Patrones Autonomos</div>
+  <div class="subtitle">Cada bloque del Trie contiene su propio entry, stop loss, take profit y regla de continuacion</div>
+
+  <!-- Timeline -->
+  <div class="timeline">
+    <span class="tl-label">Patron 50 velas:</span>
+    <div class="tl-bar">
+      <div class="tl-trigger"></div>
+      <div class="tl-trigger-label">Vela 10: TRIGGER</div>
+      <div class="tl-end"></div>
+      <div class="tl-end-label">Vela 50: FIN</div>
+      <div class="tl-entry">Entry</div>
+      <div class="tl-remaining"></div>
+      <div class="tl-remaining-label">40 velas de prediccion (+5% esperado)</div>
+    </div>
+  </div>
+
+  <!-- Row 1: Known blocks -->
+  <div class="block-row r1">
+    <div class="block-card known bc-known">
+      <div class="bc-tag">
+        <span class="bc-name">Bloque A</span>
+        <span class="bc-badge green">CONOCIDO</span>
+      </div>
+      <div class="bc-meta">
+        <b>Velas:</b> 50 | <b>Trigger:</b> vela 10<br>
+        <b>Restantes:</b> 40 | <b>Mov. esperado:</b> +5%<br>
+        <b>Max Drawdown:</b> -1.2% desde entry<br>
+        <b>Max Favorable:</b> +7.8% desde entry
+      </div>
+      <div class="bc-direction bc-dir-up">&#9650; LONG - Stop: entry -1.5%</div>
+    </div>
+
+    <div class="block-card known bc-known">
+      <div class="bc-tag">
+        <span class="bc-name">Bloque A14</span>
+        <span class="bc-badge green">CONTINUA</span>
+      </div>
+      <div class="bc-meta">
+        <b>Velas:</b> 50 | <b>Trigger:</b> vela 18<br>
+        <b>Restantes:</b> 32 | <b>Mov. esperado:</b> +3.5%<br>
+        <b>Forward:</b> Patron continua sin tocar SL<br>
+        <b>Backward:</b> Bloque A llevo aqui (85% exito)
+      </div>
+      <div class="bc-direction bc-dir-up">&#9650; MANTENER LONG - SL ajustado</div>
+    </div>
+
+    <div class="block-card unknown bc-unknown">
+      <div class="bc-tag">
+        <span class="bc-name">Bloque A2324</span>
+        <span class="bc-badge red">DESCONOCIDO</span>
+      </div>
+      <div class="bc-meta">
+        <b>No existe en Trie</b><br>
+        <b>Significado:</b> El patron se rompio<br>
+        <b>Accion:</b> Salida inmediata con profit<br>
+        <b>Motivo:</b> Ruido o patron nuevo
+      </div>
+      <div class="bc-direction bc-dir-exit">&#9632; SALIR - Trailing stop o profit</div>
+    </div>
+  </div>
+
+  <!-- Flow section -->
+  <div class="flow-section">
+    <div class="flow-label">Flujo de Decision Autonomo</div>
+    <div class="flow-desc">Bloque conocido → continuar | Bloque desconocido → salir con profit | Cada bloque define su propio SL/TP</div>
+  </div>
+
+  <!-- Row 2: Decision rules -->
+  <div class="block-row r2">
+    <div class="block-card current bc-current">
+      <div class="bc-tag">
+        <span class="bc-name">Metadata Forward</span>
+        <span class="bc-badge blue">HACIA ADELANTE</span>
+      </div>
+      <div class="bc-meta">
+        <b>Que viene despues de este nodo</b><br>
+        Probabilidad de continucion: 85%<br>
+        Siguientes bloques mas probables:<br>
+        A14 (45%) | A15 (30%) | A20 (10%)<br>
+        Si el siguiente es conocido → seguir<br>
+        Si es desconocido → exit predictivo
+      </div>
+    </div>
+
+    <div class="block-card current bc-current">
+      <div class="bc-tag">
+        <span class="bc-name">Metadata Backward</span>
+        <span class="bc-badge blue">HACIA ATRAS</span>
+      </div>
+      <div class="bc-meta">
+        <b>Que me trajo a este nodo</b><br>
+        De donde vine: A (60%) | B3 (25%)<br>
+        Resultado historico desde esos origenes:<br>
+        Exito: 82% | Parcial: 12% | SL: 6%<br>
+        Si el backward confirma → operar
+      </div>
+    </div>
+
+    <div class="block-card current bc-current">
+      <div class="bc-tag">
+        <span class="bc-name">Salida Predictiva</span>
+        <span class="bc-badge blue">EXIT PRE-STOP</span>
+      </div>
+      <div class="bc-meta">
+        <b>Salir ANTES de que toque SL</b><br>
+        Si el bloque siguiente no existe en<br>
+        el Trie, el patron se rompio mas<br>
+        temprano que cualquier stop reactivo.<br>
+        <b>Trailing stop al max alcanzado.</b>
+      </div>
+    </div>
+  </div>
+
+  <!-- Decision box -->
+  <div class="decision">
+    <div class="dec-col">
+      <div class="dc-title green">BLOQUE CONOCIDO</div>
+      <div class="dc-text">El patron existe en Trie. La metadata indica: entry point, stop loss natural (max drawdown historico), take profit (max favorable historico), y probabilidad de continucion. La operacion continua segun las reglas del bloque.</div>
+    </div>
+    <div class="dec-col">
+      <div class="dc-title red">BLOQUE DESCONOCIDO</div>
+      <div class="dc-text">El patron NO existe en Trie. Esto es la senal de salida mas temprana posible: el patron se rompio ANTES de que el precio toque el stop loss. Se sale con trailing stop al maximo alcanzado o profit. Es un EXIT PREDICTIVO.</div>
+    </div>
+    <div class="dec-col">
+      <div class="dc-title purple">AUTONOMIA TOTAL</div>
+      <div class="dc-text">Con Block Lifecycle Metadata, el PPMT se vuelve autocontenido: los bloques mismos definen entry, exit, SL y TP. Solo necesita un Risk Manager externo para position sizing. No se requieren otros indicadores.</div>
+    </div>
+  </div>
+
+  <!-- Speed box -->
+  <div class="speed-box">
+    <span class="speed-label">Impacto en velocidad:</span>
+    <span class="speed-val">O(1) = CERO penalizacion</span>
+    <span class="speed-note">Metadata se almacena en cada nodo. Viene gratis con el traversal del Trie. No hay busqueda adicional.</span>
+  </div>
+</div>
+</body>
+</html>
