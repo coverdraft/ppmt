@@ -351,6 +351,24 @@ function useIngestAsset() {
   });
 }
 
+function useBulkIngest() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ pairs, timeframes, days }: { pairs?: string[]; timeframes?: string[]; days?: number }) => {
+      const res = await fetch('/api/ppmt/bulk-ingest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pairs, timeframes, days }),
+      });
+      if (!res.ok) throw new Error('Bulk ingest failed');
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['ppmt-status'] });
+    },
+  });
+}
+
 // ============================================================
 // UTILITY FUNCTIONS
 // ============================================================
@@ -1388,17 +1406,19 @@ function DashboardTab({
 
 function CommandCenterTab({
   status, statusLoading, statusError,
-  ingestMutation, buildMutation, queryClient,
+  ingestMutation, buildMutation, bulkIngestMutation, queryClient,
 }: {
   status: StatusData | undefined;
   statusLoading: boolean;
   statusError: Error | null;
   ingestMutation: any;
   buildMutation: any;
+  bulkIngestMutation: any;
   queryClient: any;
 }) {
   const [newSymbol, setNewSymbol] = useState('');
   const [buildAllStatus, setBuildAllStatus] = useState<string>('');
+  const [bulkIngestResult, setBulkIngestResult] = useState<string>('');
 
   const handleIngestNew = useCallback(async () => {
     if (!newSymbol.trim()) return;
@@ -1637,15 +1657,51 @@ function CommandCenterTab({
               variant="outline"
               className="w-full h-7 text-[8px] font-mono bg-amber-500/10 border-amber-500/30 text-amber-400 hover:bg-amber-500/20"
               onClick={handleBulkIngest}
-              disabled={ingestMutation.isPending}
+              disabled={ingestMutation.isPending || bulkIngestMutation.isPending}
             >
               {ingestMutation.isPending ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <Download className="h-3 w-3 mr-1" />}
               Bulk Ingest All Missing
             </Button>
-            {ingestMutation.isPending && (
+            <Button
+              size="sm"
+              variant="outline"
+              className="w-full h-7 text-[8px] font-mono bg-emerald-500/10 border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/20"
+              onClick={() => {
+                setBulkIngestResult('');
+                bulkIngestMutation.mutate(
+                  { days: 365 },
+                  {
+                    onSuccess: (data: any) => {
+                      if (data?.summary) {
+                        const s = data.summary;
+                        setBulkIngestResult(
+                          `Ingested ${s.successfulIngests}/${s.successfulIngests + s.failedIngests} pairs, ${s.totalCandles?.toLocaleString() ?? 0} candles, ${s.totalPatterns?.toLocaleString() ?? 0} patterns`
+                        );
+                      }
+                    },
+                    onError: () => {
+                      setBulkIngestResult('Bulk ingest failed');
+                    },
+                  },
+                );
+              }}
+              disabled={ingestMutation.isPending || bulkIngestMutation.isPending}
+            >
+              {bulkIngestMutation.isPending ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <Zap className="h-3 w-3 mr-1" />}
+              🚀 Bulk Ingest 20 Pairs
+            </Button>
+            {(ingestMutation.isPending || bulkIngestMutation.isPending) && (
               <div className="flex items-center gap-1.5">
                 <Loader2 className="h-3 w-3 text-[#3b82f6] animate-spin" />
-                <span className="text-[8px] font-mono text-[#3b82f6]">Ingesting data...</span>
+                <span className="text-[8px] font-mono text-[#3b82f6]">
+                  {bulkIngestMutation.isPending ? 'Bulk ingesting 20 pairs (may take 1-2 min)...' : 'Ingesting data...'}
+                </span>
+              </div>
+            )}
+            {bulkIngestResult && (
+              <div className="flex items-center gap-1.5">
+                <CheckCircle2 className="h-3 w-3 text-emerald-400" />
+                <span className="text-[8px] font-mono text-emerald-400">{bulkIngestResult}</span>
               </div>
             )}
           </div>
@@ -2218,6 +2274,7 @@ export default function PPMTDashboard() {
   const queryClient = useQueryClient();
   const ingestMutation = useIngestAsset();
   const buildMutation = useBuildAsset();
+  const bulkIngestMutation = useBulkIngest();
 
   // Auto-select first asset
   const effectiveSymbol = selectedSymbol ?? (status?.assets?.length ? status.assets[0].symbol : null);
@@ -2323,6 +2380,7 @@ export default function PPMTDashboard() {
             statusError={statusError as Error | null}
             ingestMutation={ingestMutation}
             buildMutation={buildMutation}
+            bulkIngestMutation={bulkIngestMutation}
             queryClient={queryClient}
           />
         )}
