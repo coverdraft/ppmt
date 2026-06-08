@@ -1140,3 +1140,107 @@ Stage Summary:
 - Progressive Cursor for O(1) amortized per-candle updates
 - Project ready at /home/z/my-project/ppmt/
 - PDF V3 at /home/z/my-project/download/PPMT_Progressive_Pattern_Matching_Trie.pdf (24 pages)
+
+---
+Task ID: 5
+Agent: Main Agent
+Task: Build PPMT Web Dashboard with Candlestick Charts, Backtesting, and Management Zones
+
+Work Log:
+- Explored current project structure: existing PPMT API routes, ppmt-db helper, lightweight-charts v5 installed
+- Read all existing API routes: status, assets, ingest, build, predict, signals, trie-stats
+- Created OHLCV API route at `/api/ppmt/ohlcv/route.ts`:
+  - GET endpoint with symbol, timeframe, limit query params
+  - Reads from SQLite at ~/.ppmt/ppmt.db using better-sqlite3 in readonly mode
+  - Converts timestamps from ms to seconds for lightweight-charts compatibility
+  - Returns candles array with time, open, high, low, close, volume
+- Created Backtest API route at `/api/ppmt/backtest/route.ts`:
+  - POST endpoint with symbol, timeframe, start_date, end_date params
+  - Loads OHLCV data from SQLite, optionally filtered by date range
+  - Loads signals and trie data from SQLite for context
+  - Implements simplified statistical backtest:
+    - Signal-based entry: uses signal direction (LONG/SHORT) when available
+    - Momentum-based entry: uses consecutive direction candles + RSI for pattern detection
+    - Exit logic: take profit (3%), stop loss (-2%), max holding period (24 bars), or exit signals
+    - Computes equity curve, total return, max drawdown, win rate, Sharpe ratio
+  - Returns trades array, equity_curve, stats object
+- Complete dashboard rewrite of `src/app/page.tsx`:
+  - Full-screen dark terminal-style layout with 3-column design
+  - Top bar: PPMT branding, active status indicator, DB size, GitHub link
+  - Stats row: 4 stat cards (Assets, Candles, Patterns, Signals) with icons
+  - Left sidebar (240px): Asset management panel with:
+    - Asset list with data completeness bars and timeframe badges
+    - Add symbol input with ingest button
+    - Quick actions: Ingest, Build, Predict per asset
+  - Center: Candlestick chart using lightweight-charts v5:
+    - Timeframe selector buttons (1m, 5m, 15m, 1h, 4h, 1d)
+    - OHLCV crosshair tooltip
+    - Volume histogram below main chart
+    - "No data" state with ingest button
+    - ResizeObserver for responsive chart width
+  - Center bottom: Backtest panel:
+    - Timeframe selector (1h, 4h, 1d) and Run button
+    - Stats cards: Return, Max DD, Win Rate, Sharpe, Trades
+    - Equity curve line chart using lightweight-charts
+    - Recent trades table with direction, entry/exit price, PnL, holding bars
+  - Right sidebar (240px): Prediction & Trie stats panel:
+    - Prediction display: direction, move %, confidence bar, sizing
+    - 4-Level Trie architecture visualization (N1-N4) with pattern counts
+    - Weight distribution display
+    - Pattern match quality metrics
+    - Forward prediction chain visualization
+  - Bottom bar: Signals feed with horizontal scroll, color-coded cards
+- Fixed naming conflict: `CandlestickChart` imported from lucide-react aliased to `CandlestickChartIcon`
+- Fixed React lint error: replaced useEffect setState with computed `effectiveSymbol` and `effectiveTimeframe`
+- Removed unused imports, cleaned up code
+- Lint passes cleanly for all modified files
+
+Stage Summary:
+- Files created: 2 (ohlcv/route.ts, backtest/route.ts)
+- Files modified: 1 (page.tsx - complete rewrite)
+- OHLCV API: GET endpoint, SQLite readonly, ms→s timestamp conversion
+- Backtest API: POST endpoint, simplified statistical backtest with RSI + signal-based entries
+- Dashboard: ~1000 lines, 3-column layout, lightweight-charts v5 candlestick + equity charts
+- All components: CandlestickChart, EquityCurveChart, StatCard, AssetRow, PredictionPanel, BacktestPanel, SignalsFeed
+- Build status: Clean (lint passes)
+
+---
+Task ID: 7
+Agent: Main Dev Agent
+Task: Create a standalone Next.js dashboard inside the PPMT project
+
+Work Log:
+- Read all source files from /home/z/my-project/src/ that needed to be copied:
+  - src/app/page.tsx (1369 lines - PPMT dashboard)
+  - src/lib/ppmt-db.ts (68 lines - database access)
+  - src/app/layout.tsx (43 lines - root layout)
+  - src/app/globals.css (576 lines - dark theme styles)
+  - src/components/ui/button.tsx, badge.tsx (shadcn components with cva)
+  - src/components/providers.tsx (QueryClientProvider + StartupInitializer)
+  - All 9 API routes under src/app/api/ppmt/
+- Created directory structure at /home/z/my-project/ppmt/dashboard/src/
+- Created package.json with all required dependencies (upgraded lightweight-charts from v4 to v5 to match main project API)
+- Created config files: next.config.ts, tsconfig.json, tailwind.config.ts, postcss.config.mjs
+- Created src/app/layout.tsx with dark theme and custom QueryClientProvider (without StartupInitializer)
+- Created src/components/query-provider.tsx - standalone QueryClientProvider wrapper
+- Created src/app/globals.css with Tailwind v3 directives + dark theme CSS variables + Bloomberg terminal styling
+- Copied src/app/page.tsx EXACTLY from main project
+- Created simple Button component (no class-variance-authority, no @radix-ui/react-slot) with variants: default, outline, ghost, destructive, secondary; sizes: default, sm, lg, icon
+- Created simple Badge component with variants: default, outline, secondary, destructive
+- Created src/lib/utils.ts with cn() utility (clsx + tailwind-merge)
+- Copied src/lib/ppmt-db.ts exactly from main project
+- Copied all 9 API routes exactly from main project
+- Created README.md with setup instructions
+- Fixed QueryClientProvider naming conflict (renamed import to RQProvider)
+- Ran npm install - 148 packages installed
+- Ran next build - SUCCESS with all routes:
+  - Static: / (page)
+  - Dynamic: all 9 API routes (ohlcv, backtest, status, signals, predict, ingest, build, assets, trie-stats)
+- Dashboard runs on port 3001 to avoid conflict with main project on port 3000
+
+Stage Summary:
+- Files created: 17 (package.json, 4 configs, layout, globals.css, page.tsx, query-provider, button, badge, utils, ppmt-db, 9 API routes, README)
+- Dashboard location: /home/z/my-project/ppmt/dashboard/
+- Completely standalone - works with just npm install && npm run dev
+- Reads from ~/.ppmt/ppmt.db (PPMT SQLite database)
+- Build status: Clean (all routes rendering successfully)
