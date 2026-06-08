@@ -75,5 +75,11 @@ ppmt/venv/
 cryptoquant-terminal/
 ppmt-clean/
 
+# Generated/downloaded files (not source code)
+download/
+
+# Prisma database files
+prisma/db/*.db
+
 # Skills directory
 /skills/download/CryptoQuant-Terminal-RUTA.txt
