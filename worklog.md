@@ -1244,3 +1244,25 @@ Stage Summary:
 - Completely standalone - works with just npm install && npm run dev
 - Reads from ~/.ppmt/ppmt.db (PPMT SQLite database)
 - Build status: Clean (all routes rendering successfully)
+---
+Task ID: 1
+Agent: main
+Task: Build PPMT Command Center dashboard with Monte Carlo + Multi-Asset Backtesting
+
+Work Log:
+- Explored existing codebase: found main app (port 3000) running Next.js 16, standalone dashboard (port 3001) not running
+- Added Monte Carlo API route at /api/ppmt/monte-carlo/route.ts
+- Added Multi-Asset Backtest API route at /api/ppmt/multi-backtest/route.ts
+- Rewrote src/app/page.tsx with comprehensive 3-tab command center dashboard
+- Fixed status API to report actual OHLCV counts (not claimed) and sufficiency scores
+- Installed ppmt Python package and ingested real data for BTC, ETH, SOL, BNB
+- Built tries for all 4 assets (870+ patterns each)
+- Committed and pushed to GitHub
+
+Stage Summary:
+- Dashboard now has 3 tabs: Dashboard, Command Center, Backtesting Lab
+- Command Center shows data inventory, sufficiency indicators (RED/AMBER/GREEN), ingestion/build controls
+- Backtesting Lab has single-asset backtest, Monte Carlo simulation (500+ paths), multi-asset comparison
+- Real data: 45,565 candles, 28,262 patterns, 15 signals across 4 assets
+- All APIs verified working: status, backtest, monte-carlo, multi-backtest
+- Pushed to GitHub: commit 8c8c86e
