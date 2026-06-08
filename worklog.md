@@ -1,6 +1,53 @@
 # CryptoQuant Terminal — Worklog
 
 ---
+Task ID: bulk-ingest-pipeline
+Agent: Main Agent
+Task: Create bulk ingest pipeline for PPMT - 20 crypto pairs across multiple timeframes
+
+Work Log:
+- Explored existing codebase: DataCollector, AssetClassifier, PPMTStorage, PPMT engine, existing API routes (ingest, build, status)
+- Analyzed existing page.tsx CommandCenterTab component structure, mutation hooks, and button patterns
+- Created ppmt/scripts/__init__.py (empty module init)
+- Created ppmt/scripts/bulk_ingest.py (~280 lines):
+  - DEFAULT_PAIRS: 20 pairs across 5 asset classes (blue_chip: BTC/ETH, large_cap: BNB/SOL/XRP/ADA/AVAX/DOT, mid_cap: LINK/UNI/NEAR/APT/ARB/OP, defi: AAVE/CRV, meme: DOGE/SHIB/PEPE)
+  - DEFAULT_TIMEFRAMES: 1h, 4h, 1d
+  - CLI args: --pairs, --timeframes, --days (default 365)
+  - Phase 1: Ingest OHLCV via DataCollector from Binance, register assets with AssetClassifier
+  - Phase 2: Build PPMT tries for all assets with data (4-level trie: N1-N4 + adapt weights + save engine state)
+  - Rate limiting: 0.3s between Binance requests
+  - Progress output: ✓/✗ per pair+timeframe, asset summary with pattern counts
+  - Final summary: total pairs, candles, patterns, failed pairs, elapsed time
+  - Works as: `python -m ppmt.scripts.bulk_ingest` or `python ppmt/scripts/bulk_ingest.py`
+- Created src/app/api/ppmt/bulk-ingest/route.ts (~180 lines):
+  - POST endpoint accepting { pairs?, timeframes?, days? }
+  - Calls Python bulk_ingest script via execSync with 5-minute timeout
+  - Parses structured summary from Python output (total pairs, candles, patterns, failed pairs, etc.)
+  - Returns { success, results, buildResults, summary, output }
+- Added useBulkIngest() mutation hook to page.tsx (similar pattern to useIngestAsset/useBuildAsset)
+  - Calls POST /api/ppmt/bulk-ingest with { pairs?, timeframes?, days? }
+  - Invalidates ppmt-status query on success
+- Added "🚀 Bulk Ingest 20 Pairs" button to CommandCenterTab's Ingestion Controls section
+  - Calls bulkIngestMutation.mutate({ days: 365 }) with defaults (20 pairs × 3 timeframes)
+  - Shows loading spinner with "Bulk ingesting 20 pairs (may take 1-2 min)..." message
+  - Displays result: "Ingested X/Y pairs, N candles, M patterns"
+  - Disables both "Bulk Ingest All Missing" and "🚀 Bulk Ingest 20 Pairs" when either is running
+- Passed bulkIngestMutation prop through CommandCenterTab component
+- Lint check: 0 errors in modified/new files
+- Git commit: e373b23 "feat: add bulk ingest pipeline for 20 pairs" (2 files, 272 insertions)
+- Git commit: bb905a6 "feat: add bulk_ingest script and scripts/__init__.py" (3 files, 386 insertions)
+- Git push: Both commits pushed to origin/main
+
+Stage Summary:
+- Files created: 3 (ppmt/scripts/__init__.py, ppmt/scripts/bulk_ingest.py, src/app/api/ppmt/bulk-ingest/route.ts)
+- Files modified: 1 (src/app/page.tsx)
+- New hook: useBulkIngest() mutation hook
+- New UI button: "🚀 Bulk Ingest 20 Pairs" in Command Center → Ingestion Controls
+- New API endpoint: POST /api/ppmt/bulk-ingest
+- Python script supports: 20 default pairs, 3 default timeframes, configurable days, automatic trie building
+- Build status: No lint errors in new/modified files
+
+---
 Task ID: 1
 Agent: Main Auditor
 Task: Exhaustive 3-phase audit of CryptoQuant Terminal
