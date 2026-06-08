@@ -27,8 +27,8 @@ export async function GET() {
     // Total candles
     const candleStats = db.prepare('SELECT symbol, timeframe, COUNT(*) as count, MIN(timestamp) as first_ts, MAX(timestamp) as last_ts FROM ohlcv GROUP BY symbol, timeframe').all();
 
-    // Trie stats
-    const tries = db.prepare('SELECT symbol, level, updated_at FROM tries').all();
+    // Trie stats (include data for pattern counts)
+    const tries = db.prepare('SELECT symbol, level, data, updated_at FROM tries').all();
 
     // Signal count
     let signalCount = 0;
@@ -74,11 +74,25 @@ export async function GET() {
         }
       } catch { /* ignore */ }
 
+      // Calculate actual OHLCV candle count (not the claimed one from assets table)
+      const actualCandleCount = assetCandles.reduce((sum: number, c: any) => sum + c.count, 0);
+      const tfCount = assetCandles.length;
+      const trieLevelCount = Object.keys(trieDetails).length;
+
+      // Data sufficiency: 50K+ candles, 4+ timeframes, 4 trie levels for reliable prediction
+      const candleScore = Math.min(actualCandleCount / 50000, 1);
+      const tfScore = Math.min(tfCount / 6, 1);
+      const trieScore = Math.min(trieLevelCount / 4, 1);
+      const sufficiencyScore = (candleScore * 0.5 + tfScore * 0.25 + trieScore * 0.25) * 100;
+      const sufficiency: 'sufficient' | 'partial' | 'insufficient' =
+        sufficiencyScore >= 70 ? 'sufficient' : sufficiencyScore >= 35 ? 'partial' : 'insufficient';
+
       return {
         symbol: asset.symbol,
         assetClass: asset.asset_class,
         weightProfile: asset.weight_profile,
-        candleCount: asset.candle_count,
+        candleCount: actualCandleCount, // Use actual OHLCV count, not claimed
+        claimedCandleCount: asset.candle_count, // Keep claimed for reference
         firstSeen: asset.first_seen,
         lastUpdated: asset.last_updated,
         timeframes: assetCandles.map((c: any) => ({
@@ -90,6 +104,9 @@ export async function GET() {
         tries: trieDetails,
         totalPatterns,
         engineState: engineData,
+        sufficiency,
+        sufficiencyScore: Math.round(sufficiencyScore),
+        trieLevelCount,
       };
     });
 
