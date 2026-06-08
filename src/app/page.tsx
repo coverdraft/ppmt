@@ -1,981 +1,679 @@
 'use client';
 
-import { useCryptoStore, type ActiveTab } from '@/store/crypto-store';
-import { useEffect, useCallback, useState, useRef } from 'react';
-import { useQuery } from '@tanstack/react-query';
-import { motion, AnimatePresence } from 'framer-motion';
+import { useState, useEffect, useCallback } from 'react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
-  Brain,
-  BarChart3,
-  Dna,
-  Radio,
-  FlaskConical,
-  Wallet,
-  Eye,
-  Zap,
-  ChevronLeft,
-  ChevronRight,
-  ChevronDown,
+  Database,
   Activity,
-  DollarSign,
+  Brain,
+  TrendingUp,
+  TrendingDown,
+  Minus,
+  Plus,
+  RefreshCw,
+  BarChart3,
   Layers,
-  Sparkles,
-  CandlestickChart,
-  Puzzle,
-  Globe,
-  LogOut,
-  User,
-  ShieldAlert,
+  Radio,
+  Search,
+  ArrowUpRight,
+  ArrowDownRight,
+  Clock,
+  Zap,
+  Target,
   Shield,
-  Gavel,
-  ArrowRightLeft,
-  PieChart,
-  TestTube,
-  LayoutDashboard,
-  Briefcase,
-  Code2,
-  Trophy,
-  Check,
+  Eye,
+  Download,
+  Upload,
+  ChevronRight,
+  AlertTriangle,
+  CheckCircle2,
+  XCircle,
+  Loader2,
+  Github,
+  ExternalLink,
 } from 'lucide-react';
-import { UserProvider, useUser } from '@/components/auth/user-provider';
-import { DashboardLevelProvider, useDashboardLevel, type DashboardLevel } from '@/components/dashboard/dashboard-level-provider';
-import { OperationModeProvider, useOperationMode } from '@/components/dashboard/operation-mode-provider';
-import { ModeSwitcher, WorkflowStepperCompact, WorkflowGuidePanel } from '@/components/dashboard/workflow-stepper';
-
-// Providers — static imports (they wrap the whole app, must be eagerly loaded)
-import { WebSocketProvider } from '@/components/dashboard/websocket-provider';
-import { SimulationProvider } from '@/components/dashboard/simulation-provider';
-
-// Dynamic imports — extracted to lazy-tabs.ts to prevent Turbopack panic
-// (26 dynamic() calls in a single file causes "Failed to write app endpoint /page")
-import {
-  TokenFlow,
-  SignalCenter,
-  DNAScanner,
-  PatternBuilder,
-  IntelligenceModules,
-  TraderIntelligencePanel,
-  BacktestingLab,
-  BigDataPredictive,
-  BrainControl,
-  MultiChainDashboard,
-  OHLCVChart,
-  DataStatusBar,
-  DeepAnalysisPanel,
-  NotificationCenter,
-  HeaderBar,
-  StrategyLabContent,
-  KillSwitchPanel,
-  AllocationDashboard,
-  PortfolioView,
-  DecisionDashboard,
-  RiskDashboard,
-  PaperTradingPanel,
-  ExportImportPanel,
-  ExecutiveDashboard,
-  ExecutionCostPanel,
-  MetaModelPanel,
-  AlphaRankingPanel,
-  RiskPreFilterPanel,
-  PortfolioIntelligencePanel,
-  MarketRegimePanel,
-  EventBusPanel,
-} from '@/components/dashboard/lazy-tabs';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
+import { Progress } from '@/components/ui/progress';
 
 // ============================================================
-// SIDEBAR NAVIGATION CONFIG
+// TYPES
 // ============================================================
 
-interface NavItem {
-  id: ActiveTab;
-  label: string;
-  icon: React.ComponentType<{ className?: string }>;
-  shortcut: string;
-  description: string;
+interface TimeframeData {
+  timeframe: string;
+  count: number;
+  firstTs: number;
+  lastTs: number;
 }
 
-interface NavGroup {
-  id: string;
-  label: string;
-  emoji: string;
-  items: NavItem[];
+interface TrieLevelData {
+  patternCount: number;
+  maxDepth: number;
+  name?: string;
 }
 
-// Tabs visible at each dashboard level
-const PROFESSIONAL_HIDDEN_TABS: ActiveTab[] = ['dna-scanner', 'predictive', 'patterns', 'export-import', 'event-bus'];
-const ENGINEER_ONLY_TABS: ActiveTab[] = ['event-bus'];
-
-function getFilteredNavGroups(level: DashboardLevel): NavGroup[] {
-  const allGroups: NavGroup[] = [
-    {
-      id: 'market',
-      label: 'MARKET',
-      emoji: '📡',
-      items: [
-        { id: 'dashboard', label: 'Dashboard', icon: BarChart3, shortcut: '1', description: 'Live token feed & prices' },
-        { id: 'charts', label: 'Charts', icon: CandlestickChart, shortcut: '2', description: 'OHLCV candlestick charts' },
-        { id: 'multi-chain', label: 'Multi-Chain', icon: Globe, shortcut: '3', description: 'Cross-chain comparison & ranking' },
-        { id: 'market-regime', label: 'Market Regime', icon: Activity, shortcut: 'g', description: 'Regime detection & HMM analysis' },
-      ],
-    },
-    {
-      id: 'intelligence',
-      label: 'INTELLIGENCE',
-      emoji: '🧠',
-      items: [
-        { id: 'signals', label: 'Signals', icon: Radio, shortcut: '4', description: 'Live signal feed' },
-        { id: 'brain', label: 'Brain', icon: Brain, shortcut: '5', description: 'Control center' },
-        { id: 'meta-model', label: 'Meta-Model', icon: Layers, shortcut: 'm', description: 'Engine performance & weights' },
-        { id: 'alpha-ranking', label: 'Alpha Rank', icon: Trophy, shortcut: 'a', description: 'Top alpha opportunities' },
-        { id: 'smart-money', label: 'Smart Money', icon: Eye, shortcut: '6', description: 'Trader intelligence' },
-        { id: 'deep-analysis', label: 'Deep Analysis', icon: Sparkles, shortcut: '7', description: 'Deep token analysis' },
-        { id: 'dna-scanner', label: 'DNA Scanner', icon: Dna, shortcut: '8', description: 'Token DNA analysis' },
-        { id: 'predictive', label: 'Predictive', icon: Zap, shortcut: '9', description: 'AI predictions' },
-      ],
-    },
-    {
-      id: 'risk-portfolio',
-      label: 'RISK & PORTFOLIO',
-      emoji: '🛡️',
-      items: [
-        { id: 'risk-pre-filter', label: 'Pre-Filter', icon: Shield, shortcut: 'f', description: 'Risk pre-filter for signals' },
-        { id: 'kill-switches', label: 'Kill Switches', icon: ShieldAlert, shortcut: 'r', description: 'Emergency kill switches' },
-        { id: 'risk', label: 'Risk', icon: Shield, shortcut: 'u', description: 'Risk management & simulation' },
-        { id: 'portfolio', label: 'Portfolio', icon: PieChart, shortcut: 'y', description: 'Portfolio view' },
-        { id: 'portfolio-intelligence', label: 'Portfolio AI', icon: Briefcase, shortcut: 'b', description: 'Impact analysis & optimization' },
-        { id: 'capital-allocation', label: 'Capital Alloc', icon: DollarSign, shortcut: 't', description: 'Capital allocation dashboard' },
-        { id: 'decisions', label: 'SDE Decisions', icon: Gavel, shortcut: 'i', description: 'Strategic decision engine' },
-        { id: 'execution-cost', label: 'Exec Cost', icon: DollarSign, shortcut: 'p', description: 'Execution cost estimator' },
-      ],
-    },
-    {
-      id: 'strategy',
-      label: 'STRATEGY',
-      emoji: '⚙️',
-      items: [
-        { id: 'strategy-lab', label: 'Strategy Lab', icon: FlaskConical, shortcut: '0', description: 'Trading system lab & AI optimizer' },
-        { id: 'backtesting', label: 'Backtesting', icon: TestTube, shortcut: 'q', description: 'Strategy backtesting' },
-        { id: 'paper-trading', label: 'Paper Trading', icon: Wallet, shortcut: 'w', description: 'Simulated trading' },
-        { id: 'patterns', label: 'Patterns', icon: Puzzle, shortcut: 'e', description: 'Pattern builder & detection' },
-      ],
-    },
-    {
-      id: 'system',
-      label: 'SYSTEM',
-      emoji: '🔧',
-      items: [
-        { id: 'event-bus', label: 'Event Bus', icon: Radio, shortcut: 'v', description: 'Real-time event monitor' },
-        { id: 'export-import', label: 'Export/Import', icon: ArrowRightLeft, shortcut: 'o', description: 'Export & import data' },
-      ],
-    },
-  ];
-
-  if (level === 'engineer') return allGroups;
-
-  // For professional, hide engineer-only tabs
-  if (level === 'professional') {
-    return allGroups.map(g => ({
-      ...g,
-      items: g.items.filter(item => !PROFESSIONAL_HIDDEN_TABS.includes(item.id)),
-    })).filter(g => g.items.length > 0);
-  }
-
-  // Executive level doesn't use sidebar at all
-  return [];
+interface AssetDetail {
+  symbol: string;
+  assetClass: string;
+  weightProfile: string;
+  candleCount: number;
+  firstSeen: string | null;
+  lastUpdated: string | null;
+  timeframes: TimeframeData[];
+  tries: Record<string, TrieLevelData>;
+  totalPatterns: number;
+  engineState: any;
 }
 
-// Flatten for keyboard shortcut mapping (computed dynamically)
-const ALL_NAV_ITEMS_FLAT: NavItem[] = [
-  { id: 'dashboard', label: 'Dashboard', icon: BarChart3, shortcut: '1', description: '' },
-  { id: 'charts', label: 'Charts', icon: CandlestickChart, shortcut: '2', description: '' },
-  { id: 'multi-chain', label: 'Multi-Chain', icon: Globe, shortcut: '3', description: '' },
-  { id: 'market-regime', label: 'Market Regime', icon: Activity, shortcut: 'g', description: '' },
-  { id: 'signals', label: 'Signals', icon: Radio, shortcut: '4', description: '' },
-  { id: 'brain', label: 'Brain', icon: Brain, shortcut: '5', description: '' },
-  { id: 'meta-model', label: 'Meta-Model', icon: Layers, shortcut: 'm', description: '' },
-  { id: 'alpha-ranking', label: 'Alpha Rank', icon: Trophy, shortcut: 'a', description: '' },
-  { id: 'smart-money', label: 'Smart Money', icon: Eye, shortcut: '6', description: '' },
-  { id: 'deep-analysis', label: 'Deep Analysis', icon: Sparkles, shortcut: '7', description: '' },
-  { id: 'dna-scanner', label: 'DNA Scanner', icon: Dna, shortcut: '8', description: '' },
-  { id: 'predictive', label: 'Predictive', icon: Zap, shortcut: '9', description: '' },
-  { id: 'risk-pre-filter', label: 'Pre-Filter', icon: Shield, shortcut: 'f', description: '' },
-  { id: 'kill-switches', label: 'Kill Switches', icon: ShieldAlert, shortcut: 'r', description: '' },
-  { id: 'risk', label: 'Risk', icon: Shield, shortcut: 'u', description: '' },
-  { id: 'portfolio', label: 'Portfolio', icon: PieChart, shortcut: 'y', description: '' },
-  { id: 'portfolio-intelligence', label: 'Portfolio AI', icon: Briefcase, shortcut: 'b', description: '' },
-  { id: 'capital-allocation', label: 'Capital Alloc', icon: DollarSign, shortcut: 't', description: '' },
-  { id: 'decisions', label: 'SDE Decisions', icon: Gavel, shortcut: 'i', description: '' },
-  { id: 'execution-cost', label: 'Exec Cost', icon: DollarSign, shortcut: 'p', description: '' },
-  { id: 'strategy-lab', label: 'Strategy Lab', icon: FlaskConical, shortcut: '0', description: '' },
-  { id: 'backtesting', label: 'Backtesting', icon: TestTube, shortcut: 'q', description: '' },
-  { id: 'paper-trading', label: 'Paper Trading', icon: Wallet, shortcut: 'w', description: '' },
-  { id: 'patterns', label: 'Patterns', icon: Puzzle, shortcut: 'e', description: '' },
-  { id: 'event-bus', label: 'Event Bus', icon: Radio, shortcut: 'v', description: '' },
-  { id: 'export-import', label: 'Export/Import', icon: ArrowRightLeft, shortcut: 'o', description: '' },
-];
+interface StatusData {
+  assets: AssetDetail[];
+  totalAssets: number;
+  totalCandles: number;
+  totalPatterns: number;
+  signalCount: number;
+  dbSizeBytes: number;
+  dbSizeMB: string;
+}
 
-// ============================================================
-// KEYBOARD SHORTCUTS
-// ============================================================
-
-const SHORTCUT_TAB_MAP: Record<string, ActiveTab> = {};
-ALL_NAV_ITEMS_FLAT.forEach((item) => {
-  if (item.shortcut) {
-    SHORTCUT_TAB_MAP[item.shortcut] = item.id;
-  }
-});
-
-const TAB_HISTORY: ActiveTab[] = [];
-
-function useKeyboardShortcuts() {
-  const setActiveTab = useCryptoStore((s) => s.setActiveTab);
-  const activeTab = useCryptoStore((s) => s.activeTab);
-
-  const handleKeyDown = useCallback((e: KeyboardEvent) => {
-    // Don't capture when typing in inputs
-    if (
-      e.target instanceof HTMLInputElement ||
-      e.target instanceof HTMLTextAreaElement ||
-      e.target instanceof HTMLSelectElement
-    ) {
-      return;
-    }
-
-    if (SHORTCUT_TAB_MAP[e.key]) {
-      e.preventDefault();
-      TAB_HISTORY.push(activeTab);
-      setActiveTab(SHORTCUT_TAB_MAP[e.key]);
-      return;
-    }
-
-    if (e.key === 'Escape') {
-      const prevTab = TAB_HISTORY.pop() || 'dashboard';
-      setActiveTab(prevTab);
-      return;
-    }
-  }, [setActiveTab, activeTab]);
-
-  useEffect(() => {
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleKeyDown]);
+interface SignalData {
+  id: number;
+  symbol: string;
+  signal_type: string;
+  confidence: number;
+  quality_score: number;
+  sizing_multiplier: number;
+  entry_price: number | null;
+  sl_price: number | null;
+  tp_price: number | null;
+  expected_move_pct: number;
+  win_rate: number;
+  remaining_candles: number;
+  timestamp: number;
+  matchedPattern: string[];
+  predictedPath: any[];
 }
 
 // ============================================================
-// TOP BAR COMPONENT
+// API HOOKS
 // ============================================================
 
-function TopBar() {
-  const isConnected = useCryptoStore((s) => s.isConnected);
-  const marketSummary = useCryptoStore((s) => s.marketSummary);
-  const [utcTime, setUtcTime] = useState('');
-  const [userMenuOpen, setUserMenuOpen] = useState(false);
-  const userMenuRef = useRef<HTMLDivElement>(null);
-  const { user } = useUser();
-
-  // Close user menu when clicking outside
-  useEffect(() => {
-    function handleClickOutside(e: MouseEvent) {
-      if (userMenuRef.current && !userMenuRef.current.contains(e.target as Node)) {
-        setUserMenuOpen(false);
-      }
-    }
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, []);
-
-  const { data: brainStatus } = useQuery({
-    queryKey: ['brain-status-topbar'],
+function usePPMTStatus() {
+  return useQuery({
+    queryKey: ['ppmt-status'],
     queryFn: async () => {
-      try {
-        const res = await fetch('/api/brain/status');
-        if (!res.ok) return null;
-        const json = await res.json();
-        return json.data as {
-          totalSignals: number;
-          brainHealth: string;
-          brainStatusMessage?: string;
-          tokensTracked: number;
-          brainCycles: number;
-        } | null;
-      } catch {
-        return null;
-      }
+      const res = await fetch('/api/ppmt/status');
+      if (!res.ok) throw new Error('Failed to fetch PPMT status');
+      const json = await res.json();
+      return json.data as StatusData;
     },
     refetchInterval: 30000,
-    staleTime: 15000,
   });
+}
 
-  const { data: schedulerStatus } = useQuery({
-    queryKey: ['scheduler-status-topbar'],
+function usePPMTSignals(symbol?: string) {
+  return useQuery({
+    queryKey: ['ppmt-signals', symbol],
     queryFn: async () => {
-      try {
-        const res = await fetch('/api/brain/scheduler');
-        if (!res.ok) return null;
-        const json = await res.json();
-        return (json.data || json) as {
-          status: string;
-          totalCyclesCompleted: number;
-          capitalStrategy?: { totalCapital: number; growthPct: number };
-          persisted?: { totalCycles: number; capitalUsd: number };
-        } | null;
-      } catch {
-        return null;
-      }
+      const url = symbol ? `/api/ppmt/signals?symbol=${symbol}&limit=50` : '/api/ppmt/signals?limit=50';
+      const res = await fetch(url);
+      if (!res.ok) throw new Error('Failed to fetch signals');
+      const json = await res.json();
+      return json.data as SignalData[];
     },
     refetchInterval: 15000,
-    staleTime: 10000,
   });
+}
 
-  useEffect(() => {
-    const timer = setInterval(() => {
-      setUtcTime(new Date().toISOString().replace('T', ' ').substring(0, 19) + ' UTC');
-    }, 1000);
-    return () => clearInterval(timer);
-  }, []);
+function usePPMTPrediction(symbol: string | null) {
+  return useQuery({
+    queryKey: ['ppmt-prediction', symbol],
+    queryFn: async () => {
+      if (!symbol) return null;
+      const res = await fetch(`/api/ppmt/predict?symbol=${encodeURIComponent(symbol)}`);
+      if (!res.ok) throw new Error('Failed to fetch prediction');
+      const json = await res.json();
+      return json.data as { symbol: string; timeframe: string; output: string };
+    },
+    enabled: !!symbol,
+    refetchInterval: 60000,
+  });
+}
 
-  const brainHealth = brainStatus?.brainHealth ?? 'UNKNOWN';
-  const totalSignals = brainStatus?.totalSignals ?? 0;
-  const tokensTracked = brainStatus?.tokensTracked ?? 0;
-  const brainCycles = schedulerStatus?.totalCyclesCompleted ?? schedulerStatus?.persisted?.totalCycles ?? 0;
-  const capital = schedulerStatus?.capitalStrategy?.totalCapital ?? schedulerStatus?.persisted?.capitalUsd ?? 0;
-  const growthPct = schedulerStatus?.capitalStrategy?.growthPct ?? 0;
-  const schedulerRunning = schedulerStatus?.status === 'RUNNING';
+// ============================================================
+// UTILITY FUNCTIONS
+// ============================================================
 
-  const safeGrowthPct = growthPct ?? 0;
+function formatNumber(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return n.toLocaleString();
+}
 
-  const formatCapital = (v: number) => {
-    if (v == null || isNaN(v)) return '$0';
-    if (v >= 1e6) return `$${(v / 1e6).toFixed(2)}M`;
-    if (v >= 1e3) return `$${(v / 1e3).toFixed(1)}K`;
-    return `$${v.toFixed(0)}`;
-  };
+function formatDate(ts: number | string | null): string {
+  if (!ts) return '—';
+  if (typeof ts === 'number') {
+    return new Date(ts).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  }
+  return ts;
+}
 
+function getDataCompleteness(asset: AssetDetail): number {
+  // How complete is the data? Based on number of timeframes and candle counts
+  const tf = asset.timeframes.length;
+  const idealTimeframes = 6; // 1m, 5m, 15m, 1h, 4h, 1d
+  const tfScore = Math.min(tf / idealTimeframes, 1);
+  const candleScore = Math.min(asset.candleCount / 50000, 1); // 50K candles is "good"
+  return (tfScore * 0.4 + candleScore * 0.6) * 100;
+}
+
+function getCompletenessColor(pct: number): string {
+  if (pct >= 70) return 'text-emerald-400';
+  if (pct >= 40) return 'text-amber-400';
+  return 'text-red-400';
+}
+
+function getCompletenessBadge(pct: number): string {
+  if (pct >= 70) return 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30';
+  if (pct >= 40) return 'bg-amber-500/10 text-amber-400 border-amber-500/30';
+  return 'bg-red-500/10 text-red-400 border-red-500/30';
+}
+
+function getSignalTypeIcon(type: string) {
+  if (type.includes('LONG')) return <ArrowUpRight className="h-3.5 w-3.5 text-emerald-400" />;
+  if (type.includes('SHORT')) return <ArrowDownRight className="h-3.5 w-3.5 text-red-400" />;
+  if (type.includes('EXIT')) return <XCircle className="h-3.5 w-3.5 text-red-400" />;
+  if (type.includes('HOLD')) return <Minus className="h-3.5 w-3.5 text-amber-400" />;
+  return <Radio className="h-3.5 w-3.5 text-[#64748b]" />;
+}
+
+function getSignalTypeColor(type: string): string {
+  if (type.includes('LONG')) return 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30';
+  if (type.includes('SHORT')) return 'bg-red-500/10 text-red-400 border-red-500/30';
+  if (type.includes('EXIT')) return 'bg-red-500/10 text-red-400 border-red-500/30';
+  return 'bg-amber-500/10 text-amber-400 border-amber-500/30';
+}
+
+// ============================================================
+// STAT CARD COMPONENT
+// ============================================================
+
+function StatCard({ title, value, subtitle, icon: Icon, color }: {
+  title: string;
+  value: string | number;
+  subtitle?: string;
+  icon: React.ComponentType<{ className?: string }>;
+  color: string;
+}) {
   return (
-    <div className="flex items-center justify-between px-2 sm:px-3 h-9 bg-[#080b12] border-b border-[#1e293b] shrink-0">
-      {/* Left: Logo + Status */}
-      <div className="flex items-center gap-2 sm:gap-3 shrink-0">
-        <div className="flex items-center gap-1.5">
-          <span className="text-[#3b82f6] font-mono text-xs font-bold tracking-wider blue-glow">
-            CryptoQuant
-          </span>
-          <span className="text-[#475569] font-mono text-[8px] hidden sm:inline">TERMINAL</span>
-        </div>
-        <div className="h-4 w-px bg-[#1e293b]" />
-        <div className="flex items-center gap-1">
-          <div className={`w-1.5 h-1.5 rounded-full ${isConnected ? 'bg-emerald-500 live-pulse' : 'bg-red-500'}`} />
-          <span className={`font-mono text-[9px] ${isConnected ? 'text-emerald-400' : 'text-red-400'}`}>
-            {isConnected ? 'LIVE' : 'OFFLINE'}
-          </span>
-        </div>
-        <div className="h-4 w-px bg-[#1e293b]" />
-        {/* Brain Status */}
-        <div className="flex items-center gap-1.5">
-          <Brain className={`h-3 w-3 ${schedulerRunning ? 'text-emerald-400' : 'text-[#475569]'}`} />
-          <span className={`font-mono text-[9px] font-bold ${
-            brainHealth === 'HEALTHY' || brainHealth === 'ACTIVE' ? 'text-emerald-400' :
-            brainHealth === 'LEARNING' ? 'text-cyan-400' :
-            brainHealth === 'IDLE' ? 'text-gray-400' :
-            'text-[#64748b]'
-          }`}>
-            {schedulerRunning ? 'ACTIVE' :
-              brainHealth === 'HEALTHY' || brainHealth === 'ACTIVE' ? 'ACTIVE' :
-              brainHealth === 'LEARNING' ? 'LEARNING' :
-              brainHealth === 'IDLE' ? 'IDLE' :
-              brainHealth}
-          </span>
-        </div>
-      </div>
-
-      {/* Center: Key Metrics - responsive */}
-      <div className="flex items-center gap-1.5 sm:gap-3 lg:gap-4 overflow-x-auto">
-        {/* Capital */}
-        <div className="flex items-center gap-1 sm:gap-1.5 bg-[#0a0e17] px-1.5 sm:px-2 py-0.5 rounded border border-[#1e293b] shrink-0">
-          <DollarSign className="h-3 w-3 text-[#3b82f6]" />
-          <span className="text-[8px] font-mono text-[#64748b] hidden md:inline">CAPITAL</span>
-          <span className="mono-data text-[10px] font-bold text-[#e2e8f0]">{formatCapital(capital)}</span>
-          <span className={`mono-data text-[9px] font-bold ${safeGrowthPct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-            {safeGrowthPct >= 0 ? '+' : ''}{safeGrowthPct.toFixed(1)}%
-          </span>
-        </div>
-
-        {/* Cycles */}
-        <div className="flex items-center gap-1 sm:gap-1.5 bg-[#0a0e17] px-1.5 sm:px-2 py-0.5 rounded border border-[#1e293b] shrink-0">
-          <Activity className="h-3 w-3 text-cyan-400" />
-          <span className="text-[8px] font-mono text-[#64748b] hidden lg:inline">CYCLES</span>
-          <span className="mono-data text-[10px] font-bold text-cyan-400">{brainCycles}</span>
-        </div>
-
-        {/* Tokens */}
-        <div className="flex items-center gap-1 sm:gap-1.5 bg-[#0a0e17] px-1.5 sm:px-2 py-0.5 rounded border border-[#1e293b] shrink-0">
-          <BarChart3 className="h-3 w-3 text-[#3b82f6]" />
-          <span className="text-[8px] font-mono text-[#64748b] hidden lg:inline">TOKENS</span>
-          <span className="mono-data text-[10px] font-bold text-[#e2e8f0]">{tokensTracked.toLocaleString()}</span>
-        </div>
-
-        {/* Signals */}
-        <div className="flex items-center gap-1 sm:gap-1.5 bg-[#0a0e17] px-1.5 sm:px-2 py-0.5 rounded border border-[#1e293b] shrink-0">
-          <Radio className="h-3 w-3 text-amber-400" />
-          <span className="text-[8px] font-mono text-[#64748b] hidden lg:inline">SIGNALS</span>
-          <span className="mono-data text-[10px] font-bold text-amber-400">{totalSignals}</span>
-        </div>
-
-        {/* Market - hide on small screens */}
-        {marketSummary && (
-          <>
-            <div className="h-4 w-px bg-[#1e293b] hidden xl:block" />
-            <div className="flex items-center gap-1 hidden xl:flex">
-              <span className="text-[#f59e0b] font-mono text-[9px] font-bold">BTC</span>
-              <span className="mono-data text-[10px] text-[#e2e8f0]">${(marketSummary.btcPrice ?? 0).toLocaleString()}</span>
-            </div>
-            <div className="flex items-center gap-1 hidden xl:flex">
-              <span className="text-[#627eea] font-mono text-[9px] font-bold">ETH</span>
-              <span className="mono-data text-[10px] text-[#e2e8f0]">${(marketSummary.ethPrice ?? 0).toLocaleString()}</span>
-            </div>
-          </>
-        )}
-      </div>
-
-      {/* Center-Right: Workflow Stepper */}
-      <WorkflowStepperCompact />
-
-      <div className="h-4 w-px bg-[#1e293b]" />
-
-      {/* Mode Switcher */}
-      <ModeSwitcher />
-
-      <div className="h-4 w-px bg-[#1e293b]" />
-
-      {/* Dashboard Level Selector */}
-      <DashboardLevelSelector />
-
-      {/* Right: Notifications + User Menu + Time */}
-      <div className="flex items-center gap-2 shrink-0">
-        <NotificationCenter />
-        <span className="mono-data text-[9px] text-[#475569] hidden md:inline">{utcTime}</span>
-        
-        {/* User Menu */}
-        {user && (
-          <div className="relative" ref={userMenuRef}>
-            <button
-              onClick={() => setUserMenuOpen(!userMenuOpen)}
-              className="flex items-center gap-1.5 px-1.5 py-0.5 rounded border border-[#1e293b] bg-[#0a0e17] hover:border-[#3b82f6]/30 transition-colors"
-            >
-              <div className="flex items-center justify-center w-4 h-4 rounded-full bg-[#3b82f6]/20 border border-[#3b82f6]/30">
-                <User className="h-2.5 w-2.5 text-[#3b82f6]" />
-              </div>
-              <span className="font-mono text-[9px] text-[#94a3b8] max-w-[80px] truncate hidden sm:inline">
-                {user.name || user.email}
-              </span>
-              <ChevronDown className="h-2.5 w-2.5 text-[#475569]" />
-            </button>
-
-            {userMenuOpen && (
-              <div className="absolute right-0 top-full mt-1 w-48 bg-[#111827] border border-[#1e293b] rounded-lg shadow-xl shadow-black/50 z-50 py-1">
-                <div className="px-3 py-2 border-b border-[#1e293b]">
-                  <p className="font-mono text-[10px] text-[#e2e8f0] truncate">{user.name || 'User'}</p>
-                  <p className="font-mono text-[9px] text-[#64748b] truncate">{user.email}</p>
-                  <span className="inline-block mt-1 px-1.5 py-0.5 rounded bg-[#3b82f6]/10 border border-[#3b82f6]/20 font-mono text-[8px] text-[#3b82f6]">
-                    {user.role}
-                  </span>
-                </div>
-                <button
-                  onClick={() => {
-                    setUserMenuOpen(false);
-                    // Auth disabled — no sign out action
-                  }}
-                  className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-[#1e293b] transition-colors opacity-50"
-                >
-                  <LogOut className="h-3 w-3 text-[#475569]" />
-                  <span className="font-mono text-[10px] text-[#64748b]">Auth Disabled</span>
-                </button>
-              </div>
-            )}
+    <Card className="bg-[#111827] border-[#1e293b]">
+      <CardContent className="p-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-[10px] font-mono text-[#64748b] uppercase tracking-wider">{title}</p>
+            <p className="text-xl font-mono font-bold text-[#f1f5f9] mt-1">{value}</p>
+            {subtitle && <p className="text-[10px] font-mono text-[#475569] mt-0.5">{subtitle}</p>}
           </div>
-        )}
-      </div>
-    </div>
+          <div className={`flex items-center justify-center w-10 h-10 rounded-lg bg-${color}/10 border border-${color}/20`}>
+            <Icon className={`h-5 w-5 text-${color}`} />
+          </div>
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 
 // ============================================================
-// DASHBOARD LEVEL SELECTOR
+// ASSET ROW COMPONENT
 // ============================================================
 
-function DashboardLevelSelector() {
-  const { level, setLevel } = useDashboardLevel();
-
-  const levels: Array<{ id: DashboardLevel; label: string; icon: React.ComponentType<{ className?: string }>; shortcut: string }> = [
-    { id: 'executive', label: 'Executive', icon: LayoutDashboard, shortcut: '⌘1' },
-    { id: 'professional', label: 'Professional', icon: Briefcase, shortcut: '⌘2' },
-    { id: 'engineer', label: 'Engineer', icon: Code2, shortcut: '⌘3' },
-  ];
+function AssetRow({ asset, isSelected, onSelect }: {
+  asset: AssetDetail;
+  isSelected: boolean;
+  onSelect: () => void;
+}) {
+  const completeness = getDataCompleteness(asset);
+  const hasAllTries = asset.tries.N1 && asset.tries.N2 && asset.tries.N3 && asset.tries.N4;
 
   return (
-    <div className="flex items-center gap-0.5 bg-[#0a0e17] rounded border border-[#1e293b] px-0.5 py-0.5">
-      {levels.map((l) => {
-        const Icon = l.icon;
-        const isActive = level === l.id;
-        return (
-          <button
-            key={l.id}
-            onClick={() => setLevel(l.id)}
-            className={`flex items-center gap-1 px-2 py-0.5 rounded text-[9px] font-mono transition-all ${
-              isActive
-                ? 'bg-[#1e293b] text-[#f1f5f9]'
-                : 'text-[#64748b] hover:text-[#94a3b8] hover:bg-[#1e293b]/50'
-            }`}
-            title={`${l.label} view (${l.shortcut})`}
-          >
-            <Icon className="h-3 w-3" />
-            <span className="hidden sm:inline">{l.label}</span>
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-// ============================================================
-// SIDEBAR COMPONENT
-// ============================================================
-
-function Sidebar() {
-  const activeTab = useCryptoStore((s) => s.activeTab);
-  const setActiveTab = useCryptoStore((s) => s.setActiveTab);
-  const { level } = useDashboardLevel();
-  const [collapsed, setCollapsed] = useState(false);
-
-  const navGroups = getFilteredNavGroups(level);
-
-  const { mode, currentStep } = useOperationMode();
-
-  // Don't render sidebar for executive level
-  if (level === 'executive') return null;
-
-  return (
-    <nav
-      className={`flex flex-col h-full bg-[#0d1117] border-r border-[#1e293b] shrink-0 transition-all duration-200 ${
-        collapsed ? 'w-10 sm:w-12' : 'w-[140px] sm:w-[180px]'
+    <button
+      onClick={onSelect}
+      className={`w-full text-left px-4 py-3 border-b border-[#1e293b] transition-colors ${
+        isSelected ? 'bg-[#3b82f6]/5 border-l-2 border-l-[#3b82f6]' : 'hover:bg-[#1e293b]/30 border-l-2 border-l-transparent'
       }`}
     >
-      {/* Nav Items */}
-      <div className="flex-1 overflow-y-auto py-1">
-        {navGroups.map((group) => (
-          <div key={group.id}>
-            {/* Group header */}
-            {!collapsed && (
-              <div className="px-3 py-1.5 mt-2 mb-0.5">
-                <span className="text-[9px] font-mono text-[#475569] uppercase tracking-wider">
-                  {group.emoji} {group.label}
-                </span>
-              </div>
-            )}
-            {collapsed && (
-              <div className="flex justify-center py-1 mt-2">
-                <span className="text-[10px]">{group.emoji}</span>
-              </div>
-            )}
-            {/* Group items */}
-            {group.items.map((item) => {
-              const Icon = item.icon;
-              const isActive = activeTab === item.id;
-              const isWorkflowStep = currentStep?.targetTab === item.id;
-              return (
-                <button
-                  key={item.id}
-                  onClick={() => setActiveTab(item.id)}
-                  className={`sidebar-nav-item w-full flex items-center gap-2 px-3 py-2 text-left ${
-                    isActive ? 'active' : ''
-                  }`}
-                  title={`${item.label} (${item.shortcut})${isWorkflowStep ? ' — Paso actual' : ''}`}
-                >
-                  <div className="relative">
-                    <Icon className={`nav-icon h-4 w-4 shrink-0 ${
-                      isActive ? 'text-[#3b82f6]' : isWorkflowStep ? (mode === 'research' ? 'text-cyan-400' : 'text-amber-400') : 'text-[#64748b]'
-                    }`} />
-                    {isWorkflowStep && !isActive && (
-                      <div className={`absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full ${
-                        mode === 'research' ? 'bg-cyan-400' : 'bg-amber-400'
-                      }`} />
-                    )}
-                  </div>
-                  {!collapsed && (
-                    <div className="flex flex-col min-w-0">
-                      <span className={`nav-label text-[11px] font-medium truncate ${
-                        isActive ? 'text-[#f1f5f9]' : isWorkflowStep ? (mode === 'research' ? 'text-cyan-300' : 'text-amber-300') : 'text-[#94a3b8]'
-                      }`}>
-                        {item.label}
-                      </span>
-                    </div>
-                  )}
-                  {!collapsed && (
-                    <span className={`ml-auto text-[8px] font-mono ${
-                      isActive ? 'text-[#3b82f6]/60' : isWorkflowStep ? (mode === 'research' ? 'text-cyan-500/60' : 'text-amber-500/60') : 'text-[#475569]'
-                    }`}>
-                      {isWorkflowStep ? '▸' : item.shortcut}
-                    </span>
-                  )}
-                </button>
-              );
-            })}
-          </div>
-        ))}
-      </div>
-
-      {/* Collapse Toggle */}
-      <div className="border-t border-[#1e293b] p-1">
-        <button
-          onClick={() => setCollapsed(!collapsed)}
-          className="flex items-center justify-center w-full py-1.5 text-[#475569] hover:text-[#94a3b8] transition-colors"
-          title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-        >
-          {collapsed ? (
-            <ChevronRight className="h-3.5 w-3.5" />
+      <div className="flex items-center justify-between mb-1.5">
+        <div className="flex items-center gap-2">
+          <span className="font-mono text-sm font-bold text-[#f1f5f9]">{asset.symbol}</span>
+          <Badge variant="outline" className="text-[8px] font-mono px-1.5 py-0 h-4 bg-[#1e293b] text-[#94a3b8] border-[#334155]">
+            {asset.assetClass}
+          </Badge>
+        </div>
+        <div className="flex items-center gap-2">
+          {hasAllTries ? (
+            <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
           ) : (
-            <ChevronLeft className="h-3.5 w-3.5" />
+            <AlertTriangle className="h-3.5 w-3.5 text-amber-400" />
           )}
-        </button>
+          <ChevronRight className={`h-3.5 w-3.5 ${isSelected ? 'text-[#3b82f6]' : 'text-[#475569]'}`} />
+        </div>
       </div>
-    </nav>
+      <div className="flex items-center gap-3">
+        <div className="flex-1">
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-[9px] font-mono text-[#475569]">Data Completeness</span>
+            <span className={`text-[9px] font-mono font-bold ${getCompletenessColor(completeness)}`}>
+              {Math.round(completeness)}%
+            </span>
+          </div>
+          <div className="h-1 bg-[#1e293b] rounded-full overflow-hidden">
+            <div
+              className={`h-full rounded-full transition-all ${
+                completeness >= 70 ? 'bg-emerald-500' : completeness >= 40 ? 'bg-amber-500' : 'bg-red-500'
+              }`}
+              style={{ width: `${completeness}%` }}
+            />
+          </div>
+        </div>
+        <span className="text-[9px] font-mono text-[#475569]">{formatNumber(asset.candleCount)} candles</span>
+      </div>
+      <div className="flex items-center gap-1.5 mt-1.5">
+        {asset.timeframes.map(tf => (
+          <Badge key={tf.timeframe} variant="outline" className="text-[7px] font-mono px-1 py-0 h-3.5 bg-[#0a0e17] text-emerald-400 border-emerald-500/30">
+            {tf.timeframe}
+          </Badge>
+        ))}
+        {!asset.timeframes.length && (
+          <span className="text-[8px] font-mono text-red-400">No data</span>
+        )}
+      </div>
+    </button>
   );
 }
 
 // ============================================================
-// QUICK START GUIDE
+// ASSET DETAIL PANEL
 // ============================================================
 
-function QuickStartGuide() {
-  const { mode, steps, currentStepIndex, goToStep, currentStep, isStepCompleted, progressPct } = useOperationMode();
-  const setActiveTab = useCryptoStore((s) => s.setActiveTab);
+function AssetDetailPanel({ asset, prediction }: { asset: AssetDetail; prediction: any }) {
+  const queryClient = useQueryClient();
 
-  const modeColor = mode === 'research' ? 'cyan' : 'amber';
-  const modeLabel = mode === 'research' ? 'INVESTIGACIÓN' : 'OPERACIÓN';
-  const modeDesc = mode === 'research'
-    ? 'Pipeline de backtesting y validación — investiga, diseña, valida y optimiza estrategias con datos históricos'
-    : 'Pipeline de ejecución y trading — selecciona estrategias validadas, paper trade y ejecuta en vivo';
+  const ingestMutation = useMutation({
+    mutationFn: async ({ symbol, timeframe, days }: { symbol: string; timeframe: string; days: number }) => {
+      const res = await fetch('/api/ppmt/ingest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol, timeframe, days }),
+      });
+      if (!res.ok) throw new Error('Ingest failed');
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['ppmt-status'] });
+    },
+  });
+
+  const buildMutation = useMutation({
+    mutationFn: async ({ symbol, timeframe }: { symbol: string; timeframe: string }) => {
+      const res = await fetch('/api/ppmt/build', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol, timeframe }),
+      });
+      if (!res.ok) throw new Error('Build failed');
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['ppmt-status'] });
+    },
+  });
+
+  const trieLevels = ['N1', 'N2', 'N3', 'N4'];
+  const trieDescriptions: Record<string, string> = {
+    N1: 'Universal (all assets)',
+    N2: 'Asset Class',
+    N3: 'Per-Asset',
+    N4: 'Per-Asset + Regime',
+  };
+  const weights = asset.engineState?.weights;
 
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 10 }}
-      animate={{ opacity: 1, y: 0 }}
-      className="flex flex-col h-full"
-    >
-      {/* Welcome Header */}
-      <div className="px-6 pt-6 pb-4">
-        <div className="flex items-center gap-2 mb-2">
-          <Sparkles className="h-5 w-5 text-[#3b82f6]" />
-          <h1 className="text-xl font-bold text-[#f1f5f9] font-mono">CryptoQuant Terminal</h1>
+    <div className="h-full overflow-y-auto">
+      {/* Header */}
+      <div className="px-4 py-3 border-b border-[#1e293b]">
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="font-mono text-lg font-bold text-[#f1f5f9]">{asset.symbol}</h2>
+            <div className="flex items-center gap-2 mt-1">
+              <Badge variant="outline" className="text-[9px] font-mono bg-[#1e293b] text-[#94a3b8] border-[#334155]">
+                {asset.assetClass}
+              </Badge>
+              <Badge variant="outline" className="text-[9px] font-mono bg-[#3b82f6]/10 text-[#3b82f6] border-[#3b82f6]/30">
+                {asset.weightProfile}
+              </Badge>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 text-[9px] font-mono bg-[#1e293b] border-[#334155] text-[#94a3b8] hover:text-[#f1f5f9]"
+              onClick={() => ingestMutation.mutate({ symbol: asset.symbol, timeframe: '1h', days: 365 })}
+              disabled={ingestMutation.isPending}
+            >
+              {ingestMutation.isPending ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <Download className="h-3 w-3 mr-1" />}
+              Ingest 1h
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 text-[9px] font-mono bg-[#3b82f6]/10 border-[#3b82f6]/30 text-[#3b82f6] hover:bg-[#3b82f6]/20"
+              onClick={() => buildMutation.mutate({ symbol: asset.symbol, timeframe: '1h' })}
+              disabled={buildMutation.isPending}
+            >
+              {buildMutation.isPending ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : <Layers className="h-3 w-3 mr-1" />}
+              Build Trie
+            </Button>
+          </div>
         </div>
-        <div className="flex items-center gap-2 mb-2">
-          <span className={`font-mono text-[10px] font-bold tracking-wider px-2 py-0.5 rounded ${
-            mode === 'research' ? 'bg-cyan-500/10 text-cyan-400 border border-cyan-500/30' : 'bg-amber-500/10 text-amber-400 border border-amber-500/30'
-          }`}>
-            MODO {modeLabel}
-          </span>
-          <span className="font-mono text-[9px] text-[#64748b]">
-            Paso {currentStepIndex + 1} de {steps.length} — {Math.round(progressPct)}% completado
-          </span>
-        </div>
-        <p className="text-sm text-[#94a3b8] max-w-xl">
-          {modeDesc}
-        </p>
       </div>
 
-      {/* Workflow Steps */}
-      <div className="px-6 pb-4">
-        <h2 className="text-[11px] font-mono text-[#64748b] uppercase tracking-wider mb-3">
-          Pipeline: {mode === 'research' ? 'Investigación → Backtesting' : 'Operación → Ejecución'}
-        </h2>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-          {steps.map((step, i) => {
-            const isCurrent = i === currentStepIndex;
-            const isDone = isStepCompleted(step.id);
-            const isPast = i < currentStepIndex;
-
+      {/* Trie Architecture */}
+      <div className="px-4 py-3 border-b border-[#1e293b]">
+        <h3 className="text-[10px] font-mono text-[#64748b] uppercase tracking-wider mb-2">4-Level Trie Architecture</h3>
+        <div className="grid grid-cols-4 gap-2">
+          {trieLevels.map(level => {
+            const trie = asset.tries[level];
+            const weight = weights ? Object.values(weights).find((_: any, i: number) => i === trieLevels.indexOf(level)) : null;
             return (
-              <div
-                key={step.id}
-                onClick={() => {
-                  goToStep(i);
-                  setActiveTab(step.targetTab as ActiveTab);
-                }}
-                className={`quick-start-step bg-[#111827] rounded-lg p-4 cursor-pointer transition-all ${
-                  isCurrent
-                    ? mode === 'research'
-                      ? 'border-2 border-cyan-500/50 shadow-lg shadow-cyan-500/10'
-                      : 'border-2 border-amber-500/50 shadow-lg shadow-amber-500/10'
-                    : isDone
-                    ? 'border border-emerald-500/30 hover:border-emerald-500/50'
-                    : 'border border-[#1e293b] hover:border-[#3b82f6]/30'
-                }`}
-              >
-                <div className="flex items-center gap-2 mb-2">
-                  <div className={`flex items-center justify-center w-8 h-8 rounded-lg border ${
-                    isDone
-                      ? 'bg-emerald-500/10 border-emerald-500/30'
-                      : isCurrent
-                      ? mode === 'research'
-                        ? 'bg-cyan-500/10 border-cyan-500/30'
-                        : 'bg-amber-500/10 border-amber-500/30'
-                      : 'bg-[#1e293b] border-[#334155]'
-                  }`}>
-                    {isDone ? (
-                      <Check className="h-4 w-4 text-emerald-400" />
-                    ) : (
-                      <span className="text-sm">{step.icon}</span>
-                    )}
-                  </div>
-                  <div className="flex flex-col">
-                    <span className={`text-[9px] font-mono ${
-                      isCurrent
-                        ? mode === 'research' ? 'text-cyan-400' : 'text-amber-400'
-                        : isDone
-                        ? 'text-emerald-400'
-                        : 'text-[#475569]'
-                    }`}>
-                      PASO {i + 1}
-                    </span>
-                    <span className={`text-[10px] font-bold ${
-                      isCurrent ? 'text-[#f1f5f9]' : isDone ? 'text-emerald-300' : 'text-[#94a3b8]'
-                    }`}>
-                      {step.label}
-                    </span>
-                  </div>
+              <div key={level} className={`p-2 rounded-lg border ${
+                trie ? 'bg-emerald-500/5 border-emerald-500/20' : 'bg-[#0a0e17] border-[#1e293b]'
+              }`}>
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-[9px] font-mono font-bold text-[#f1f5f9]">{level}</span>
+                  {trie ? <CheckCircle2 className="h-3 w-3 text-emerald-400" /> : <XCircle className="h-3 w-3 text-[#475569]" />}
                 </div>
-                <p className="text-[10px] text-[#64748b] leading-relaxed">{step.description}</p>
-                {isCurrent && (
-                  <div className="mt-2 pt-2 border-t border-[#1e293b]">
-                    <span className={`text-[8px] font-mono font-bold ${
-                      mode === 'research' ? 'text-cyan-500' : 'text-amber-500'
-                    }`}>
-                      ▸ PASO ACTUAL — Haz click para ir
-                    </span>
+                <p className="text-[7px] font-mono text-[#475569] mb-1">{trieDescriptions[level]}</p>
+                {trie && (
+                  <div className="space-y-0.5">
+                    <p className="text-[8px] font-mono text-[#94a3b8]">{formatNumber(trie.patternCount)} patterns</p>
+                    <p className="text-[8px] font-mono text-[#64748b]">Depth: {trie.maxDepth}</p>
                   </div>
                 )}
               </div>
             );
           })}
         </div>
-      </div>
-
-      {/* Main Dashboard Content - Token Flow + Signals */}
-      <div className="flex-1 flex gap-1.5 min-h-0 px-1.5 pb-1.5">
-        <div className="w-[45%] shrink-0">
-          <TokenFlow />
-        </div>
-        <div className="flex-1 flex flex-col gap-1.5 min-h-0">
-          <div className="flex-1 min-h-0">
-            <SignalCenter />
-          </div>
-          <div className="shrink-0">
-            <IntelligenceModules />
-          </div>
-        </div>
-      </div>
-    </motion.div>
-  );
-}
-
-// ============================================================
-// MAIN CONTENT AREA
-// ============================================================
-
-function MainContent() {
-  const activeTab = useCryptoStore((s) => s.activeTab);
-  const selectedToken = useCryptoStore((s) => s.selectedToken);
-
-  const contentMap: Record<ActiveTab, React.ReactNode> = {
-    dashboard: <QuickStartGuide />,
-    charts: (
-      <div className="flex-1 flex gap-1.5 min-h-0 h-full">
-        <div className="w-[35%] shrink-0">
-          <TokenFlow />
-        </div>
-        <div className="flex-1">
-          {selectedToken ? (
-            <OHLCVChart tokenAddress={(selectedToken as any).address ?? selectedToken.id} chain={selectedToken.chain} />
-          ) : (
-            <div className="flex flex-col items-center justify-center h-full bg-[#0d1117] border border-[#1e293b] rounded-lg">
-              <BarChart3 className="h-8 w-8 text-[#475569] mb-2" />
-              <span className="text-[#64748b] font-mono text-sm">Select a token to view charts</span>
+        {weights && (
+          <div className="mt-2 flex items-center gap-2">
+            <span className="text-[8px] font-mono text-[#475569]">Weights:</span>
+            <div className="flex gap-1">
+              {trieLevels.map((level, i) => {
+                const w = Object.values(weights)[i];
+                return (
+                  <span key={level} className="text-[8px] font-mono text-[#3b82f6]">{level}={typeof w === 'number' ? `${(w * 100).toFixed(0)}%` : '—'}</span>
+                );
+              })}
             </div>
-          )}
-        </div>
-      </div>
-    ),
-    'multi-chain': (
-      <div className="flex-1 min-h-0 h-full">
-        <MultiChainDashboard />
-      </div>
-    ),
-    signals: (
-      <div className="flex-1 min-h-0 h-full">
-        <SignalCenter />
-      </div>
-    ),
-    'smart-money': (
-      <div className="flex-1 min-h-0 h-full">
-        <TraderIntelligencePanel />
-      </div>
-    ),
-    'deep-analysis': (
-      <div className="flex-1 min-h-0 h-full overflow-y-auto">
-        <DeepAnalysisPanel />
-      </div>
-    ),
-    'dna-scanner': (
-      <div className="flex-1 flex gap-1.5 min-h-0 h-full">
-        <div className="w-[35%] shrink-0">
-          <TokenFlow />
-        </div>
-        <div className="flex-1">
-          <DNAScanner />
-        </div>
-      </div>
-    ),
-    predictive: (
-      <div className="flex-1 min-h-0 h-full">
-        <BigDataPredictive />
-      </div>
-    ),
-    brain: (
-      <div className="flex-1 min-h-0 h-full">
-        <BrainControl />
-      </div>
-    ),
-    'strategy-lab': (
-      <div className="flex-1 min-h-0 h-full flex flex-col">
-        <StrategyLabContent />
-      </div>
-    ),
-    backtesting: (
-      <div className="flex-1 min-h-0 h-full">
-        <BacktestingLab />
-      </div>
-    ),
-    'paper-trading': (
-      <div className="flex-1 min-h-0 h-full">
-        <PaperTradingPanel />
-      </div>
-    ),
-    patterns: (
-      <div className="flex-1 min-h-0 h-full">
-        <PatternBuilder />
-      </div>
-    ),
-    'kill-switches': (
-      <div className="flex-1 min-h-0 h-full">
-        <KillSwitchPanel />
-      </div>
-    ),
-    'capital-allocation': (
-      <div className="flex-1 min-h-0 h-full">
-        <AllocationDashboard />
-      </div>
-    ),
-    portfolio: (
-      <div className="flex-1 min-h-0 h-full">
-        <PortfolioView />
-      </div>
-    ),
-    risk: (
-      <div className="flex-1 min-h-0 h-full">
-        <RiskDashboard />
-      </div>
-    ),
-    decisions: (
-      <div className="flex-1 min-h-0 h-full">
-        <DecisionDashboard />
-      </div>
-    ),
-    'export-import': (
-      <div className="flex-1 min-h-0 h-full">
-        <ExportImportPanel />
-      </div>
-    ),
-    'execution-cost': (
-      <div className="flex-1 min-h-0 h-full">
-        <ExecutionCostPanel />
-      </div>
-    ),
-    'risk-pre-filter': <div className="flex-1 min-h-0 h-full"><RiskPreFilterPanel /></div>,
-    'portfolio-intelligence': <div className="flex-1 min-h-0 h-full"><PortfolioIntelligencePanel /></div>,
-    'market-regime': <div className="flex-1 min-h-0 h-full"><MarketRegimePanel /></div>,
-    'meta-model': <div className="flex-1 min-h-0 h-full"><MetaModelPanel /></div>,
-    'alpha-ranking': <div className="flex-1 min-h-0 h-full"><AlphaRankingPanel /></div>,
-    'event-bus': <div className="flex-1 min-h-0 h-full"><EventBusPanel /></div>,
-  };
-
-  return (
-    <AnimatePresence mode="wait">
-      <motion.div
-        key={activeTab}
-        initial={{ opacity: 0, y: 4 }}
-        animate={{ opacity: 1, y: 0 }}
-        exit={{ opacity: 0, y: -4 }}
-        transition={{ duration: 0.15 }}
-        className="flex-1 flex min-h-0 p-1.5"
-      >
-        {contentMap[activeTab]}
-      </motion.div>
-    </AnimatePresence>
-  );
-}
-
-// ============================================================
-// DASHBOARD CONTENT
-// ============================================================
-
-function DashboardContent() {
-  useKeyboardShortcuts();
-  const { level } = useDashboardLevel();
-
-  return (
-    <div className="flex flex-col h-screen bg-[#0a0e17] overflow-hidden">
-      {/* Top Bar */}
-      <TopBar />
-
-      {/* Ticker Strip */}
-      <HeaderBar />
-
-      {/* Main Layout: Sidebar + Content */}
-      <div className="flex-1 flex min-h-0">
-        <Sidebar />
-        {level === 'executive' ? (
-          <div className="flex-1 min-h-0">
-            <ExecutiveDashboard />
           </div>
-        ) : (
-          <MainContent />
         )}
       </div>
 
-      {/* Bottom Status Bar */}
-      <DataStatusBar />
+      {/* Timeframe Data */}
+      <div className="px-4 py-3 border-b border-[#1e293b]">
+        <h3 className="text-[10px] font-mono text-[#64748b] uppercase tracking-wider mb-2">Stored Timeframes</h3>
+        {asset.timeframes.length === 0 ? (
+          <p className="text-[10px] font-mono text-[#475569]">No OHLCV data stored yet. Click &quot;Ingest&quot; to fetch data.</p>
+        ) : (
+          <div className="space-y-1.5">
+            {asset.timeframes.map(tf => (
+              <div key={tf.timeframe} className="flex items-center justify-between py-1 px-2 rounded bg-[#0a0e17] border border-[#1e293b]">
+                <div className="flex items-center gap-2">
+                  <Clock className="h-3 w-3 text-[#3b82f6]" />
+                  <span className="text-[10px] font-mono font-bold text-[#f1f5f9]">{tf.timeframe}</span>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className="text-[9px] font-mono text-[#94a3b8]">{formatNumber(tf.count)} candles</span>
+                  <span className="text-[8px] font-mono text-[#475569]">
+                    {tf.firstTs ? formatDate(tf.firstTs) : '—'} → {tf.lastTs ? formatDate(tf.lastTs) : '—'}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="mt-2 flex items-center gap-2">
+          <span className="text-[8px] font-mono text-[#475569]">Total candles: {formatNumber(asset.candleCount)}</span>
+          <span className="text-[8px] font-mono text-[#475569]">|</span>
+          <span className="text-[8px] font-mono text-[#475569]">Total patterns: {formatNumber(asset.totalPatterns)}</span>
+        </div>
+      </div>
 
-      {/* Workflow Guide Panel (floating, toggleable) */}
-      <WorkflowGuidePanel />
+      {/* Prediction */}
+      <div className="px-4 py-3">
+        <h3 className="text-[10px] font-mono text-[#64748b] uppercase tracking-wider mb-2">Prediction Output</h3>
+        {prediction?.output ? (
+          <pre className="text-[9px] font-mono text-[#94a3b8] bg-[#0a0e17] border border-[#1e293b] rounded-lg p-3 whitespace-pre-wrap overflow-x-auto max-h-96 overflow-y-auto">
+            {prediction.output}
+          </pre>
+        ) : (
+          <div className="flex flex-col items-center justify-center py-6 bg-[#0a0e17] border border-[#1e293b] rounded-lg">
+            <Brain className="h-6 w-6 text-[#475569] mb-2" />
+            <p className="text-[10px] font-mono text-[#475569]">No prediction available</p>
+            <p className="text-[9px] font-mono text-[#334155] mt-1">Build the Trie first, then predict</p>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
 
 // ============================================================
-// HOME PAGE
+// MAIN DASHBOARD
 // ============================================================
 
-export default function HomePage() {
+export default function PPMTDashboard() {
+  const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null);
+  const [addSymbolInput, setAddSymbolInput] = useState('');
+
+  const { data: status, isLoading: statusLoading, error: statusError } = usePPMTStatus();
+  const { data: signals } = usePPMTSignals();
+  const { data: prediction } = usePPMTPrediction(selectedSymbol);
+
+  const selectedAsset = status?.assets.find(a => a.symbol === selectedSymbol);
+
+  // Auto-select first asset
+  useEffect(() => {
+    if (status?.assets?.length && !selectedSymbol) {
+      setSelectedSymbol(status.assets[0].symbol);
+    }
+  }, [status, selectedSymbol]);
+
+  const handleIngestNew = useCallback(async () => {
+    if (!addSymbolInput.trim()) return;
+    try {
+      const res = await fetch('/api/ppmt/ingest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol: addSymbolInput.trim().toUpperCase(), timeframe: '1h', days: 365 }),
+      });
+      if (res.ok) {
+        setAddSymbolInput('');
+        // Refetch after a delay
+        setTimeout(() => {
+          window.location.reload();
+        }, 2000);
+      }
+    } catch { /* ignore */ }
+  }, [addSymbolInput]);
+
   return (
-    <UserProvider>
-      <DashboardLevelProvider>
-        <OperationModeProvider>
-          <WebSocketProvider>
-            <SimulationProvider>
-              <DashboardContent />
-            </SimulationProvider>
-          </WebSocketProvider>
-        </OperationModeProvider>
-      </DashboardLevelProvider>
-    </UserProvider>
+    <div className="flex flex-col h-screen bg-[#0a0e17] overflow-hidden">
+      {/* Top Bar */}
+      <div className="flex items-center justify-between px-4 h-11 bg-[#0d1117] border-b border-[#1e293b] shrink-0">
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-1.5">
+            <Brain className="h-4 w-4 text-[#3b82f6]" />
+            <span className="text-[#3b82f6] font-mono text-xs font-bold tracking-wider">PPMT</span>
+            <span className="text-[#475569] font-mono text-[8px]">Dashboard</span>
+          </div>
+          <div className="h-4 w-px bg-[#1e293b]" />
+          <div className="flex items-center gap-1">
+            <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+            <span className="font-mono text-[9px] text-emerald-400">ACTIVE</span>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          {status && (
+            <span className="font-mono text-[9px] text-[#475569]">
+              DB: {status.dbSizeMB} MB
+            </span>
+          )}
+          <a
+            href="https://github.com/coverdraft/ppmt"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center gap-1 text-[#475569] hover:text-[#94a3b8] transition-colors"
+          >
+            <Github className="h-3.5 w-3.5" />
+            <span className="font-mono text-[9px] hidden sm:inline">GitHub</span>
+          </a>
+        </div>
+      </div>
+
+      {/* Stats Row */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2 px-4 py-3 shrink-0">
+        <StatCard title="Assets Tracked" value={status?.totalAssets ?? '—'} subtitle="Symbols in database" icon={Database} color="emerald-500" />
+        <StatCard title="Total Candles" value={status ? formatNumber(status.totalCandles) : '—'} subtitle="OHLCV data points" icon={BarChart3} color="[#3b82f6]" />
+        <StatCard title="Patterns Found" value={status ? formatNumber(status.totalPatterns) : '—'} subtitle="Unique trie patterns" icon={Layers} color="amber-500" />
+        <StatCard title="Signals Generated" value={status?.signalCount ?? '—'} subtitle="Trading signals" icon={Radio} color="cyan-500" />
+      </div>
+
+      {/* Main Content */}
+      <div className="flex-1 flex min-h-0 px-4 pb-4 gap-3">
+        {/* Left: Asset List */}
+        <div className="w-[320px] shrink-0 flex flex-col bg-[#0d1117] border border-[#1e293b] rounded-lg overflow-hidden">
+          {/* Asset List Header */}
+          <div className="px-4 py-2.5 border-b border-[#1e293b] shrink-0">
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-[10px] font-mono text-[#64748b] uppercase tracking-wider">Tracked Assets</h3>
+              <Badge variant="outline" className="text-[8px] font-mono bg-[#1e293b] text-[#94a3b8] border-[#334155] px-1.5 py-0 h-4">
+                {status?.assets?.length ?? 0}
+              </Badge>
+            </div>
+            {/* Add Asset */}
+            <div className="flex gap-1.5">
+              <input
+                type="text"
+                placeholder="e.g. SOL/USDT"
+                value={addSymbolInput}
+                onChange={(e) => setAddSymbolInput(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleIngestNew()}
+                className="flex-1 h-7 px-2 text-[10px] font-mono bg-[#0a0e17] border border-[#1e293b] rounded text-[#94a3b8] placeholder-[#334155] focus:border-[#3b82f6]/50 focus:outline-none"
+              />
+              <Button
+                size="sm"
+                onClick={handleIngestNew}
+                disabled={!addSymbolInput.trim()}
+                className="h-7 px-2 bg-[#3b82f6]/10 border border-[#3b82f6]/30 text-[#3b82f6] hover:bg-[#3b82f6]/20 text-[9px] font-mono"
+                variant="outline"
+              >
+                <Plus className="h-3 w-3" />
+              </Button>
+            </div>
+          </div>
+
+          {/* Asset List */}
+          <div className="flex-1 overflow-y-auto">
+            {statusLoading ? (
+              <div className="flex items-center justify-center py-8">
+                <Loader2 className="h-5 w-5 text-[#475569] animate-spin" />
+              </div>
+            ) : statusError ? (
+              <div className="px-4 py-8 text-center">
+                <AlertTriangle className="h-6 w-6 text-red-400 mx-auto mb-2" />
+                <p className="text-[10px] font-mono text-red-400">Failed to load assets</p>
+                <p className="text-[9px] font-mono text-[#475569] mt-1">Make sure PPMT is initialized</p>
+              </div>
+            ) : !status?.assets?.length ? (
+              <div className="px-4 py-8 text-center">
+                <Database className="h-6 w-6 text-[#475569] mx-auto mb-2" />
+                <p className="text-[10px] font-mono text-[#475569]">No assets tracked yet</p>
+                <p className="text-[9px] font-mono text-[#334155] mt-1">Add a symbol above to get started</p>
+              </div>
+            ) : (
+              status.assets.map(asset => (
+                <AssetRow
+                  key={asset.symbol}
+                  asset={asset}
+                  isSelected={selectedSymbol === asset.symbol}
+                  onSelect={() => setSelectedSymbol(asset.symbol)}
+                />
+              ))
+            )}
+          </div>
+        </div>
+
+        {/* Center: Asset Detail */}
+        <div className="flex-1 min-w-0 flex flex-col gap-3">
+          <div className="flex-1 bg-[#0d1117] border border-[#1e293b] rounded-lg overflow-hidden">
+            {selectedAsset ? (
+              <AssetDetailPanel asset={selectedAsset} prediction={prediction} />
+            ) : (
+              <div className="flex flex-col items-center justify-center h-full">
+                <Brain className="h-10 w-10 text-[#334155] mb-3" />
+                <p className="text-sm font-mono text-[#475569]">Select an asset to view details</p>
+                <p className="text-[10px] font-mono text-[#334155] mt-1">Choose from the list on the left</p>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Right: Recent Signals */}
+        <div className="w-[280px] shrink-0 bg-[#0d1117] border border-[#1e293b] rounded-lg overflow-hidden flex flex-col">
+          <div className="px-4 py-2.5 border-b border-[#1e293b] shrink-0">
+            <h3 className="text-[10px] font-mono text-[#64748b] uppercase tracking-wider">Recent Signals</h3>
+          </div>
+          <div className="flex-1 overflow-y-auto">
+            {!signals?.length ? (
+              <div className="px-4 py-8 text-center">
+                <Radio className="h-5 w-5 text-[#475569] mx-auto mb-2" />
+                <p className="text-[10px] font-mono text-[#475569]">No signals yet</p>
+                <p className="text-[9px] font-mono text-[#334155] mt-1">Signals appear when patterns match</p>
+              </div>
+            ) : (
+              signals.map((signal, i) => (
+                <div key={signal.id || i} className="px-3 py-2 border-b border-[#1e293b]">
+                  <div className="flex items-center justify-between mb-1">
+                    <div className="flex items-center gap-1.5">
+                      {getSignalTypeIcon(signal.signal_type)}
+                      <span className="text-[9px] font-mono font-bold text-[#f1f5f9]">{signal.symbol}</span>
+                    </div>
+                    <Badge variant="outline" className={`text-[7px] font-mono px-1 py-0 h-3.5 ${getSignalTypeColor(signal.signal_type)}`}>
+                      {signal.signal_type.replace('ENTRY_', '').replace('EXIT', 'EXIT')}
+                    </Badge>
+                  </div>
+                  <div className="grid grid-cols-3 gap-1">
+                    <div>
+                      <span className="text-[7px] font-mono text-[#475569]">Conf</span>
+                      <p className="text-[9px] font-mono text-[#94a3b8]">{(signal.confidence * 100).toFixed(0)}%</p>
+                    </div>
+                    <div>
+                      <span className="text-[7px] font-mono text-[#475569]">Quality</span>
+                      <p className="text-[9px] font-mono text-[#94a3b8]">{(signal.quality_score * 100).toFixed(0)}%</p>
+                    </div>
+                    <div>
+                      <span className="text-[7px] font-mono text-[#475569]">Size</span>
+                      <p className="text-[9px] font-mono text-[#94a3b8]">{signal.sizing_multiplier.toFixed(1)}x</p>
+                    </div>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }

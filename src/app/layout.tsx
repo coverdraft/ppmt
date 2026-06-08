@@ -15,10 +15,10 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "CryptoQuant Terminal — Professional Crypto Analytics",
-  description: "Professional crypto quantitative analytics terminal with real-time data, signal intelligence, DNA scanning, and pattern recognition.",
+  title: "PPMT Dashboard — Progressive Pattern Matching Trie",
+  description: "Autonomous pattern-based trading engine dashboard",
   icons: {
-    icon: "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>",
+    icon: "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌲</text></svg>",
   },
 };
 
