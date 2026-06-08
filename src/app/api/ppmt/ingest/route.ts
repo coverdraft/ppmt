@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { execSync } from 'child_process';
+import { execPpmt } from '@/lib/ppmt-cli';
 
 export const dynamic = 'force-dynamic';
 
@@ -12,9 +12,9 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'symbol is required' }, { status: 400 });
     }
 
-    // Run ppmt ingest command
-    const cmd = `ppmt ingest -s "${symbol}" -t "${timeframe}" -d ${days}`;
-    const output = execSync(cmd, { timeout: 300000, encoding: 'utf-8' });
+    const output = execPpmt(`ingest -s "${symbol}" -t "${timeframe}" -d ${days}`, {
+      timeout: 300000,
+    });
 
     return NextResponse.json({
       data: {
@@ -22,7 +22,7 @@ export async function POST(request: Request) {
         symbol,
         timeframe,
         days,
-        output: output.slice(-500), // Last 500 chars of output
+        output: output.slice(-500),
       },
     });
   } catch (error: any) {

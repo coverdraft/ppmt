@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { execSync } from 'child_process';
+import { execPpmt } from '@/lib/ppmt-cli';
 
 export const dynamic = 'force-dynamic';
 
@@ -12,9 +12,9 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'symbol is required' }, { status: 400 });
     }
 
-    // Run ppmt build command
-    const cmd = `ppmt build -s "${symbol}" -t "${timeframe}"`;
-    const output = execSync(cmd, { timeout: 120000, encoding: 'utf-8' });
+    const output = execPpmt(`build -s "${symbol}" -t "${timeframe}"`, {
+      timeout: 120000,
+    });
 
     return NextResponse.json({
       data: {

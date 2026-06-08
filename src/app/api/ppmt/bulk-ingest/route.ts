@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { execSync } from 'child_process';
+import { execBulkIngest } from '@/lib/ppmt-cli';
 
 export const dynamic = 'force-dynamic';
 
@@ -46,7 +46,7 @@ export async function POST(request: Request) {
     const body: BulkIngestRequest = await request.json();
     const { pairs, timeframes, days = 365 } = body;
 
-    // Build the command
+    // Build the command args
     const args: string[] = [];
 
     if (pairs && pairs.length > 0) {
@@ -59,18 +59,12 @@ export async function POST(request: Request) {
 
     args.push(`--days ${days}`);
 
-    const cmd = `cd /home/z/my-project/ppmt && python -m ppmt.scripts.bulk_ingest ${args.join(' ')}`;
-
-    // Use execSync with a 5-minute timeout since bulk ingest can take a while
-    // 20 pairs × 3 timeframes = 60 requests × ~1s each ≈ 60s+ for ingest + build time
-    const output = execSync(cmd, {
+    const output = execBulkIngest(args.join(' '), {
       timeout: 300000, // 5 minutes
-      encoding: 'utf-8',
-      maxBuffer: 10 * 1024 * 1024, // 10MB buffer for large output
+      maxBuffer: 10 * 1024 * 1024,
     });
 
     // Parse the summary from stdout
-    // The Python script prints a structured summary at the end
     const summary = parseSummaryFromOutput(output);
 
     return NextResponse.json({
@@ -88,12 +82,11 @@ export async function POST(request: Request) {
         failedPairs: summary.failed_pairs,
         elapsedSeconds: summary.elapsed_seconds,
       },
-      output: output.slice(-2000), // Last 2000 chars of output for debugging
+      output: output.slice(-2000),
     });
   } catch (error: any) {
     console.error('Bulk ingest error:', error);
 
-    // Try to extract useful info from the error output
     const stdout = error.stdout?.toString() || '';
     const stderr = error.stderr?.toString() || '';
     const errorMessage = stderr || error.message || 'Unknown error';
@@ -119,10 +112,6 @@ export async function POST(request: Request) {
 
 /**
  * Parse the Python script output to extract summary statistics.
- * The script prints lines like:
- *   Total pairs:       20
- *   Total candles:     52,340
- * etc.
  */
 function parseSummaryFromOutput(output: string): BulkIngestSummary {
   const summary: BulkIngestSummary = {
@@ -145,7 +134,6 @@ function parseSummaryFromOutput(output: string): BulkIngestSummary {
   for (const line of lines) {
     const trimmed = line.trim();
 
-    // Parse "Total pairs:       20"
     if (trimmed.startsWith('Total pairs:')) {
       summary.total_pairs = parseInt(trimmed.split(':')[1]?.trim().replace(/,/g, '') || '0', 10);
     }

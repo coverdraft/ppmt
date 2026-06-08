@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { execSync } from 'child_process';
+import { execPpmt } from '@/lib/ppmt-cli';
 
 export const dynamic = 'force-dynamic';
 
@@ -14,9 +14,9 @@ export async function GET(request: Request) {
   }
 
   try {
-    // Run ppmt predict command
-    const cmd = `ppmt predict -s "${symbol}" -t "${timeframe}" -d ${depth}`;
-    const output = execSync(cmd, { timeout: 30000, encoding: 'utf-8' });
+    const output = execPpmt(`predict -s "${symbol}" -t "${timeframe}" -d ${depth}`, {
+      timeout: 30000,
+    });
 
     return NextResponse.json({
       data: {
