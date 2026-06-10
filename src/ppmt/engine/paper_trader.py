@@ -260,6 +260,16 @@ class PaperTrader:
             strategy=cfg.sax_strategy,
         )
 
+        # Encode the FULL DataFrame once (same z-score context as during build)
+        # This is critical: encoding only a window produces different symbols
+        # than encoding the full DataFrame, because SAX uses z-score normalization
+        all_sax_symbols = sax_encoder.encode(df)
+        if not all_sax_symbols:
+            console.print(f"[red]Could not SAX encode data for {cfg.symbol}.[/red]")
+            return result
+
+        console.print(f"  SAX symbols: {len(all_sax_symbols)} (from {len(df)} candles)")
+
         # Create engines
         pred_engine = PredictionEngine(trie, prediction_depth=cfg.pattern_length)
         risk_mgr = RiskManager(capital=cfg.initial_capital, config=self.risk_config)
@@ -284,22 +294,34 @@ class PaperTrader:
         trade_counter = 0
         peak_capital = cfg.initial_capital
 
-        # Start from warm-up offset
-        start = cfg.start_offset
-        if start >= len(df):
-            console.print(f"[red]Not enough data. Need at least {start} candles, have {len(df)}.[/red]")
+        # Start from warm-up offset (in candle space)
+        # Map to SAX symbol space: each symbol covers window_size candles
+        start_candle = cfg.start_offset
+        if start_candle >= len(df):
+            console.print(f"[red]Not enough data. Need at least {start_candle} candles, have {len(df)}.[/red]")
             return result
 
         console.print(f"\n[bold cyan]Starting Paper Trading: {cfg.symbol} ({cfg.timeframe})[/bold cyan]")
         console.print(f"  Capital: ${cfg.initial_capital:,.2f}")
-        console.print(f"  Data: {len(df)} candles, starting from index {start}")
+        console.print(f"  Data: {len(df)} candles, starting from index {start_candle}")
         console.print(f"  Trie: {trie.pattern_count} patterns\n")
 
-        for i in range(start, len(df)):
-            # Get data up to current candle
-            window_df = df.iloc[max(0, i - 100):i + 1]
-            current_price = float(df["close"].iloc[i])
-            current_time = str(df.index[i]) if hasattr(df.index, 'strftime') else str(i)
+        # We iterate over SAX symbol positions instead of individual candles
+        # This is more efficient and ensures correct symbol alignment with the Trie
+        start_sym_idx = start_candle // cfg.sax_window_size
+        if start_sym_idx < cfg.pattern_length:
+            start_sym_idx = cfg.pattern_length  # Need at least pattern_length symbols
+
+        for sym_idx in range(start_sym_idx, len(all_sax_symbols)):
+            # Map symbol index back to candle index for price lookup
+            candle_idx = min(sym_idx * cfg.sax_window_size + cfg.sax_window_size - 1, len(df) - 1)
+            current_price = float(df["close"].iloc[candle_idx])
+            current_time = str(df.index[candle_idx]) if hasattr(df.index, 'strftime') else str(candle_idx)
+
+            # Current SAX pattern: use the last pattern_length symbols up to sym_idx
+            if sym_idx < cfg.pattern_length:
+                continue
+            current_symbols = all_sax_symbols[sym_idx - cfg.pattern_length:sym_idx]
 
             # Check SL/TP for open position
             if current_position is not None:
@@ -355,18 +377,6 @@ class PaperTrader:
 
                 # Update position unrealized P&L
                 risk_mgr.update_position(cfg.symbol, current_price)
-
-            # Encode recent data to SAX
-            try:
-                sax_symbols = sax_encoder.encode(window_df)
-            except Exception:
-                continue
-
-            if not sax_symbols or len(sax_symbols) < 3:
-                continue
-
-            # Use last N symbols as current pattern
-            current_symbols = sax_symbols[-cfg.pattern_length:] if len(sax_symbols) >= cfg.pattern_length else sax_symbols
 
             # If in position, check for pattern break
             if current_position is not None and len(current_symbols) >= 2:
@@ -501,7 +511,7 @@ class PaperTrader:
                         )
 
             # Record equity curve periodically
-            if i % 10 == 0:
+            if sym_idx % 10 == 0:
                 unrealized_capital = risk_mgr.capital
                 result.equity_curve.append(unrealized_capital)
                 result.capital_history.append(unrealized_capital)

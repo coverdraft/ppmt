@@ -280,7 +280,7 @@ def predict(symbol: str, timeframe: str, depth: int, price: float):
         console.print(f"[red]No Trie built for {symbol}. Run 'ppmt build' first.[/red]")
         return
 
-    # Encode recent data to SAX symbols
+    # Encode the FULL DataFrame to SAX symbols (same context as build)
     sax_config = config.get("sax", {})
     from ppmt.core.sax import SAXEncoder
     encoder = SAXEncoder(
@@ -289,12 +289,11 @@ def predict(symbol: str, timeframe: str, depth: int, price: float):
         strategy=sax_config.get("strategy", "ohlcv"),
     )
 
-    # Use last N candles to get recent SAX symbols
-    recent_df = df.tail(100)
-    symbols = encoder.encode(recent_df)
+    # Must encode full DataFrame to get same z-score context as during build
+    symbols = encoder.encode(df)
 
     if not symbols:
-        console.print("[red]Could not encode recent data.[/red]")
+        console.print("[red]Could not encode data.[/red]")
         return
 
     # Use last 5 SAX blocks as current pattern
