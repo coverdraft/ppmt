@@ -195,90 +195,58 @@ class PredictionEngine:
         """
         Find the deepest matching node in the Trie that has real metadata.
 
-        Searches for exact match first, then progressively shorter prefixes.
-        Returns the node with the deepest match that has historical_count > 0,
-        along with the matched depth.
+        After propagate_metadata(), intermediate nodes also have aggregated
+        metadata, so most matches will find meaningful statistics.
 
-        This is crucial because intermediate nodes created during Trie
-        construction may have default (empty) metadata, while terminal
-        nodes have observation-based metadata.
+        Returns the node with the deepest match, along with the matched depth.
         """
         # Try exact match first
         node = self.trie.search(current_symbols)
         if node is not None and node.metadata.historical_count > 0:
             return node, len(current_symbols)
 
-        # Try progressively shorter prefixes
-        best_node = None
-        best_depth = 0
-
-        for prefix_len in range(len(current_symbols), 0, -1):
+        # Try progressively shorter prefixes (from root)
+        # This is correct because Trie stores patterns from root
+        for prefix_len in range(len(current_symbols) - 1, 0, -1):
             prefix = current_symbols[:prefix_len]
             n = self.trie.search(prefix)
             if n is not None and n.metadata.historical_count > 0:
-                # Found a node with real metadata
-                if best_node is None or n.metadata.historical_count > best_node.metadata.historical_count:
-                    best_node = n
-                    best_depth = prefix_len
-                break  # Take the deepest match with metadata
+                return n, prefix_len
 
-        # If no node with metadata found, try prefix search
-        if best_node is None:
-            node, depth = self.trie.search_prefix(current_symbols)
-            if node is not None:
-                best_node = node
-                best_depth = depth
+        # Last resort: search_prefix (partial match)
+        node, depth = self.trie.search_prefix(current_symbols)
+        if node is not None and node.metadata.historical_count > 0:
+            return node, depth
 
-        return best_node, best_depth
+        return None, 0
 
     def _compute_confidence(self, node: TrieNode, matched_depth: int, total_depth: int) -> float:
         """
         Compute prediction confidence from node metadata and match quality.
 
-        Takes into account:
-        - Node's metadata confidence (win_rate, historical_count)
-        - Match quality (exact match > prefix match)
-        - Depth of match relative to requested depth
-        - Number of continuation children (more = more predictable)
+        After propagate_metadata(), all nodes have meaningful statistics,
+        so confidence is computed from the node's own metadata with
+        adjustments for match depth and sample size.
         """
         if node is None or node.metadata.historical_count == 0:
-            # No observations — estimate from children
-            total_child_count = sum(
-                c.metadata.historical_count for c in node.children.values()
-                if c.metadata.historical_count > 0
-            ) if node else 0
+            return 0.0
 
-            if total_child_count == 0:
-                return 0.0
-
-            # Use aggregate child statistics
-            child_count = sum(1 for c in node.children.values() if c.metadata.historical_count > 0)
-            avg_wr = sum(
-                c.metadata.win_rate * c.metadata.historical_count
-                for c in node.children.values()
-                if c.metadata.historical_count > 0
-            ) / total_child_count if total_child_count > 0 else 0.0
-
-            # Bayesian adjustment with child data
-            prior_strength = 10.0
-            adjusted_wr = (avg_wr * total_child_count + 0.5 * prior_strength) / (total_child_count + prior_strength)
-
-            import numpy as np
-            count_bonus = min(1.0, np.sqrt(np.log1p(total_child_count) / np.log(1000)))
-            depth_penalty = matched_depth / max(total_depth, 1)
-            return adjusted_wr * count_bonus * depth_penalty
-
-        # Node has real metadata — use it
+        # Base confidence from the node's own metadata
         base_confidence = node.metadata.confidence
 
-        # Depth penalty: if we matched a shorter prefix, reduce confidence
+        # Depth penalty: shorter prefix match = less specific = lower confidence
         depth_penalty = min(matched_depth / max(total_depth, 1), 1.0)
 
         # Continuation bonus: more children = more information
         n_children = len(node.children)
         cont_bonus = min(1.0, n_children / 4.0)  # 4+ children = full bonus
 
-        return base_confidence * depth_penalty * (0.7 + 0.3 * cont_bonus)
+        # Sample size factor: more observations = more reliable
+        # Gentle bonus that saturates around count=100
+        import numpy as np
+        sample_factor = min(1.0, np.log1p(node.metadata.historical_count) / np.log(100))
+
+        return base_confidence * depth_penalty * (0.7 + 0.3 * cont_bonus) * (0.8 + 0.2 * sample_factor)
 
     def predict(
         self,
@@ -307,7 +275,7 @@ class PredictionEngine:
                 confidence=0.0,
             )
 
-        # Build main predicted path
+        # Build main predicted path by walking forward from the matched node
         main_path = self._walk_path(node, current_prob=1.0, depth=self.prediction_depth)
 
         # Build alternative paths
@@ -321,34 +289,54 @@ class PredictionEngine:
         pattern_break_prob = 0.0
 
         if main_path:
-            overall_prob = main_path[-1].cumulative_probability if main_path else 0.0
-            total_move = main_path[-1].cumulative_move_pct if main_path else 0.0
-            total_candles = main_path[-1].total_candles_remaining if main_path else 0
+            overall_prob = main_path[-1].cumulative_probability
+            total_move = main_path[-1].cumulative_move_pct
+            total_candles = main_path[-1].total_candles_remaining
+            direction = "LONG" if total_move > 0.5 else "SHORT" if total_move < -0.5 else "FLAT"
+        elif node.metadata.historical_count > 0:
+            # No forward path (terminal node with no children), but the node
+            # has metadata — use it directly as the prediction.
+            # This happens when we matched a terminal node at full pattern depth.
+            total_move = node.metadata.expected_move_pct
+            overall_prob = node.metadata.win_rate
+            total_candles = node.metadata.avg_duration
             direction = "LONG" if total_move > 0.5 else "SHORT" if total_move < -0.5 else "FLAT"
 
-            # Pattern break probability
-            # Use node's own metadata if available, else estimate from children
-            if node.metadata.historical_count > 0:
-                continuation_count = sum(
-                    child.metadata.historical_count
-                    for child in node.children.values()
-                    if child.metadata
-                )
+            # Create a single path step from the node's own metadata
+            step = PathStep(
+                block_index=1,
+                symbol=node.metadata.continuation_nodes[0] if node.metadata.continuation_nodes else "→",
+                probability=node.metadata.win_rate,
+                cumulative_probability=node.metadata.win_rate,
+                expected_move_pct=node.metadata.expected_move_pct,
+                cumulative_move_pct=node.metadata.expected_move_pct,
+                estimated_candles=node.metadata.avg_duration,
+                total_candles_remaining=node.metadata.avg_duration,
+                win_rate=node.metadata.win_rate,
+                is_continuation=True,
+            )
+            main_path = [step]
+
+        # Pattern break probability
+        if node.metadata.historical_count > 0:
+            continuation_count = sum(
+                child.metadata.historical_count
+                for child in node.children.values()
+                if child.metadata and child.metadata.historical_count > 0
+            )
+            if continuation_count > 0:
                 pattern_break_prob = 1.0 - (continuation_count / node.metadata.historical_count)
             else:
-                # Estimate from children: if all children have low count, break prob is high
-                total_child_count = sum(
-                    c.metadata.historical_count for c in node.children.values()
-                    if c.metadata.historical_count > 0
-                )
-                n_children = len(node.children)
-                if n_children > 0 and total_child_count > 0:
-                    # Lower count = higher break probability
-                    pattern_break_prob = max(0.0, 1.0 - min(total_child_count / 20.0, 1.0))
-                else:
-                    pattern_break_prob = 1.0
+                # Terminal node: estimate break prob from win_rate
+                # Low win_rate = higher chance pattern breaks
+                pattern_break_prob = 1.0 - node.metadata.win_rate
+        else:
+            pattern_break_prob = 1.0
 
-        # Compute confidence using enhanced method
+        # Clamp break probability to [0, 1]
+        pattern_break_prob = max(0.0, min(1.0, pattern_break_prob))
+
+        # Compute confidence
         confidence = self._compute_confidence(node, matched_depth, len(current_symbols))
 
         # Compute price levels
@@ -400,11 +388,14 @@ class PredictionEngine:
         )
 
         if not children:
+            # Terminal node with no children — can't walk further.
+            # The calling predict() method will handle this by using
+            # the node's own metadata.
             return steps
 
         # Total count for probability calculation
         total_count = sum(
-            c.metadata.historical_count for _, c in children if c.metadata
+            c.metadata.historical_count for _, c in children if c.metadata and c.metadata.historical_count > 0
         )
         if total_count == 0:
             # Fallback: equal probability for all children
@@ -418,13 +409,12 @@ class PredictionEngine:
         child_meta = child.metadata
 
         if child_meta.historical_count > 0:
-            step_prob = child_meta.historical_count / total_count
+            step_prob = child_count / total_count
             step_move = child_meta.expected_move_pct
             step_candles = child_meta.avg_duration
             wr = child_meta.win_rate
         else:
             step_prob = 1.0 / total_count if total_count > 0 else 1.0
-            # Estimate move from direction
             step_move = 0.0
             step_candles = 10
             wr = 0.5
@@ -471,7 +461,7 @@ class PredictionEngine:
             return alternatives
 
         total_count = sum(
-            c.metadata.historical_count for _, c in children if c.metadata
+            c.metadata.historical_count for _, c in children if c.metadata and c.metadata.historical_count > 0
         )
         if total_count == 0:
             total_count = len(children)

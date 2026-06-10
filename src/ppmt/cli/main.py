@@ -46,7 +46,7 @@ def load_config() -> dict:
 
 
 @click.group()
-@click.version_option(version="0.2.0")
+@click.version_option(version="0.2.1")
 def cli():
     """PPMT - Progressive Pattern Matching Trie Engine"""
     pass
@@ -280,6 +280,10 @@ def predict(symbol: str, timeframe: str, depth: int, price: float):
         console.print(f"[red]No Trie built for {symbol}. Run 'ppmt build' first.[/red]")
         return
 
+    # Propagate metadata so intermediate nodes have statistics
+    # (old stored Tries may not have propagated metadata)
+    trie.propagate_metadata()
+
     # Encode the FULL DataFrame to SAX symbols (same context as build)
     sax_config = config.get("sax", {})
     from ppmt.core.sax import SAXEncoder
@@ -384,7 +388,7 @@ def predict(symbol: str, timeframe: str, depth: int, price: float):
 @click.option("--timeframe", "-t", default="1h", help="Candle timeframe")
 @click.option("--paper", is_flag=True, default=False, help="Run in paper trading mode (simulated)")
 @click.option("--capital", "-c", default=10000.0, type=float, help="Initial capital for paper trading")
-@click.option("--min-confidence", default=0.60, type=float, help="Minimum signal confidence to enter")
+@click.option("--min-confidence", default=0.10, type=float, help="Minimum signal confidence to enter (default: 0.10)")
 def run(symbol: str, timeframe: str, paper: bool, capital: float, min_confidence: float):
     """Run real-time pattern matching (requires exchange connection).
 
@@ -451,7 +455,7 @@ def run(symbol: str, timeframe: str, paper: bool, capital: float, min_confidence
 @click.option("--seed", default=42, type=int, help="Random seed for reproducibility")
 @click.option("--ruin-threshold", default=0.5, type=float, help="Ruin threshold (fraction of capital)")
 @click.option("--paper-first", is_flag=True, default=False, help="Run paper trading first, then Monte Carlo on results")
-@click.option("--min-confidence", default=0.60, type=float, help="Min confidence for paper trading (with --paper-first)")
+@click.option("--min-confidence", default=0.10, type=float, help="Min confidence for paper trading (with --paper-first)")
 def monte_carlo(
     symbol: str,
     timeframe: str,

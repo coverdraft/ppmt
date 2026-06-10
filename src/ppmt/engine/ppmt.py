@@ -240,6 +240,13 @@ class PPMT:
 
             count += 1
 
+        # Propagate metadata from terminal nodes to intermediate nodes
+        # This is critical: after building, only terminal nodes have metadata.
+        # Propagation computes aggregate statistics for intermediate nodes
+        # so that PredictionEngine can find meaningful data at any depth.
+        for trie in [self.trie_n1, self.trie_n2, self.trie_n3, self.trie_n4]:
+            trie.propagate_metadata()
+
         self._total_patterns_built += count
         return count
 

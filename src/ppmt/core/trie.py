@@ -410,6 +410,94 @@ class PPMTTrie:
 
         return trie
 
+    def propagate_metadata(self) -> None:
+        """
+        Propagate metadata from terminal nodes up to intermediate nodes.
+
+        After building, only terminal nodes (at the full pattern length depth)
+        have real metadata from observations. Intermediate nodes have
+        historical_count=0 and default values.
+
+        This method walks the Trie bottom-up and computes aggregate statistics
+        for each intermediate node from its terminal descendants. This enables:
+          1. PredictionEngine to find meaningful metadata at any depth
+          2. Better confidence estimates from larger sample sizes
+          3. Forward path walking from intermediate nodes
+
+        Must be called after build() and before saving/loading.
+        Idempotent: calling multiple times produces the same result.
+        """
+        self._propagate_node(self.root)
+
+    def _propagate_node(self, node: TrieNode) -> BlockLifecycleMetadata:
+        """
+        Recursively propagate metadata from children to parent.
+
+        Returns the aggregate metadata for this subtree (including all descendants).
+        """
+        if not node.children:
+            # Leaf node — return its own metadata
+            return node.metadata
+
+        # Recursively propagate to children first (bottom-up)
+        child_metas = []
+        for sym, child in node.children.items():
+            child_meta = self._propagate_node(child)
+            child_metas.append(child_meta)
+
+        # If this node already has real observations, keep them
+        # (terminal nodes have their own observations)
+        if node.metadata.historical_count > 0 and node.depth > 0:
+            # But still ensure continuation_nodes are populated
+            for sym in node.children:
+                if sym not in node.metadata.continuation_nodes:
+                    node.metadata.continuation_nodes.append(sym)
+            return node.metadata
+
+        # Compute aggregate from children that have metadata
+        children_with_data = [m for m in child_metas if m.historical_count > 0]
+
+        if not children_with_data:
+            return node.metadata
+
+        total_count = sum(m.historical_count for m in children_with_data)
+
+        # Weighted average of children's statistics
+        weighted_move = sum(
+            m.expected_move_pct * m.historical_count
+            for m in children_with_data
+        ) / total_count
+
+        weighted_wr = sum(
+            m.win_rate * m.historical_count
+            for m in children_with_data
+        ) / total_count
+
+        weighted_duration = int(sum(
+            m.avg_duration * m.historical_count
+            for m in children_with_data
+        ) / total_count)
+
+        min_dd = min(m.max_drawdown_pct for m in children_with_data)
+
+        max_fav = max(m.max_favorable_pct for m in children_with_data)
+
+        # Update the node's metadata with aggregated values
+        node.metadata.historical_count = total_count
+        node.metadata.expected_move_pct = weighted_move
+        node.metadata.win_rate = weighted_wr
+        node.metadata.avg_duration = weighted_duration
+        node.metadata.remaining_candles = weighted_duration
+        node.metadata.max_drawdown_pct = min_dd
+        node.metadata.max_favorable_pct = max_fav
+
+        # Ensure continuation_nodes include all children
+        for sym in node.children:
+            if sym not in node.metadata.continuation_nodes:
+                node.metadata.continuation_nodes.append(sym)
+
+        return node.metadata
+
     def __len__(self) -> int:
         return self._pattern_count
 

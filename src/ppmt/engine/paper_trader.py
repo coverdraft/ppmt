@@ -69,8 +69,11 @@ class PaperTraderConfig:
     sax_strategy: str = "ohlcv"
     """SAX encoding strategy."""
 
-    min_confidence: float = 0.60
-    """Minimum confidence to generate entry signal."""
+    min_confidence: float = 0.10
+    """Minimum confidence to generate entry signal.
+    Lowered from 0.60 because aggregated Trie metadata
+    produces moderate confidence values (10-40%) that are
+    still meaningful for position sizing."""
 
     min_risk_reward: float = 1.5
     """Minimum risk:reward ratio."""
@@ -214,14 +217,15 @@ class PaperTrader:
         Steps:
         1. Load OHLCV data from storage
         2. Build PPMT engine from stored Tries (or build from data)
-        3. Step through candles from warm-up offset
-        4. At each candle:
+        3. Propagate metadata so intermediate nodes have statistics
+        4. Step through candles from warm-up offset
+        5. At each candle:
            a. Encode recent data to SAX
            b. Match pattern in Trie
            c. Generate prediction
            d. If no position and signal is strong → enter
            e. If in position → check SL/TP/pattern break
-        5. Track all trades and equity curve
+        6. Track all trades and equity curve
         """
         cfg = self.config
         storage = PPMTStorage()
@@ -253,6 +257,11 @@ class PaperTrader:
         else:
             console.print(f"[green]Loaded N3 Trie for {cfg.symbol} ({trie.pattern_count} patterns)[/green]")
 
+        # CRITICAL: Propagate metadata so intermediate nodes have statistics
+        # This must be done after loading (old stored Tries don't have it)
+        trie.propagate_metadata()
+        console.print(f"[green]Metadata propagated: root now has {trie.root.metadata.historical_count} aggregated observations[/green]")
+
         # Create SAX encoder
         sax_encoder = SAXEncoder(
             alphabet_size=cfg.sax_alphabet_size,
@@ -261,12 +270,10 @@ class PaperTrader:
         )
 
         # Encode the FULL DataFrame once (same z-score context as during build)
-        # This is critical: encoding only a window produces different symbols
-        # than encoding the full DataFrame, because SAX uses z-score normalization
         all_sax_symbols = sax_encoder.encode(df)
         if not all_sax_symbols:
             console.print(f"[red]Could not SAX encode data for {cfg.symbol}.[/red]")
-            return result
+            return PaperTraderResult(symbol=cfg.symbol, timeframe=cfg.timeframe)
 
         console.print(f"  SAX symbols: {len(all_sax_symbols)} (from {len(df)} candles)")
 
@@ -295,7 +302,6 @@ class PaperTrader:
         peak_capital = cfg.initial_capital
 
         # Start from warm-up offset (in candle space)
-        # Map to SAX symbol space: each symbol covers window_size candles
         start_candle = cfg.start_offset
         if start_candle >= len(df):
             console.print(f"[red]Not enough data. Need at least {start_candle} candles, have {len(df)}.[/red]")
@@ -304,13 +310,19 @@ class PaperTrader:
         console.print(f"\n[bold cyan]Starting Paper Trading: {cfg.symbol} ({cfg.timeframe})[/bold cyan]")
         console.print(f"  Capital: ${cfg.initial_capital:,.2f}")
         console.print(f"  Data: {len(df)} candles, starting from index {start_candle}")
-        console.print(f"  Trie: {trie.pattern_count} patterns\n")
+        console.print(f"  Trie: {trie.pattern_count} patterns")
+        console.print(f"  Min confidence: {cfg.min_confidence:.0%}")
+        console.print(f"  Entry: move > 0.3%, probability > 20%\n")
 
         # We iterate over SAX symbol positions instead of individual candles
-        # This is more efficient and ensures correct symbol alignment with the Trie
         start_sym_idx = start_candle // cfg.sax_window_size
         if start_sym_idx < cfg.pattern_length:
             start_sym_idx = cfg.pattern_length  # Need at least pattern_length symbols
+
+        # Track prediction statistics
+        pred_count = 0
+        pred_with_direction = 0
+        pred_passed_threshold = 0
 
         for sym_idx in range(start_sym_idx, len(all_sax_symbols)):
             # Map symbol index back to candle index for price lookup
@@ -410,37 +422,43 @@ class PaperTrader:
 
             # If no position, try to generate entry signal
             if current_position is None:
-                prediction = None
+                pred_count += 1
 
-                # Try progressively shorter patterns for a match
-                for pat_len in range(len(current_symbols), 1, -1):
-                    try:
-                        candidate = current_symbols[-pat_len:]
-                        pred = pred_engine.predict(
-                            current_symbols=candidate,
-                            entry_price=current_price,
-                            timeframe_hours=tf_hours,
-                            symbol=cfg.symbol,
-                        )
-                        if pred.direction != "FLAT" and pred.confidence > 0:
-                            prediction = pred
-                            break
-                    except Exception:
-                        continue
-
-                if prediction is None:
+                # Use the full current pattern for prediction.
+                # The PredictionEngine._find_best_node() handles prefix matching
+                # internally — it tries exact match, then progressively shorter
+                # prefixes from the root. This is correct because the Trie stores
+                # patterns as paths from root.
+                #
+                # DO NOT use suffix-based shortening (current_symbols[-pat_len:])
+                # because that would search for unrelated patterns in the Trie.
+                try:
+                    prediction = pred_engine.predict(
+                        current_symbols=current_symbols,
+                        entry_price=current_price,
+                        timeframe_hours=tf_hours,
+                        symbol=cfg.symbol,
+                    )
+                except Exception:
                     continue
+
+                if prediction.direction == "FLAT" or prediction.confidence <= 0:
+                    continue
+
+                pred_with_direction += 1
 
                 # Check if prediction is strong enough for entry
                 # Use min_confidence but allow lower if probability is high
                 effective_min_conf = cfg.min_confidence
                 if prediction.overall_probability > 0.5:
-                    effective_min_conf = max(cfg.min_confidence * 0.5, 0.10)
+                    effective_min_conf = max(cfg.min_confidence * 0.5, 0.05)
 
                 if (prediction.direction != "FLAT"
                     and prediction.confidence >= effective_min_conf
                     and abs(prediction.expected_total_move_pct) > 0.3
                     and prediction.overall_probability > 0.2):
+
+                    pred_passed_threshold += 1
 
                     # Create signal
                     from ppmt.engine.signal import Signal, SignalType
@@ -530,6 +548,11 @@ class PaperTrader:
             current_position.actual_move_pct = current_position.pnl_pct
             current_position.exit_reason = "end_of_data"
             result.trades.append(current_position)
+
+        # Print prediction statistics
+        console.print(f"\n[dim]Prediction stats: {pred_count} attempts, "
+                      f"{pred_with_direction} with direction, "
+                      f"{pred_passed_threshold} passed threshold[/dim]")
 
         # Compute final results
         result.final_capital = risk_mgr.capital
