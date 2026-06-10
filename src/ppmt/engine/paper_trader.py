@@ -208,6 +208,9 @@ class PaperTrader:
             base_position_size_pct=0.02,
             max_position_size_pct=0.06,
             min_position_size_pct=0.005,
+            min_risk_reward=0.5,
+            min_quality_score=0.0,
+            min_confidence=0.0,
         )
 
     def run(self) -> PaperTraderResult:
@@ -323,6 +326,7 @@ class PaperTrader:
         pred_count = 0
         pred_with_direction = 0
         pred_passed_threshold = 0
+        risk_reject_reasons = {}  # reason -> count
 
         for sym_idx in range(start_sym_idx, len(all_sax_symbols)):
             # Map symbol index back to candle index for price lookup
@@ -527,6 +531,9 @@ class PaperTrader:
                             expected_move_pct=signal.expected_move_pct,
                             matched_pattern=current_symbols,
                         )
+                    else:
+                        # Track rejection reasons
+                        risk_reject_reasons[reason] = risk_reject_reasons.get(reason, 0) + 1
 
             # Record equity curve periodically
             if sym_idx % 10 == 0:
@@ -553,6 +560,8 @@ class PaperTrader:
         console.print(f"\n[dim]Prediction stats: {pred_count} attempts, "
                       f"{pred_with_direction} with direction, "
                       f"{pred_passed_threshold} passed threshold[/dim]")
+        if risk_reject_reasons:
+            console.print(f"[dim]Risk rejections: {risk_reject_reasons}[/dim]")
 
         # Compute final results
         result.final_capital = risk_mgr.capital

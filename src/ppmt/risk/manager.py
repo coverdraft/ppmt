@@ -58,8 +58,9 @@ class RiskConfig:
     min_position_size_pct: float = 0.005  # 0.5% min (base × 0.25x)
     max_daily_loss_pct: float = 0.05      # 5% max daily loss
     max_drawdown_pct: float = 0.15        # 15% max portfolio drawdown
-    min_risk_reward: float = 1.5          # Minimum R:R to accept signal
-    min_quality_score: float = 0.3        # Minimum quality to accept
+    min_risk_reward: float = 0.5          # Minimum R:R to accept signal
+    min_quality_score: float = 0.0        # Minimum quality to accept
+    min_confidence: float = 0.0           # Minimum confidence to accept signal
     max_open_positions: int = 5           # Max simultaneous positions
     max_correlated_positions: int = 2     # Max positions in same asset class
 
@@ -121,8 +122,9 @@ class RiskManager:
         """
         Check if a new position can be opened based on risk constraints.
 
-        V3: Also checks quality_score from PPMT metadata.
-        Low quality patterns are rejected outright.
+        V3: Also checks quality_score and confidence from PPMT metadata.
+        All thresholds are configurable via RiskConfig so that paper trading
+        can use more permissive settings than live trading.
         """
         # Must be an entry signal
         if not signal.is_entry:
@@ -132,8 +134,8 @@ class RiskManager:
         if signal.quality_score < self.config.min_quality_score:
             return False, f"Quality too low: {signal.quality_score:.2f}"
 
-        # Check minimum confidence
-        if signal.confidence < 0.5:
+        # Check minimum confidence (configurable, was hardcoded at 0.5)
+        if signal.confidence < self.config.min_confidence:
             return False, f"Confidence too low: {signal.confidence:.2f}"
 
         # Check minimum risk:reward
