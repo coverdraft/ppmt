@@ -152,8 +152,85 @@ Config changes:
 - RiskConfig.min_risk_reward: 1.5 → 1.0
 
 Stage Summary:
-- v0.2.9 = MAJOR ACCURACY IMPROVEMENT — 5 targeted fixes
-- #1 (intra-symbol SL/TP) is the most impactful — prevents catastrophic losses
-- Expected: WR should improve from 47% toward 55-60%, Max DD should drop significantly
+- v0.2.9 = MAJOR REGRESSION — P&L collapsed from +1578% to +6.14%
+- ROOT CAUSE: Intra-symbol HIGH/LOW checking was too aggressive
+  - Triggered SL on candle wicks before price actually closed there
+  - Only 1 take_profit in 380 trades (vs many in v0.2.8)
+  - Almost all stop_loss exits at exactly -1.50% (the SL floor)
+  - Re-entry cooldown of 3 blocked 358 entries (too aggressive)
+  - min_quality_score of 0.10 rejected 105 trades (too strict)
+- KEY LESSON: Checking every candle with HIGH/LOW cuts winners short.
+  The v0.2.8 approach (SAX boundary, close price) was correct because
+  it gave trades room to reach take_profit. Catastrophic losses (-9.39%)
+  should be prevented with a targeted safety net, not blanket per-candle checks.
 - Files modified: paper_trader.py, __init__.py, pyproject.toml, cli/main.py
-- PENDING: Run on user's machine to measure actual improvement
+
+v0.2.9 RESULTS:
+- 380 trades, W:201 L:179, WR 52.9%, P&L +6.14%
+- Profit Factor 1.02, Max DD 21.1%, Sharpe 0.11
+- Best trade: +4.89%, Worst trade: -4.72%
+- Avg confidence: 22.3%, Avg quality: 0.16
+- Risk rejections: 105 low_quality
+- Re-entry cooldown blocks: 358
+
+---
+Task ID: v0.2.10
+Agent: Main
+Task: Fix v0.2.9 regression — restore v0.2.8's profitability while adding targeted catastrophic protection
+
+Work Log:
+
+1. REVERT INTRA-SYMBOL HIGH/LOW CHECKING → SAX-boundary checking
+   - Problem: v0.2.9's per-candle HIGH/LOW SL/TP checking was too aggressive.
+     It triggered on candle wicks (LOW touching SL even though close was above),
+     cutting winners short before they could reach take_profit.
+     Result: only 1 take_profit exit in 380 trades (vs many in v0.2.8).
+   - Fix: Reverted to v0.2.8's SAX-boundary SL/TP checking (once per 10 candles,
+     using close price). This gives trades room to breathe and reach TP.
+   - Added: catastrophic_loss_pct = 5.0% (new config parameter) — scans every
+     candle within the SAX window but ONLY closes if unrealized loss exceeds 5%.
+     This is a safety net that prevents -9.39% type losses without cutting normal
+     trades short on candle wicks.
+
+2. RAISE SL FLOOR (1.5% → 2.0% for LONG, 2.0% → 2.5% for SHORT)
+   - Problem: v0.2.9 had almost all stop_loss exits at exactly -1.50%.
+     With avg ATR=0.84%, ATR*1.5 = 1.26% → floored to 1.5%. This was too tight.
+   - Fix: Raised LONG SL floor from 1.5% to 2.0%, SHORT SL floor from 2.0% to 2.5%.
+     This gives trades more room to survive normal noise.
+
+3. LOWER MIN CONFIDENCE (0.15 → 0.12)
+   - Problem: v0.2.9's min_confidence of 0.15 was too restrictive.
+   - Fix: Compromise at 0.12 — filters the worst signals while allowing enough
+     trades for the Living Trie to learn from.
+
+4. LOWER MIN QUALITY SCORE (0.10 → 0.05)
+   - Problem: v0.2.9's min_quality_score of 0.10 rejected 105 trades.
+   - Fix: Lowered to 0.05 — only rejects the truly terrible signals.
+
+5. REDUCE RE-ENTRY COOLDOWN (3 → 1)
+   - Problem: v0.2.9's cooldown of 3 blocked 358 potential entries — way too many.
+   - Fix: Reduced to 1 — still prevents immediate revenge trading but allows
+     the system to capture the next valid signal.
+
+6. KEEP GOOD v0.2.9 FEATURES:
+   - Pattern break grace period = 2 (prevents closing on single noise break)
+   - SHORT-specific wider SL (ATR*2.0) and lower TP (SL*1.5)
+   - SHORT confidence gate: max(conf*2, 0.20)
+
+Config changes:
+- PaperTraderConfig.min_confidence: 0.15 → 0.12
+- PaperTraderConfig.min_quality_score: 0.10 → 0.05
+- PaperTraderConfig.reentry_cooldown: 3 → 1
+- PaperTraderConfig.catastrophic_loss_pct: 5.0 (NEW)
+- LONG SL floor: 1.5% → 2.0%
+- SHORT SL floor: 2.0% → 2.5%
+- SHORT confidence gate: 0.25 → 0.20
+
+Stage Summary:
+- v0.2.10 = TARGETED FIX for v0.2.9 regression
+- Core philosophy: v0.2.8's approach was correct (SAX-boundary checking with close
+  price). The catastrophic intra-window protection adds a safety net without
+  cutting winners short.
+- Expected: results should be similar to v0.2.8 run #2 (54.7% WR, +1578% P&L)
+  but with the catastrophic loss protection preventing -9.39% type losses
+- Files modified: paper_trader.py, __init__.py, pyproject.toml, cli/main.py
