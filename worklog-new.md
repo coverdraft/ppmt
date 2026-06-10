@@ -1446,3 +1446,78 @@ Stage Summary:
 - MUST revert to 2-pass bootstrap (proven optimal)
 - v0.5.0 remains the benchmark: 519 trades, 50.5% WR, +1434% P&L
 - PENDING: Revert all v0.5.1/v0.5.2 changes → v0.5.3 = v0.5.0 baseline
+
+---
+Task ID: v0.5.3
+Agent: Main
+Task: Revert ALL v0.5.1/v0.5.2 changes back to v0.5.0 baseline
+
+Work Log:
+
+ROOT CAUSE CONFIRMED:
+v0.5.2 produced the WORST results in PPMT history (-29.52% P&L). Three
+separate experiments (v0.5.1 --force, v0.5.1 merge, v0.5.2) all confirm:
+1. SAX window=5 produces noisier predictions → worse quality trades
+2. >2 bootstrap passes POISONS the trie (WR degrades: 49.3% → 30.6%)
+3. Loosened entry filters let through more signals but lower quality
+4. Reduced SHORT multiplier creates SHORT bias → losses on uptrending BTC
+
+The ONLY version that works well with --force fresh build is v0.5.0:
+519 trades, 50.5% WR, +1434% P&L, Sharpe 2.27
+
+CHANGES (v0.5.3 = FULL REVERT to v0.5.0 baseline):
+
+1. SAX PARAMETERS (sax.py, encoder.py, all files)
+   - alphabet: 10 → 8 (v0.5.0 value)
+   - window: 5 → 10 (v0.5.0 value)
+   - These are THE most important parameters — window=10 produces
+     much more stable, meaningful SAX symbols for pattern matching
+
+2. BOOTSTRAP (cli/main.py, ppmt.py)
+   - Passes: 5 → 2 (v0.5.0 value — proven optimal)
+   - Confidence: 0.05 → 0.10 (v0.5.0 value)
+   - Move threshold: 0.5% → 1.0% (v0.5.0 value)
+   - Probability: 10% → 20% (v0.5.0 value)
+   - SHORT multiplier: 1.2x/floor 0.10 → 1.5x/floor 0.15 (v0.5.0 value)
+
+3. ENTRY FILTERS (paper_trader.py)
+   - Move threshold: 0.5% → 1.0% (v0.5.0 value)
+   - Probability threshold: 15% → 20% (v0.5.0 value)
+   - SHORT multiplier: 1.2x/floor 0.10 → 1.5x/floor 0.15 (v0.5.0 value)
+
+4. MERGE LOGIC (cli/main.py)
+   - Removed v0.5.2 "smart merge" SAX compatibility check
+   - Restored v0.5.0 merge logic (simple pattern count comparison)
+
+5. VERSION UPDATES
+   - __init__.py: "0.5.2" → "0.5.3"
+   - pyproject.toml: "0.5.2" → "0.5.3"
+   - cli/main.py: version "0.5.2" → "0.5.3"
+
+6. CLI CLEANUP (cli/main.py)
+   - Removed --sax-alphabet and --sax-window CLI options added in v0.5.1
+   - These should not be easily changeable from CLI — they're core params
+
+FILES MODIFIED: 8 files, 64 insertions, 89 deletions (net reduction!)
+
+GIT COMMIT: 8e08ab9
+- Pushed to GitHub: https://github.com/coverdraft/ppmt
+
+EXPECTED RESULTS:
+v0.5.3 should reproduce v0.5.0's results since it's an exact revert:
+- ~519 trades, ~50.5% WR, ~+1434% P&L, Sharpe ~2.27
+
+LESSON LEARNED (5th confirmation):
+- SAX window=10, alphabet=8 are the CORRECT values for PPMT
+- 2 bootstrap passes is optimal — more is worse
+- Tighter entry filters (move > 1.0%, prob > 20%) produce BETTER results
+  with the Living Trie than looser ones
+- The Living Trie compensates for fewer entries with better quality
+- Never change multiple fundamental parameters at once
+
+Stage Summary:
+- v0.5.3 = FULL REVERT to v0.5.0 baseline
+- All v0.5.1/v0.5.2 changes undone: SAX, bootstrap, entry filters, merge
+- 8 files modified, net code reduction (removed broken additions)
+- Expected: reproduce v0.5.0's +1434% P&L, 50.5% WR
+- PENDING: User needs to git pull, pip3 install -e ., test with --force
