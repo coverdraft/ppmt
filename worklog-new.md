@@ -1336,3 +1336,113 @@ Stage Summary:
 - SHORT multiplier reduced for better LONG/SHORT balance
 - Commit: 18e0f9d "v0.5.2: Loosen entry filters for window=5 regime"
 - PENDING: User needs to git pull, pip3 install -e ., and test with --force
+
+---
+Task ID: v0.5.2-test
+Agent: Main
+Task: User tested v0.5.2 — massive regression continues with 5-pass bootstrap + SAX window=5
+
+Work Log:
+
+USER TEST:
+- User ran: git pull origin main && pip3 install -e . && ppmt build --force -s BTC/USDT && ppmt run --symbol BTC/USDT --paper
+- Installed ppmt-0.5.2
+
+v0.5.2 BUILD RESULTS:
+- SAX config: alphabet=10, window=5 (STILL the problematic SAX params from v0.5.1)
+- 5 bootstrap passes:
+  - Pass 1/5: 857 trades, WR 45.2%
+  - Pass 2/5: 824 trades, WR 49.3% (best pass)
+  - Pass 3/5: 872 trades, WR 37.0% (DEGRADING!)
+  - Pass 4/5: 875 trades, WR 32.6% (still degrading)
+  - Pass 5/5: 880 trades, WR 30.6% (worst pass)
+- N1-N4 Tries: 9125-10639 patterns, max depth 5-6
+- Built 9593 patterns for BTC/USDT
+- Bootstrap final: N3 trie 4308 trading observations, WR 38.8%
+
+CRITICAL FINDING: BOOTSTRAP WR DEGRADES AFTER PASS 2
+- Pass 1: 45.2% → Pass 2: 49.3% (improving, as expected)
+- Pass 2: 49.3% → Pass 3: 37.0% (COLLAPSE! -12.3pp)
+- Pass 3: 37.0% → Pass 4: 32.6% → Pass 5: 30.6%
+- The trie is being POISONED by its own bad observations
+- After pass 2, the trie has enough bad data to start self-reinforcing
+  bad predictions, making subsequent passes WORSE not better
+- This is a fundamental problem with >2 bootstrap passes
+
+v0.5.2 PAPER TRADING RESULTS:
+- 628 trades, W:307 L:321, WR 48.9%
+- P&L: -29.52% ($10,000 → $7,047.88)
+- Profit Factor: 0.95
+- Max DD: 40.7%
+- Sharpe: -0.30
+- Best trade: +12.25%
+- Worst trade: -12.85%
+- Avg confidence: 14.4%
+- Avg quality: 0.10
+- Living Trie: 628 observations, 414 new nodes, 20 metadata propagations
+- Trie grew: 10639 → 11053 patterns
+
+ANALYSIS — ROOT CAUSES OF REGRESSION:
+
+1. SAX WINDOW=5 IS FUNDAMENTALLY FLAWED FOR PPMT
+   - v0.5.0 with window=10: 519 trades, 50.5% WR, +1434% P&L
+   - v0.5.2 with window=5: 628 trades, 48.9% WR, -29.52% P&L
+   - More trades (628 vs 519) but WORSE quality — window=5 produces
+     noisier, shorter-horizon predictions
+   - Entry filters loosened (move > 0.5%, prob > 15%) let through
+     more signals but they're lower quality
+   - SHORT bias still present: many SHORT trades with big losses
+     (trades #5: -7.31%, #7: -5.53%, #13: -12.09%, #18: -6.28%)
+   - Window=5 means only 5 candles per SAX symbol → too little
+     context for reliable pattern matching
+
+2. >2 BOOTSTRAP PASSES IS COUNTERPRODUCTIVE
+   - Pass 2 WR (49.3%) is the peak — everything after degrades
+   - Passes 3-5 accumulate BAD observations that poison the trie
+   - The trie's own bad predictions create self-reinforcing loops
+   - 5 passes accumulated 4308 observations but most are LOW QUALITY
+   - v0.5.0 with only 2 passes produced MUCH better P&L (+1434%)
+
+3. SHORT TRADES STILL LOSING BIG
+   - Heavy SHORT bias in the trade list (many SHORT entries)
+   - BTC is in an uptrend over the test period → SHORTs systematically lose
+   - The SHORT multiplier reduction (1.5x→1.2x) made MORE SHORTs pass,
+     which is WORSE because SHORTs on BTC are mostly losing
+   - Trades like #13 (SHORT, -12.09%), #25 (SHORT, -7.75%), #67 (SHORT, -12.85%)
+
+COMPLETE RESULTS HISTORY (updated):
+| Version | Build Method | Trades | WR | P&L | Sharpe | Max DD |
+|---------|-------------|--------|------|------|--------|--------|
+| v0.4.0 | build+bootstrap+merge (3975) | 601 | 53.1% | +3665% | 2.80 | 22.9% |
+| v0.4.1 | build+bootstrap+merge (4297) | 566 | 46.6% | +347.7% | 0.88 | 44.3% |
+| v0.4.2 | build+bootstrap+merge (4366→4550) | 627 | 48.2% | +665.6% | 1.51 | 35.9% |
+| **v0.5.0** | **2-pass bootstrap, no merge** | **519** | **50.5%** | **+1434%** | **2.27** | **29.2%** |
+| v0.5.1 | 3-pass, --force (no merge) | 83 | 59.0% | +14.18% | 0.62 | 17.9% |
+| v0.5.1 | 3-pass, merge | 263 | 49.8% | +20.50% | 0.78 | 21.4% |
+| v0.5.2 | 5-pass, --force | 628 | 48.9% | -29.52% | -0.30 | 40.7% |
+
+KEY LESSONS REINFORCED (4th time):
+1. SAX window=10 is the CORRECT value — window=5 produces noise
+2. 2 bootstrap passes is optimal — more passes degrade the trie
+3. Loosening entry filters to get more trades ≠ better results
+4. SHORT confidence multiplier should be HIGHER (1.5x+), not lower
+   - More SHORT entries on an uptrending asset = more losses
+5. v0.5.0 remains the BEST version for --force fresh build
+
+REQUIRED FIX — v0.5.3:
+- REVERT SAX to v0.5.0 values: alphabet=8, window=10
+- KEEP 2-pass bootstrap (optimal, not 5)
+- REVERT entry filters: move > 1.0%, probability > 20%
+- REVERT SHORT multiplier: 1.5x / floor 0.15
+- Keep v0.5.0 as the baseline — all v0.5.1/v0.5.2 changes were regressions
+
+Stage Summary:
+- v0.5.2 = WORST VERSION EVER — first negative P&L (-29.52%)
+- SAX window=5 continues to be the root cause of regression
+- 5-pass bootstrap POISONS the trie after pass 2 (WR 49.3% → 30.6%)
+- Loosened entry filters + noisier predictions = more bad trades
+- SHORT bias from reduced multiplier = systematic losses on uptrend
+- MUST revert to v0.5.0 SAX parameters (window=10, alphabet=8)
+- MUST revert to 2-pass bootstrap (proven optimal)
+- v0.5.0 remains the benchmark: 519 trades, 50.5% WR, +1434% P&L
+- PENDING: Revert all v0.5.1/v0.5.2 changes → v0.5.3 = v0.5.0 baseline
