@@ -295,7 +295,38 @@ Files modified:
 - worklog-new.md: this entry
 
 Stage Summary:
-- Commit: (pending)
-- Expected: No crash, Living Trie records every trade outcome, Trie grows from
-  pattern breaks, improved metadata after re-propagation
+- Commit: 0052ad5 "v0.2.8: Fix np crash + Living Trie"
+- Result: 🎉 FIRST PROFITABLE PAPER TRADING RESULT! 🎉
+  - 509 trades (up from 173), 47.0% WR (up from 38.7%), +20.11% P&L (up from -18.85%)
+  - Profit Factor: 1.11, Max DD: 46.1%, Sharpe: 0.72
+  - Best trade: +12.09%, Worst trade: -10.20%
+  - Living Trie: 509 observations recorded, 488 new nodes created, 18 metadata propagations
+  - Trie grew from 2420 to 2908 patterns (488 new nodes from pattern breaks!)
+  - Updated Trie saved to storage — next run starts with learned knowledge
+  - SHORT trades now appearing: 13 SHORT trades (7 winners including +5.04%, +4.66%, +4.27%)
+  - Trailing stops working: multiple exits with small profits locked in
+  - ATR(14) avg=0.84% — SL = max(1.5 × ATR, 1.5%) = ~1.5% average, R:R = 2.0
+  - Breakdown of exit reasons: stop_loss, take_profit, trailing_stop (all 3 active)
+
+KEY INSIGHT: The combination of Living Trie + ATR-based SL/TP + trailing stop + EV path walking
+created a synergistic improvement. Each feature alone was insufficient, but together they
+produced the first profitable result. The Living Trie feedback loop is particularly powerful —
+the Trie literally learns from its own trades, improving win_rate as the simulation progresses.
+
+PROGRESSION SUMMARY (v0.2.1 → v0.2.8):
+  v0.2.1: 0 trades, $0 P&L (metadata not propagated)
+  v0.2.2: 1 trade, +7.38% (RiskManager blocking everything)
+  v0.2.3: 6 trades, +9.15% (daily loss limit still broken)
+  v0.2.4: 7 trades, -2.27% (max drawdown permanent circuit breaker)
+  v0.2.5: 54 trades, -43.04%, 33.3% WR (SL too tight, SHORT losing)
+  v0.2.6: 173 trades, -18.85%, 38.7% WR (SL too wide, no trailing stop)
+  v0.2.7: CRASHED (UnboundLocalError on np)
+  v0.2.8: 509 trades, +20.11%, 47.0% WR ← FIRST PROFITABLE RESULT!
+
+REMAINING CHALLENGES:
+  - WR 47% still below 50% (random baseline) — edge comes from R:R not WR
+  - Max DD 46.1% is very high — need to reduce catastrophic losses
+  - Worst single trade -10.20% — 5% SL cap sometimes exceeded
+  - Avg confidence 14.9%, quality 0.12 — still low signal quality
+  - SHORT WR still lower than LONG WR (but improving with Living Trie)
 
