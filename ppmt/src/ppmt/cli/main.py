@@ -36,6 +36,7 @@ from ppmt.data.classifier import AssetClassifier
 from ppmt.engine.ppmt import PPMT
 from ppmt.engine.prediction import PredictionEngine
 from ppmt.core.sax import SAXEncoder
+from ppmt.core.matcher import FuzzyMatcher
 
 console = Console()
 
@@ -201,7 +202,6 @@ def _run_backtest_window(
     window_size = encoder.window_size
 
     # Use the engine's fuzzy matcher for noise-tolerant matching
-    from ppmt.core.matcher import FuzzyMatcher
     fuzzy_matcher = FuzzyMatcher(sax_encoder=encoder, threshold=0.85)
 
     for i in range(n_train_symbols, len(all_symbols) - pattern_length):
@@ -784,13 +784,15 @@ def backtest(
         console.print("[yellow]No trades generated in backtest.[/yellow]")
 
     # Save results to JSON
-    output_dir = os.path.join(os.path.dirname(csv_path) if csv_path else os.path.expanduser("~/.ppmt/backtest_results"), "backtest_results")
+    output_dir = os.path.dirname(csv_path) if csv_path else os.path.expanduser("~/.ppmt/backtest_results")
     os.makedirs(output_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_file = os.path.join(output_dir, f"backtest_{symbol.replace('/', '_')}_{timestamp}.json")
 
     # Convert trades for JSON serialization
     json_result = {k: v for k, v in result.items() if k != "trades"}
+    json_result["version"] = VERSION
+    json_result["symbol"] = symbol
     json_result["trades"] = [
         {k: v for k, v in t.items() if k != "won"} for t in result["trades"]
     ]
@@ -1026,7 +1028,7 @@ def rolling_backtest(
         console.print(table)
 
     # Save results
-    output_dir = os.path.join(os.path.dirname(csv_path) if csv_path else os.path.expanduser("~/.ppmt/backtest_results"), "backtest_results")
+    output_dir = os.path.dirname(csv_path) if csv_path else os.path.expanduser("~/.ppmt/backtest_results")
     os.makedirs(output_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_file = os.path.join(

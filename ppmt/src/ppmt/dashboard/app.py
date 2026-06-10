@@ -39,24 +39,32 @@ def create_app(backtest_dir: Optional[str] = None) -> Flask:
         return render_template_string(DASHBOARD_HTML)
 
     # ===================================================================
+    # Favicon (inline SVG to eliminate 404 errors)
+    # ===================================================================
+    @app.route("/favicon.ico")
+    def favicon():
+        return '''data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" rx="20" fill="%230f1117"/><text x="50" y="68" font-size="50" font-family="sans-serif" font-weight="bold" text-anchor="middle" fill="%234f8cff">P</text></svg>''', 200, {"Content-Type": "image/svg+xml"}
+
+    # ===================================================================
     # API: List available backtest result files
     # ===================================================================
     @app.route("/api/backtest-results")
     def api_list_results():
-        """Return list of all backtest result JSON files."""
+        """Return list of all backtest result JSON files (recursive)."""
         files = []
-        for f in sorted(glob.glob(os.path.join(bt_dir, "*.json")), reverse=True):
+        # Search recursively to handle both flat and nested directory structures
+        for f in sorted(glob.glob(os.path.join(bt_dir, "**", "*.json"), recursive=True), reverse=True):
             try:
                 with open(f) as fh:
                     data = json.load(fh)
                 files.append({
-                    "filename": os.path.basename(f),
+                    "filename": os.path.relpath(f, bt_dir),
                     "symbol": data.get("symbol", "unknown"),
                     "version": data.get("version", ""),
                     "type": "rolling" if "rolling" in os.path.basename(f) else "static",
-                    "total_trades": data.get("total_trades", 0),
-                    "win_rate": data.get("win_rate", 0),
-                    "total_pnl_pct": data.get("total_pnl_pct", 0),
+                    "total_trades": data.get("total_trades", data.get("summary", {}).get("total_trades", 0)),
+                    "win_rate": data.get("win_rate", data.get("summary", {}).get("win_rate", 0)),
+                    "total_pnl_pct": data.get("total_pnl_pct", data.get("summary", {}).get("total_pnl_pct", 0)),
                     "timestamp": os.path.basename(f).split("_")[-1].replace(".json", ""),
                 })
             except (json.JSONDecodeError, OSError):
@@ -94,13 +102,16 @@ def create_app(backtest_dir: Optional[str] = None) -> Flask:
     @app.route("/api/assets")
     def api_assets():
         """Return list of tracked assets from the PPMT database."""
+        storage = None
         try:
             storage = PPMTStorage()
             assets = storage.get_assets()
-            storage.close()
             return jsonify(assets)
         except Exception as e:
             return jsonify({"error": str(e)}), 500
+        finally:
+            if storage:
+                storage.close()
 
     # ===================================================================
     # API: Quick summary for a symbol (latest result)
@@ -114,8 +125,8 @@ def create_app(backtest_dir: Optional[str] = None) -> Flask:
         # Normalize: support both BTC/USDT and BTC_USDT
         safe_symbol = symbol.replace("_", "/")
         search_symbol = symbol.replace("/", "_")
-        pattern = os.path.join(bt_dir, f"*{search_symbol}*.json")
-        files = sorted(glob.glob(pattern), reverse=True)
+        pattern = os.path.join(bt_dir, "**", f"*{search_symbol}*.json")
+        files = sorted(glob.glob(pattern, recursive=True), reverse=True)
 
         if not files:
             return jsonify({"error": f"No results for {symbol}"}), 404
@@ -179,7 +190,7 @@ def create_app(backtest_dir: Optional[str] = None) -> Flask:
         """Get comparison data for all symbols with results."""
         symbols_data = {}
 
-        for f in sorted(glob.glob(os.path.join(bt_dir, "*.json")), reverse=True):
+        for f in sorted(glob.glob(os.path.join(bt_dir, "**", "*.json"), recursive=True), reverse=True):
             try:
                 with open(f) as fh:
                     data = json.load(fh)
@@ -513,10 +524,10 @@ DASHBOARD_HTML = r"""
     <div class="container">
         <!-- Tabs -->
         <div class="tabs">
-            <div class="tab active" onclick="switchTab('overview')">Overview</div>
-            <div class="tab" onclick="switchTab('windows')">Windows</div>
-            <div class="tab" onclick="switchTab('trades')">Trades</div>
-            <div class="tab" onclick="switchTab('compare')">Compare</div>
+            <div class="tab active" onclick="switchTab('overview', this)">Overview</div>
+            <div class="tab" onclick="switchTab('windows', this)">Windows</div>
+            <div class="tab" onclick="switchTab('trades', this)">Trades</div>
+            <div class="tab" onclick="switchTab('compare', this)">Compare</div>
         </div>
 
         <!-- Overview Tab -->
@@ -650,10 +661,19 @@ DASHBOARD_HTML = r"""
     // ===================================================================
     // Tab switching
     // ===================================================================
-    function switchTab(name) {
+    function switchTab(name, clickedEl) {
         document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
         document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
-        event.target.classList.add('active');
+        if (clickedEl) clickedEl.classList.add('active');
+        document.getElementById('tab-' + name).classList.add('active');
+    }
+
+    function activateTabByName(name) {
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.tab').forEach(t => {
+            if (t.textContent.trim().toLowerCase() === name) t.classList.add('active');
+        });
         document.getElementById('tab-' + name).classList.add('active');
     }
 
@@ -996,10 +1016,7 @@ DASHBOARD_HTML = r"""
             const res = await fetch('/api/compare');
             const data = await res.json();
             renderCompare(data);
-            switchTab('compare');
-            // activate compare tab
-            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-            document.querySelectorAll('.tab')[3].classList.add('active');
+            activateTabByName('compare');
         } catch (e) {
             console.error('Error loading comparison:', e);
         }
