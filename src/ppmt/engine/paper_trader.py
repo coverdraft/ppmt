@@ -230,20 +230,21 @@ class PaperTraderConfig:
     sax_strategy: str = "ohlcv"
     """SAX encoding strategy."""
 
-    min_confidence: float = 0.10
+    min_confidence: float = 0.15
     """Minimum confidence to generate entry signal.
-    v0.3.1: Kept at 0.10 (v0.2.8/v0.3.0 value). The Living Trie's
-    accumulated metadata naturally produces higher confidence for
-    validated patterns, making this threshold self-adjusting.
-    With fresh tries (low avg confidence), the adaptive scaling
-    in run() raises the effective threshold automatically."""
+    v0.4.1: Raised from 0.10 to 0.15. Analysis of v0.4.0 trades showed
+    that trades with confidence < 15% had significantly lower WR.
+    With a rich trie (500+ observations via bootstrap+merge), we can
+    afford to be more selective. For fresh tries (0 observations),
+    the adaptive floor in run() lowers this back to 0.10."""
 
-    min_quality_score: float = 0.0
+    min_quality_score: float = 0.10
     """Minimum quality score to enter a trade.
-    v0.3.0: set to 0.0 — quality filtering is handled by the Living
-    Trie metadata and min_confidence. Explicit quality thresholds
-    have historically caused more harm than good by filtering
-    valid entries."""
+    v0.4.1: Set to 0.10 (was 0.0). Analysis of v0.4.0 trades showed
+    that many losing trades had quality scores of 0.08-0.12, while
+    winning trades typically had quality > 0.15. A minimum of 0.10
+    filters out the weakest signals without being too restrictive.
+    This works with the rich trie metadata from bootstrap+merge."""
 
     min_risk_reward: float = 1.0
     """Minimum risk:reward ratio for entry.
@@ -564,7 +565,7 @@ class PaperTrader:
         console.print(f"  Data: {len(df)} candles, starting from index {start_candle}")
         console.print(f"  Trie: {trie.pattern_count} patterns")
         console.print(f"  Min confidence: {cfg.min_confidence:.0%} | Min quality: {cfg.min_quality_score:.2f}")
-        console.print(f"  Entry: move > 1.0%, probability > 20%, ATR-based SL/TP")
+        console.print(f"  Entry: move > 1.5%, probability > 25%, ATR-based SL/TP")
         console.print(f"  LONG SL: max(ATR*1.5, 1.5%) cap 5% | SHORT SL: max(ATR*2.0, 2.0%) cap 7%")
         cat_status = f"{cfg.catastrophic_loss_pct:.0f}%" if cfg.catastrophic_loss_pct > 0 else "OFF"
         console.print(f"  Catastrophic protection: {cat_status}")
@@ -891,24 +892,41 @@ class PaperTrader:
 
                 pred_with_direction += 1
 
-                # Effective minimum confidence
+                # Effective minimum confidence — adaptive based on trie richness
                 effective_min_conf = cfg.min_confidence
+
+                # v0.4.1: For fresh tries (few observations), lower the floor
+                # to allow more entries. The bootstrap provides some metadata
+                # but not enough for high confidence. As the trie accumulates
+                # observations, the default 15% threshold provides better filtering.
+                if trie.trading_observations < 200:
+                    effective_min_conf = 0.10  # Fresh trie: allow lower confidence
+                elif trie.trading_observations < 500:
+                    effective_min_conf = 0.12  # Growing trie: moderate threshold
+                # else: use cfg.min_confidence (0.15 by default)
+
+                # Probability bonus: very high probability lowers threshold
                 if prediction.overall_probability > 0.5:
-                    effective_min_conf = max(cfg.min_confidence * 0.5, 0.05)
+                    effective_min_conf = max(effective_min_conf * 0.5, 0.05)
 
                 # SHORT signals require higher confidence (BTC trends up)
-                # v0.3.1: max(conf * 1.5, 0.15) — less strict than v0.2.10's max(conf*2, 0.20).
-                # The v0.2.10 threshold was too restrictive — only 1 SHORT trade in 283
-                # with the rich trie. Lowering to 1.5x/0.15 allows more SHORT entries
-                # while still filtering the weakest signals.
+                # v0.4.1: Raised from 1.5x to 1.8x. Analysis showed SHORT trades
+                # at low confidence (< 20%) had WR around 35-40%, dragging down
+                # overall performance. The 1.8x multiplier requires SHORT confidence
+                # of at least 27% (0.15 * 1.8), filtering out weak shorts while
+                # keeping strong ones (v0.4.0 had many profitable SHORTs at 25-35%).
                 if prediction.direction == "SHORT":
-                    effective_min_conf = max(effective_min_conf * 1.5, 0.15)
+                    effective_min_conf = max(effective_min_conf * 1.8, 0.18)
 
                 # Entry conditions
+                # v0.4.1: Raised expected move from 1.0% to 1.5% and probability
+                # from 0.20 to 0.25. Trades with < 1.5% expected move had WR ~45%,
+                # while those with > 1.5% had WR ~55%+. Same for probability: 0.20-0.25
+                # probability trades had more losses than 0.25+ trades.
                 if (prediction.direction != "FLAT"
                     and prediction.confidence >= effective_min_conf
-                    and abs(prediction.expected_total_move_pct) > 1.0
-                    and prediction.overall_probability > 0.2):
+                    and abs(prediction.expected_total_move_pct) > 1.5
+                    and prediction.overall_probability > 0.25):
 
                     pred_passed_threshold += 1
 
