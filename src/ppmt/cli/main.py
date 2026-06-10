@@ -46,7 +46,7 @@ def load_config() -> dict:
 
 
 @click.group()
-@click.version_option(version="0.5.0")
+@click.version_option(version="0.5.1")
 def cli():
     """PPMT - Progressive Pattern Matching Trie Engine"""
     pass
@@ -71,7 +71,7 @@ def init():
         else:
             # Write minimal config
             with open(CONFIG_FILE, "w") as f:
-                yaml.dump({"sax": {"alphabet_size": 8, "window_size": 10}}, f)
+                yaml.dump({"sax": {"alphabet_size": 10, "window_size": 5}}, f)
             console.print(f"[green]Created minimal config at {CONFIG_FILE}[/green]")
     else:
         console.print(f"[yellow]Config already exists at {CONFIG_FILE}[/yellow]")
@@ -137,21 +137,22 @@ def ingest(symbol: str, timeframe: str, days: int, exchange: str, csv_path: str)
 @click.option("--force", "-f", is_flag=True, default=False, help="Force rebuild (discard Living Trie data)")
 @click.option("--bootstrap/--no-bootstrap", default=True, help="Run bootstrap paper trading after build (default: enabled)")
 @click.option("--bootstrap-ratio", default=1.0, type=float, help="Fraction of data for bootstrap (default: 1.0 = 100%%)")
-@click.option("--bootstrap-passes", default=2, type=int, help="Number of bootstrap passes (default: 2 — second pass uses improved trie from first)")
-def build(symbol: str, timeframe: str, pattern_length: int, force: bool, bootstrap: bool, bootstrap_ratio: float, bootstrap_passes: int):
+@click.option("--bootstrap-passes", default=3, type=int, help="Number of bootstrap passes (default: 3 — each pass improves trie from previous)")
+@click.option("--sax-alphabet", default=10, type=int, help="SAX alphabet size (default: 10, more = finer patterns)")
+@click.option("--sax-window", default=5, type=int, help="SAX window size in candles (default: 5, smaller = more symbols = more trades)")
+def build(symbol: str, timeframe: str, pattern_length: int, force: bool, bootstrap: bool, bootstrap_ratio: float, bootstrap_passes: int, sax_alphabet: int, sax_window: int):
     """Build PPMT Trie from stored data.
 
     By default, preserves the existing N3 Living Trie (accumulated trading
     metadata) by merging the new build into it. Use --force to discard
     the Living Trie and rebuild from scratch.
 
-    v0.5.0: After building the trie, automatically runs bootstrap paper
-    trading passes on the data (--bootstrap-ratio, default 100%%)
-    to accumulate trading observations in the N3 trie. By default, 2 passes
-    are run (--bootstrap-passes) — the second pass uses the improved trie
-    from the first pass, producing higher-quality observations.
-    This gives fresh tries meaningful metadata from day one.
-    Use --no-bootstrap to skip.
+    v0.5.1: SAX defaults changed to alphabet_size=10, window_size=5
+    (was 8/10). Smaller window = more SAX symbols = more trade entries.
+    Larger alphabet = finer pattern discrimination. Also, bootstrap
+    passes increased to 3 (was 2) for more accumulated observations.
+    Merge logic fixed to always preserve Living Trie metadata.
+    Use --no-bootstrap to skip, --sax-alphabet/--sax-window to override.
     """
     config = load_config()
     storage = PPMTStorage()
@@ -168,16 +169,17 @@ def build(symbol: str, timeframe: str, pattern_length: int, force: bool, bootstr
     classifier = AssetClassifier()
     info = classifier.classify(symbol)
 
-    # Create engine
+    # Create engine — CLI options override config.yaml
     sax_config = config.get("sax", {})
     engine = PPMT(
         symbol=symbol,
         asset_class=info.asset_class,
-        sax_alphabet_size=sax_config.get("alphabet_size", 8),
-        sax_window_size=sax_config.get("window_size", 10),
+        sax_alphabet_size=sax_alphabet or sax_config.get("alphabet_size", 10),
+        sax_window_size=sax_window or sax_config.get("window_size", 5),
         sax_strategy=sax_config.get("strategy", "ohlcv"),
         weight_profile=info.weight_profile,
     )
+    console.print(f"  SAX config: alphabet={engine.sax.alphabet_size}, window={engine.sax.window_size}")
 
     # Build Trie
     count = engine.build(df, pattern_length=pattern_length)
@@ -225,17 +227,21 @@ def build(symbol: str, timeframe: str, pattern_length: int, force: bool, bootstr
         console.print(f"  [dim]Bootstrap: skipped (--no-bootstrap)[/dim]")
 
     # For N3: check if existing Living Trie should be preserved
+    # v0.5.1: ALWAYS merge existing Living Trie into new build to preserve
+    # valuable trading observations. Never replace — metadata is too precious.
     existing_n3 = storage.load_trie(symbol, "n3")
     n3_to_save = engine.trie_n3
 
     if existing_n3 is not None and not force:
         existing_count = existing_n3.pattern_count
         new_count = engine.trie_n3.pattern_count
+        existing_obs = existing_n3.trading_observations
 
-        if existing_count >= new_count:
-            # Existing trie has Living Trie growth — merge new build INTO it
-            console.print(f"[bold cyan]Living Trie detected:[/bold cyan] existing N3 has {existing_count} patterns vs {new_count} new")
-            console.print(f"[cyan]Merging new build into existing Living Trie (preserving {existing_count - new_count} discovered patterns)...[/cyan]")
+        # v0.5.1: Always merge if existing trie has trading observations
+        # Even if existing has fewer patterns, its metadata is invaluable
+        if existing_obs > 0:
+            console.print(f"[bold cyan]Living Trie detected:[/bold cyan] existing N3 has {existing_count} patterns ({existing_obs} observations) vs {new_count} new")
+            console.print(f"[cyan]Merging new build into existing Living Trie (preserving {existing_obs} trading observations)...[/cyan]")
 
             merge_stats = existing_n3.merge(engine.trie_n3)
 
@@ -247,8 +253,9 @@ def build(symbol: str, timeframe: str, pattern_length: int, force: bool, bootstr
 
             n3_to_save = existing_n3
         else:
-            console.print(f"[yellow]Existing N3 ({existing_count} patterns) has fewer patterns than new build ({new_count})[/yellow]")
-            console.print(f"[yellow]Replacing with new build (existing trie was likely from a different config)[/yellow]")
+            # No trading observations — safe to replace
+            console.print(f"[yellow]Existing N3 ({existing_count} patterns) has no trading observations — using new build[/yellow]")
+            n3_to_save = engine.trie_n3
 
     # Save Tries
     for level, trie in [
@@ -383,8 +390,8 @@ def predict(symbol: str, timeframe: str, depth: int, price: float):
     sax_config = config.get("sax", {})
     from ppmt.core.sax import SAXEncoder
     encoder = SAXEncoder(
-        alphabet_size=sax_config.get("alphabet_size", 8),
-        window_size=sax_config.get("window_size", 10),
+        alphabet_size=sax_config.get("alphabet_size", 10),
+        window_size=sax_config.get("window_size", 5),
         strategy=sax_config.get("strategy", "ohlcv"),
     )
 
@@ -501,8 +508,8 @@ def run(symbol: str, timeframe: str, paper: bool, capital: float, min_confidence
             symbol=symbol,
             timeframe=timeframe,
             initial_capital=capital,
-            sax_alphabet_size=sax_config.get("alphabet_size", 8),
-            sax_window_size=sax_config.get("window_size", 10),
+            sax_alphabet_size=sax_config.get("alphabet_size", 10),
+            sax_window_size=sax_config.get("window_size", 5),
             sax_strategy=sax_config.get("strategy", "ohlcv"),
             min_confidence=min_confidence,
         )
@@ -589,8 +596,8 @@ def monte_carlo(
             symbol=symbol,
             timeframe=timeframe,
             initial_capital=capital,
-            sax_alphabet_size=sax_config.get("alphabet_size", 8),
-            sax_window_size=sax_config.get("window_size", 10),
+            sax_alphabet_size=sax_config.get("alphabet_size", 10),
+            sax_window_size=sax_config.get("window_size", 5),
             sax_strategy=sax_config.get("strategy", "ohlcv"),
             min_confidence=min_confidence,
         )
@@ -633,8 +640,8 @@ def monte_carlo(
             symbol=symbol,
             timeframe=timeframe,
             initial_capital=capital,
-            sax_alphabet_size=sax_config.get("alphabet_size", 8),
-            sax_window_size=sax_config.get("window_size", 10),
+            sax_alphabet_size=sax_config.get("alphabet_size", 10),
+            sax_window_size=sax_config.get("window_size", 5),
             sax_strategy=sax_config.get("strategy", "ohlcv"),
             min_confidence=min_confidence,
         )

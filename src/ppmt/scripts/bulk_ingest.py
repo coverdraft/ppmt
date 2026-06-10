@@ -157,8 +157,8 @@ def run_build(
             engine = PPMT(
                 symbol=symbol,
                 asset_class=info.asset_class,
-                sax_alphabet_size=sax_config.get("alphabet_size", 8),
-                sax_window_size=sax_config.get("window_size", 10),
+                sax_alphabet_size=sax_config.get("alphabet_size", 10),
+                sax_window_size=sax_config.get("window_size", 5),
                 sax_strategy=sax_config.get("strategy", "ohlcv"),
                 weight_profile=info.weight_profile,
             )

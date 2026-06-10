@@ -221,10 +221,10 @@ class PaperTraderConfig:
     pattern_length: int = 5
     """SAX blocks per pattern."""
 
-    sax_alphabet_size: int = 8
+    sax_alphabet_size: int = 10
     """SAX alphabet size."""
 
-    sax_window_size: int = 10
+    sax_window_size: int = 5
     """SAX window size."""
 
     sax_strategy: str = "ohlcv"

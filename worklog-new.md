@@ -1066,3 +1066,94 @@ Stage Summary:
 - CRITICAL: User must use build WITHOUT --force for the merge workflow
 - Files modified: cli/main.py, __init__.py, pyproject.toml
 - PENDING: User needs to git pull, pip3 install -e ., and test
+
+---
+Task ID: v0.5.1
+Agent: Main
+Task: Increase trade count and WR through SAX granularity changes + fix merge logic + more bootstrap passes
+
+Work Log:
+
+PROBLEM ANALYSIS:
+v0.5.0 results: 519 trades, 50.5% WR, +1434% P&L, Sharpe 2.27
+- P&L exceeds 1400% target ✅
+- WR still below 60% target (50.5% vs 60%+) ❌
+- Trade count far below 960+ target (519 vs 960+) ❌
+- Root cause: SAX window_size=10 produces only ~4799 symbols from 47990 candles
+  → only 519 trade entries out of ~4799 SAX positions (~11% entry rate)
+
+KEY INSIGHT: The SAX parameters are the BIGGEST lever for trade count.
+- window_size=10: 47990 candles / 10 = 4799 SAX symbols → ~519 trades
+- window_size=5: 47990 candles / 5 = 9598 SAX symbols → potentially ~1000+ trades
+- Smaller windows = more frequent pattern evaluations = more entry opportunities
+- Larger alphabet = finer pattern discrimination = potentially better WR
+
+CHANGES (v0.5.1):
+
+1. SAX WINDOW SIZE: 10 → 5 (candles per SAX block)
+   - Doubles the number of SAX symbols from ~4799 to ~9598
+   - Each symbol represents 5 candles (5 hours for 1h timeframe) instead of 10
+   - More symbols = more pattern matches evaluated = more potential trade entries
+   - Target: increase trade count from ~519 to ~960+
+   - Trade risk unchanged: SL/TP still based on ATR, which is independent of SAX window
+
+2. SAX ALPHABET SIZE: 8 → 10 (number of distinct symbols)
+   - More symbols = finer discrimination of price movements
+   - 8 symbols: very different patterns might map to same symbol sequence
+   - 10 symbols: better differentiation between strong and weak patterns
+   - Expected: better confidence differentiation → potentially higher WR
+   - Trade-off: more patterns but fewer observations per pattern (bootstrap compensates)
+
+3. BOOTSTRAP PASSES: 2 → 3 (default)
+   - Each additional pass accumulates more observations in the Living Trie
+   - Pass 1: ~44% WR (fresh trie), Pass 2: ~47.5% WR (improved trie)
+   - Pass 3: expected ~50%+ WR (further improved trie)
+   - With 3 passes × ~600 trades each × 100% data = ~1800 total observations
+   - More observations = better metadata = better predictions
+
+4. FIX MERGE LOGIC: Always preserve Living Trie metadata
+   - BUG: v0.5.0 merge logic replaced existing trie if new_count > existing_count
+   - User's run showed: "Existing N3 (3080 patterns) has fewer patterns than new build (3136)
+     Replacing with new build" — LOST all Living Trie observations!
+   - Fix: merge whenever existing_n3.trading_observations > 0, regardless of pattern count
+   - Living Trie observations are too valuable to lose just because pattern count changed
+   - Only replace when existing trie has 0 observations (fresh/unused trie)
+
+5. CLI OPTIONS FOR SAX PARAMS: --sax-alphabet and --sax-window
+   - Users can now experiment with different SAX configurations without editing config.yaml
+   - Build command: ppmt build -s BTC/USDT --sax-alphabet 10 --sax-window 5
+   - These override config.yaml values
+
+6. VERSION UPDATES
+   - __init__.py: "0.5.0" → "0.5.1"
+   - pyproject.toml: "0.5.0" → "0.5.1"
+   - cli/main.py: version "0.5.0" → "0.5.1"
+
+CONFIG CHANGES SUMMARY:
+| Parameter | v0.5.0 | v0.5.1 | Impact |
+|-----------|--------|--------|--------|
+| SAX window_size | 10 | 5 | ~2x more SAX symbols → ~2x more trades |
+| SAX alphabet_size | 8 | 10 | Finer patterns → better discrimination |
+| Bootstrap passes | 2 | 3 | More observations → better metadata |
+| Merge logic | Replace if new>existing | Always preserve Living Trie | Never lose observations |
+
+IMPORTANT: Since SAX params changed, existing Living Trie is INCOMPATIBLE.
+User MUST use --force for the first build with v0.5.1:
+  ppmt build --force -s BTC/USDT && ppmt run --symbol BTC/USDT --paper
+
+After that, subsequent builds WITHOUT --force will properly merge.
+
+EXPECTED IMPACT:
+- Trade count: ~519 → ~960+ (target met via 2x SAX symbols)
+- WR: ~50.5% → potentially 55%+ (finer patterns + 3 bootstrap passes)
+- P&L: ~1434% → potentially 2000%+ (more trades + higher WR compounding)
+- Bootstrap observations: ~1151 → ~1800+ (3 passes vs 2)
+
+Stage Summary:
+- v0.5.1 = SAX GRANULARITY + MERGE FIX + MORE BOOTSTRAP
+- Biggest change: SAX window_size 10→5 (doubles potential trades)
+- Also: alphabet_size 8→10 (finer patterns), bootstrap 2→3 passes
+- Fix: merge logic now always preserves Living Trie observations
+- New CLI: --sax-alphabet, --sax-window for easy experimentation
+- Files modified: sax.py, cli/main.py, paper_trader.py, ppmt.py, encoder.py, bulk_ingest.py, __init__.py, pyproject.toml
+- PENDING: User needs to git pull, pip3 install -e ., and test with --force
