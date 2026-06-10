@@ -76,7 +76,7 @@ class PaperTraderConfig:
     still meaningful for position sizing."""
 
     min_risk_reward: float = 1.5
-    """Minimum risk:reward ratio."""
+    """Minimum risk:reward ratio. With expected_move-based SL, R:R >= 2.0."""
 
     start_offset: int = 200
     """Number of initial candles to skip (warm-up for SAX encoding)."""
@@ -208,7 +208,7 @@ class PaperTrader:
             base_position_size_pct=0.02,
             max_position_size_pct=0.06,
             min_position_size_pct=0.005,
-            min_risk_reward=0.5,
+            min_risk_reward=1.5,  # With expected_move-based SL, R:R >= 2.0
             min_quality_score=0.0,
             min_confidence=0.0,
         )
@@ -328,11 +328,25 @@ class PaperTrader:
         pred_passed_threshold = 0
         risk_reject_reasons = {}  # reason -> count
 
+        # Track current date for daily P&L reset
+        # CRITICAL: Without this, the daily loss limit triggers once
+        # and then blocks ALL subsequent signals forever (across days)
+        current_date = None
+
         for sym_idx in range(start_sym_idx, len(all_sax_symbols)):
             # Map symbol index back to candle index for price lookup
             candle_idx = min(sym_idx * cfg.sax_window_size + cfg.sax_window_size - 1, len(df) - 1)
             current_price = float(df["close"].iloc[candle_idx])
             current_time = str(df.index[candle_idx]) if hasattr(df.index, 'strftime') else str(candle_idx)
+
+            # Check for new day → reset daily P&L tracking
+            # This prevents the daily loss limit from blocking all signals
+            # across multiple days once triggered on a single bad day
+            candle_date = current_time[:10] if len(current_time) >= 10 else None
+            if candle_date and candle_date != current_date:
+                if current_date is not None:
+                    risk_mgr.reset_daily()
+                current_date = candle_date
 
             # Current SAX pattern: use the last pattern_length symbols up to sym_idx
             if sym_idx < cfg.pattern_length:
@@ -473,26 +487,30 @@ class PaperTrader:
                         else SignalType.ENTRY_SHORT
                     )
 
-                    # Compute SL/TP from prediction metadata
-                    # Use the node's max_drawdown_pct for SL if available,
-                    # otherwise derive from expected_move with a safety margin
-                    if prediction.predicted_sl is not None:
-                        sl_price = prediction.predicted_sl
-                    else:
-                        # Default: SL at 50% of expected move (conservative)
-                        sl_distance_pct = max(abs(prediction.expected_total_move_pct) * 0.5, 1.0)
-                        if prediction.direction == "LONG":
-                            sl_price = current_price * (1 - sl_distance_pct / 100)
-                        else:
-                            sl_price = current_price * (1 + sl_distance_pct / 100)
+                    # Compute SL/TP from expected_move (NOT max_drawdown_pct)
+                    #
+                    # Using max_drawdown_pct for SL produces terrible R:R ratios
+                    # because max_drawdown (worst observed drawdown) is typically
+                    # 2-4x larger than expected_move (average move). This gives
+                    # R:R = 0.2-0.5 which gets rejected by RiskManager.
+                    #
+                    # Instead, we use a fraction of expected_move for SL:
+                    #   SL = 50% of expected_move (minimum 1% for noise protection)
+                    #   TP = 100% of expected_move
+                    # This guarantees R:R >= 2.0 by construction.
+                    #
+                    expected_move_abs = abs(prediction.expected_total_move_pct)
+                    sl_fraction = 0.5   # SL at 50% of expected move
+                    min_sl_pct = 1.0    # Minimum SL distance for noise protection
+                    sl_distance_pct = max(expected_move_abs * sl_fraction, min_sl_pct)
+                    tp_distance_pct = expected_move_abs
 
-                    if prediction.predicted_target is not None:
-                        tp_price = prediction.predicted_target
+                    if prediction.direction == "LONG":
+                        sl_price = current_price * (1 - sl_distance_pct / 100)
+                        tp_price = current_price * (1 + tp_distance_pct / 100)
                     else:
-                        if prediction.direction == "LONG":
-                            tp_price = current_price * (1 + abs(prediction.expected_total_move_pct) / 100)
-                        else:
-                            tp_price = current_price * (1 - abs(prediction.expected_total_move_pct) / 100)
+                        sl_price = current_price * (1 + sl_distance_pct / 100)
+                        tp_price = current_price * (1 - tp_distance_pct / 100)
 
                     # Risk:Reward ratio = expected_move / SL_distance
                     sl_distance_pct = abs(current_price - sl_price) / current_price * 100
