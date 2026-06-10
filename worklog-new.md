@@ -889,3 +889,107 @@ Stage Summary:
 - Key insight: more observations + stricter filtering = higher WR
 - Commit: f3d00a4 "v0.4.1: Tighter entry filters for higher WR"
 - Pushed to GitHub
+
+---
+Task ID: v0.4.1-test
+Agent: Main
+Task: User tested v0.4.1 tighter entry filters — MASSIVE REGRESSION
+
+Work Log:
+
+v0.4.1 CHANGES (commit f3d00a4):
+- min_confidence: 0.10 → 0.15 (higher threshold to filter weak signals)
+- min_quality_score: 0.0 → 0.10 (new quality filter)
+- SHORT confidence multiplier: 1.5x → 1.8x (stricter SHORT entry)
+- Expected move threshold: 1.0% → 1.5% (filter small moves)
+- Probability threshold: 0.20 → 0.25 (filter low-probability signals)
+- Added adaptive confidence floor based on trie observations (<200: 0.10, <500: 0.12, else: 0.15)
+- Bootstrap code kept at v0.4.0 thresholds (looser for gathering observations)
+
+v0.4.1 RESULTS (build+bootstrap+merge):
+- Bootstrap: 429 trades simulated, WR 44.1%, 429 observations recorded
+- Living Trie merge: 4297 existing → 4297 patterns, 24797 observations added
+- 566 trades, W:264 L:302, WR 46.6%, P&L +347.69%
+- Capital: $10,000 → $44,769.35
+- Profit Factor 1.13, Max DD 44.3%, Sharpe 0.88
+- Avg confidence: 28.2%, Avg quality: 0.22
+- Risk rejections: Daily loss limit 21, low_quality 1
+- Living Trie: 566 observations, 69 new nodes, Trie grew 4297→4366
+
+COMPARISON (v0.4.0 vs v0.4.1, both build+bootstrap+merge):
+| Metric | v0.4.0 | v0.4.1 | Change |
+|--------|--------|--------|--------|
+| Trades | 601 | 566 | -35 |
+| WR | 53.1% | 46.6% | -6.5pp ❌ |
+| P&L | +3665% | +347.7% | -3317pp ❌❌❌ |
+| Sharpe | 2.80 | 0.88 | -1.92 ❌ |
+| Max DD | 22.9% | 44.3% | +21.4pp ❌ |
+
+ROOT CAUSE: Tighter filters removed MORE winning trades than losing ones
+- The v0.4.0 approach of trusting the Living Trie metadata naturally was correct
+- Artificial thresholds (0.15 confidence, 0.10 quality, 1.5% move, 0.25 probability)
+  filtered out profitable entries that the Living Trie had validated
+- The SHORT multiplier (1.8x) was especially destructive — reduced SHORT observations
+  and prevented the trie from learning SHORT patterns
+- This is the SAME pattern as v0.2.9 and v0.3.2: tighter thresholds → worse results
+
+KEY LESSON (REINFORCED 3rd TIME):
+1. v0.2.9: min_confidence 0.15 + min_quality 0.10 → P&L collapsed +1578% → +6%
+2. v0.3.2: adaptive min_confidence 0.20 → P&L dropped +76% → +50%
+3. v0.4.1: min_confidence 0.15 + quality 0.10 + move 1.5% + SHORT 1.8x → P&L dropped +3665% → +348%
+
+The Living Trie + bootstrap merge provides NATURAL filtering through accumulated
+metadata. Artificial thresholds ALWAYS remove more winners than losers because:
+- Confidence correlates loosely with WR (high conf trades still lose sometimes)
+- Quality scores reflect trie richness, not signal quality per se
+- Expected move and probability thresholds filter marginal but profitable entries
+- The compounding effect means each filtered winning trade has outsized P&L impact
+
+Stage Summary:
+- v0.4.1 = CATASTROPHIC REGRESSION — tighter filters destroyed performance
+- P&L: +3665% → +347% (10x reduction), WR: 53.1% → 46.6%, Sharpe: 2.80 → 0.88
+- Third time tighter thresholds have failed (v0.2.9, v0.3.2, v0.4.1)
+- MUST REVERT to v0.4.0's looser thresholds
+- Commit: f3d00a4 "v0.4.1: Tighter entry filters for higher WR"
+
+---
+Task ID: v0.4.2
+Agent: Main
+Task: Revert v0.4.1 tighter filters — restore v0.4.0 performance
+
+Work Log:
+
+CHANGES (v0.4.2, commit 0b7e9c8):
+All v0.4.1 changes reverted to v0.4.0 values:
+
+1. min_confidence: 0.15 → 0.10 (v0.4.0 value)
+   - Removed adaptive confidence floor based on trie observations
+   - The simple probability bonus (>50% probability → half threshold) kept
+
+2. min_quality_score: 0.10 → 0.0 (v0.4.0 value)
+   - Quality filtering is handled by Living Trie metadata, not explicit thresholds
+
+3. SHORT confidence multiplier: 1.8x → 1.5x (v0.4.0 value)
+   - v0.4.1's 1.8x was too restrictive — reduced SHORT learning
+
+4. Expected move threshold: 1.5% → 1.0% (v0.4.0 value)
+   - v0.4.1 filtered profitable small-move trades
+
+5. Probability threshold: 0.25 → 0.20 (v0.4.0 value)
+   - v0.4.1 removed marginal but winning signals
+
+6. Console message: "move > 1.5%, probability > 25%" → "move > 1.0%, probability > 20%"
+
+7. Version: 0.4.1 → 0.4.2
+
+Bootstrap code (ppmt.py) was already at v0.4.0 thresholds — no changes needed.
+
+GIT COMMIT: 0b7e9c8
+- Pushed to GitHub: https://github.com/coverdraft/ppmt
+
+Stage Summary:
+- v0.4.2 = REVERT v0.4.1 — restore v0.4.0 entry filter thresholds
+- All 5 filter changes from v0.4.1 reversed to v0.4.0 values
+- Expected: restore +3665% P&L, 53.1% WR performance from v0.4.0
+- User needs to reinstall and test: pip3 install -e .
+- KEY INSIGHT: Trust the Living Trie metadata. Don't add artificial filters.
