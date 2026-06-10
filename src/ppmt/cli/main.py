@@ -7,6 +7,8 @@ Usage:
   ppmt build --symbol BTC/USDT       Build Trie from stored data
   ppmt predict --symbol BTC/USDT     Show prediction from current pattern
   ppmt run --symbol BTC/USDT         Real-time pattern matching
+  ppmt run --symbol BTC/USDT --paper Run paper trading simulation
+  ppmt monte-carlo --symbol BTC/USDT Monte Carlo simulation
   ppmt stats --symbol BTC/USDT       Show pattern statistics
   ppmt list                          List tracked assets
 """
@@ -21,6 +23,7 @@ import click
 import yaml
 from rich.console import Console
 from rich.table import Table
+from rich.panel import Panel
 
 from ppmt.data.storage import PPMTStorage
 from ppmt.data.collector import DataCollector
@@ -43,7 +46,7 @@ def load_config() -> dict:
 
 
 @click.group()
-@click.version_option(version="0.1.0")
+@click.version_option(version="0.2.0")
 def cli():
     """PPMT - Progressive Pattern Matching Trie Engine"""
     pass
@@ -119,7 +122,7 @@ def ingest(symbol: str, timeframe: str, days: int, exchange: str, csv_path: str)
         console.print(f"  Asset Class: {info.asset_class}")
         console.print(f"  Weight Profile: {info.weight_profile}")
         if not df.empty and hasattr(df, 'index') and len(df.index) > 0:
-            console.print(f"  Date Range: {df.index[0]} → {df.index[-1]}")
+            console.print(f"  Date Range: {df.index[0]} -> {df.index[-1]}")
 
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
@@ -348,13 +351,13 @@ def predict(symbol: str, timeframe: str, depth: int, price: float):
 
         # Sizing interpretation
         if mock_signal.metadata_sizing_signal >= 1.5:
-            console.print(f"  → [bold green]2.0x base position (HIGH CONVICTION)[/bold green]")
+            console.print(f"  -> [bold green]2.0x base position (HIGH CONVICTION)[/bold green]")
         elif mock_signal.metadata_sizing_signal >= 1.0:
-            console.print(f"  → [green]1.0x base position (NORMAL)[/green]")
+            console.print(f"  -> [green]1.0x base position (NORMAL)[/green]")
         elif mock_signal.metadata_sizing_signal >= 0.5:
-            console.print(f"  → [yellow]0.5x base position (LOW CONVICTION)[/yellow]")
+            console.print(f"  -> [yellow]0.5x base position (LOW CONVICTION)[/yellow]")
         else:
-            console.print(f"  → [red]0.25x base position or REJECT[/red]")
+            console.print(f"  -> [red]0.25x base position or REJECT[/red]")
 
         # Forward prediction chain
         if prediction.predicted_path:
@@ -363,7 +366,7 @@ def predict(symbol: str, timeframe: str, depth: int, price: float):
             for step in prediction.predicted_path:
                 step_hours = step.estimated_candles * tf_hours
                 total_hours += step_hours
-                marker = "[green]✓[/green]" if step.is_continuation else "[red]✗[/red]"
+                marker = "[green]ok[/green]" if step.is_continuation else "[red]X[/red]"
                 console.print(
                     f"  {marker} Block [{step.symbol}] "
                     f"prob={step.probability:.0%} "
@@ -380,20 +383,241 @@ def predict(symbol: str, timeframe: str, depth: int, price: float):
 @cli.command()
 @click.option("--symbol", "-s", required=True, help="Trading pair")
 @click.option("--timeframe", "-t", default="1h", help="Candle timeframe")
-def run(symbol: str, timeframe: str):
-    """Run real-time pattern matching (requires exchange connection)."""
+@click.option("--paper", is_flag=True, default=False, help="Run in paper trading mode (simulated)")
+@click.option("--capital", "-c", default=10000.0, type=float, help="Initial capital for paper trading")
+@click.option("--min-confidence", default=0.60, type=float, help="Minimum signal confidence to enter")
+def run(symbol: str, timeframe: str, paper: bool, capital: float, min_confidence: float):
+    """Run real-time pattern matching (requires exchange connection).
+
+    Use --paper to run a paper trading simulation on historical data
+    without real money. This validates PPMT predictions before going live.
+    """
+    if paper:
+        # Paper trading mode
+        from ppmt.engine.paper_trader import PaperTrader, PaperTraderConfig
+
+        config = load_config()
+        sax_config = config.get("sax", {})
+
+        pt_config = PaperTraderConfig(
+            symbol=symbol,
+            timeframe=timeframe,
+            initial_capital=capital,
+            sax_alphabet_size=sax_config.get("alphabet_size", 8),
+            sax_window_size=sax_config.get("window_size", 10),
+            sax_strategy=sax_config.get("strategy", "ohlcv"),
+            min_confidence=min_confidence,
+        )
+
+        trader = PaperTrader(config=pt_config)
+        result = trader.run()
+
+        # Display results
+        console.print()
+        console.print(Panel(result.format_summary(), title="Paper Trading Results", border_style="cyan"))
+
+        if result.trades:
+            console.print()
+            console.print(result.format_trades_table())
+
+            # Offer Monte Carlo on paper trading results
+            trades_pnl = [t.pnl_pct / 100.0 for t in result.trades]
+            if len(trades_pnl) >= 5:
+                console.print(f"\n[dim]Tip: Run 'ppmt monte-carlo --symbol {symbol}' for risk analysis[/dim]")
+        else:
+            console.print("\n[yellow]No trades generated. Try adjusting --min-confidence or ensure data is available.[/yellow]")
+
+        return
+
+    # Real-time mode (requires exchange connection)
     console.print(f"[cyan]Starting PPMT real-time matching for {symbol}...[/cyan]")
     console.print("[yellow]Real-time mode requires exchange API connection.[/yellow]")
-    console.print("[yellow]This is a placeholder for the real-time loop.[/yellow]")
+    console.print("[yellow]Use --paper to run a paper trading simulation instead.[/yellow]")
 
     # TODO: Implement real-time loop with WebSocket
     # 1. Load engine state and Tries from storage
     # 2. Connect to exchange WebSocket
-    # 3. Process each new candle through SAX → match → signal
+    # 3. Process each new candle through SAX -> match -> signal
     # 4. Pass signals to RiskManager
     # 5. Execute trades if risk allows
 
     console.print("Real-time engine will be implemented in the next phase.")
+
+
+@cli.command("monte-carlo")
+@click.option("--symbol", "-s", required=True, help="Trading pair")
+@click.option("--timeframe", "-t", default="1h", help="Candle timeframe")
+@click.option("--simulations", "-n", default=1000, type=int, help="Number of Monte Carlo simulations")
+@click.option("--capital", "-c", default=10000.0, type=float, help="Initial capital")
+@click.option("--seed", default=42, type=int, help="Random seed for reproducibility")
+@click.option("--ruin-threshold", default=0.5, type=float, help="Ruin threshold (fraction of capital)")
+@click.option("--paper-first", is_flag=True, default=False, help="Run paper trading first, then Monte Carlo on results")
+@click.option("--min-confidence", default=0.60, type=float, help="Min confidence for paper trading (with --paper-first)")
+def monte_carlo(
+    symbol: str,
+    timeframe: str,
+    simulations: int,
+    capital: float,
+    seed: int,
+    ruin_threshold: float,
+    paper_first: bool,
+    min_confidence: float,
+):
+    """Run Monte Carlo simulation to assess trading system robustness.
+
+    Reshuffles trade order many times to estimate the distribution of
+    possible outcomes and derive confidence intervals for key risk metrics
+    including Risk of Ruin, P95 Max Drawdown, and Probability of Profit.
+
+    Two modes:
+      1. With --paper-first: Runs paper trading first, then Monte Carlo on results
+      2. Without --paper-first: Runs Monte Carlo on stored trade history (if any)
+    """
+    from ppmt.risk.monte_carlo import MonteCarloSimulator, MonteCarloConfig
+
+    config = load_config()
+    storage = PPMTStorage()
+
+    trades_pnl_pct = []
+
+    if paper_first:
+        # Run paper trading first to generate trade history
+        from ppmt.engine.paper_trader import PaperTrader, PaperTraderConfig
+
+        sax_config = config.get("sax", {})
+
+        console.print(f"[cyan]Step 1: Running paper trading for {symbol}...[/cyan]\n")
+        pt_config = PaperTraderConfig(
+            symbol=symbol,
+            timeframe=timeframe,
+            initial_capital=capital,
+            sax_alphabet_size=sax_config.get("alphabet_size", 8),
+            sax_window_size=sax_config.get("window_size", 10),
+            sax_strategy=sax_config.get("strategy", "ohlcv"),
+            min_confidence=min_confidence,
+        )
+
+        trader = PaperTrader(config=pt_config)
+        pt_result = trader.run()
+
+        # Show paper trading summary
+        console.print(Panel(pt_result.format_summary(), title="Paper Trading Results", border_style="cyan"))
+
+        if not pt_result.trades:
+            console.print("[red]No trades generated. Cannot run Monte Carlo.[/red]")
+            console.print("[yellow]Try adjusting --min-confidence or ensure data is available.[/yellow]")
+            storage.close()
+            return
+
+        trades_pnl_pct = [t.pnl_pct / 100.0 for t in pt_result.trades]
+        console.print(f"\n[cyan]Step 2: Running Monte Carlo on {len(trades_pnl_pct)} trades...[/cyan]\n")
+
+    else:
+        # Try to load trade history from storage
+        # For now, we need paper trading results
+        console.print(f"[cyan]Loading trade history for {symbol}...[/cyan]")
+
+        # Try paper trading as source
+        df = storage.load_ohlcv(symbol, timeframe)
+        if df.empty:
+            console.print(f"[red]No data found for {symbol}. Run 'ppmt ingest' first.[/red]")
+            storage.close()
+            return
+
+        # Run paper trading to generate trades
+        console.print(f"[yellow]No stored trade history found. Running paper trading first...[/yellow]")
+        console.print(f"[dim](Use --paper-first explicitly to control paper trading parameters)[/dim]\n")
+
+        from ppmt.engine.paper_trader import PaperTrader, PaperTraderConfig
+
+        sax_config = config.get("sax", {})
+        pt_config = PaperTraderConfig(
+            symbol=symbol,
+            timeframe=timeframe,
+            initial_capital=capital,
+            sax_alphabet_size=sax_config.get("alphabet_size", 8),
+            sax_window_size=sax_config.get("window_size", 10),
+            sax_strategy=sax_config.get("strategy", "ohlcv"),
+            min_confidence=min_confidence,
+        )
+
+        trader = PaperTrader(config=pt_config)
+        pt_result = trader.run()
+
+        if not pt_result.trades:
+            console.print("[red]No trades generated. Cannot run Monte Carlo.[/red]")
+            storage.close()
+            return
+
+        trades_pnl_pct = [t.pnl_pct / 100.0 for t in pt_result.trades]
+        console.print(f"\n[cyan]Running Monte Carlo on {len(trades_pnl_pct)} trades...[/cyan]\n")
+
+    # Run Monte Carlo simulation
+    mc_config = MonteCarloConfig(
+        simulations=simulations,
+        seed=seed,
+        initial_capital=capital,
+        ruin_threshold=ruin_threshold,
+    )
+
+    simulator = MonteCarloSimulator()
+
+    with console.status(f"[bold green]Running {simulations} Monte Carlo simulations...") as status:
+        result = simulator.simulate(trades_pnl_pct, config=mc_config)
+
+    # Display results
+    summary = simulator.generate_summary(result)
+    console.print(summary)
+
+    # Show interpretation
+    console.print()
+    if result.risk_of_ruin < 0.01:
+        console.print("[bold green]VERDICT: Excellent - Very low risk of ruin[/bold green]")
+    elif result.risk_of_ruin < 0.05:
+        console.print("[green]VERDICT: Good - Acceptable risk for most traders[/green]")
+    elif result.risk_of_ruin < 0.10:
+        console.print("[yellow]VERDICT: Marginal - Consider reducing position sizes[/yellow]")
+    else:
+        console.print("[bold red]VERDICT: Dangerous - High risk of blow-up, reduce exposure[/bold red]")
+
+    # Show equity curve percentiles in a table
+    table = Table(title="Equity Curve Percentiles")
+    table.add_column("Percentile", style="cyan")
+    table.add_column("Final Equity", justify="right")
+    table.add_column("vs Initial", justify="right")
+
+    for ci in result.equity_percentiles:
+        pct_change = (ci.value - capital) / capital * 100
+        style = "green" if pct_change >= 0 else "red"
+        table.add_row(
+            f"P{ci.level}",
+            f"${ci.value:,.2f}",
+            f"[{style}]{pct_change:+.1f}%[/{style}]",
+        )
+
+    console.print(table)
+
+    # Drawdown percentiles
+    dd_table = Table(title="Max Drawdown Percentiles")
+    dd_table.add_column("Percentile", style="cyan")
+    dd_table.add_column("Max Drawdown", justify="right")
+    dd_table.add_column("Risk Level", justify="right")
+
+    for ci in result.drawdown_percentiles:
+        dd_pct = ci.value * 100
+        if dd_pct < 10:
+            risk = "[green]Low[/green]"
+        elif dd_pct < 25:
+            risk = "[yellow]Moderate[/yellow]"
+        elif dd_pct < 40:
+            risk = "[red]High[/red]"
+        else:
+            risk = "[bold red]Extreme[/bold red]"
+        dd_table.add_row(f"P{ci.level}", f"{dd_pct:.1f}%", risk)
+
+    console.print(dd_table)
+
+    storage.close()
 
 
 if __name__ == "__main__":
