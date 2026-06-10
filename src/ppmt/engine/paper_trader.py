@@ -400,21 +400,37 @@ class PaperTrader:
 
             # If no position, try to generate entry signal
             if current_position is None:
-                try:
-                    prediction = pred_engine.predict(
-                        current_symbols=current_symbols,
-                        entry_price=current_price,
-                        timeframe_hours=tf_hours,
-                        symbol=cfg.symbol,
-                    )
-                except Exception:
+                prediction = None
+
+                # Try progressively shorter patterns for a match
+                for pat_len in range(len(current_symbols), 1, -1):
+                    try:
+                        candidate = current_symbols[-pat_len:]
+                        pred = pred_engine.predict(
+                            current_symbols=candidate,
+                            entry_price=current_price,
+                            timeframe_hours=tf_hours,
+                            symbol=cfg.symbol,
+                        )
+                        if pred.direction != "FLAT" and pred.confidence > 0:
+                            prediction = pred
+                            break
+                    except Exception:
+                        continue
+
+                if prediction is None:
                     continue
 
                 # Check if prediction is strong enough for entry
+                # Use min_confidence but allow lower if probability is high
+                effective_min_conf = cfg.min_confidence
+                if prediction.overall_probability > 0.5:
+                    effective_min_conf = max(cfg.min_confidence * 0.5, 0.10)
+
                 if (prediction.direction != "FLAT"
-                    and prediction.confidence >= cfg.min_confidence
-                    and abs(prediction.expected_total_move_pct) > 0.5
-                    and prediction.overall_probability > 0.3):
+                    and prediction.confidence >= effective_min_conf
+                    and abs(prediction.expected_total_move_pct) > 0.3
+                    and prediction.overall_probability > 0.2):
 
                     # Create signal
                     from ppmt.engine.signal import Signal, SignalType
