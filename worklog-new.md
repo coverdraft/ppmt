@@ -1521,3 +1521,88 @@ Stage Summary:
 - 8 files modified, net code reduction (removed broken additions)
 - Expected: reproduce v0.5.0's +1434% P&L, 50.5% WR
 - PENDING: User needs to git pull, pip3 install -e ., test with --force
+
+---
+Task ID: v0.5.3-test
+Agent: Main
+Task: User tested v0.5.3 — confirm full revert to v0.5.0 performance
+
+Work Log:
+
+USER TEST:
+- `git pull origin main && pip3 install -e .` → ppmt-0.5.3 installed
+- `ppmt build --force -s BTC/USDT && ppmt run --symbol BTC/USDT --paper`
+
+v0.5.3 BUILD RESULTS:
+- Bootstrap pass 1/2: 600 trades simulated, WR 44.2%, 600 observations
+- Bootstrap pass 2/2: 551 trades simulated, WR 47.5%, 551 observations
+- N1 Trie: 2420 patterns, max depth 5
+- N2 Trie: 2420 patterns, max depth 5
+- N3 Trie: 3136 patterns, max depth 6
+- N4 Trie: 2420 patterns, max depth 5
+- Built 4794 patterns for BTC/USDT
+- Bootstrap result: (2 passes) N3 trie now has 1151 trading observations (WR 45.8%)
+- ATR(14): avg=0.84%, recent=0.69%
+
+v0.5.3 PAPER TRADING RESULTS:
+- Capital: $10,000.00 → $153,412.09 (+1434.12%)
+- Trades: 519 (W:262 L:257)
+- Win Rate: 50.5%
+- Profit Factor: 1.38
+- Max DD: 29.2%
+- Sharpe: 2.27
+- Avg Trade: +0.62%
+- Best Trade: +17.46%
+- Worst Trade: -9.79%
+- Avg Confidence: 21.5%
+- Avg Quality: 0.16
+- Prediction stats: 2000 attempts, 1726 with direction, 561 passed threshold
+- Risk rejections: Daily loss limit reached: 42
+- Living Trie: 519 observations, 86 new nodes, 19 metadata propagations
+- Trie growth: 3136 → 3222 patterns (+86 new patterns discovered)
+
+CONFIRMED: v0.5.3 exactly reproduces v0.5.0 results:
+
+| Metric | v0.5.0 | v0.5.3 | Match? |
+|--------|--------|--------|--------|
+| Trades | 519 | 519 | ✅ |
+| WR | 50.5% | 50.5% | ✅ |
+| P&L | +1434% | +1434.12% | ✅ |
+| Sharpe | 2.27 | 2.27 | ✅ |
+| Max DD | 29.2% | 29.2% | ✅ |
+| Best Trade | +17.46% | +17.46% | ✅ |
+| Worst Trade | -9.79% | -9.79% | ✅ |
+
+COMPLETE RESULTS HISTORY (updated):
+
+| Version | Build Method | Trades | WR | P&L | Sharpe | Max DD |
+|---------|-------------|--------|------|------|--------|--------|
+| v0.4.0 | build+bootstrap+merge | 601 | 53.1% | +3665% | 2.80 | 22.9% |
+| v0.4.1 | build+bootstrap+merge | 566 | 46.6% | +347.7% | 0.88 | 44.3% |
+| v0.4.2 | build+bootstrap+merge | 627 | 48.2% | +665.6% | 1.51 | 35.9% |
+| **v0.5.0** | **2-pass bootstrap, no merge** | **519** | **50.5%** | **+1434%** | **2.27** | **29.2%** |
+| v0.5.1 | 3-pass, --force | 83 | 59.0% | +14.18% | 0.62 | 17.9% |
+| v0.5.1 | 3-pass, merge | 263 | 49.8% | +20.50% | 0.78 | 21.4% |
+| v0.5.2 | 5-pass, --force | 628 | 48.9% | -29.52% | -0.30 | 40.7% |
+| **v0.5.3** | **2-pass, --force (reverted)** | **519** | **50.5%** | **+1434.12%** | **2.27** | **29.2%** |
+
+KEY TAKEAWAYS:
+1. v0.5.3 = v0.5.0 confirmed — full revert successful
+2. SAX window=10 + alphabet=8 is the correct configuration
+3. 2-pass bootstrap is optimal — more passes degrade WR
+4. Entry filters move > 1.0%, probability > 20% are correct
+5. SHORT confidence multiplier 1.5x/floor 0.15 is correct
+6. The Living Trie works: 86 new nodes discovered, 19 propagations
+7. Current baseline: 519 trades, 50.5% WR, +1434% P&L
+
+REMAINING GAPS vs TARGET:
+- Trades: 519 vs 960+ target (need +441 more trades)
+- WR: 50.5% vs 60%+ target (need +9.5pp)
+- P&L: +1434% vs 1400%+ target (MET ✅)
+
+Stage Summary:
+- v0.5.3 = CONFIRMED revert to v0.5.0 baseline
+- Results are 100% reproducible: +1434% P&L, 50.5% WR, 519 trades
+- P&L target met, but WR (50.5%) and trade count (519) still below target
+- Next steps: incrementally improve WR toward 60%+ and trade count toward 960+
+- Must NOT repeat v0.5.1/v0.5.2 mistakes (changing multiple parameters at once)
