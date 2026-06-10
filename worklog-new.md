@@ -680,3 +680,93 @@ Stage Summary:
 - Also reverted counterproductive adaptive scaling (20% threshold made things worse)
 - Expected: more differentiated confidence scores → better pattern selection → higher WR
 - Files modified: ppmt.py, paper_trader.py, __init__.py, pyproject.toml, cli/main.py
+
+---
+Task ID: v0.4.0
+Agent: Main
+Task: Implement Backtesting Bootstrap — automatic paper trading during build to pre-populate Living Trie metadata
+
+Work Log:
+
+PROBLEM ANALYSIS:
+User ran `ppmt build --force -s BTC/USDT && ppmt run --symbol BTC/USDT --paper` and got:
+- 467 trades, 43.9% WR, +49.66% P&L, Max DD 51.2%, Sharpe 0.64
+
+CRITICAL: `pip install -e .` FAILED (zsh: command not found: pip), so the user was
+still running v0.3.2 code, NOT v0.3.3. The message "min_confidence 10% → 20%" confirms
+this is v0.3.2, not v0.3.3 (which removed the threshold raise).
+
+But even with v0.3.3's trade-simulation "won" fix, the fundamental problem remains:
+- Fresh tries have ~2 observations per pattern from build-time data
+- Without ACTUAL trading observations, confidence scores are uncalibrated
+- The Living Trie's magic comes from ACCUMULATED observations across multiple runs
+- The iterative workflow (build → run → repeat) works but requires manual effort
+
+SOLUTION: Backtesting Bootstrap (v0.4.0)
+
+During `ppmt build`, after constructing the trie from historical patterns, automatically
+run a "bootstrap" paper trading simulation on a portion of the data. This accumulates
+trading observations in the N3 trie BEFORE the user runs `ppmt run`, giving fresh tries
+meaningful metadata from day one.
+
+This automates the "ppmt build → ppmt run → repeat" workflow that produces
+extraordinary results (+12K% to +37K% P&L).
+
+IMPLEMENTATION:
+
+1. PPMT.bootstrap() METHOD (ppmt.py, ~300 lines)
+   - Added bootstrap() method to the PPMT class
+   - Lazy imports from paper_trader.py to avoid circular dependency
+   - Simplified paper trading simulation on first bootstrap_ratio of data
+   - Same SL/TP logic as PaperTrader:
+     - LONG: SL = max(ATR*1.5, 1.5%) cap 5%, TP = SL*2.0
+     - SHORT: SL = max(ATR*2.0, 2.0%) cap 7%, TP = SL*1.5
+   - SAX boundary SL/TP checking (like v0.2.8)
+   - Trailing stop at 75% of TP distance with 1.5*ATR trailing distance
+   - Pattern break grace = 2, re-entry cooldown = 1
+   - Living Trie ON: records observations via _record_observation()
+   - Only modifies N3 trie (per-asset), NOT N1/N2/N4
+   - Re-propagates metadata after bootstrap
+   - Returns dict: trades, winning_trades, win_rate, observations_recorded, new_nodes_created
+
+2. CLI CHANGES (cli/main.py)
+   - Added --bootstrap/--no-bootstrap flag (default=True) to build command
+   - Added --bootstrap-ratio option (default=0.7 = 70% of data for bootstrap)
+   - After building trie, calls engine.bootstrap() if enabled
+   - Displays bootstrap statistics with color-coded win rate
+   - Shows final N3 trading_observations count
+   - Updated version to 0.4.0
+
+3. VERSION UPDATES
+   - __init__.py: "0.3.3" → "0.4.0"
+   - pyproject.toml: "0.3.3" → "0.4.0"
+   - cli/main.py: version "0.3.3" → "0.4.0"
+
+KEY DESIGN DECISIONS:
+- Bootstrap is ON by default (--bootstrap) but can be disabled with --no-bootstrap
+- Bootstrap ratio 0.7 means 70% of data for bootstrap, 30% "held out" for actual trading
+- Bootstrap uses the N3 trie (same as paper trading), not the full 4-level system
+- After bootstrap, trie.trading_observations > 0, so ppmt run treats it as a "rich" trie
+- The bootstrap is SIMPLIFIED: no risk management, position sizing, or capital tracking
+- Only the N3 trie gets Living Trie treatment during bootstrap
+
+EXPECTED IMPACT:
+- Fresh builds (ppmt build --force) should now produce significantly better results
+  because the trie starts with accumulated trading metadata from the bootstrap pass
+- The bootstrap effectively automates the first "ppmt run" cycle
+- A fresh build + bootstrap should produce results similar to a second-run Living Trie
+- Combined with the existing merge feature, the workflow becomes:
+  1. First time: ppmt build (with bootstrap) → ppmt run (should be much better than before)
+  2. Subsequent: ppmt build (merge + bootstrap) → ppmt run (should be excellent)
+
+GIT COMMIT: f9af47f
+- Pushed to GitHub: https://github.com/coverdraft/ppmt
+
+Stage Summary:
+- v0.4.0 = BACKTESTING BOOTSTRAP — automatic paper trading during build
+- Core innovation: ppmt build now pre-populates Living Trie with trading observations
+- New flags: --bootstrap/--no-bootstrap (default: enabled), --bootstrap-ratio (default: 0.7)
+- Expected: fresh builds should now produce results comparable to second-run Living Tries
+- Automates the iterative workflow that was previously manual
+- Files modified: ppmt.py, cli/main.py, __init__.py, pyproject.toml
+- PENDING: User needs to reinstall package and test with fresh build
