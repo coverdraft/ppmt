@@ -46,7 +46,7 @@ def load_config() -> dict:
 
 
 @click.group()
-@click.version_option(version="0.5.1")
+@click.version_option(version="0.5.2")
 def cli():
     """PPMT - Progressive Pattern Matching Trie Engine"""
     pass
@@ -137,7 +137,7 @@ def ingest(symbol: str, timeframe: str, days: int, exchange: str, csv_path: str)
 @click.option("--force", "-f", is_flag=True, default=False, help="Force rebuild (discard Living Trie data)")
 @click.option("--bootstrap/--no-bootstrap", default=True, help="Run bootstrap paper trading after build (default: enabled)")
 @click.option("--bootstrap-ratio", default=1.0, type=float, help="Fraction of data for bootstrap (default: 1.0 = 100%%)")
-@click.option("--bootstrap-passes", default=3, type=int, help="Number of bootstrap passes (default: 3 — each pass improves trie from previous)")
+@click.option("--bootstrap-passes", default=5, type=int, help="Number of bootstrap passes (default: 5 — each pass improves trie from previous)")
 @click.option("--sax-alphabet", default=10, type=int, help="SAX alphabet size (default: 10, more = finer patterns)")
 @click.option("--sax-window", default=5, type=int, help="SAX window size in candles (default: 5, smaller = more symbols = more trades)")
 def build(symbol: str, timeframe: str, pattern_length: int, force: bool, bootstrap: bool, bootstrap_ratio: float, bootstrap_passes: int, sax_alphabet: int, sax_window: int):
@@ -147,11 +147,10 @@ def build(symbol: str, timeframe: str, pattern_length: int, force: bool, bootstr
     metadata) by merging the new build into it. Use --force to discard
     the Living Trie and rebuild from scratch.
 
-    v0.5.1: SAX defaults changed to alphabet_size=10, window_size=5
-    (was 8/10). Smaller window = more SAX symbols = more trade entries.
-    Larger alphabet = finer pattern discrimination. Also, bootstrap
-    passes increased to 3 (was 2) for more accumulated observations.
-    Merge logic fixed to always preserve Living Trie metadata.
+    v0.5.2: Entry filters lowered for window=5 regime (move > 0.5%, prob > 15%).
+    Bootstrap passes increased to 5 with much looser entry thresholds to
+    accumulate more observations. SHORT confidence multiplier reduced to
+    1.2x (was 1.5x). Merge now checks SAX parameter compatibility.
     Use --no-bootstrap to skip, --sax-alphabet/--sax-window to override.
     """
     config = load_config()
@@ -237,9 +236,23 @@ def build(symbol: str, timeframe: str, pattern_length: int, force: bool, bootstr
         new_count = engine.trie_n3.pattern_count
         existing_obs = existing_n3.trading_observations
 
-        # v0.5.1: Always merge if existing trie has trading observations
-        # Even if existing has fewer patterns, its metadata is invaluable
-        if existing_obs > 0:
+        # v0.5.2: Check SAX parameter compatibility before merging.
+        # If existing trie was built with different SAX params (e.g., window=10
+        # vs window=5), its patterns don't align with the new build. Merging
+        # such tries introduces conflicting observations that dilute quality
+        # (v0.5.1 merge dropped WR from 59% to 49.8%).
+        # Check: existing trie's max depth indicates different SAX params.
+        # With window=5, pattern_length=5, max_depth should be ~5-6.
+        # With window=10, max_depth is also ~5-6 but pattern count differs.
+        # Use pattern count ratio as a heuristic for SAX param mismatch.
+        expected_pattern_range = (new_count * 0.5, new_count * 2.0)  # Allow 50-200% of new
+        sax_compatible = expected_pattern_range[0] <= existing_count <= expected_pattern_range[1]
+
+        if not sax_compatible and existing_obs > 0:
+            console.print(f"[yellow]Existing N3 has {existing_count} patterns (new: {new_count}) — SAX params likely differ[/yellow]")
+            console.print(f"[yellow]Merging would introduce conflicting observations. Using --force logic.[/yellow]")
+            n3_to_save = engine.trie_n3
+        elif existing_obs > 0:
             console.print(f"[bold cyan]Living Trie detected:[/bold cyan] existing N3 has {existing_count} patterns ({existing_obs} observations) vs {new_count} new")
             console.print(f"[cyan]Merging new build into existing Living Trie (preserving {existing_obs} trading observations)...[/cyan]")
 

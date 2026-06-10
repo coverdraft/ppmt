@@ -735,22 +735,24 @@ class PPMT:
                 except Exception:
                     continue
 
-                # Entry conditions (v0.4.1: bootstrap uses looser thresholds since
-                # the trie is being built from scratch during bootstrap)
+                # Entry conditions (v0.5.2: bootstrap uses MUCH looser thresholds to
+                # accumulate as many observations as possible. The purpose of bootstrap
+                # is NOT to be profitable but to ENRICH the trie with trading metadata.
+                # More observations = better metadata = better predictions later.)
                 if (prediction.direction == "FLAT"
                     or prediction.confidence <= 0
-                    or prediction.confidence < 0.10  # Bootstrap: keep 0.10 to gather more observations
-                    or abs(prediction.expected_total_move_pct) < 1.0  # Bootstrap: keep 1.0 for more coverage
-                    or prediction.overall_probability <= 0.20):  # Bootstrap: keep 0.20
+                    or prediction.confidence < 0.05  # Bootstrap: very low — gather all observations
+                    or abs(prediction.expected_total_move_pct) < 0.5  # Bootstrap: 0.5% — more entries
+                    or prediction.overall_probability <= 0.10):  # Bootstrap: 10% — very inclusive
                     continue
 
-                # SHORT requires higher confidence (bootstrap: use 1.5x, not 1.8x,
+                # SHORT requires slightly higher confidence (bootstrap: use 1.2x,
                 # since we want to gather SHORT observations too)
-                effective_min_conf = 0.10
+                effective_min_conf = 0.05
                 if prediction.overall_probability > 0.5:
-                    effective_min_conf = max(0.10 * 0.5, 0.05)
+                    effective_min_conf = max(0.05 * 0.5, 0.03)
                 if prediction.direction == "SHORT":
-                    effective_min_conf = max(effective_min_conf * 1.5, 0.15)
+                    effective_min_conf = max(effective_min_conf * 1.2, 0.10)
 
                 if prediction.confidence < effective_min_conf:
                     continue
