@@ -218,7 +218,84 @@ Files modified:
 - worklog-new.md: this entry
 
 Stage Summary:
+- Commit: 10b415a "v0.2.7: ATR-based SL/TP, trailing stop, expected-value path walking"
+- Result: CRASHED with UnboundLocalError: `np` not accessible at line 324
+  - Root cause: `import numpy as np` on line 734 (inside run()) shadows module-level
+    import on line 36, making Python treat `np` as local variable throughout the function
+  - The ATR/trailing/EV changes never actually ran
+
+---
+Task ID: v0.2.8
+Agent: Main
+Task: Fix np crash + implement Living Trie (incremental learning during paper trading)
+
+Problem:
+1. v0.2.7 crashed immediately: UnboundLocalError on `np` because `import numpy as np`
+   inside run() (line 734) shadows the module-level import (line 36). Python treats
+   `np` as local throughout the function, so it's unbound at line 324.
+2. The Trie is STATIC — built from historical data, never updated during paper trading.
+   Every trade outcome is LOST information. The Trie can't learn from its mistakes.
+
+Root cause analysis:
+1. The `import numpy as np` on line 734 was added for Sharpe ratio calculation,
+   but `np` is already imported at module level (line 36). Python determines variable
+   scope at function definition time — an assignment (including import) inside a
+   function makes it local throughout that function.
+2. The Trie currently operates in "batch mode" only: train once, use forever.
+   This means:
+   - Pattern breaks (unexpected SAX symbols) are detected but NOT recorded
+   - Winning/losing trade outcomes don't update the node that generated the signal
+   - The Trie never improves — it can only repeat the same predictions
+
+Changes:
+1. Fix UnboundLocalError: Removed `import numpy as np` from line 734 in run()
+   (module-level import on line 36 is sufficient)
+
+2. Living Trie — _record_observation() function:
+   When a trade closes (SL/TP/trailing_stop/pattern_break/end_of_data):
+   a. Find the Trie node that was the basis of the entry prediction
+   b. Update that node's metadata with the actual trade outcome:
+      - actual_move_pct (real PnL%)
+      - max_drawdown_pct (from SL distance or actual adverse move)
+      - max_favorable_pct (from TP distance or actual favorable move)
+      - duration (SAX symbol steps from entry to exit)
+      - won (whether trade was profitable)
+      - next_symbol (what SAX symbol followed — especially for pattern breaks)
+   c. If next_symbol is NOT already a child node, CREATE IT as a new child
+      This means: pattern ['a','d','b','h'] getting unexpected symbol 'f' now
+      creates node ['a','d','b','h','f'] — the Trie literally GROWS
+   d. Periodically re-propagate metadata (every 200 symbol steps) so parent
+      nodes reflect the new observations
+
+3. Added PaperTrade fields:
+   - entry_sym_idx: SAX symbol index at entry (for duration calculation)
+   - trie_updated: whether this trade's outcome was recorded in the Trie
+
+4. Added PaperTraderConfig field:
+   - living_trie: bool = True (enable/disable Living Trie)
+
+5. Living Trie statistics printed at end:
+   - Observations recorded, new nodes created, metadata propagations
+   - Updated Trie is saved back to storage (so next run uses improved Trie)
+
+The feedback loop:
+  Trie predicts → Paper trade executes → Outcome observed → Trie node updated
+  ↓                                                            ↓
+  Next prediction uses improved metadata ←─────────────────────┘
+
+This is the "Trie Viva" concept: the structure is alive, learning from each
+trade. Pattern breaks don't just close positions — they create new knowledge.
+
+Files modified:
+- src/ppmt/engine/paper_trader.py: Removed local np import, added _record_observation(),
+  Living Trie integration at every trade close, metadata re-propagation, stats display
+- src/ppmt/__init__.py: version 0.2.8
+- pyproject.toml: version 0.2.8
+- src/ppmt/cli/main.py: version 0.2.8
+- worklog-new.md: this entry
+
+Stage Summary:
 - Commit: (pending)
-- Expected: Higher WR (ATR-based SL avoids noise exits), fewer catastrophic losses
-  (5% SL cap), more profit from winners (trailing stop), better predictions
-  (EV-based path walking)
+- Expected: No crash, Living Trie records every trade outcome, Trie grows from
+  pattern breaks, improved metadata after re-propagation
+

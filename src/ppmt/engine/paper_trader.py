@@ -88,6 +88,130 @@ def compute_atr_pct(df, period: int = 14) -> np.ndarray:
     return atr_pct
 
 
+def _record_observation(
+    trie: "PPMTTrie",
+    trade: PaperTrade,
+    exit_sym_idx: int,
+    next_symbol: Optional[str] = None,
+) -> dict:
+    """
+    Living Trie: Record a trade's outcome back into the Trie.
+
+    This is the core of the "Living Trie" concept — the Trie learns from
+    its own trading results. Every closed trade becomes a new observation
+    that updates the node's metadata, creating a feedback loop:
+
+      Trie predicts → Trade executes → Outcome observed → Trie updated
+
+    Two things happen:
+    1. The entry node's metadata is updated with the actual outcome
+       (win/loss, actual move, duration)
+    2. If a pattern break occurred with a new symbol, that symbol is
+       added as a new child node — the Trie literally grows
+
+    Args:
+        trie: The PPMT Trie to update
+        trade: The closed PaperTrade with outcome data
+        exit_sym_idx: SAX symbol index at trade exit
+        next_symbol: The SAX symbol that followed (especially important
+                     for pattern breaks — this is the NEW symbol)
+
+    Returns:
+        Dict with 'observations' and 'new_nodes' counts
+    """
+    from ppmt.core.metadata import BlockLifecycleMetadata
+
+    observations = 0
+    new_nodes = 0
+
+    if not trade.matched_pattern:
+        return {"observations": 0, "new_nodes": 0}
+
+    # 1. Find the Trie node for the matched entry pattern
+    #    Try exact match first, then progressively shorter prefixes
+    node = trie.search(trade.matched_pattern)
+    if node is None:
+        # Try shorter prefixes (the prediction may have used a prefix match)
+        for prefix_len in range(len(trade.matched_pattern) - 1, 0, -1):
+            node = trie.search(trade.matched_pattern[:prefix_len])
+            if node is not None:
+                break
+
+    if node is None:
+        # Pattern not in Trie at all — shouldn't happen normally
+        # but create the entry as a new pattern
+        trie.insert_with_observations(
+            symbols=trade.matched_pattern,
+            move_pct=trade.actual_move_pct,
+            drawdown_pct=min(trade.actual_move_pct, 0) if trade.actual_move_pct < 0 else 0,
+            favorable_pct=max(trade.actual_move_pct, 0) if trade.actual_move_pct > 0 else 0,
+            duration=max(1, exit_sym_idx - trade.entry_sym_idx) if trade.entry_sym_idx > 0 else 1,
+            won=trade.pnl_pct > 0,
+            next_symbol=next_symbol,
+        )
+        new_nodes += 1
+        observations += 1
+        trade.trie_updated = True
+        return {"observations": observations, "new_nodes": new_nodes}
+
+    # 2. Update the node's metadata with the actual trade outcome
+    duration = max(1, exit_sym_idx - trade.entry_sym_idx) if trade.entry_sym_idx > 0 else 1
+    won = trade.pnl_pct > 0
+
+    # For drawdown: if the trade was a loss, the actual move IS the drawdown
+    # If the trade was a win, we don't know the actual drawdown from PnL alone
+    # Use a conservative estimate: if SL was set, SL distance is max drawdown
+    if trade.sl_price > 0 and trade.entry_price > 0:
+        if trade.direction == "LONG":
+            max_dd_pct = -(trade.entry_price - trade.sl_price) / trade.entry_price * 100
+        else:
+            max_dd_pct = -(trade.sl_price - trade.entry_price) / trade.entry_price * 100
+    else:
+        # No SL set — approximate drawdown from actual move if negative
+        max_dd_pct = min(trade.actual_move_pct, 0)
+
+    # For favorable excursion: if the trade hit TP, the TP distance is max favorable
+    if trade.tp_price > 0 and trade.entry_price > 0:
+        if trade.direction == "LONG":
+            max_fav_pct = (trade.tp_price - trade.entry_price) / trade.entry_price * 100
+        else:
+            max_fav_pct = (trade.entry_price - trade.tp_price) / trade.entry_price * 100
+    else:
+        max_fav_pct = max(trade.actual_move_pct, 0)
+
+    # Call update_from_observation on the entry node
+    node.metadata.update_from_observation(
+        move_pct=trade.actual_move_pct,
+        drawdown_pct=max_dd_pct,
+        favorable_pct=max_fav_pct,
+        duration=duration,
+        won=won,
+        next_symbol=next_symbol,
+    )
+    observations += 1
+
+    # 3. If next_symbol is provided and it's NOT already a child,
+    #    add it as a new child node — the Trie GROWS
+    if next_symbol and not node.has_child(next_symbol):
+        # Create the new extended pattern
+        extended_pattern = trade.matched_pattern + [next_symbol]
+        child_node = trie.insert(extended_pattern)
+
+        # Give the new child initial metadata from this observation
+        child_node.metadata.update_from_observation(
+            move_pct=trade.actual_move_pct * 0.5,  # Partial credit — this is a break
+            drawdown_pct=max_dd_pct,
+            favorable_pct=max_fav_pct,
+            duration=duration,
+            won=won,
+            next_symbol=None,
+        )
+        new_nodes += 1
+
+    trade.trie_updated = True
+    return {"observations": observations, "new_nodes": new_nodes}
+
+
 @dataclass
 class PaperTraderConfig:
     """Configuration for paper trading simulation."""
@@ -124,6 +248,12 @@ class PaperTraderConfig:
     start_offset: int = 200
     """Number of initial candles to skip (warm-up for SAX encoding)."""
 
+    living_trie: bool = True
+    """Whether to update the Trie with observations during paper trading.
+    When True, every trade outcome updates the Trie node's metadata,
+    and pattern breaks create new child nodes. This makes the Trie
+    'alive' — it learns and improves from its own trading results."""
+
     verbose: bool = True
     """Whether to print step-by-step details."""
 
@@ -157,6 +287,10 @@ class PaperTrade:
     """Take profit price at entry."""
     trailing_activated: bool = False
     """Whether trailing stop was activated during this trade."""
+    entry_sym_idx: int = 0
+    """SAX symbol index at entry (for duration calculation)."""
+    trie_updated: bool = False
+    """Whether this trade's outcome was recorded in the Trie (living Trie)."""
 
 
 @dataclass
@@ -387,6 +521,11 @@ class PaperTrader:
         pred_passed_threshold = 0
         risk_reject_reasons = {}  # reason -> count
 
+        # Living Trie: track how many observations are recorded
+        trie_observations_recorded = 0
+        trie_new_nodes_created = 0
+        trie_metadata_propagations = 0
+
         # Track current date for daily P&L reset
         # CRITICAL: Without this, the daily loss limit triggers once
         # and then blocks ALL subsequent signals forever (across days)
@@ -458,6 +597,15 @@ class PaperTrader:
                     current_position.actual_move_pct = current_position.pnl_pct
                     current_position.exit_reason = "trailing_stop" if current_position.trailing_activated else "stop_loss"
 
+                    # Living Trie: record this trade outcome in the Trie
+                    if cfg.living_trie and current_position.matched_pattern:
+                        obs_result = _record_observation(
+                            trie, current_position, sym_idx,
+                            current_symbols[-1] if current_symbols else None
+                        )
+                        trie_observations_recorded += obs_result["observations"]
+                        trie_new_nodes_created += obs_result["new_nodes"]
+
                     result.trades.append(current_position)
                     trade_counter += 1
                     current_position = None
@@ -481,6 +629,15 @@ class PaperTrader:
                         current_position.pnl_pct = (current_position.entry_price - current_price) / current_position.entry_price * 100
                     current_position.actual_move_pct = current_position.pnl_pct
                     current_position.exit_reason = "take_profit"
+
+                    # Living Trie: record this trade outcome in the Trie
+                    if cfg.living_trie and current_position.matched_pattern:
+                        obs_result = _record_observation(
+                            trie, current_position, sym_idx,
+                            current_symbols[-1] if current_symbols else None
+                        )
+                        trie_observations_recorded += obs_result["observations"]
+                        trie_new_nodes_created += obs_result["new_nodes"]
 
                     result.trades.append(current_position)
                     trade_counter += 1
@@ -514,6 +671,17 @@ class PaperTrader:
                         current_position.pnl_pct = (current_position.entry_price - current_price) / current_position.entry_price * 100
                     current_position.actual_move_pct = current_position.pnl_pct
                     current_position.exit_reason = "pattern_break"
+
+                    # Living Trie: record outcome AND create new child node
+                    # This is the KEY innovation — the Trie learns from the
+                    # unexpected symbol that broke the pattern.
+                    if cfg.living_trie and current_position.matched_pattern:
+                        obs_result = _record_observation(
+                            trie, current_position, sym_idx,
+                            latest_symbol,  # The new symbol that broke the pattern
+                        )
+                        trie_observations_recorded += obs_result["observations"]
+                        trie_new_nodes_created += obs_result["new_nodes"]
 
                     result.trades.append(current_position)
                     trade_counter += 1
@@ -661,16 +829,24 @@ class PaperTrader:
                             matched_pattern=current_symbols,
                             sl_price=sl_price,
                             tp_price=tp_price,
+                            entry_sym_idx=sym_idx,
                         )
                     else:
                         # Track rejection reasons
                         risk_reject_reasons[reason] = risk_reject_reasons.get(reason, 0) + 1
 
             # Record equity curve periodically
+            # Also re-propagate Trie metadata periodically for living Trie
             if sym_idx % 10 == 0:
                 unrealized_capital = risk_mgr.capital
                 result.equity_curve.append(unrealized_capital)
                 result.capital_history.append(unrealized_capital)
+
+            # Living Trie: re-propagate metadata every 200 symbol steps
+            # This ensures parent nodes reflect newly recorded observations
+            if cfg.living_trie and trie_observations_recorded > 0 and sym_idx % 200 == 0:
+                trie.propagate_metadata()
+                trie_metadata_propagations += 1
 
         # Close any open position at end of data
         if current_position is not None:
@@ -685,6 +861,15 @@ class PaperTrader:
                 current_position.pnl_pct = (current_position.entry_price - last_price) / current_position.entry_price * 100
             current_position.actual_move_pct = current_position.pnl_pct
             current_position.exit_reason = "end_of_data"
+
+            # Living Trie: record the final trade outcome too
+            if cfg.living_trie and current_position.matched_pattern:
+                obs_result = _record_observation(
+                    trie, current_position, len(all_sax_symbols) - 1, None
+                )
+                trie_observations_recorded += obs_result["observations"]
+                trie_new_nodes_created += obs_result["new_nodes"]
+
             result.trades.append(current_position)
 
         # Print prediction statistics
@@ -693,6 +878,19 @@ class PaperTrader:
                       f"{pred_passed_threshold} passed threshold[/dim]")
         if risk_reject_reasons:
             console.print(f"[dim]Risk rejections: {risk_reject_reasons}[/dim]")
+
+        # Living Trie statistics
+        if cfg.living_trie and trie_observations_recorded > 0:
+            console.print(f"[bold cyan]Living Trie:[/bold cyan] "
+                          f"{trie_observations_recorded} observations recorded, "
+                          f"{trie_new_nodes_created} new nodes created, "
+                          f"{trie_metadata_propagations} metadata propagations")
+            console.print(f"  Trie patterns: {trie.pattern_count} "
+                          f"(was {trie.pattern_count - trie_new_nodes_created} at start)")
+
+            # Save updated Trie back to storage
+            storage.save_trie(cfg.symbol, "n3", trie)
+            console.print(f"  [green]Updated Trie saved to storage[/green]")
 
         # Compute final results
         result.final_capital = risk_mgr.capital
@@ -731,7 +929,6 @@ class PaperTrader:
             # Sharpe ratio
             returns = [t.pnl_pct / 100 for t in result.trades]
             if len(returns) >= 2:
-                import numpy as np
                 mean_ret = np.mean(returns)
                 std_ret = np.std(returns, ddof=1)
                 if std_ret > 0:
