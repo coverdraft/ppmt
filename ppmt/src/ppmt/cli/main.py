@@ -70,6 +70,27 @@ def _make_engine(symbol: str, config: dict) -> PPMT:
 
 
 # ---------------------------------------------------------------------------
+# Helper: load OHLCV data (from CSV or SQLite DB)
+# ---------------------------------------------------------------------------
+def _load_data(symbol: str, csv_path: str | None, timeframe: str = "1h") -> pd.DataFrame:
+    """Load OHLCV data from CSV file or SQLite database."""
+    if csv_path:
+        return _load_csv_data(csv_path)
+
+    # Try loading from SQLite database
+    storage = PPMTStorage()
+    df = storage.load_ohlcv(symbol, timeframe)
+    storage.close()
+
+    if df.empty:
+        raise ValueError(
+            f"No data found for {symbol} ({timeframe}) in database. "
+            f"Run 'ppmt ingest -s {symbol}' first, or use --csv to specify a file."
+        )
+    return df
+
+
+# ---------------------------------------------------------------------------
 # Helper: load OHLCV from CSV (standalone, no DB needed)
 # ---------------------------------------------------------------------------
 def _load_csv_data(csv_path: str) -> pd.DataFrame:
@@ -657,7 +678,8 @@ def run(symbol: str, timeframe: str):
 # ===================================================================
 @cli.command()
 @click.option("--symbol", "-s", required=True, help="Trading pair")
-@click.option("--csv", "csv_path", required=True, help="Path to OHLCV CSV file")
+@click.option("--csv", "csv_path", default=None, help="Path to OHLCV CSV file (optional, uses DB if not specified)")
+@click.option("--timeframe", "-t", default="1h", help="Candle timeframe (for DB lookup)")
 @click.option("--train-ratio", default=0.7, type=float, help="Training data ratio (default: 0.7)")
 @click.option("--pattern-length", "-p", default=5, type=int, help="SAX blocks per pattern")
 @click.option("--forward-window", "-f", default=5, type=int, help="Forward window in SAX blocks")
@@ -665,7 +687,8 @@ def run(symbol: str, timeframe: str):
 @click.option("--min-dir-count", default=0, type=int, help="Min directional count for signal (0=disabled)")
 def backtest(
     symbol: str,
-    csv_path: str,
+    csv_path: str | None,
+    timeframe: str,
     train_ratio: float,
     pattern_length: int,
     forward_window: int,
@@ -677,18 +700,21 @@ def backtest(
 
     Uses training z-score stats for both train and test encoding
     to ensure SAX symbol consistency across regimes.
+
+    Data source: use --csv for a CSV file, or omit to load from
+    the SQLite database (requires 'ppmt ingest' first).
     """
     config = load_config()
 
     console.print(f"\n[bold cyan]PPMT Walk-Forward Backtest {VERSION}[/bold cyan]")
     console.print(f"  Symbol: {symbol}")
-    console.print(f"  CSV: {csv_path}")
+    console.print(f"  Data source: {'CSV: ' + csv_path if csv_path else 'SQLite DB'}")
 
     # Load data
     try:
-        df = _load_csv_data(csv_path)
+        df = _load_data(symbol, csv_path, timeframe)
     except Exception as e:
-        console.print(f"[red]Error loading CSV: {e}[/red]")
+        console.print(f"[red]Error loading data: {e}[/red]")
         return
 
     console.print(f"  Candles: {len(df)}")
@@ -757,7 +783,7 @@ def backtest(
         console.print("[yellow]No trades generated in backtest.[/yellow]")
 
     # Save results to JSON
-    output_dir = os.path.join(os.path.dirname(csv_path), "backtest_results")
+    output_dir = os.path.join(os.path.dirname(csv_path) if csv_path else os.path.expanduser("~/.ppmt/backtest_results"), "backtest_results")
     os.makedirs(output_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_file = os.path.join(output_dir, f"backtest_{symbol.replace('/', '_')}_{timestamp}.json")
@@ -780,7 +806,8 @@ def backtest(
 # ===================================================================
 @cli.command("rolling-backtest")
 @click.option("--symbol", "-s", required=True, help="Trading pair")
-@click.option("--csv", "csv_path", required=True, help="Path to OHLCV CSV file")
+@click.option("--csv", "csv_path", default=None, help="Path to OHLCV CSV file (optional, uses DB if not specified)")
+@click.option("--timeframe", "-t", default="1h", help="Candle timeframe (for DB lookup)")
 @click.option("--train-candles", default=4000, type=int,
               help="Training window size in candles (default: 4000)")
 @click.option("--test-candles", default=1000, type=int,
@@ -794,7 +821,8 @@ def backtest(
 @click.option("--save-trades", is_flag=True, help="Save individual trade details to JSON")
 def rolling_backtest(
     symbol: str,
-    csv_path: str,
+    csv_path: str | None,
+    timeframe: str,
     train_candles: int,
     test_candles: int,
     step_candles: int,
@@ -815,20 +843,24 @@ def rolling_backtest(
     system is consistently profitable across different market regimes,
     not just a single static split.
 
-    Example:
-      ppmt rolling-backtest -s BTC/USDT --csv data.csv --train-candles 2000 --test-candles 200
+    Data source: use --csv for a CSV file, or omit to load from
+    the SQLite database (requires 'ppmt ingest' first).
+
+    Examples:
+      ppmt rolling-backtest -s BTC/USDT
+      ppmt rolling-backtest -s BTC/USDT --csv data.csv --train-candles 4000
     """
     config = load_config()
 
     console.print(f"\n[bold cyan]PPMT Rolling Walk-Forward Backtest {VERSION}[/bold cyan]")
     console.print(f"  Symbol: {symbol}")
-    console.print(f"  CSV: {csv_path}")
+    console.print(f"  Data source: {'CSV: ' + csv_path if csv_path else 'SQLite DB'}")
 
     # Load data
     try:
-        df = _load_csv_data(csv_path)
+        df = _load_data(symbol, csv_path, timeframe)
     except Exception as e:
-        console.print(f"[red]Error loading CSV: {e}[/red]")
+        console.print(f"[red]Error loading data: {e}[/red]")
         return
 
     total_candles = len(df)
@@ -993,7 +1025,7 @@ def rolling_backtest(
         console.print(table)
 
     # Save results
-    output_dir = os.path.join(os.path.dirname(csv_path), "backtest_results")
+    output_dir = os.path.join(os.path.dirname(csv_path) if csv_path else os.path.expanduser("~/.ppmt/backtest_results"), "backtest_results")
     os.makedirs(output_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_file = os.path.join(
