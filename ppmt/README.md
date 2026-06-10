@@ -187,3 +187,9 @@ ppmt/
 ## License
 
 Proprietary - All rights reserved.
+
+## GitHub Repository
+
+**https://github.com/coverdraft/ppmt**
+
+This is the official PPMT repository. Always push updates here.

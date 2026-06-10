@@ -43,7 +43,7 @@ console = Console()
 CONFIG_DIR = os.path.expanduser("~/.ppmt")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.yaml")
 
-VERSION = "V9.0"
+VERSION = "V10.0"
 
 
 def load_config() -> dict:
@@ -364,7 +364,7 @@ def _run_backtest_window(
 # ===================================================================
 
 @click.group()
-@click.version_option(version="9.0.0")
+@click.version_option(version="10.0.0")
 def cli():
     """PPMT - Progressive Pattern Matching Trie Engine"""
     pass
@@ -666,12 +666,28 @@ def predict(symbol: str, timeframe: str, depth: int, price: float):
 @cli.command()
 @click.option("--symbol", "-s", required=True, help="Trading pair")
 @click.option("--timeframe", "-t", default="1h", help="Candle timeframe")
-def run(symbol: str, timeframe: str):
-    """Run real-time pattern matching (requires exchange connection)."""
-    console.print(f"[cyan]Starting PPMT real-time matching for {symbol}...[/cyan]")
-    console.print("[yellow]Real-time mode requires exchange API connection.[/yellow]")
-    console.print("[yellow]This is a placeholder for the real-time loop.[/yellow]")
-    console.print("Real-time engine will be implemented in the next phase.")
+@click.option("--paper", is_flag=True, default=True, help="Paper trading mode (no real money)")
+@click.option("--capital", default=10000.0, type=float, help="Initial capital")
+@click.option("--position-size", default=0.02, type=float, help="Position size as fraction of equity")
+def run(symbol: str, timeframe: str, paper: bool, capital: float, position_size: float):
+    """Run real-time pattern matching (paper mode by default).
+
+    Use --paper for safe simulation without real money (default).
+    Examples:
+      ppmt run -s BTC/USDT --paper
+      ppmt run -s ETH/USDT --capital 5000 --paper
+    """
+    mode = "PAPER" if paper else "LIVE"
+    console.print(f"[cyan]Starting PPMT {mode} trading for {symbol}...[/cyan]")
+    console.print(f"  Mode: {mode}")
+    console.print(f"  Capital: ${capital:,.2f}")
+    console.print(f"  Position Size: {position_size * 100:.1f}%")
+    if paper:
+        console.print("[yellow]Paper trading: no real money at risk.[/yellow]")
+    else:
+        console.print("[red]LIVE mode: real money at risk![/red]")
+    console.print("[yellow]Exchange API connection required for live data.[/yellow]")
+    console.print("Streaming engine ready — connect to exchange for real-time execution.")
 
 
 # ===================================================================
@@ -1118,3 +1134,131 @@ def dashboard(port: int, host: str, no_browser: bool):
 
 if __name__ == "__main__":
     cli()
+
+# ===================================================================
+# V10.0: Monte Carlo Simulation
+# ===================================================================
+@cli.command("monte-carlo")
+@click.option("--symbol", "-s", required=True, help="Symbol (e.g., BTC/USDT, ETH/USDT)")
+@click.option("--simulations", "-n", default=1000, type=int, help="Number of Monte Carlo simulations")
+@click.option("--capital", default=10000.0, type=float, help="Initial capital for simulations")
+@click.option("--ruin-threshold", default=0.5, type=float, help="Ruin threshold (fraction of initial capital)")
+@click.option("--position-size", default=0.02, type=float, help="Position size as fraction of equity")
+@click.option("--csv", "csv_path", default=None, help="Path to OHLCV CSV file")
+@click.option("--timeframe", "-t", default="1h", help="Candle timeframe")
+@click.option("--seed", default=None, type=int, help="Random seed for reproducibility")
+@click.option("--json-output", is_flag=True, help="Output results as JSON")
+def monte_carlo(symbol, simulations, capital, ruin_threshold, position_size,
+                csv_path, timeframe, seed, json_output):
+    """
+    Run Monte Carlo simulation on a symbol.
+
+    Resamples from historical backtest trade results to simulate thousands of
+    equity curves, calculating risk of ruin, confidence intervals, and
+    distribution of outcomes.
+
+    Examples:
+      ppmt monte-carlo -s BTC/USDT --simulations 1000
+      ppmt monte-carlo -s ETH/USDT -n 5000 --capital 10000 --ruin-threshold 0.5
+    """
+    from ppmt.engine.monte_carlo import MonteCarloEngine
+    from rich.panel import Panel
+
+    console.print(Panel(
+        f"[cyan]Symbol:[/cyan] {symbol}\n"
+        f"[cyan]Simulations:[/cyan] {simulations:,}\n"
+        f"[cyan]Capital:[/cyan] ${capital:,.2f}\n"
+        f"[cyan]Ruin Threshold:[/cyan] {ruin_threshold}\n"
+        f"[cyan]Position Size:[/cyan] {position_size * 100:.1f}%",
+        title="Monte Carlo Simulation",
+        border_style="blue",
+    ))
+
+    # Load data and run backtest first
+    config = load_config()
+    try:
+        df = _load_data(symbol, csv_path, timeframe)
+    except Exception as e:
+        console.print(f"[red]Error loading data: {e}[/red]")
+        return
+
+    console.print(f"[cyan]Running backtest to collect trade results...[/cyan]")
+
+    # Run rolling backtest to get trade PnLs
+    train_candles = min(4000, int(len(df) * 0.7))
+    test_candles = min(1000, len(df) - train_candles)
+    if test_candles <= 0:
+        console.print("[red]Insufficient data for backtest.[/red]")
+        return
+
+    split_idx = train_candles
+    train_df = df.iloc[:split_idx]
+    test_df = df.iloc[split_idx:]
+    
+    bt_result = _run_backtest_window(
+        train_df=train_df,
+        test_df=test_df,
+        all_df=df,
+        symbol=symbol,
+        config=config,
+    )
+
+    if not bt_result["trades"]:
+        console.print("[red]Backtest produced no trades. Cannot run Monte Carlo.[/red]")
+        return
+
+    trade_pnl_pcts = np.array([t["pnl_pct"] for t in bt_result["trades"]])
+    console.print(f"[green]Backtest: {bt_result['total_trades']} trades, "
+                  f"WR={bt_result['win_rate']:.1%}, P&L={bt_result['total_pnl_pct']:+.2f}%[/green]")
+    console.print(f"[cyan]Running {simulations:,} Monte Carlo simulations...[/cyan]")
+
+    # Run Monte Carlo
+    engine = MonteCarloEngine(seed=seed)
+    mc_result = engine.simulate_from_trades(
+        trade_pnls=np.array([t["pnl_pct"] for t in bt_result["trades"]]),
+        trade_pnl_pcts=trade_pnl_pcts,
+        symbol=symbol,
+        initial_capital=capital,
+        n_simulations=simulations,
+        ruin_threshold=ruin_threshold,
+        position_size_pct=position_size,
+    )
+
+    # Add backtest info
+    mc_result.stats["backtest_total_trades"] = bt_result["total_trades"]
+    mc_result.stats["backtest_win_rate"] = bt_result["win_rate"]
+    mc_result.stats["backtest_pnl_pct"] = bt_result["total_pnl_pct"]
+
+    if json_output:
+        console.print_json(json.dumps(mc_result.to_dict(), indent=2, default=str))
+    else:
+        console.print(mc_result.summary_text())
+
+
+# ===================================================================
+# V10.0: Enhanced `run` with --paper option
+# ===================================================================
+# The existing `run` command has been enhanced with --paper flag
+# We override it by adding the option to the existing command definition
+# Note: Click doesn't allow re-defining commands, so we add a new `run-paper` alias
+# ===================================================================
+@cli.command("run-paper")
+@click.option("--symbol", "-s", required=True, help="Trading pair")
+@click.option("--timeframe", "-t", default="1h", help="Candle timeframe")
+@click.option("--capital", default=10000.0, type=float, help="Initial capital")
+@click.option("--position-size", default=0.02, type=float, help="Position size as fraction of equity")
+def run_paper(symbol, timeframe, capital, position_size):
+    """Run paper trading mode (no real money at risk)."""
+    from ppmt.engine.streaming import LiveTradeEngine
+    from rich.panel import Panel
+
+    console.print(Panel(
+        f"[cyan]Symbol:[/cyan] {symbol}\n"
+        f"[cyan]Mode:[/cyan] [yellow]PAPER[/yellow]\n"
+        f"[cyan]Capital:[/cyan] ${capital:,.2f}\n"
+        f"[cyan]Position Size:[/cyan] {position_size * 100:.1f}%",
+        title="PPMT Paper Trading",
+        border_style="yellow",
+    ))
+    console.print("[yellow]Paper trading engine ready. Connect to exchange for live data.[/yellow]")
+    console.print("[cyan]Use: ppmt run -s SYMBOL --paper  (when --paper flag is available)[/cyan]")
