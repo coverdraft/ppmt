@@ -221,10 +221,10 @@ class PaperTraderConfig:
     pattern_length: int = 5
     """SAX blocks per pattern."""
 
-    sax_alphabet_size: int = 10
+    sax_alphabet_size: int = 8
     """SAX alphabet size."""
 
-    sax_window_size: int = 5
+    sax_window_size: int = 10
     """SAX window size."""
 
     sax_strategy: str = "ohlcv"
@@ -566,7 +566,7 @@ class PaperTrader:
         console.print(f"  Data: {len(df)} candles, starting from index {start_candle}")
         console.print(f"  Trie: {trie.pattern_count} patterns")
         console.print(f"  Min confidence: {cfg.min_confidence:.0%} | Min quality: {cfg.min_quality_score:.2f}")
-        console.print(f"  Entry: move > 0.5%, probability > 15%, ATR-based SL/TP")
+        console.print(f"  Entry: move > 1.0%, probability > 20%, ATR-based SL/TP")
         console.print(f"  LONG SL: max(ATR*1.5, 1.5%) cap 5% | SHORT SL: max(ATR*2.0, 2.0%) cap 7%")
         cat_status = f"{cfg.catastrophic_loss_pct:.0f}%" if cfg.catastrophic_loss_pct > 0 else "OFF"
         console.print(f"  Catastrophic protection: {cat_status}")
@@ -901,24 +901,21 @@ class PaperTrader:
                     effective_min_conf = max(cfg.min_confidence * 0.5, 0.05)
 
                 # SHORT signals require higher confidence (BTC trends up)
-                # v0.5.2: Reduced to 1.2x with floor 0.10 (was 1.5x/0.15).
-                # The 1.5x multiplier was too restrictive with window=5 SAX params,
-                # producing a heavy SHORT bias (64 SHORT vs 19 LONG trades in v0.5.1).
-                # Lower multiplier allows more balanced LONG/SHORT distribution.
+                # v0.4.2: Reverted to 1.5x (v0.4.0 value). The v0.4.1 1.8x multiplier
+                # was too restrictive — only a handful of SHORT trades passed, and those
+                # that did had worse performance because the trie didn't get enough
+                # SHORT observations to learn from.
                 if prediction.direction == "SHORT":
-                    effective_min_conf = max(effective_min_conf * 1.2, 0.10)
+                    effective_min_conf = max(effective_min_conf * 1.5, 0.15)
 
                 # Entry conditions
-                # v0.5.2: Lowered move threshold to 0.5% (was 1.0%) and probability
-                # to 15% (was 20%). With SAX window=5, predictions have shorter
-                # time horizons and smaller expected moves. The old filters
-                # rejected 98.1% of predictions (83/4445 in v0.5.1), producing
-                # too few trades (83) for meaningful compounding. Loosening
-                # these should increase trade count toward 960+ target.
+                # v0.4.2: Reverted to v0.4.0 thresholds. The tighter v0.4.1 filters
+                # (1.5% move, 0.25 probability) removed too many winning trades,
+                # causing P&L to drop from +3665% to +347%.
                 if (prediction.direction != "FLAT"
                     and prediction.confidence >= effective_min_conf
-                    and abs(prediction.expected_total_move_pct) > 0.5
-                    and prediction.overall_probability > 0.15):
+                    and abs(prediction.expected_total_move_pct) > 1.0
+                    and prediction.overall_probability > 0.2):
 
                     pred_passed_threshold += 1
 

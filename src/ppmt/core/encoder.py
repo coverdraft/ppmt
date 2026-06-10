@@ -31,7 +31,7 @@ class DeltaEncoder:
     3. Faster fuzzy matching: Compare deltas instead of absolute symbols
     """
 
-    def __init__(self, alphabet_size: int = 10):
+    def __init__(self, alphabet_size: int = 8):
         self.alphabet_size = alphabet_size
         self._symbol_to_idx = {c: i for i, c in enumerate(SAX_ALPHABET[:alphabet_size])}
         self._idx_to_symbol = {i: c for i, c in enumerate(SAX_ALPHABET[:alphabet_size])}

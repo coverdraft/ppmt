@@ -46,7 +46,7 @@ def load_config() -> dict:
 
 
 @click.group()
-@click.version_option(version="0.5.2")
+@click.version_option(version="0.5.3")
 def cli():
     """PPMT - Progressive Pattern Matching Trie Engine"""
     pass
@@ -71,7 +71,7 @@ def init():
         else:
             # Write minimal config
             with open(CONFIG_FILE, "w") as f:
-                yaml.dump({"sax": {"alphabet_size": 10, "window_size": 5}}, f)
+                yaml.dump({"sax": {"alphabet_size": 8, "window_size": 10}}, f)
             console.print(f"[green]Created minimal config at {CONFIG_FILE}[/green]")
     else:
         console.print(f"[yellow]Config already exists at {CONFIG_FILE}[/yellow]")
@@ -137,21 +137,21 @@ def ingest(symbol: str, timeframe: str, days: int, exchange: str, csv_path: str)
 @click.option("--force", "-f", is_flag=True, default=False, help="Force rebuild (discard Living Trie data)")
 @click.option("--bootstrap/--no-bootstrap", default=True, help="Run bootstrap paper trading after build (default: enabled)")
 @click.option("--bootstrap-ratio", default=1.0, type=float, help="Fraction of data for bootstrap (default: 1.0 = 100%%)")
-@click.option("--bootstrap-passes", default=5, type=int, help="Number of bootstrap passes (default: 5 — each pass improves trie from previous)")
-@click.option("--sax-alphabet", default=10, type=int, help="SAX alphabet size (default: 10, more = finer patterns)")
-@click.option("--sax-window", default=5, type=int, help="SAX window size in candles (default: 5, smaller = more symbols = more trades)")
-def build(symbol: str, timeframe: str, pattern_length: int, force: bool, bootstrap: bool, bootstrap_ratio: float, bootstrap_passes: int, sax_alphabet: int, sax_window: int):
+@click.option("--bootstrap-passes", default=2, type=int, help="Number of bootstrap passes (default: 2 — second pass uses improved trie from first)")
+def build(symbol: str, timeframe: str, pattern_length: int, force: bool, bootstrap: bool, bootstrap_ratio: float, bootstrap_passes: int):
     """Build PPMT Trie from stored data.
 
     By default, preserves the existing N3 Living Trie (accumulated trading
     metadata) by merging the new build into it. Use --force to discard
     the Living Trie and rebuild from scratch.
 
-    v0.5.2: Entry filters lowered for window=5 regime (move > 0.5%, prob > 15%).
-    Bootstrap passes increased to 5 with much looser entry thresholds to
-    accumulate more observations. SHORT confidence multiplier reduced to
-    1.2x (was 1.5x). Merge now checks SAX parameter compatibility.
-    Use --no-bootstrap to skip, --sax-alphabet/--sax-window to override.
+    v0.5.0: After building the trie, automatically runs bootstrap paper
+    trading passes on the data (--bootstrap-ratio, default 100%%)
+    to accumulate trading observations in the N3 trie. By default, 2 passes
+    are run (--bootstrap-passes) — the second pass uses the improved trie
+    from the first pass, producing higher-quality observations.
+    This gives fresh tries meaningful metadata from day one.
+    Use --no-bootstrap to skip.
     """
     config = load_config()
     storage = PPMTStorage()
@@ -168,17 +168,16 @@ def build(symbol: str, timeframe: str, pattern_length: int, force: bool, bootstr
     classifier = AssetClassifier()
     info = classifier.classify(symbol)
 
-    # Create engine — CLI options override config.yaml
+    # Create engine
     sax_config = config.get("sax", {})
     engine = PPMT(
         symbol=symbol,
         asset_class=info.asset_class,
-        sax_alphabet_size=sax_alphabet or sax_config.get("alphabet_size", 10),
-        sax_window_size=sax_window or sax_config.get("window_size", 5),
+        sax_alphabet_size=sax_config.get("alphabet_size", 8),
+        sax_window_size=sax_config.get("window_size", 10),
         sax_strategy=sax_config.get("strategy", "ohlcv"),
         weight_profile=info.weight_profile,
     )
-    console.print(f"  SAX config: alphabet={engine.sax.alphabet_size}, window={engine.sax.window_size}")
 
     # Build Trie
     count = engine.build(df, pattern_length=pattern_length)
@@ -226,35 +225,17 @@ def build(symbol: str, timeframe: str, pattern_length: int, force: bool, bootstr
         console.print(f"  [dim]Bootstrap: skipped (--no-bootstrap)[/dim]")
 
     # For N3: check if existing Living Trie should be preserved
-    # v0.5.1: ALWAYS merge existing Living Trie into new build to preserve
-    # valuable trading observations. Never replace — metadata is too precious.
     existing_n3 = storage.load_trie(symbol, "n3")
     n3_to_save = engine.trie_n3
 
     if existing_n3 is not None and not force:
         existing_count = existing_n3.pattern_count
         new_count = engine.trie_n3.pattern_count
-        existing_obs = existing_n3.trading_observations
 
-        # v0.5.2: Check SAX parameter compatibility before merging.
-        # If existing trie was built with different SAX params (e.g., window=10
-        # vs window=5), its patterns don't align with the new build. Merging
-        # such tries introduces conflicting observations that dilute quality
-        # (v0.5.1 merge dropped WR from 59% to 49.8%).
-        # Check: existing trie's max depth indicates different SAX params.
-        # With window=5, pattern_length=5, max_depth should be ~5-6.
-        # With window=10, max_depth is also ~5-6 but pattern count differs.
-        # Use pattern count ratio as a heuristic for SAX param mismatch.
-        expected_pattern_range = (new_count * 0.5, new_count * 2.0)  # Allow 50-200% of new
-        sax_compatible = expected_pattern_range[0] <= existing_count <= expected_pattern_range[1]
-
-        if not sax_compatible and existing_obs > 0:
-            console.print(f"[yellow]Existing N3 has {existing_count} patterns (new: {new_count}) — SAX params likely differ[/yellow]")
-            console.print(f"[yellow]Merging would introduce conflicting observations. Using --force logic.[/yellow]")
-            n3_to_save = engine.trie_n3
-        elif existing_obs > 0:
-            console.print(f"[bold cyan]Living Trie detected:[/bold cyan] existing N3 has {existing_count} patterns ({existing_obs} observations) vs {new_count} new")
-            console.print(f"[cyan]Merging new build into existing Living Trie (preserving {existing_obs} trading observations)...[/cyan]")
+        if existing_count >= new_count:
+            # Existing trie has Living Trie growth — merge new build INTO it
+            console.print(f"[bold cyan]Living Trie detected:[/bold cyan] existing N3 has {existing_count} patterns vs {new_count} new")
+            console.print(f"[cyan]Merging new build into existing Living Trie (preserving {existing_count - new_count} discovered patterns)...[/cyan]")
 
             merge_stats = existing_n3.merge(engine.trie_n3)
 
@@ -266,9 +247,8 @@ def build(symbol: str, timeframe: str, pattern_length: int, force: bool, bootstr
 
             n3_to_save = existing_n3
         else:
-            # No trading observations — safe to replace
-            console.print(f"[yellow]Existing N3 ({existing_count} patterns) has no trading observations — using new build[/yellow]")
-            n3_to_save = engine.trie_n3
+            console.print(f"[yellow]Existing N3 ({existing_count} patterns) has fewer patterns than new build ({new_count})[/yellow]")
+            console.print(f"[yellow]Replacing with new build (existing trie was likely from a different config)[/yellow]")
 
     # Save Tries
     for level, trie in [
@@ -403,8 +383,8 @@ def predict(symbol: str, timeframe: str, depth: int, price: float):
     sax_config = config.get("sax", {})
     from ppmt.core.sax import SAXEncoder
     encoder = SAXEncoder(
-        alphabet_size=sax_config.get("alphabet_size", 10),
-        window_size=sax_config.get("window_size", 5),
+        alphabet_size=sax_config.get("alphabet_size", 8),
+        window_size=sax_config.get("window_size", 10),
         strategy=sax_config.get("strategy", "ohlcv"),
     )
 
@@ -521,8 +501,8 @@ def run(symbol: str, timeframe: str, paper: bool, capital: float, min_confidence
             symbol=symbol,
             timeframe=timeframe,
             initial_capital=capital,
-            sax_alphabet_size=sax_config.get("alphabet_size", 10),
-            sax_window_size=sax_config.get("window_size", 5),
+            sax_alphabet_size=sax_config.get("alphabet_size", 8),
+            sax_window_size=sax_config.get("window_size", 10),
             sax_strategy=sax_config.get("strategy", "ohlcv"),
             min_confidence=min_confidence,
         )
@@ -609,8 +589,8 @@ def monte_carlo(
             symbol=symbol,
             timeframe=timeframe,
             initial_capital=capital,
-            sax_alphabet_size=sax_config.get("alphabet_size", 10),
-            sax_window_size=sax_config.get("window_size", 5),
+            sax_alphabet_size=sax_config.get("alphabet_size", 8),
+            sax_window_size=sax_config.get("window_size", 10),
             sax_strategy=sax_config.get("strategy", "ohlcv"),
             min_confidence=min_confidence,
         )
@@ -653,8 +633,8 @@ def monte_carlo(
             symbol=symbol,
             timeframe=timeframe,
             initial_capital=capital,
-            sax_alphabet_size=sax_config.get("alphabet_size", 10),
-            sax_window_size=sax_config.get("window_size", 5),
+            sax_alphabet_size=sax_config.get("alphabet_size", 8),
+            sax_window_size=sax_config.get("window_size", 10),
             sax_strategy=sax_config.get("strategy", "ohlcv"),
             min_confidence=min_confidence,
         )
