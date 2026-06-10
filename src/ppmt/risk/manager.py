@@ -150,8 +150,8 @@ class RiskManager:
         if signal.symbol in self._positions:
             return False, f"Already in position: {signal.symbol}"
 
-        # Check daily loss limit
-        if abs(self._daily_pnl) / self.initial_capital >= self.config.max_daily_loss_pct:
+        # Check daily loss limit (only count losses, not gains)
+        if self._daily_pnl < 0 and abs(self._daily_pnl) / self.initial_capital >= self.config.max_daily_loss_pct:
             return False, "Daily loss limit reached"
 
         # Check max drawdown
@@ -262,7 +262,10 @@ class RiskManager:
             pnl = (position.entry_price - exit_price) * position.size
 
         self.capital += pnl
-        self._daily_pnl += pnl
+        # Only count losses toward daily P&L limit
+        # Gains should NOT prevent further trading
+        if pnl < 0:
+            self._daily_pnl += pnl
 
         # Update peak capital
         if self.capital > self._peak_capital:

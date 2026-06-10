@@ -473,14 +473,31 @@ class PaperTrader:
                         else SignalType.ENTRY_SHORT
                     )
 
-                    # Compute SL/TP from prediction
-                    sl_distance = abs(prediction.pattern_break_probability) * 2 + 0.01
-                    if prediction.direction == "LONG":
-                        sl_price = current_price * (1 - sl_distance)
-                        tp_price = prediction.predicted_target or current_price * (1 + abs(prediction.expected_total_move_pct) / 100)
+                    # Compute SL/TP from prediction metadata
+                    # Use the node's max_drawdown_pct for SL if available,
+                    # otherwise derive from expected_move with a safety margin
+                    if prediction.predicted_sl is not None:
+                        sl_price = prediction.predicted_sl
                     else:
-                        sl_price = current_price * (1 + sl_distance)
-                        tp_price = prediction.predicted_target or current_price * (1 - abs(prediction.expected_total_move_pct) / 100)
+                        # Default: SL at 50% of expected move (conservative)
+                        sl_distance_pct = max(abs(prediction.expected_total_move_pct) * 0.5, 1.0)
+                        if prediction.direction == "LONG":
+                            sl_price = current_price * (1 - sl_distance_pct / 100)
+                        else:
+                            sl_price = current_price * (1 + sl_distance_pct / 100)
+
+                    if prediction.predicted_target is not None:
+                        tp_price = prediction.predicted_target
+                    else:
+                        if prediction.direction == "LONG":
+                            tp_price = current_price * (1 + abs(prediction.expected_total_move_pct) / 100)
+                        else:
+                            tp_price = current_price * (1 - abs(prediction.expected_total_move_pct) / 100)
+
+                    # Risk:Reward ratio = expected_move / SL_distance
+                    sl_distance_pct = abs(current_price - sl_price) / current_price * 100
+                    tp_distance_pct = abs(tp_price - current_price) / current_price * 100
+                    risk_reward = tp_distance_pct / sl_distance_pct if sl_distance_pct > 0 else 0
 
                     signal = Signal(
                         signal_type=signal_type,
@@ -490,7 +507,7 @@ class PaperTrader:
                         sl_price=sl_price,
                         tp_price=tp_price,
                         expected_move_pct=prediction.expected_total_move_pct,
-                        risk_reward_ratio=abs(prediction.expected_total_move_pct / (sl_distance * 100)) if sl_distance > 0 else 0,
+                        risk_reward_ratio=risk_reward,
                         win_rate=prediction.overall_probability,
                         historical_count=100,
                         matched_pattern=current_symbols,
@@ -502,7 +519,7 @@ class PaperTrader:
                     mock_meta = BlockLifecycleMetadata(
                         win_rate=signal.win_rate,
                         expected_move_pct=signal.expected_move_pct,
-                        max_drawdown_pct=-sl_distance * 100,
+                        max_drawdown_pct=-sl_distance_pct,
                         historical_count=100,
                     )
                     signal.probability_of_success = mock_meta.probability_of_success
