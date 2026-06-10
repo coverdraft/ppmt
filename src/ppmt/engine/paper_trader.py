@@ -150,6 +150,7 @@ def _record_observation(
         )
         new_nodes += 1
         observations += 1
+        trie.trading_observations += 1
         trade.trie_updated = True
         return {"observations": observations, "new_nodes": new_nodes}
 
@@ -185,6 +186,7 @@ def _record_observation(
         next_symbol=next_symbol,
     )
     observations += 1
+    trie.trading_observations += 1
 
     # 3. If next_symbol is NOT already a child, add it — the Trie GROWS
     if next_symbol and not node.has_child(next_symbol):
@@ -509,25 +511,26 @@ class PaperTrader:
         pred_engine = PredictionEngine(trie, prediction_depth=cfg.pattern_length)
         risk_mgr = RiskManager(capital=cfg.initial_capital, config=self.risk_config)
 
-        # v0.3.1: Adaptive confidence scaling for fresh tries
-        # When the trie has sparse metadata (low avg confidence), many predictions
-        # barely pass the 0.10 threshold, leading to low-quality trades (46.1% WR
-        # with fresh trie vs 66.1% with rich trie). We detect this by sampling
-        # the trie's root metadata — if the average confidence is low, we scale
-        # up the min_confidence threshold proportionally.
-        root_meta = trie.root.metadata
-        if root_meta.historical_count > 0:
-            avg_node_confidence = root_meta.confidence
-            if avg_node_confidence < 0.15:
-                # Fresh trie with sparse metadata — raise threshold
-                # Scale: at avg_conf=0.10, multiply by 1.5; at 0.15, multiply by 1.0
-                adaptive_scale = 0.15 / max(avg_node_confidence, 0.05)
-                adaptive_scale = min(adaptive_scale, 2.0)  # Cap at 2x
-                cfg.min_confidence = min(cfg.min_confidence * adaptive_scale, 0.20)
-                console.print(f"  [yellow]Adaptive confidence: trie avg={avg_node_confidence:.1%}, "
-                              f"min_confidence scaled to {cfg.min_confidence:.0%}[/yellow]")
-            else:
-                console.print(f"  [green]Trie metadata quality: good (avg confidence={avg_node_confidence:.1%})[/green]")
+        # v0.3.2: Adaptive confidence scaling for fresh tries
+        # When the trie has NO trading observations (fresh build), predictions
+        # barely pass the 0.10 threshold, leading to low-quality trades (45.3% WR
+        # with fresh trie vs 64.8% with rich trie). We detect fresh tries by
+        # checking trading_observations — a count of actual trade outcomes
+        # recorded via the Living Trie. Build-time metadata propagation gives
+        # root_meta.confidence ~51% for ALL tries (even fresh), so that's not
+        # a useful freshness indicator.
+        if trie.trading_observations == 0:
+            # Fresh trie with no trading metadata — raise threshold to filter
+            # low-confidence predictions. With avg prediction confidence ~15%,
+            # a min_confidence of 0.20 filters the weakest signals while still
+            # allowing enough trades for the Living Trie to learn from.
+            original_min = cfg.min_confidence
+            cfg.min_confidence = max(cfg.min_confidence, 0.20)
+            console.print(f"  [yellow]Fresh trie detected (0 trading observations): "
+                          f"min_confidence {original_min:.0%} → {cfg.min_confidence:.0%}[/yellow]")
+        else:
+            console.print(f"  [green]Trie has {trie.trading_observations} trading observations "
+                          f"— metadata quality: good[/green]")
 
         # Timeframe to hours
         tf_hours = {

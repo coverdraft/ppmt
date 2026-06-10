@@ -157,6 +157,10 @@ class PPMTTrie:
         self.root = TrieNode(symbol="", depth=0)
         self._pattern_count = 0
         self._max_depth = 0
+        self.trading_observations: int = 0
+        """Number of trading-time observations recorded via Living Trie.
+        Distinguishes fresh builds (0) from tries with accumulated
+        trading metadata (>0). Used for adaptive confidence scaling."""
 
     @property
     def pattern_count(self) -> int:
@@ -392,6 +396,7 @@ class PPMTTrie:
             "name": self.name,
             "pattern_count": self._pattern_count,
             "max_depth": self._max_depth,
+            "trading_observations": self.trading_observations,
             "root": self.root.to_dict(),
         }
 
@@ -401,6 +406,7 @@ class PPMTTrie:
         trie = cls(name=data.get("name", "root"))
         trie._pattern_count = data.get("pattern_count", 0)
         trie._max_depth = data.get("max_depth", 0)
+        trie.trading_observations = data.get("trading_observations", 0)
 
         # Reconstruct children from root
         root_data = data.get("root", {})
@@ -603,6 +609,9 @@ class PPMTTrie:
 
                 stats["merged_patterns"] += 1
                 stats["total_observations_added"] += s_count
+
+        # Merge trading observations count
+        self.trading_observations += other.trading_observations
 
         # Recompute pattern count and max depth
         self._recompute_counts()
