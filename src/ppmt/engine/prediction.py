@@ -374,16 +374,32 @@ class PredictionEngine:
         cumulative_move: float = 0.0,
         cumulative_candles: int = 0,
     ) -> list[PathStep]:
-        """Walk the most likely path forward from a node."""
+        """Walk the most profitable path forward from a node.
+        
+        V0.2.7: Changed from frequency-based (most common child) to
+        expected-value-based (most profitable child). A child with 40%
+        probability and +5% move is better than one with 50% probability
+        and +0.5% move. This follows the path with the highest
+        win_rate × abs(expected_move), i.e., the path most likely to
+        produce a profitable trade.
+        """
         steps = []
 
         if depth <= 0 or node is None:
             return steps
 
-        # Get children sorted by count (most likely first)
+        # Get children sorted by expected value (most profitable first)
+        # Expected value = win_rate × abs(expected_move) × sign_correct
+        # This prioritizes paths that are both likely AND profitable
+        def child_expected_value(item):
+            _, child = item
+            if child.metadata is None or child.metadata.historical_count == 0:
+                return 0.0
+            return child.metadata.win_rate * abs(child.metadata.expected_move_pct)
+
         children = sorted(
             node.children.items(),
-            key=lambda x: x[1].metadata.historical_count if x[1].metadata else 0,
+            key=child_expected_value,
             reverse=True,
         )
 

@@ -154,6 +154,71 @@ Changes:
 6. min_risk_reward set to 1.0 (TP=2*SL guarantees R:R=2.0 anyway)
 
 Stage Summary:
+- Commit: 99fd1e6 "v0.2.6: Wider SL, SHORT filter, better signal selection"
+- Result: 173 trades (up from 54!), 38.7% WR (up from 33.3%), -18.85% P&L (up from -43.04%)
+  - Trade count dramatically improved (173 vs 54)
+  - WR improved from 33.3% to 38.7%
+  - P&L improved from -43.04% to -18.85%
+  - All trades are LONG (SHORT filter worked too well — 0 SHORT trades)
+  - Profit Factor 1.11 (almost break-even)
+  - Best trade +39.23%, worst -14.66% (still catastrophic single-trade losses)
+  - Max DD 50%, Sharpe 0.65
+  - REMAINING: SL still too wide for some trades (-14.66%), no trailing stop
+
+---
+Task ID: v0.2.7
+Agent: Main
+Task: ATR-based SL/TP, trailing stop, expected-value path walking
+
+Problem:
+- v0.2.6 generated 173 trades with 38.7% WR but still -18.85% P&L
+- SL = expected_move can be 10-15% for some predictions, leading to catastrophic
+  single-trade losses (-14.66%, -13.74%, -13.36%)
+- No trailing stop — winning trades reverse and exit at SL instead of locking in profit
+- _walk_path() follows most frequent child, not most profitable
+- SL based on expected_move is arbitrary — doesn't adapt to market volatility
+
+Root cause analysis:
+- Expected_move of 10-15% produces SL at 10-15% from entry — way too wide.
+  With 1% base risk and these SL distances, position sizing reduces exposure
+  but the PnL% still shows the full move (-14%).
+- Without trailing stop, a trade that reaches +8% unrealized can reverse
+  all the way back to -5% SL before exiting. This destroys the R:R advantage.
+- Following the most frequent child in the Trie means we follow the most
+  COMMON outcome, not the most PROFITABLE one. A 40%-likely child with +5%
+  expected move is better than a 50%-likely child with +0.5%.
+- ATR (Average True Range) is the industry standard for setting stops
+  because it adapts to current volatility. Using fixed percentages ignores
+  that BTC volatility varies from 0.5%/hour to 5%/hour.
+
+Changes:
+1. ATR-based SL/TP: SL = max(1.5 × ATR_pct, 1.5%), capped at 5% max
+   - High ATR (volatile) → wider stops to avoid noise
+   - Low ATR (quiet) → tighter stops for better R:R
+   - 5% cap prevents catastrophic single-trade losses
+   - TP = SL × 2.0 (R:R = 2.0 by construction)
+2. Trailing stop: activates when unrealized profit > 50% of TP distance
+   - Once activated, SL trails at 1.0× ATR below current price (LONG)
+   - This locks in profit and lets winners run further
+   - Exit reason labeled "trailing_stop" (vs "stop_loss")
+3. Expected-value path walking in prediction.py:
+   - Changed _walk_path() to sort children by win_rate × abs(expected_move)
+   - Instead of following the most common child, follows the most profitable
+   - A 40%-likely child with +5% move now beats a 50%-likely +0.5% child
+4. Added compute_atr_pct() function for ATR calculation
+5. Added sl_price, tp_price, trailing_activated fields to PaperTrade
+6. min_risk_reward raised to 1.5 (ATR-based SL gives R:R=2.0)
+
+Files modified:
+- src/ppmt/engine/paper_trader.py: ATR computation, SL/TP, trailing stop, PaperTrade fields
+- src/ppmt/engine/prediction.py: _walk_path() expected-value sorting
+- src/ppmt/__init__.py: version 0.2.7
+- pyproject.toml: version 0.2.7
+- src/ppmt/cli/main.py: version 0.2.7
+- worklog-new.md: this entry
+
+Stage Summary:
 - Commit: (pending)
-- Expected: Higher WR (wider SL avoids noise exits), fewer but better SHORT trades,
-  more total trades (max_drawdown at 80% blocks fewer signals)
+- Expected: Higher WR (ATR-based SL avoids noise exits), fewer catastrophic losses
+  (5% SL cap), more profit from winners (trailing stop), better predictions
+  (EV-based path walking)

@@ -33,6 +33,8 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.text import Text
 
+import numpy as np
+
 from ppmt.data.storage import PPMTStorage
 from ppmt.data.classifier import AssetClassifier
 from ppmt.core.sax import SAXEncoder
@@ -43,6 +45,47 @@ from ppmt.risk.manager import RiskManager, RiskConfig
 
 
 console = Console()
+
+
+def compute_atr_pct(df, period: int = 14) -> np.ndarray:
+    """
+    Compute ATR (Average True Range) as a percentage of close price.
+
+    ATR measures volatility — higher ATR = more volatile = wider stops needed.
+    Expressing ATR as % of price makes it comparable across price levels.
+
+    Args:
+        df: OHLCV DataFrame
+        period: ATR lookback period (default 14)
+
+    Returns:
+        numpy array of ATR % values, same length as df
+    """
+    high = df['high'].values.astype(float)
+    low = df['low'].values.astype(float)
+    close = df['close'].values.astype(float)
+
+    # True Range = max(H-L, |H-prev_C|, |L-prev_C|)
+    prev_close = np.roll(close, 1)
+    prev_close[0] = close[0]
+    tr = np.maximum(
+        high - low,
+        np.maximum(
+            np.abs(high - prev_close),
+            np.abs(low - prev_close)
+        )
+    )
+
+    # Wilder's smoothing (exponential moving average)
+    atr = np.zeros_like(tr)
+    if len(tr) >= period:
+        atr[period - 1] = np.mean(tr[:period])
+        for i in range(period, len(tr)):
+            atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
+
+    # Convert to percentage of close price
+    atr_pct = np.where(close > 0, atr / close * 100, 0)
+    return atr_pct
 
 
 @dataclass
@@ -107,7 +150,13 @@ class PaperTrade:
     actual_move_pct: float = 0.0
     matched_pattern: list[str] = field(default_factory=list)
     exit_reason: str = ""
-    """Why the trade closed: 'take_profit', 'stop_loss', 'pattern_break', 'end_of_data'"""
+    """Why the trade closed: 'take_profit', 'stop_loss', 'trailing_stop', 'pattern_break', 'end_of_data'"""
+    sl_price: float = 0.0
+    """Stop loss price at entry."""
+    tp_price: float = 0.0
+    """Take profit price at entry."""
+    trailing_activated: bool = False
+    """Whether trailing stop was activated during this trade."""
 
 
 @dataclass
@@ -208,7 +257,7 @@ class PaperTrader:
             base_position_size_pct=0.01,  # 1% risk per trade (conservative while tuning)
             max_position_size_pct=0.04,
             min_position_size_pct=0.005,
-            min_risk_reward=1.0,         # R:R >= 1.0 needed (with TP=2*SL, we get R:R=2.0)
+            min_risk_reward=1.5,         # ATR-based SL gives R:R=2.0 by default
             max_daily_loss_pct=0.10,      # 10% daily loss limit
             max_drawdown_pct=0.80,        # 80% for paper trading (don't block signals while tuning)
             min_quality_score=0.0,
@@ -267,6 +316,13 @@ class PaperTrader:
         trie.propagate_metadata()
         console.print(f"[green]Metadata propagated: root now has {trie.root.metadata.historical_count} aggregated observations[/green]")
 
+        # Compute ATR for dynamic SL/TP sizing
+        # ATR adapts to current volatility — high ATR = wider stops, low ATR = tighter
+        atr_pct = compute_atr_pct(df, period=14)
+        valid_atr = atr_pct[atr_pct > 0]
+        if len(valid_atr) > 0:
+            console.print(f"  ATR(14): avg={np.mean(valid_atr):.2f}%, recent={atr_pct[-1]:.2f}%")
+
         # Create SAX encoder
         sax_encoder = SAXEncoder(
             alphabet_size=cfg.sax_alphabet_size,
@@ -317,7 +373,8 @@ class PaperTrader:
         console.print(f"  Data: {len(df)} candles, starting from index {start_candle}")
         console.print(f"  Trie: {trie.pattern_count} patterns")
         console.print(f"  Min confidence: {cfg.min_confidence:.0%}")
-        console.print(f"  Entry: move > 0.3%, probability > 20%\n")
+        console.print(f"  Entry: move > 1.0%, probability > 20%, ATR-based SL/TP")
+        console.print(f"  Trailing stop: activates at 50% of TP distance\n")
 
         # We iterate over SAX symbol positions instead of individual candles
         start_sym_idx = start_candle // cfg.sax_window_size
@@ -357,11 +414,39 @@ class PaperTrader:
 
             # Check SL/TP for open position
             if current_position is not None:
+                # === Trailing Stop Logic ===
+                # When unrealized profit exceeds 50% of TP distance, activate
+                # trailing stop. This locks in profit and lets winners run.
+                pos = risk_mgr._positions.get(cfg.symbol)
+                if pos and pos.tp_price is not None:
+                    entry = pos.entry_price
+                    if pos.direction == "LONG":
+                        unrealized_pct = (current_price - entry) / entry * 100
+                        tp_distance_pct = (pos.tp_price - entry) / entry * 100
+                    else:
+                        unrealized_pct = (entry - current_price) / entry * 100
+                        tp_distance_pct = (entry - pos.tp_price) / entry * 100
+
+                    # Activate trailing when profit > 50% of TP distance
+                    if not current_position.trailing_activated and tp_distance_pct > 0 and unrealized_pct >= tp_distance_pct * 0.5:
+                        current_position.trailing_activated = True
+
+                    # If trailing is active, move SL to protect gains
+                    if current_position.trailing_activated:
+                        current_atr = atr_pct[candle_idx] if candle_idx < len(atr_pct) else 2.0
+                        if pos.direction == "LONG":
+                            # Trail SL at 1.0× ATR below current price
+                            new_sl = max(pos.sl_price, current_price * (1 - current_atr / 100))
+                        else:
+                            # Trail SL at 1.0× ATR above current price
+                            new_sl = min(pos.sl_price, current_price * (1 + current_atr / 100))
+                        pos.sl_price = new_sl
+
                 sl_hit = risk_mgr.check_stop_loss(cfg.symbol, current_price)
                 tp_hit = risk_mgr.check_take_profit(cfg.symbol, current_price)
 
                 if sl_hit:
-                    # Close at stop loss
+                    # Close at stop loss (or trailing stop)
                     _, pnl = risk_mgr.close_position(cfg.symbol, current_price)
                     current_position.exit_price = current_price
                     current_position.exit_time = current_time
@@ -371,7 +456,7 @@ class PaperTrader:
                     else:
                         current_position.pnl_pct = (current_position.entry_price - current_price) / current_position.entry_price * 100
                     current_position.actual_move_pct = current_position.pnl_pct
-                    current_position.exit_reason = "stop_loss"
+                    current_position.exit_reason = "trailing_stop" if current_position.trailing_activated else "stop_loss"
 
                     result.trades.append(current_position)
                     trade_counter += 1
@@ -498,18 +583,21 @@ class PaperTrader:
                         else SignalType.ENTRY_SHORT
                     )
 
-                    # Compute SL/TP from expected_move
+                    # Compute SL/TP from ATR (Average True Range)
                     #
-                    # Key insight: BTC 1h has 1-2% noise per candle. SL < 2%
-                    # gets triggered by noise, not by wrong direction.
+                    # ATR-based stops adapt to current market volatility:
+                    #   - High ATR (volatile) → wider stops to avoid noise
+                    #   - Low ATR (quiet) → tighter stops for better R:R
                     #
-                    # New approach: SL = expected_move (full), TP = 2x expected_move
-                    # This gives R:R = 2.0 by construction with WIDE stops that
-                    # avoid noise triggers. Minimum SL = 2.0% for BTC 1h.
+                    # SL = max(1.5 × ATR_pct, 1.5%), capped at 5% max
+                    # TP = SL × 2.0 (R:R = 2.0 by construction)
                     #
-                    expected_move_abs = abs(prediction.expected_total_move_pct)
-                    sl_distance_pct = max(expected_move_abs, 2.0)   # SL = expected_move, min 2%
-                    tp_distance_pct = expected_move_abs * 2.0       # TP = 2x expected_move (R:R = 2.0)
+                    # The 5% cap prevents catastrophic single-trade losses.
+                    # The 1.5% floor ensures SL isn't too tight during low-vol periods.
+                    #
+                    current_atr_pct = atr_pct[candle_idx] if candle_idx < len(atr_pct) else 2.0
+                    sl_distance_pct = min(max(current_atr_pct * 1.5, 1.5), 5.0)
+                    tp_distance_pct = sl_distance_pct * 2.0  # R:R = 2.0
 
                     if prediction.direction == "LONG":
                         sl_price = current_price * (1 - sl_distance_pct / 100)
@@ -571,6 +659,8 @@ class PaperTrader:
                             risk_reward_ratio=signal.risk_reward_ratio,
                             expected_move_pct=signal.expected_move_pct,
                             matched_pattern=current_symbols,
+                            sl_price=sl_price,
+                            tp_price=tp_price,
                         )
                     else:
                         # Track rejection reasons
