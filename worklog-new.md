@@ -521,11 +521,68 @@ Config changes:
 - Fresh trie min_confidence: max(cfg.min_confidence, 0.20) (was proportional scaling)
 - Versions: __init__.py, pyproject.toml, cli/main.py → 0.3.2
 
+v0.3.2 RESULTS (user test — 2 scenarios):
+
+Run 1 — Fresh Build (ppmt build --force → 2420 patterns, min_confidence raised to 20%):
+- 467 trades, W:205 L:262, WR 43.9%, P&L +49.66%
+- Capital: $10,000 → $14,966.15
+- Profit Factor 1.10, Max DD 51.2%, Sharpe 0.64
+- Best trade: +12.09%, Worst trade: -10.71%
+- Avg confidence: 15.3%, Avg quality: 0.13
+- Fresh trie detected (0 trading observations): min_confidence 10% → 20%
+- Living Trie: 467 observations, 444 new nodes, Trie grew 2420→2864
+- Almost all trades are LONG, very few SHORTs
+
+Run 2 — Merged Build (ppmt build, no --force → 3643 patterns, 9588 obs):
+- 457 trades, W:285 L:172, WR 62.4%, P&L +12,112.73%
+- Capital: $10,000 → $1,221,273.04
+- Profit Factor 2.39, Max DD 18.6%, Sharpe 6.14
+- Best trade: +16.26%, Worst trade: -9.79%
+- Avg confidence: 22.6%, Avg quality: 0.18
+- Risk rejections: Daily loss limit reached: 21
+- Living Trie: 457 observations, 197 new nodes, Trie grew 3643→3840
+- Many SHORT trades winning (trades 10, 13, 18, 24, 25, 32, 36, 39, 40, 51, 52...)
+- Merge details: 2864 existing + 2420 new → 3643 patterns, 3199 merged, 23970 obs added
+
+COMPARISON TABLE (v0.3.1 vs v0.3.2):
+| Scenario | Version | Patterns | Trades | WR | P&L | PF | Sharpe | MaxDD | AvgConf |
+|----------|---------|----------|--------|-----|-----|-----|--------|-------|---------|
+| Fresh (--force) | v0.3.1 | 2420 | 486 | 45.3% | +76% | 1.16 | 1.01 | 45.3% | 15.1% |
+| Fresh (--force) | v0.3.2 | 2420 | 467 | 43.9% | +50% | 1.10 | 0.64 | 51.2% | 15.3% |
+| Merged Build | v0.3.1 | 3837 | 446 | 64.8% | +37,397% | 2.83 | 7.42 | 14.8% | 24.4% |
+| Merged Build | v0.3.2 | 3643 | 457 | 62.4% | +12,113% | 2.39 | 6.14 | 18.6% | 22.6% |
+
+CRITICAL FINDING: Adaptive confidence fix did NOT improve fresh builds
+- Raising min_confidence from 10%→20% reduced trades (486→467) but WR DROPPED (45.3%→43.9%)
+- The 20% threshold filtered some good trades too — avg confidence 15.3% means most trades
+  barely pass, but the ones that do are NOT better quality
+- The fundamental problem is NOT the threshold — without metadata, confidence scores are
+  unreliable regardless of threshold. A 20% confidence on a fresh trie is as meaningless
+  as a 10% confidence because there's no trading data to calibrate it against.
+- v0.3.2 fresh P&L also dropped (+76% → +50%) because fewer trades = less compounding
+
+WHY v0.3.2 merged is lower than v0.3.1 merged:
+- v0.3.2 merged trie has only 467 trading observations (from 1 fresh run)
+- v0.3.1 merged trie had 9588 accumulated observations (from multiple previous runs)
+- This v0.3.2 test started from scratch (--force first), so the Living Trie had minimal metadata
+- If user does another ppmt build + ppmt run cycle, results should improve further
+
+POSITIVE: Risk management working
+- 21 "Daily loss limit reached" rejections in merged run
+- This prevents catastrophic drawdown days
+
+POSITIVE: SHORT diversification in merged run
+- Many winning SHORT trades visible (trades 10, 13, 18, 24, 25, 32, 36, 39, 40, etc.)
+- Fresh run: almost no SHORT winners
+
 Stage Summary:
-- v0.3.2 = FIX broken adaptive confidence scaling
+- v0.3.2 = FIX broken adaptive confidence scaling (trading_observations counter)
 - Root cause: root_meta.confidence always ~51% (propagation artifact)
 - Fix: use trading_observations counter as reliable freshness indicator
 - Fresh tries now get min_confidence=0.20 (vs 0.10 for rich tries)
-- Expected improvement for fresh builds: fewer but better trades → higher WR
-- Merged builds and existing Living Tries: no change (already working great)
+- RESULT: Fix did NOT improve fresh builds — WR dropped from 45.3% to 43.9%, P&L from +76% to +50%
+- The problem is fundamental: without metadata, confidence scores are uncalibrated
+- Raising the threshold just reduces trades without improving quality
+- Merged build still excellent: +12,113% P&L, 62.4% WR (lower than v0.3.1 due to less accumulated metadata)
+- The correct workflow is iterative: ppmt build → ppmt run → repeat (each cycle improves the Living Trie)
 - Files modified: trie.py, paper_trader.py, __init__.py, pyproject.toml, cli/main.py
