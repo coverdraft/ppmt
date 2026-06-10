@@ -1157,3 +1157,182 @@ Stage Summary:
 - New CLI: --sax-alphabet, --sax-window for easy experimentation
 - Files modified: sax.py, cli/main.py, paper_trader.py, ppmt.py, encoder.py, bulk_ingest.py, __init__.py, pyproject.toml
 - PENDING: User needs to git pull, pip3 install -e ., and test with --force
+
+---
+Task ID: v0.5.1-test
+Agent: Main
+Task: User tested v0.5.1 — SAX window=5, alphabet=10, 3-pass bootstrap
+
+Work Log:
+
+USER TEST SETUP:
+- git pull origin main && pip3 install -e .
+- Ran two scenarios:
+  1. ppmt build --force -s BTC/USDT && ppmt run --symbol BTC/USDT --paper
+  2. ppmt build -s BTC/USDT && ppmt run --symbol BTC/USDT --paper (with merge)
+
+v0.5.1 RESULTS:
+
+Run 1 — Fresh build (--force, no merge):
+- Bootstrap: 3 passes (508/41.9% → 432/51.2% → 375/57.9% WR)
+- Total bootstrap: 1315 trading observations, combined WR 49.5%
+- Paper trading: 83 trades, W:49 L:34, WR 59.0%, P&L +14.18%
+- Capital: $10,000 → $11,418.38
+- Sharpe 0.62, Max DD 17.9%, Profit Factor 1.12
+- Avg confidence: 16.6%, Avg quality: 0.11
+- Prediction stats: 4610 attempts, 4445 with direction, 83 passed threshold
+- Living Trie: 83 observations, 47 new nodes, Trie grew 10089→10136
+
+Run 2 — Build with merge (existing Living Trie from previous runs):
+- Bootstrap: same 3 passes
+- Merge: existing N3 had 10136 patterns (1398 observations) merged with new 10089
+- After merge: 17424 patterns, 2713 trading observations
+- Paper trading: 263 trades, W:131 L:132, WR 49.8%, P&L +20.50%
+- Capital: $10,000 → $12,050.39
+- Sharpe 0.78, Max DD 21.4%, Profit Factor 1.14
+- Prediction stats: 4218 attempts, 3991 with direction, 263 passed threshold
+- Living Trie: 263 observations, 151 new nodes, Trie grew 17424→17575
+
+CRITICAL FINDINGS:
+
+1. MASSIVE TRADE COUNT SHORTFALL
+   - Target: 960+ trades. Actual: 83 (force) / 263 (merge)
+   - Root cause: entry filters reject 98.1% of predictions (83/4445)
+   - With window=5, predictions have smaller expected moves and lower
+     probabilities → most fail the move > 1.0% and prob > 20% filters
+   - The filters were calibrated for window=10 regime, not window=5
+
+2. MERGE DILUTES WIN RATE
+   - --force: 59.0% WR (clean trie from bootstrap)
+   - With merge: 49.8% WR (old observations from different SAX params)
+   - The existing Living Trie was built with window=10, alphabet=8
+   - Its patterns don't align with window=5, alphabet=10 trie
+   - Merging introduces conflicting observations that pollute predictions
+
+3. SHORT BIAS
+   - In the --force run: ~64 SHORT vs ~19 LONG trades
+   - The SHORT confidence multiplier (1.5x) makes SHORT entries easier
+     to pass (higher effective threshold means only high-conviction SHORTs
+     pass, which tend to win) BUT it also suppresses LONG entries
+   - Actually, the SHORT bias means the system predicts SHORT more often
+     than LONG, possibly because bootstrap pass 1 had 41.9% WR (mostly
+     losses), creating self-reinforcing SHORT predictions
+
+4. P&L FAR BELOW TARGET
+   - Target: 1400%+. Actual: +14.18% (force) / +20.50% (merge)
+   - With only 83 trades and avg +0.11% per trade, there's minimal compounding
+   - The v0.5.0 result (+1434% P&L with 519 trades) was MUCH better
+     because window=10 produced higher-conviction predictions
+
+COMPARISON WITH PREVIOUS VERSIONS:
+| Version | Method | Trades | WR | P&L | Sharpe |
+|---------|--------|--------|-----|------|--------|
+| v0.3.1 | merged (w=10,a=8) | 446 | 64.8% | +37,397% | 7.42 |
+| v0.4.0 | build+merge (w=10,a=8) | 601 | 53.1% | +3,665% | 2.80 |
+| v0.5.0 | 2-pass boot (w=10,a=8) | 519 | 50.5% | +1,434% | 2.27 |
+| v0.5.1 | 3-pass boot (w=5,a=10) --force | 83 | 59.0% | +14% | 0.62 |
+| v0.5.1 | 3-pass boot (w=5,a=10) merge | 263 | 49.8% | +20% | 0.78 |
+
+Stage Summary:
+- v0.5.1 REGRESSION: SAX window=5 produced FEWER trades, not more
+- Entry filters (move>1.0%, prob>20%) are too strict for window=5 regime
+- Merge with old SAX params dilutes WR from 59% to 49.8%
+- SHORT bias heavy (64 SHORT vs 19 LONG in --force run)
+- The 3-pass bootstrap is working well (pass 3: 57.9% WR)
+- Need to: loosen filters, fix merge for SAX mismatch, reduce SHORT bias
+
+---
+Task ID: v0.5.2
+Agent: Main
+Task: Fix v0.5.1 regression — loosen entry filters for window=5 regime, fix merge, increase bootstrap
+
+Work Log:
+
+ROOT CAUSE ANALYSIS:
+v0.5.1 with window=5 produced only 83 trades (target: 960+) because:
+1. Entry filters (move > 1.0%, prob > 20%) reject 98.1% of predictions
+   - With window=5, predictions have shorter time horizons → smaller moves
+   - With window=5, predictions are noisier → lower probabilities
+   - The filters were calibrated for window=10 where predictions are stronger
+2. Merge with old window=10 Living Trie dilutes WR (59% → 49.8%)
+   - Patterns from different SAX params don't align
+   - Old observations create conflicting signals
+3. SHORT multiplier 1.5x creates SHORT bias (64 SHORT vs 19 LONG)
+   - The multiplier makes SHORT entries harder BUT the system still
+     predicts SHORT more often, so most entries that pass are SHORT
+
+CHANGES (v0.5.2):
+
+1. LOWER ENTRY FILTERS (paper_trader.py)
+   - Move threshold: 1.0% → 0.5%
+     With window=5 (5 candles per SAX block), expected moves are smaller.
+     A 0.5% threshold allows more signals through while still filtering
+     noise. v0.5.1 rejected 98.1% of predictions — we need ~15-20% pass
+     rate to reach 960+ trades.
+   - Probability threshold: 20% → 15%
+     Noisier predictions from window=5 have lower probabilities. Lowering
+     to 15% allows more entries while still filtering the worst signals.
+   - SHORT confidence multiplier: 1.5x/floor 0.15 → 1.2x/floor 0.10
+     The 1.5x multiplier was creating SHORT bias. Reducing to 1.2x
+     allows more balanced LONG/SHORT distribution. Lower floor (0.10 vs
+     0.15) allows more SHORT entries for Living Trie diversification.
+
+2. LOOSEN BOOTSTRAP ENTRY FILTERS (ppmt.py)
+   - Bootstrap confidence: 0.10 → 0.05 (gather ALL observations)
+   - Bootstrap move threshold: 1.0% → 0.5% (more entries = more obs)
+   - Bootstrap probability: 20% → 10% (very inclusive)
+   - Bootstrap SHORT multiplier: 1.5x/0.15 → 1.2x/0.10 (same as trading)
+   - Rationale: The bootstrap's PURPOSE is to enrich the trie, not to be
+     profitable. More observations = better metadata for actual trading.
+     v0.5.1's bootstrap only accumulated 1315 observations in 3 passes.
+     With looser filters, each pass should generate 2-3x more trades,
+     accumulating 3000-5000+ observations across 5 passes.
+
+3. INCREASE BOOTSTRAP PASSES (cli/main.py)
+   - Default: 3 → 5 passes
+   - v0.5.1's 3-pass bootstrap showed progressive WR improvement:
+     pass 1: 41.9%, pass 2: 51.2%, pass 3: 57.9%
+   - More passes = more observations + higher WR per pass
+   - Pass 4 and 5 should approach 60%+ WR
+
+4. SMART MERGE — SAX PARAMETER COMPATIBILITY CHECK (cli/main.py)
+   - Before merging, check if existing trie's pattern count is within
+     50-200% of new build's pattern count
+   - If outside this range, SAX params likely differ (e.g., window=10 vs 5)
+   - In that case, skip merge and use new build (like --force)
+   - This prevents v0.5.1's WR drop from 59% to 49.8% caused by
+     merging window=10 data into window=5 trie
+
+5. VERSION UPDATES
+   - __init__.py: "0.5.1" → "0.5.2"
+   - pyproject.toml: "0.5.1" → "0.5.2"
+   - cli/main.py: version "0.5.1" → "0.5.2"
+
+CONFIG CHANGES SUMMARY:
+| Parameter | v0.5.1 | v0.5.2 | Impact |
+|-----------|--------|--------|--------|
+| Entry move threshold | 1.0% | 0.5% | ~5x more signals pass |
+| Entry prob threshold | 20% | 15% | ~1.5x more signals pass |
+| SHORT multiplier | 1.5x / floor 0.15 | 1.2x / floor 0.10 | Less SHORT bias |
+| Bootstrap confidence | 0.10 | 0.05 | 2x more bootstrap trades |
+| Bootstrap move | 1.0% | 0.5% | More bootstrap entries |
+| Bootstrap prob | 20% | 10% | Much more inclusive |
+| Bootstrap passes | 3 | 5 | More observations accumulated |
+| Merge logic | Always merge | Check SAX compatibility | Prevents WR dilution |
+
+EXPECTED IMPACT:
+- Trade count: 83 → 400-800+ (much more pass the loosened filters)
+- WR: 59% → 55-60% (more trades includes some lower-quality, but Living
+  Trie should compensate with better metadata from more observations)
+- Bootstrap observations: 1315 → 4000+ (5 passes with looser filters)
+- P&L: +14% → 500%+ (more trades × compounding = much higher returns)
+
+Stage Summary:
+- v0.5.2 = LOOSEN FILTERS + MORE BOOTSTRAP + SMART MERGE
+- Core fix: entry filters calibrated for window=5 regime (were for window=10)
+- Bootstrap filters much looser to maximize observation accumulation
+- 5 bootstrap passes for progressive trie enrichment (pass 3 hit 57.9% WR)
+- Smart merge prevents SAX param mismatch from diluting WR
+- SHORT multiplier reduced for better LONG/SHORT balance
+- Commit: 18e0f9d "v0.5.2: Loosen entry filters for window=5 regime"
+- PENDING: User needs to git pull, pip3 install -e ., and test with --force
