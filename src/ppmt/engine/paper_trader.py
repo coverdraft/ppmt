@@ -208,7 +208,9 @@ class PaperTrader:
             base_position_size_pct=0.02,
             max_position_size_pct=0.06,
             min_position_size_pct=0.005,
-            min_risk_reward=1.5,  # With expected_move-based SL, R:R >= 2.0
+            min_risk_reward=0.5,     # Permissive for paper trading to validate signals
+            max_daily_loss_pct=0.10, # 10% daily loss limit (was 5%)
+            max_drawdown_pct=0.50,   # 50% max drawdown for paper trading (was 15%)
             min_quality_score=0.0,
             min_confidence=0.0,
         )
@@ -495,13 +497,14 @@ class PaperTrader:
                     # R:R = 0.2-0.5 which gets rejected by RiskManager.
                     #
                     # Instead, we use a fraction of expected_move for SL:
-                    #   SL = 50% of expected_move (minimum 1% for noise protection)
+                    #   SL = 50% of expected_move (minimum 0.5% for noise protection)
                     #   TP = 100% of expected_move
-                    # This guarantees R:R >= 2.0 by construction.
+                    # This gives R:R = 2.0 for all moves >= 1%,
+                    # and R:R = expected_move / 0.5 for moves < 1%.
                     #
                     expected_move_abs = abs(prediction.expected_total_move_pct)
                     sl_fraction = 0.5   # SL at 50% of expected move
-                    min_sl_pct = 1.0    # Minimum SL distance for noise protection
+                    min_sl_pct = 0.5    # Minimum SL distance for noise protection
                     sl_distance_pct = max(expected_move_abs * sl_fraction, min_sl_pct)
                     tp_distance_pct = expected_move_abs
 
