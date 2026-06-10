@@ -111,6 +111,49 @@ Work Log:
 - Updated versions to 0.2.5
 
 Stage Summary:
-- Commit: (pending push)
-- Expected: Far more trades generated. Previous 2518 signals that passed threshold
-  should now mostly pass risk checks instead of being blocked by drawdown/R:R.
+- Commit: 9fcaa8b "v0.2.5: Fix max drawdown circuit breaker + R:R for small moves + worklog"
+- Result: 54 trades (up from 7!), -43.04%, WR 33.3%, Max DD 51.3%
+  - Trade count dramatically improved (54 vs 7)
+  - BUT: 33% WR is terrible (worse than random 50%)
+  - 2288 signals blocked by "Max drawdown reached: 51.25%" (even 50% was hit)
+  - SHORT signals consistently lose (most SHORT trades hit stop_loss)
+  - Many trades exit at SL with small losses (-1.91%, -2.41%, -2.65%) suggesting
+    SL is too tight for BTC 1h noise (1-2% normal fluctuation)
+
+---
+Task ID: v0.2.6
+Agent: Main
+Task: Improve trade quality - wider SL, SHORT filter, better signal selection
+
+Problem:
+- v0.2.5 generated 54 trades but with 33.3% WR (worse than random)
+- SL at 0.5% minimum gets triggered by normal BTC noise (1-2% per hour)
+- SHORT signals are consistently losing (BTC trends up long-term)
+- 2288 signals blocked by max drawdown (even at 50%)
+- Most signals have only 10% confidence (basically noise)
+
+Root cause analysis:
+- SL = 0.5% of price is INSANE for crypto. BTC 1h ATR is typically 1-2%.
+  A 0.5% SL gets hit by a single noisy candle, not by wrong direction.
+- SHORT signals on BTC are fundamentally unreliable because BTC trends up.
+  The Trie has fewer SHORT patterns and they have lower WR.
+- Low confidence (10%) signals are indistinguishable from noise.
+
+Changes:
+1. SL/TP redesigned: SL = expected_move (full), TP = 2x expected_move, min SL = 2.0%
+   - This gives R:R = 2.0 by construction with WIDE stops
+   - 2% minimum SL avoids noise triggers on BTC 1h
+2. SHORT filter: Require confidence >= 20% for SHORT (vs 10% for LONG)
+   - SHORT predictions need higher conviction since BTC trends up
+3. Minimum expected_move raised from 0.3% to 1.0%
+   - Moves < 1% are noise on BTC 1h, not actionable signals
+4. Position size reduced from 2% to 1% base risk
+   - Conservative while tuning signal quality
+5. max_drawdown_pct increased from 50% to 80% for paper trading
+   - Don't block signals while still tuning the strategy
+6. min_risk_reward set to 1.0 (TP=2*SL guarantees R:R=2.0 anyway)
+
+Stage Summary:
+- Commit: (pending)
+- Expected: Higher WR (wider SL avoids noise exits), fewer but better SHORT trades,
+  more total trades (max_drawdown at 80% blocks fewer signals)

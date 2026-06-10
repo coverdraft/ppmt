@@ -205,12 +205,12 @@ class PaperTrader:
     def __init__(self, config: Optional[PaperTraderConfig] = None):
         self.config = config or PaperTraderConfig()
         self.risk_config = RiskConfig(
-            base_position_size_pct=0.02,
-            max_position_size_pct=0.06,
+            base_position_size_pct=0.01,  # 1% risk per trade (conservative while tuning)
+            max_position_size_pct=0.04,
             min_position_size_pct=0.005,
-            min_risk_reward=0.5,     # Permissive for paper trading to validate signals
-            max_daily_loss_pct=0.10, # 10% daily loss limit (was 5%)
-            max_drawdown_pct=0.50,   # 50% max drawdown for paper trading (was 15%)
+            min_risk_reward=1.0,         # R:R >= 1.0 needed (with TP=2*SL, we get R:R=2.0)
+            max_daily_loss_pct=0.10,      # 10% daily loss limit
+            max_drawdown_pct=0.80,        # 80% for paper trading (don't block signals while tuning)
             min_quality_score=0.0,
             min_confidence=0.0,
         )
@@ -473,9 +473,18 @@ class PaperTrader:
                 if prediction.overall_probability > 0.5:
                     effective_min_conf = max(cfg.min_confidence * 0.5, 0.05)
 
+                # SHORT signals require higher confidence because BTC trends up
+                # and SHORT predictions from the Trie are less reliable.
+                # LONG: min_confidence = cfg.min_confidence (default 10%)
+                # SHORT: min_confidence = max(cfg.min_confidence * 2, 0.20) (at least 20%)
+                if prediction.direction == "SHORT":
+                    effective_min_conf = max(effective_min_conf * 2, 0.20)
+
+                # Minimum expected move: 1.0% (was 0.3%)
+                # Moves < 1% are mostly noise on BTC 1h timeframe
                 if (prediction.direction != "FLAT"
                     and prediction.confidence >= effective_min_conf
-                    and abs(prediction.expected_total_move_pct) > 0.3
+                    and abs(prediction.expected_total_move_pct) > 1.0
                     and prediction.overall_probability > 0.2):
 
                     pred_passed_threshold += 1
@@ -489,24 +498,18 @@ class PaperTrader:
                         else SignalType.ENTRY_SHORT
                     )
 
-                    # Compute SL/TP from expected_move (NOT max_drawdown_pct)
+                    # Compute SL/TP from expected_move
                     #
-                    # Using max_drawdown_pct for SL produces terrible R:R ratios
-                    # because max_drawdown (worst observed drawdown) is typically
-                    # 2-4x larger than expected_move (average move). This gives
-                    # R:R = 0.2-0.5 which gets rejected by RiskManager.
+                    # Key insight: BTC 1h has 1-2% noise per candle. SL < 2%
+                    # gets triggered by noise, not by wrong direction.
                     #
-                    # Instead, we use a fraction of expected_move for SL:
-                    #   SL = 50% of expected_move (minimum 0.5% for noise protection)
-                    #   TP = 100% of expected_move
-                    # This gives R:R = 2.0 for all moves >= 1%,
-                    # and R:R = expected_move / 0.5 for moves < 1%.
+                    # New approach: SL = expected_move (full), TP = 2x expected_move
+                    # This gives R:R = 2.0 by construction with WIDE stops that
+                    # avoid noise triggers. Minimum SL = 2.0% for BTC 1h.
                     #
                     expected_move_abs = abs(prediction.expected_total_move_pct)
-                    sl_fraction = 0.5   # SL at 50% of expected move
-                    min_sl_pct = 0.5    # Minimum SL distance for noise protection
-                    sl_distance_pct = max(expected_move_abs * sl_fraction, min_sl_pct)
-                    tp_distance_pct = expected_move_abs
+                    sl_distance_pct = max(expected_move_abs, 2.0)   # SL = expected_move, min 2%
+                    tp_distance_pct = expected_move_abs * 2.0       # TP = 2x expected_move (R:R = 2.0)
 
                     if prediction.direction == "LONG":
                         sl_price = current_price * (1 - sl_distance_pct / 100)
