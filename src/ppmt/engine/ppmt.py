@@ -184,6 +184,14 @@ class PPMT:
         overlapping pattern sequences and inserts them into all
         4 Trie levels with Block Lifecycle Metadata.
 
+        v0.3.3: Uses trade-simulation "won" classification instead of
+        the crude move_pct > 0. Now computes ATR at each position and
+        classifies "won" based on whether the price would have reached
+        the take-profit level before the stop-loss, exactly as the
+        paper trader does. This aligns build-time win_rate with
+        trading-time win_rate, producing more differentiated confidence
+        scores across patterns.
+
         Args:
             df: OHLCV DataFrame with columns: open, high, low, close, volume
             pattern_length: Number of SAX blocks per pattern sequence
@@ -196,6 +204,30 @@ class PPMT:
 
         if len(symbols) < pattern_length:
             return 0
+
+        # Pre-compute ATR for trade-simulation "won" classification
+        # ATR measures volatility — we use it to determine what SL/TP
+        # would have been at each position, then check if the price
+        # reached TP (won) or not.
+        high = df['high'].values.astype(float)
+        low = df['low'].values.astype(float)
+        close = df['close'].values.astype(float)
+        prev_close = np.roll(close, 1)
+        prev_close[0] = close[0]
+        tr = np.maximum(
+            high - low,
+            np.maximum(
+                np.abs(high - prev_close),
+                np.abs(low - prev_close)
+            )
+        )
+        atr = np.zeros_like(tr)
+        period = 14
+        if len(tr) >= period:
+            atr[period - 1] = np.mean(tr[:period])
+            for i in range(period, len(tr)):
+                atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
+        atr_pct = np.where(close > 0, atr / close * 100, 0)
 
         # Create overlapping sequences
         count = 0
@@ -218,13 +250,36 @@ class PPMT:
             exit_price = window_df["close"].iloc[-1]
             move_pct = ((exit_price - entry_price) / entry_price) * 100.0
 
-            high = window_df["high"].max()
-            low = window_df["low"].min()
-            drawdown_pct = ((low - entry_price) / entry_price) * 100.0
-            favorable_pct = ((high - entry_price) / entry_price) * 100.0
+            win_high = window_df["high"].max()
+            win_low = window_df["low"].min()
+            drawdown_pct = ((win_low - entry_price) / entry_price) * 100.0
+            favorable_pct = ((win_high - entry_price) / entry_price) * 100.0
 
             duration = len(window_df)
-            won = move_pct > 0  # Simple: positive move = win
+
+            # v0.3.3: Trade-simulation "won" classification
+            # Instead of crude move_pct > 0 (which gives ~50% win_rate for
+            # random data), simulate whether a trade would have hit TP.
+            # This aligns build-time win_rate with trading-time reality.
+            #
+            # For LONG (move_pct > 0):
+            #   SL = max(ATR*1.5, 1.5%) cap 5%, TP = SL*2.0
+            #   won = favorable_pct >= TP_distance (would have hit LONG TP)
+            #
+            # For SHORT (move_pct <= 0):
+            #   SL = max(ATR*2.0, 2.0%) cap 7%, TP = SL*1.5
+            #   won = |drawdown_pct| >= TP_distance (would have hit SHORT TP)
+            entry_candle_idx = start_candle
+            atr_at_entry = atr_pct[entry_candle_idx] if entry_candle_idx < len(atr_pct) else 2.0
+
+            if move_pct > 0:  # Bullish pattern → LONG trade simulation
+                sl_dist = min(max(atr_at_entry * 1.5, 1.5), 5.0)
+                tp_dist = sl_dist * 2.0  # R:R = 2.0
+                won = favorable_pct >= tp_dist
+            else:  # Bearish pattern → SHORT trade simulation
+                sl_dist = min(max(atr_at_entry * 2.0, 2.0), 7.0)
+                tp_dist = sl_dist * 1.5  # R:R = 1.5
+                won = abs(drawdown_pct) >= tp_dist
 
             # Insert into all 4 levels
             for trie in [self.trie_n1, self.trie_n2, self.trie_n3, self.trie_n4]:

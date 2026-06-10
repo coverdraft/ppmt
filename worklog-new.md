@@ -586,3 +586,97 @@ Stage Summary:
 - Merged build still excellent: +12,113% P&L, 62.4% WR (lower than v0.3.1 due to less accumulated metadata)
 - The correct workflow is iterative: ppmt build → ppmt run → repeat (each cycle improves the Living Trie)
 - Files modified: trie.py, paper_trader.py, __init__.py, pyproject.toml, cli/main.py
+
+---
+Task ID: v0.3.3
+Agent: Main
+Task: Fix fresh build problem at the root — trade-simulation "won" classification during build + revert counterproductive adaptive scaling
+
+Work Log:
+
+ROOT CAUSE ANALYSIS (deep dive into code):
+The explore agent initially reported that propagate_metadata() was NOT called during build,
+but this was WRONG — it IS called at lines 243-248 of ppmt.py. The real problem is:
+
+1. BUILD-TIME "won" CLASSIFICATION IS TOO CRUDE
+   - Code: `won = move_pct > 0` (line 227 in ppmt.py)
+   - This means a +0.01% move counts as "won" → ~50% win_rate for ALL patterns
+   - No differentiation between strong and weak patterns
+   - During TRADING: "won" means price hit TP before SL → much harder condition
+   - Build-time win_rate is systematically INFLATED vs trading-time win_rate
+   - The Bayesian confidence formula (metadata.py lines 102-119) uses prior_strength=10
+   - With ~2 obs/pattern and ~50% WR: confidence = 0.5 * 0.399 = 0.20 for terminal nodes
+   - But PredictionEngine._compute_confidence() further reduces with depth_penalty,
+     cont_bonus, and sample_factor → avg output confidence ~15%
+   - All patterns look equally mediocre → can't separate good from bad
+
+2. ADAPTIVE CONFIDENCE SCALING (20% threshold) IS COUNTERPRODUCTIVE
+   - v0.3.2 proved: raising min_confidence from 10%→20% for fresh tries WORSENS results
+   - WR dropped from 45.3% → 43.9%, P&L from +76% → +50%
+   - The threshold filters some good trades along with bad ones
+   - The problem is NOT the threshold — it's the metadata quality
+
+3. ~2 OBSERVATIONS PER PATTERN IS STATISTICALLY WEAK
+   - 4,789 observations spread across 2,420 unique patterns ≈ 2 obs/pattern
+   - Bayesian prior (strength=10) dominates → confidence shrinks toward 0.5
+   - After propagation, intermediate nodes aggregate children but still limited
+
+CHANGES (v0.3.3):
+
+1. TRADE-SIMULATION "won" CLASSIFICATION DURING BUILD (ppmt.py)
+   - Replaced `won = move_pct > 0` with ATR-based trade simulation
+   - For each pattern window, compute ATR at entry position
+   - For BULLISH patterns (move_pct > 0):
+     - SL = max(ATR*1.5, 1.5%) cap 5%, TP = SL*2.0 (same as paper trader LONG)
+     - won = favorable_pct >= TP_distance (price would have hit LONG TP)
+   - For BEARISH patterns (move_pct <= 0):
+     - SL = max(ATR*2.0, 2.0%) cap 7%, TP = SL*1.5 (same as paper trader SHORT)
+     - won = |drawdown_pct| >= TP_distance (price would have hit SHORT TP)
+   - This aligns build-time win_rate with trading-time win_rate
+   - Expected: much lower but more realistic win_rates (~25-35% vs ~50%)
+   - Patterns that produce strong moves will have HIGHER win_rates
+   - Patterns that produce weak moves will have LOWER win_rates
+   - This creates the DIFFERENTIATION that the prediction engine needs
+
+2. REVERTED ADAPTIVE CONFIDENCE SCALING (paper_trader.py)
+   - Removed the min_confidence 0.20 → 0.10 raise for fresh tries
+   - v0.3.2 proved this was counterproductive (WR dropped, P&L dropped)
+   - With trade-simulation "won", confidence scores are naturally more
+     differentiated, so the threshold doesn't need to be raised
+   - Fresh tries still detected via trading_observations == 0, but only
+     print a warning message instead of raising the threshold
+   - Keeping trading_observations counter for future use
+
+3. PRE-COMPUTED ATR IN BUILD (ppmt.py)
+   - Added ATR computation at the start of build() method
+   - Uses same Wilder's smoothing (period=14) as paper_trader.py
+   - ATR array indexed by candle position for each pattern window
+
+Config changes:
+- Build "won" classification: move_pct > 0 → ATR-based trade simulation
+- Adaptive confidence scaling: min_confidence raise REMOVED (reverted)
+- Fresh trie message: now just a warning, no threshold change
+- Versions: __init__.py, pyproject.toml, cli/main.py → 0.3.3
+
+EXPECTED IMPACT:
+- Fresh builds should have more differentiated confidence scores
+- Build-time win_rate will drop from ~50% to ~25-35% (more realistic)
+- Patterns with strong moves will have higher win_rate → higher confidence
+- Patterns with weak moves will have lower win_rate → lower confidence
+- The prediction engine can now distinguish good patterns from bad
+- This should IMPROVE fresh build WR without needing a higher threshold
+- Merged builds: minimal impact (Living Trie metadata already overrides build metadata)
+
+KEY INSIGHT:
+The root cause of the fresh build problem was never missing propagation or
+wrong thresholds — it was that build-time metadata was INFLATED (50% WR for
+all patterns). The trade-simulation "won" classification fixes this at the
+source by making build metadata reflect actual trading outcomes.
+
+Stage Summary:
+- v0.3.3 = FIX fresh build at the root — trade-simulation "won" during build
+- Root cause: build-time `won = move_pct > 0` inflated win_rate to ~50% for all patterns
+- Fix: ATR-based trade simulation classifies "won" = would have hit TP (same SL/TP as paper trader)
+- Also reverted counterproductive adaptive scaling (20% threshold made things worse)
+- Expected: more differentiated confidence scores → better pattern selection → higher WR
+- Files modified: ppmt.py, paper_trader.py, __init__.py, pyproject.toml, cli/main.py

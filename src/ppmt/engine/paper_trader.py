@@ -511,23 +511,16 @@ class PaperTrader:
         pred_engine = PredictionEngine(trie, prediction_depth=cfg.pattern_length)
         risk_mgr = RiskManager(capital=cfg.initial_capital, config=self.risk_config)
 
-        # v0.3.2: Adaptive confidence scaling for fresh tries
-        # When the trie has NO trading observations (fresh build), predictions
-        # barely pass the 0.10 threshold, leading to low-quality trades (45.3% WR
-        # with fresh trie vs 64.8% with rich trie). We detect fresh tries by
-        # checking trading_observations — a count of actual trade outcomes
-        # recorded via the Living Trie. Build-time metadata propagation gives
-        # root_meta.confidence ~51% for ALL tries (even fresh), so that's not
-        # a useful freshness indicator.
+        # v0.3.3: Reverted adaptive confidence scaling (was raising min_confidence
+        # to 0.20 for fresh tries). v0.3.2 proved this was COUNTERPRODUCTIVE:
+        # fresh WR dropped from 45.3% (v0.3.1, no scaling) to 43.9% (v0.3.2, 20%).
+        # The fix is NOT a higher threshold but better build-time metadata.
+        # v0.3.3's trade-simulation "won" classification during build produces
+        # more differentiated win_rates, so confidence scores are naturally
+        # more meaningful even for fresh tries.
         if trie.trading_observations == 0:
-            # Fresh trie with no trading metadata — raise threshold to filter
-            # low-confidence predictions. With avg prediction confidence ~15%,
-            # a min_confidence of 0.20 filters the weakest signals while still
-            # allowing enough trades for the Living Trie to learn from.
-            original_min = cfg.min_confidence
-            cfg.min_confidence = max(cfg.min_confidence, 0.20)
-            console.print(f"  [yellow]Fresh trie detected (0 trading observations): "
-                          f"min_confidence {original_min:.0%} → {cfg.min_confidence:.0%}[/yellow]")
+            console.print(f"  [yellow]Fresh trie detected (0 trading observations) — "
+                          f"v0.3.3 trade-simulation build should provide better metadata[/yellow]")
         else:
             console.print(f"  [green]Trie has {trie.trading_observations} trading observations "
                           f"— metadata quality: good[/green]")
