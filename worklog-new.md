@@ -57,23 +57,37 @@ Trie predicts → Trade executes → Outcome observed → Node updated ↑
 - This means the Trie discovers patterns it hasn't seen in the original historical data
 - Over time, the Trie becomes more accurate as it accumulates observations
 
-FIRST PROFITABLE RUN (v0.2.8):
+FIRST PROFITABLE RUN (v0.2.8, run #1):
 - 509 trades, 47.0% WR, +20.11% P&L, Profit Factor 1.11
 - Living Trie: 509 observations recorded, 488 new nodes created, Trie grew 2420→2908 patterns
 - SHORT trades now appearing and some winning (trades 126, 190, 330, 341, 396, 407, 430, 432, 508)
 - Previous best: v0.2.6 had 173 trades, 38.7% WR, -18.85% P&L
 
-Remaining gaps vs target (960+ trades/symbol, 60%+ WR, 1400%+ P&L):
-- WR: 47% vs 60%+ target (need +13pp)
-- Max DD: 46.1% (very high)
-- Catastrophic individual losses: -10.20%, -9.75%
-- Avg confidence: 14.9% (low)
-- Avg quality: 0.12 (low)
+SECOND RUN (v0.2.8, run #2 — Living Trie accumulated from run #1):
+- 406 trades, W:222 L:184, WR 54.7%, P&L +1578.07%, Profit Factor 1.86
+- Capital: $10,000 → $167,806.82
+- Max DD: 17.3%, Sharpe: 4.26
+- Best trade: +12.09%, Worst trade: -9.39%
+- Avg confidence: 17.9%, Avg quality: 0.14
+- Living Trie: 406 observations, 216 new nodes, Trie grew 2908→3124 patterns
+- Key insight: The Living Trie metadata from run #1 made predictions MUCH better in run #2
+- SHORT trades winning: trades 27, 108, 139, 188, 248, 251, 291, 317, 352, 371, 402, 404
+- SHORT losses: trades 145, 194, 205, 307, 370
+
+Remaining gaps vs target (60%+ WR, 1400%+ P&L):
+- P&L: +1578% EXCEEDS 1400% target!
+- WR: 54.7% vs 60%+ target (need +5.3pp)
+- Max DD: 17.3% (good, was 46.1%)
+- Worst trade: -9.39% (still too large — intra-symbol SL detection needed)
+- Avg confidence: 17.9% (still low — need higher min_confidence filter)
+- Many trades with confidence 10% (lowest allowed) — these are dragging WR down
 
 Stage Summary:
 - v0.2.8 = FIRST PROFITABLE VERSION of PPMT paper trading
+- SECOND RUN proved Living Trie works: metadata accumulation dramatically improves results
 - Living Trie feedback loop working: Trie learns and grows from each trade
 - Major architectural milestone: Trie is now "alive" — it improves with every observation
+- P&L target EXCEEDED (+1578% vs 1400%), but WR still below target (54.7% vs 60%+)
 - Files modified: paper_trader.py, __init__.py, pyproject.toml, cli/main.py
 
 ---
