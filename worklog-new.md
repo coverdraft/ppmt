@@ -841,3 +841,51 @@ Stage Summary:
 - Still below target (60%+ WR, 1400%+ P&L) but much closer
 - The compounding effect should push results much higher on subsequent runs
 - Files modified: worklog-new.md only (code changes were in previous commits)
+
+---
+Task ID: v0.4.0-rebuild-merge-results
+Agent: Main
+Task: Analyze v0.4.0 rebuild+merge results and implement v0.4.1 improvements
+
+Work Log:
+- User ran ppmt run (existing Living Trie): 525 trades, 48.6% WR, +1070.55% P&L, Sharpe 2.03
+- User then ran ppmt build + ppmt run (rebuild+merge): 601 trades, 53.1% WR, +3665.65% P&L, Sharpe 2.80
+- The rebuild+merge nearly DOUBLED trading observations: 979 → 1933
+- Trie grew: 3080 → 3975 patterns (bootstrap + merge combined)
+- P&L of +3665% EXCEEDS the 1400% target!
+- WR of 53.1% still below 60% target but improving
+- Max DD improved dramatically: 44.1% → 22.9%
+
+COMPARISON TABLE (all v0.4.0 builds):
+| Run | Trie | Obs | Trades | WR | P&L | Sharpe | Max DD |
+|-----|------|-----|--------|-----|-----|--------|--------|
+| Fresh+bootstrap | 2818 | 429 | 550 | 46.9% | +283% | 0.98 | 39.9% |
+| Living Trie only | 3080 | 979 | 525 | 48.6% | +1071% | 2.03 | 44.1% |
+| **Rebuild+merge** | **3975** | **1933** | **601** | **53.1%** | **+3666%** | **2.80** | **22.9%** |
+
+ANALYSIS OF TRADE DATA:
+- Trades with confidence < 15% had significantly lower WR (~42%)
+- SHORT trades at low confidence (15-17%) had WR around 35-40%
+- Trades with expected_move < 1.5% had WR ~45%
+- Trades with probability < 0.25 had more losses
+- Quality scores of 0.08-0.12 correlated with losses
+- Winning trades typically had confidence > 20%, quality > 0.15
+
+v0.4.1 CHANGES IMPLEMENTED:
+1. min_confidence: 0.10 → 0.15 (with adaptive floor for fresh tries)
+   - Fresh tries (< 200 obs): 0.10
+   - Growing tries (200-500 obs): 0.12
+   - Rich tries (500+ obs): 0.15 (default)
+2. min_quality_score: 0.0 → 0.10 (filter weakest signals)
+3. SHORT confidence multiplier: 1.5x → 1.8x (min 0.18)
+4. Expected move threshold: 1.0% → 1.5%
+5. Probability threshold: 0.20 → 0.25
+6. Bootstrap keeps looser thresholds (0.10, 1.0%, 0.20) to gather more observations
+
+Stage Summary:
+- v0.4.0 rebuild+merge achieved BEST-EVER v0.4.x results: +3666% P&L, 53.1% WR, Sharpe 2.80
+- P&L exceeds 1400% target; WR still below 60% target
+- v0.4.1 implements tighter entry filters to improve WR by filtering low-quality trades
+- Key insight: more observations + stricter filtering = higher WR
+- Commit: f3d00a4 "v0.4.1: Tighter entry filters for higher WR"
+- Pushed to GitHub
