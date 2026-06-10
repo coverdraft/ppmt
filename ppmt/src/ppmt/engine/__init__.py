@@ -4,6 +4,7 @@ from ppmt.engine.ppmt import PPMT
 from ppmt.engine.weights import AdaptiveWeights
 from ppmt.engine.signal import SignalGenerator, Signal, SignalType, PredictionBlock
 from ppmt.engine.prediction import PredictionEngine, Prediction, PathStep
+from ppmt.engine.paper_trader import PaperTrader, PaperTraderConfig, PaperTraderResult
 
 __all__ = [
     "PPMT",
@@ -15,4 +16,7 @@ __all__ = [
     "PredictionEngine",
     "Prediction",
     "PathStep",
+    "PaperTrader",
+    "PaperTraderConfig",
+    "PaperTraderResult",
 ]
