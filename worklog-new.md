@@ -770,3 +770,74 @@ Stage Summary:
 - Automates the iterative workflow that was previously manual
 - Files modified: ppmt.py, cli/main.py, __init__.py, pyproject.toml
 - PENDING: User needs to reinstall package and test with fresh build
+
+---
+Task ID: v0.4.0-test
+Agent: Main
+Task: User tested v0.4.0 bootstrap — fresh build with automatic paper trading during build
+
+Work Log:
+
+USER TEST SETUP:
+- User initially ran v0.3.2 code by mistake (no git pull before pip install)
+- Corrected with `git pull origin main` → installed ppmt-0.4.0
+- Ran: `ppmt build --force -s BTC/USDT && ppmt run --symbol BTC/USDT --paper`
+
+v0.4.0 BOOTSTRAP RESULTS:
+- Bootstrap: 429 trades simulated, WR 44.1%, 429 observations recorded
+- N3 Trie after bootstrap: 2818 patterns (2420 base + 398 new from bootstrap discoveries)
+- Bootstrap runs on first 70% of data (bootstrap_ratio=0.7)
+
+v0.4.0 PAPER TRADING RESULTS (fresh build --force + bootstrap):
+- 550 trades, W:258 L:292, WR 46.9%, P&L +282.69%
+- Capital: $10,000 → $38,269.32
+- Profit Factor 1.15, Max DD 39.9%, Sharpe 0.98
+- Best trade: +17.46%, Worst trade: -9.79%
+- Avg confidence: 18.4%, Avg quality: 0.14
+- Risk rejections: Daily loss limit reached: 20
+- Living Trie: 550 observations, 262 new nodes, Trie grew 2818→3080
+- Many SHORT trades visible (significantly more than v0.3.2 fresh)
+- No more "min_confidence 10% → 20%" message (v0.4.0 removed adaptive scaling)
+- "Trie has 429 trading observations — metadata quality: good" at start of paper trading
+
+COMPARISON TABLE (fresh builds only):
+| Version | Bootstrap | Trades | WR | P&L | PF | Sharpe | MaxDD | AvgConf |
+|---------|-----------|--------|-----|-----|-----|--------|-------|---------|
+| v0.3.1 | NO | 486 | 45.3% | +76% | 1.16 | 1.01 | 45.3% | 15.1% |
+| v0.3.2 | NO | 467 | 43.9% | +50% | 1.10 | 0.64 | 51.2% | 15.3% |
+| v0.4.0 | YES | 550 | 46.9% | +283% | 1.15 | 0.98 | 39.9% | 18.4% |
+
+IMPROVEMENTS (v0.4.0 vs v0.3.2 fresh):
+- P&L: +50% → +283% (+233pp, 5.7x improvement)
+- WR: 43.9% → 46.9% (+3.0pp)
+- Max DD: 51.2% → 39.9% (-11.3pp)
+- Sharpe: 0.64 → 0.98 (+0.34)
+- Avg Confidence: 15.3% → 18.4% (+3.1pp)
+- Trades: 467 → 550 (+83 more trades)
+- SHORT diversity: significantly more SHORT trades visible
+
+KEY ANALYSIS:
+1. BOOTSTRAP IS WORKING: The 429 bootstrap observations give the trie
+   meaningful metadata from day one, eliminating the cold-start problem
+2. NOT YET AT TARGET: WR 46.9% vs 60%+ target, P&L +283% vs 1400%+ target
+   — still far from benchmark, but massive improvement over cold start
+3. SHORT TRADES EMERGING: Bootstrap metadata enables SHORT signals that
+   were invisible in v0.3.2 (which had almost no SHORT trades)
+4. LIVING TRIE COMPOUNDING: The trie now has 429 (bootstrap) + 550 (paper) = 979
+   total observations. Running `ppmt run` again without rebuild should produce
+   significantly better results as the Living Trie compounds.
+5. NEXT STEP: The user should run `ppmt run --symbol BTC/USDT --paper` again
+   WITHOUT rebuilding — the accumulated 979 observations should push WR
+   toward 55-60% and P&L toward +1000%+ based on v0.2.8/v0.3.1 patterns.
+   Alternatively, `ppmt build -s BTC/USDT` (without --force) will MERGE the
+   Living Trie with a fresh build + bootstrap, which was the best approach
+   in v0.3.1 (+37,397% P&L, 64.8% WR).
+
+Stage Summary:
+- v0.4.0 bootstrap CONFIRMED WORKING — 5.7x P&L improvement over cold start
+- Fresh build + bootstrap: +283% P&L, 46.9% WR (vs +50%, 43.9% without bootstrap)
+- Bootstrap pre-populates 429 trading observations, giving the trie meaningful metadata
+- SHORT trade diversity restored by bootstrap metadata
+- Still below target (60%+ WR, 1400%+ P&L) but much closer
+- The compounding effect should push results much higher on subsequent runs
+- Files modified: worklog-new.md only (code changes were in previous commits)
