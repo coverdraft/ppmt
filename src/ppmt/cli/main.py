@@ -46,7 +46,7 @@ def load_config() -> dict:
 
 
 @click.group()
-@click.version_option(version="0.3.3")
+@click.version_option(version="0.4.0")
 def cli():
     """PPMT - Progressive Pattern Matching Trie Engine"""
     pass
@@ -135,12 +135,19 @@ def ingest(symbol: str, timeframe: str, days: int, exchange: str, csv_path: str)
 @click.option("--timeframe", "-t", default="1h", help="Candle timeframe")
 @click.option("--pattern-length", "-p", default=5, type=int, help="SAX blocks per pattern")
 @click.option("--force", "-f", is_flag=True, default=False, help="Force rebuild (discard Living Trie data)")
-def build(symbol: str, timeframe: str, pattern_length: int, force: bool):
+@click.option("--bootstrap/--no-bootstrap", default=True, help="Run bootstrap paper trading after build (default: enabled)")
+@click.option("--bootstrap-ratio", default=0.7, type=float, help="Fraction of data for bootstrap (default: 0.7 = 70%%)")
+def build(symbol: str, timeframe: str, pattern_length: int, force: bool, bootstrap: bool, bootstrap_ratio: float):
     """Build PPMT Trie from stored data.
 
     By default, preserves the existing N3 Living Trie (accumulated trading
     metadata) by merging the new build into it. Use --force to discard
     the Living Trie and rebuild from scratch.
+
+    v0.4.0: After building the trie, automatically runs a bootstrap paper
+    trading pass on a portion of the data (--bootstrap-ratio, default 70%%)
+    to accumulate trading observations in the N3 trie. This gives fresh
+    tries meaningful metadata from day one. Use --no-bootstrap to skip.
     """
     config = load_config()
     storage = PPMTStorage()
@@ -170,6 +177,30 @@ def build(symbol: str, timeframe: str, pattern_length: int, force: bool):
 
     # Build Trie
     count = engine.build(df, pattern_length=pattern_length)
+
+    # v0.4.0: Run bootstrap paper trading pass
+    # This accumulates trading observations in the N3 trie,
+    # giving fresh tries meaningful metadata from day one.
+    bootstrap_stats = None
+    if bootstrap:
+        console.print(f"[cyan]Running bootstrap paper trading (ratio={bootstrap_ratio:.0%})...[/cyan]")
+        bootstrap_stats = engine.bootstrap(
+            df=df,
+            pattern_length=pattern_length,
+            bootstrap_ratio=bootstrap_ratio,
+            verbose=False,
+        )
+        if bootstrap_stats["trades"] > 0:
+            wr_color = "green" if bootstrap_stats["win_rate"] >= 0.5 else "yellow"
+            console.print(
+                f"  [bold]Bootstrap:[/bold] {bootstrap_stats['trades']} trades simulated, "
+                f"WR [{wr_color}]{bootstrap_stats['win_rate']:.1%}[/{wr_color}], "
+                f"{bootstrap_stats['observations_recorded']} observations recorded"
+            )
+        else:
+            console.print(f"  [yellow]Bootstrap: no trades generated (data may be insufficient)[/yellow]")
+    else:
+        console.print(f"  [dim]Bootstrap: skipped (--no-bootstrap)[/dim]")
 
     # For N3: check if existing Living Trie should be preserved
     existing_n3 = storage.load_trie(symbol, "n3")
@@ -215,6 +246,15 @@ def build(symbol: str, timeframe: str, pattern_length: int, force: bool):
     # Show stats
     stats = engine.get_stats()
     console.print(f"  Weights: {engine.weights}")
+
+    # Show bootstrap results summary
+    if bootstrap_stats and bootstrap_stats["trades"] > 0:
+        console.print(
+            f"  [bold cyan]Bootstrap result:[/bold cyan] "
+            f"N3 trie now has {engine.trie_n3.trading_observations} trading observations "
+            f"({bootstrap_stats['trades']} trades, "
+            f"WR {bootstrap_stats['win_rate']:.1%})"
+        )
 
     storage.close()
 
