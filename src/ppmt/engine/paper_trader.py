@@ -230,10 +230,11 @@ class PaperTraderConfig:
 
     min_confidence: float = 0.10
     """Minimum confidence to generate entry signal.
-    v0.3.0: reverted to 0.10 (v0.2.8 value). v0.2.10's 0.12 was too
-    restrictive — it filtered out valid entries that the Living Trie
-    would have learned from. The metadata feedback loop handles
-    quality filtering naturally."""
+    v0.3.1: Kept at 0.10 (v0.2.8/v0.3.0 value). The Living Trie's
+    accumulated metadata naturally produces higher confidence for
+    validated patterns, making this threshold self-adjusting.
+    With fresh tries (low avg confidence), the adaptive scaling
+    in run() raises the effective threshold automatically."""
 
     min_quality_score: float = 0.0
     """Minimum quality score to enter a trade.
@@ -507,6 +508,26 @@ class PaperTrader:
         # Create engines
         pred_engine = PredictionEngine(trie, prediction_depth=cfg.pattern_length)
         risk_mgr = RiskManager(capital=cfg.initial_capital, config=self.risk_config)
+
+        # v0.3.1: Adaptive confidence scaling for fresh tries
+        # When the trie has sparse metadata (low avg confidence), many predictions
+        # barely pass the 0.10 threshold, leading to low-quality trades (46.1% WR
+        # with fresh trie vs 66.1% with rich trie). We detect this by sampling
+        # the trie's root metadata — if the average confidence is low, we scale
+        # up the min_confidence threshold proportionally.
+        root_meta = trie.root.metadata
+        if root_meta.historical_count > 0:
+            avg_node_confidence = root_meta.confidence
+            if avg_node_confidence < 0.15:
+                # Fresh trie with sparse metadata — raise threshold
+                # Scale: at avg_conf=0.10, multiply by 1.5; at 0.15, multiply by 1.0
+                adaptive_scale = 0.15 / max(avg_node_confidence, 0.05)
+                adaptive_scale = min(adaptive_scale, 2.0)  # Cap at 2x
+                cfg.min_confidence = min(cfg.min_confidence * adaptive_scale, 0.20)
+                console.print(f"  [yellow]Adaptive confidence: trie avg={avg_node_confidence:.1%}, "
+                              f"min_confidence scaled to {cfg.min_confidence:.0%}[/yellow]")
+            else:
+                console.print(f"  [green]Trie metadata quality: good (avg confidence={avg_node_confidence:.1%})[/green]")
 
         # Timeframe to hours
         tf_hours = {
@@ -880,9 +901,12 @@ class PaperTrader:
                     effective_min_conf = max(cfg.min_confidence * 0.5, 0.05)
 
                 # SHORT signals require higher confidence (BTC trends up)
-                # v0.2.10: max(conf * 2, 0.20) — slightly less strict than v0.2.9's 0.25
+                # v0.3.1: max(conf * 1.5, 0.15) — less strict than v0.2.10's max(conf*2, 0.20).
+                # The v0.2.10 threshold was too restrictive — only 1 SHORT trade in 283
+                # with the rich trie. Lowering to 1.5x/0.15 allows more SHORT entries
+                # while still filtering the weakest signals.
                 if prediction.direction == "SHORT":
-                    effective_min_conf = max(effective_min_conf * 2, 0.20)
+                    effective_min_conf = max(effective_min_conf * 1.5, 0.15)
 
                 # Entry conditions
                 if (prediction.direction != "FLAT"

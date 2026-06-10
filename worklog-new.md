@@ -339,3 +339,88 @@ Stage Summary:
   collectively destroyed the R:R ratio by cutting winners short
 - Target: restore +1578% P&L performance while keeping WR near 55-60%
 - Files modified: paper_trader.py, __init__.py, pyproject.toml, cli/main.py
+
+v0.3.0 RESULTS (user test):
+
+Run 1 — Existing Living Trie (3551 patterns, accumulated metadata):
+- 283 trades, W:187 L:96, WR 66.1%, P&L +1657.30%
+- Capital: $10,000 → $175,729.66
+- Profit Factor 3.12, Max DD 8.5%, Sharpe 8.25
+- Best trade: +15.10%, Worst trade: -9.79%
+- Avg confidence: 30.9%, Avg quality: 0.20
+- Living Trie: 283 observations, 40 new nodes, Trie grew 3551→3591
+- TARGETS MET: 66.1% WR (≥60% ✅), +1657% P&L (≥1400% ✅)
+
+Run 2 — Rebuilt Trie (2420 patterns, no accumulated metadata):
+- 473 trades, W:218 L:255, WR 46.1%, P&L +107.90%
+- Capital: $10,000 → $20,789.61
+- Profit Factor 1.20, Max DD 42.4%, Sharpe 1.27
+- Best trade: +12.09%, Worst trade: -10.20%
+- Avg confidence: 14.9%, Avg quality: 0.12
+- Living Trie: 473 observations, 451 new nodes, Trie grew 2420→2871
+
+CRITICAL FINDING: `ppmt build` DESTROYS the Living Trie by replacing it
+with a fresh build (2420 patterns). The Living Trie's accumulated metadata
+(3551 patterns + observations from 283 trades) is the KEY to high performance.
+Without it, confidence values are too low (10-19% vs 30.9%), allowing too
+many low-quality trades, collapsing WR from 66.1% to 46.1%.
+
+---
+Task ID: v0.3.1
+Agent: Main
+Task: Preserve Living Trie across rebuilds + adaptive confidence for fresh tries + more SHORT trades
+
+Work Log:
+
+1. PPMTTrie.merge() METHOD (trie.py)
+   - Added merge() method that walks two tries in parallel and combines metadata
+   - Merge rules for shared paths:
+     - historical_count: sum of both
+     - expected_move_pct, win_rate, avg_duration: weighted average by count
+     - max_drawdown_pct: min (worst case)
+     - max_favorable_pct: max (best case)
+     - continuation_nodes, break_nodes: set union
+   - Paths only in source are deep-copied with full metadata
+   - After merge, recompute counts and re-propagate metadata
+   - Added _recompute_counts() helper to fix pattern_count and max_depth
+
+2. ppmt build — PRESERVE LIVING TRIE (cli/main.py)
+   - Added --force/-f flag to discard Living Trie and rebuild from scratch
+   - Default behavior: if existing N3 trie has >= patterns than new build,
+     merge the new build INTO the existing Living Trie instead of replacing
+   - This preserves all accumulated trading observations while adding
+     any new patterns from the rebuild
+   - Console output shows merge statistics (new/merged/observations added)
+   - If existing N3 has FEWER patterns (different config), replace it
+
+3. ADAPTIVE CONFIDENCE SCALING (paper_trader.py)
+   - Problem: Fresh tries produce avg confidence of ~10%, barely above the
+     0.10 threshold. This allows many low-quality trades (46.1% WR).
+   - Solution: When trie's root metadata has low avg confidence (<15%),
+     automatically scale up min_confidence proportionally.
+   - At avg_conf=0.10, min_confidence scales to 0.15 (1.5x)
+   - At avg_conf=0.15+, no scaling (rich trie, high-quality predictions)
+   - Capped at 2x scaling and max 0.20 to avoid being too restrictive
+   - Console prints the adaptive scaling decision for transparency
+
+4. LOWER SHORT CONFIDENCE THRESHOLD (paper_trader.py)
+   - Changed from max(conf*2, 0.20) to max(conf*1.5, 0.15)
+   - v0.2.10/v0.3.0's threshold was too restrictive — only 1 SHORT trade
+     in 283 with the rich trie
+   - Lowering to 1.5x/0.15 allows more SHORT entries while still filtering
+   - Expected: more SHORT trades, better diversification, more total trades
+
+Config changes:
+- SHORT confidence gate: max(conf*2, 0.20) → max(conf*1.5, 0.15)
+- NEW: Adaptive confidence scaling for fresh tries (automatic)
+- NEW: ppmt build --force flag (default: preserve Living Trie)
+- Versions: __init__.py, pyproject.toml, cli/main.py → 0.3.1
+
+Stage Summary:
+- v0.3.1 = LIVING TRIE PRESERVATION + adaptive confidence + more SHORT trades
+- Core fix: ppmt build no longer destroys Living Trie — merges instead
+- Adaptive confidence: fresh tries auto-scale min_confidence to avoid 46% WR
+- SHORT threshold lowered: should produce more SHORT trades (was 1/283)
+- With existing Living Trie (3551 patterns), v0.3.0 already produces +1657% P&L / 66.1% WR
+- v0.3.1 should produce CONSISTENT results regardless of trie state
+- Files modified: trie.py, paper_trader.py, cli/main.py, __init__.py, pyproject.toml

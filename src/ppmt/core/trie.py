@@ -498,6 +498,137 @@ class PPMTTrie:
 
         return node.metadata
 
+    def merge(self, other: PPMTTrie) -> dict:
+        """
+        Merge another trie into this one, preserving and combining metadata.
+
+        This is critical for the Living Trie: when `ppmt build` creates a fresh
+        trie, we merge it INTO the existing Living Trie rather than replacing it.
+        This preserves all accumulated trading observations while adding any new
+        patterns from the rebuild.
+
+        Merge rules for shared paths:
+        - historical_count: sum of both
+        - expected_move_pct, win_rate, avg_duration: weighted average by count
+        - max_drawdown_pct: min (worst case)
+        - max_favorable_pct: max (best case)
+        - continuation_nodes, break_nodes: set union
+
+        Paths only in `other` are deep-copied into this trie.
+
+        Args:
+            other: The source trie to merge from (typically a fresh build)
+
+        Returns:
+            Dict with merge statistics: 'new_patterns', 'merged_patterns',
+            'total_observations_added'
+        """
+        stats = {"new_patterns": 0, "merged_patterns": 0, "total_observations_added": 0}
+
+        # Collect all terminal patterns from the source trie
+        source_patterns = other.get_all_patterns()
+
+        for symbols, source_node in source_patterns:
+            source_meta = source_node.metadata
+            if source_meta.historical_count == 0:
+                continue
+
+            # Find or create the path in this trie
+            target_node = self.search(symbols)
+
+            if target_node is None or target_node.metadata.historical_count == 0:
+                # Path doesn't exist or has no observations — insert it fresh
+                self.insert_with_observations(
+                    symbols=symbols,
+                    move_pct=source_meta.expected_move_pct,
+                    drawdown_pct=source_meta.max_drawdown_pct,
+                    favorable_pct=source_meta.max_favorable_pct,
+                    duration=source_meta.avg_duration,
+                    won=True,  # Default to won; win_rate will be set below
+                    next_symbol=source_meta.continuation_nodes[0] if source_meta.continuation_nodes else None,
+                )
+                # Override the single-observation stats with the source's aggregate
+                target_node = self.search(symbols)
+                if target_node is not None:
+                    target_node.metadata.historical_count = source_meta.historical_count
+                    target_node.metadata.win_rate = source_meta.win_rate
+                    target_node.metadata.expected_move_pct = source_meta.expected_move_pct
+                    target_node.metadata.avg_duration = source_meta.avg_duration
+                    target_node.metadata.remaining_candles = source_meta.avg_duration
+                    target_node.metadata.max_drawdown_pct = source_meta.max_drawdown_pct
+                    target_node.metadata.max_favorable_pct = source_meta.max_favorable_pct
+                    for sym in source_meta.continuation_nodes:
+                        if sym not in target_node.metadata.continuation_nodes:
+                            target_node.metadata.continuation_nodes.append(sym)
+                    for sym in source_meta.break_nodes:
+                        if sym not in target_node.metadata.break_nodes:
+                            target_node.metadata.break_nodes.append(sym)
+                stats["new_patterns"] += 1
+                stats["total_observations_added"] += source_meta.historical_count
+            else:
+                # Path exists with observations — merge metadata using weighted average
+                t_meta = target_node.metadata
+                s_meta = source_meta
+
+                t_count = t_meta.historical_count
+                s_count = s_meta.historical_count
+                total = t_count + s_count
+
+                # Weighted averages
+                t_meta.expected_move_pct = (
+                    t_meta.expected_move_pct * t_count + s_meta.expected_move_pct * s_count
+                ) / total
+                t_meta.win_rate = (
+                    t_meta.win_rate * t_count + s_meta.win_rate * s_count
+                ) / total
+                t_meta.avg_duration = int(
+                    (t_meta.avg_duration * t_count + s_meta.avg_duration * s_count) / total
+                )
+                t_meta.remaining_candles = t_meta.avg_duration
+
+                # Min/max for extremes
+                t_meta.max_drawdown_pct = min(t_meta.max_drawdown_pct, s_meta.max_drawdown_pct)
+                t_meta.max_favorable_pct = max(t_meta.max_favorable_pct, s_meta.max_favorable_pct)
+
+                # Sum counts
+                t_meta.historical_count = total
+
+                # Set union for navigation lists
+                for sym in s_meta.continuation_nodes:
+                    if sym not in t_meta.continuation_nodes:
+                        t_meta.continuation_nodes.append(sym)
+                for sym in s_meta.break_nodes:
+                    if sym not in t_meta.break_nodes:
+                        t_meta.break_nodes.append(sym)
+
+                stats["merged_patterns"] += 1
+                stats["total_observations_added"] += s_count
+
+        # Recompute pattern count and max depth
+        self._recompute_counts()
+
+        # Re-propagate metadata so intermediate nodes are updated
+        self.propagate_metadata()
+
+        return stats
+
+    def _recompute_counts(self) -> None:
+        """Recompute _pattern_count and _max_depth from the actual trie structure."""
+        count = [0]
+        max_depth = [0]
+
+        def _walk(node: TrieNode, depth: int):
+            if depth > 0 and node.metadata.historical_count > 0:
+                count[0] += 1
+            if depth > max_depth[0]:
+                max_depth[0] = depth
+            for child in node.children.values():
+                _walk(child, depth + 1)
+
+        _walk(self.root, 0)
+        self._pattern_count = count[0]
+        self._max_depth = max_depth[0]
+
     def __len__(self) -> int:
         return self._pattern_count
 

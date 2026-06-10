@@ -46,7 +46,7 @@ def load_config() -> dict:
 
 
 @click.group()
-@click.version_option(version="0.3.0")
+@click.version_option(version="0.3.1")
 def cli():
     """PPMT - Progressive Pattern Matching Trie Engine"""
     pass
@@ -134,8 +134,14 @@ def ingest(symbol: str, timeframe: str, days: int, exchange: str, csv_path: str)
 @click.option("--symbol", "-s", required=True, help="Trading pair")
 @click.option("--timeframe", "-t", default="1h", help="Candle timeframe")
 @click.option("--pattern-length", "-p", default=5, type=int, help="SAX blocks per pattern")
-def build(symbol: str, timeframe: str, pattern_length: int):
-    """Build PPMT Trie from stored data."""
+@click.option("--force", "-f", is_flag=True, default=False, help="Force rebuild (discard Living Trie data)")
+def build(symbol: str, timeframe: str, pattern_length: int, force: bool):
+    """Build PPMT Trie from stored data.
+
+    By default, preserves the existing N3 Living Trie (accumulated trading
+    metadata) by merging the new build into it. Use --force to discard
+    the Living Trie and rebuild from scratch.
+    """
     config = load_config()
     storage = PPMTStorage()
 
@@ -165,11 +171,37 @@ def build(symbol: str, timeframe: str, pattern_length: int):
     # Build Trie
     count = engine.build(df, pattern_length=pattern_length)
 
+    # For N3: check if existing Living Trie should be preserved
+    existing_n3 = storage.load_trie(symbol, "n3")
+    n3_to_save = engine.trie_n3
+
+    if existing_n3 is not None and not force:
+        existing_count = existing_n3.pattern_count
+        new_count = engine.trie_n3.pattern_count
+
+        if existing_count >= new_count:
+            # Existing trie has Living Trie growth — merge new build INTO it
+            console.print(f"[bold cyan]Living Trie detected:[/bold cyan] existing N3 has {existing_count} patterns vs {new_count} new")
+            console.print(f"[cyan]Merging new build into existing Living Trie (preserving {existing_count - new_count} discovered patterns)...[/cyan]")
+
+            merge_stats = existing_n3.merge(engine.trie_n3)
+
+            console.print(f"[green]Merge complete:[/green] "
+                          f"{merge_stats['new_patterns']} new patterns added, "
+                          f"{merge_stats['merged_patterns']} patterns merged, "
+                          f"{merge_stats['total_observations_added']} observations added")
+            console.print(f"[green]N3 Trie: {existing_count} -> {existing_n3.pattern_count} patterns[/green]")
+
+            n3_to_save = existing_n3
+        else:
+            console.print(f"[yellow]Existing N3 ({existing_count} patterns) has fewer patterns than new build ({new_count})[/yellow]")
+            console.print(f"[yellow]Replacing with new build (existing trie was likely from a different config)[/yellow]")
+
     # Save Tries
     for level, trie in [
         ("n1", engine.trie_n1),
         ("n2", engine.trie_n2),
-        ("n3", engine.trie_n3),
+        ("n3", n3_to_save),
         ("n4", engine.trie_n4),
     ]:
         storage.save_trie(symbol, level, trie)
