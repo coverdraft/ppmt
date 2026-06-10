@@ -1,5 +1,5 @@
 """
-PPMT CLI - Command Line Interface V8.0
+PPMT CLI - Command Line Interface V9.0
 
 Usage:
   ppmt init                          Initialize database and config
@@ -11,6 +11,7 @@ Usage:
   ppmt list                          List tracked assets
   ppmt backtest --symbol BTC/USDT    Walk-forward backtest (static split)
   ppmt rolling-backtest --symbol BTC/USDT  Rolling walk-forward backtest
+  ppmt dashboard                     Launch web dashboard (V9.0)
 """
 
 from __future__ import annotations
@@ -41,7 +42,7 @@ console = Console()
 CONFIG_DIR = os.path.expanduser("~/.ppmt")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.yaml")
 
-VERSION = "V8.0"
+VERSION = "V9.0"
 
 
 def load_config() -> dict:
@@ -363,7 +364,7 @@ def _run_backtest_window(
 # ===================================================================
 
 @click.group()
-@click.version_option(version="8.0.0")
+@click.version_option(version="9.0.0")
 def cli():
     """PPMT - Progressive Pattern Matching Trie Engine"""
     pass
@@ -1072,6 +1073,45 @@ def rolling_backtest(
     with open(output_file, "w") as f:
         json.dump(json_result, f, indent=2, default=str)
     console.print(f"\n[green]Results saved to {output_file}[/green]")
+
+
+# ===================================================================
+# V9.0: Web Dashboard
+# ===================================================================
+@cli.command()
+@click.option("--port", default=5000, type=int, help="Port to run the dashboard on (default: 5000)")
+@click.option("--host", default="127.0.0.1", help="Host to bind to (default: 127.0.0.1)")
+@click.option("--no-browser", is_flag=True, help="Don't open browser automatically")
+def dashboard(port: int, host: str, no_browser: bool):
+    """
+    Launch the PPMT web dashboard (V9.0).
+
+    Opens an interactive web dashboard with equity curves, drawdown
+    charts, per-window analysis, trade distribution, and symbol
+    comparison. Uses Chart.js for visualization and reads backtest
+    results from ~/.ppmt/backtest_results/.
+
+    Examples:
+      ppmt dashboard
+      ppmt dashboard --port 8080
+      ppmt dashboard --no-browser
+    """
+    try:
+        from ppmt.dashboard.server import start_dashboard
+    except ImportError:
+        console.print("[red]Dashboard requires Flask. Install with: pip install flask[/red]")
+        console.print("[yellow]  pip install flask[/yellow]")
+        return
+
+    console.print(f"\n[bold cyan]PPMT Dashboard {VERSION}[/bold cyan]")
+    console.print(f"  Starting on http://{host}:{port}")
+    console.print(f"  Press Ctrl+C to stop\n")
+
+    start_dashboard(
+        port=port,
+        host=host,
+        open_browser=not no_browser,
+    )
 
 
 if __name__ == "__main__":

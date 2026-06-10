@@ -114,12 +114,35 @@ ppmt stats --symbol BTC/USDT
   - Searches all 4 trie levels (N3→N2→N1)
   - Uses fuzzy matching for noise tolerance
   - Falls back to prefix search (shorter patterns) if full match not found
-- **Synthetic data results** (2 years, 1h candles, 26 windows):
-  - BTC: 24 trades, 58.3% WR, +191.58% P&L, 81% profitable windows
-  - ETH: 26 trades, 46.2% WR, +126.98% P&L, 40% profitable windows
-  - SOL: 30 trades, 50.0% WR, -206.05% P&L, 41% profitable windows
-- **Note**: Synthetic data has different characteristics than real markets; user's Mac results with real data showed much stronger performance
-- **Next**: Run with real market data on user's Mac for definitive validation
+- **Real data results** (SQLite DB, 1h candles, 86 windows each):
+
+  | Symbol | Trades | WR | P&L | Avg R:R | Max DD | Profitable Windows |
+  |--------|--------|-----|------|---------|--------|--------------------|
+  | BTC/USDT | 964 | 60.5% | +1479.26% | 7.91 | -54.80% | 73/86 (85%) |
+  | ETH/USDT | 924 | 64.4% | +1486.69% | 6.70 | -218.37% | 67/86 (78%) |
+  | SOL/USDT | 935 | 61.0% | +2672.78% | 6.43 | -193.79% | 73/86 (85%) |
+
+- **Observation**: ETH and SOL have Max DD > 100%, suggesting position sizing improvements needed
+
+### V9.0 — Web Dashboard
+- **Purpose**: Interactive visualization of backtest results
+- **Technology**: Flask backend + Chart.js frontend (single-page app)
+- **Features**:
+  - Equity curve (cumulative P&L over time)
+  - Drawdown chart
+  - Per-window P&L bar chart
+  - Per-window win rate and trade count
+  - P&L distribution histogram
+  - LONG vs SHORT direction split (doughnut chart)
+  - R:R distribution histogram
+  - Multi-symbol comparison (equity curves, WR, P&L)
+  - Trade log table with pattern, match level, and historical WR
+- **API Endpoints**:
+  - `GET /api/backtest-results` — List all available result files
+  - `GET /api/summary/<symbol>` — Summary + equity curve + windows for a symbol
+  - `GET /api/compare` — Side-by-side comparison of all symbols
+  - `GET /api/assets` — List tracked assets from SQLite
+- **Integration**: `ppmt dashboard` CLI command with `--port` and `--no-browser` options
 
 ## CLI Commands
 
@@ -129,7 +152,8 @@ ppmt stats --symbol BTC/USDT
 | `ppmt ingest -s BTC/USDT` | Fetch historical data |
 | `ppmt build -s BTC/USDT` | Build Trie from stored data |
 | `ppmt backtest -s BTC/USDT --csv data.csv` | Static walk-forward backtest |
-| `ppmt rolling-backtest -s BTC/USDT --csv data.csv` | Rolling walk-forward backtest |
+| `ppmt rolling-backtest -s BTC/USDT` | Rolling walk-forward backtest |
+| `ppmt dashboard` | Launch web dashboard |
 | `ppmt predict -s BTC/USDT` | Show current prediction |
 | `ppmt stats -s BTC/USDT` | Show pattern statistics |
 | `ppmt list` | List tracked assets |
@@ -143,6 +167,7 @@ ppmt/
 │   ├── engine/         # PPMT Engine, Adaptive Weights, Signal Generator
 │   ├── data/           # Data Collection, Storage, Asset Classification
 │   ├── risk/           # Capital Risk Manager
+│   ├── dashboard/      # Web Dashboard (Flask + Chart.js)
 │   └── cli/            # Command Line Interface
 ├── tests/              # Unit & integration tests
 ├── config/             # Configuration files
@@ -156,6 +181,8 @@ ppmt/
 3. **SHORT signals are very strong** — 80-88% WR across BTC, ETH, SOL (V7.9 real data)
 4. **Fuzzy matching significantly increases trade count** without degrading win rate
 5. **Rolling walk-forward reveals regime sensitivity** — some windows are unprofitable, confirming the need for regime detection
+6. **System is consistently profitable in walk-forward** — 78-85% of rolling windows profitable across BTC, ETH, SOL
+7. **Max drawdown is the main risk** — ETH (-218%) and SOL (-194%) need position sizing improvements
 
 ## License
 
