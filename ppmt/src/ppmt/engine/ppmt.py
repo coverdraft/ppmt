@@ -176,7 +176,14 @@ class PPMT:
         """Set the current market regime for N4 Trie selection."""
         self._current_regime = regime
 
-    def build(self, df: pd.DataFrame, pattern_length: int = 5) -> int:
+    def build(
+        self,
+        df: pd.DataFrame,
+        pattern_length: int = 5,
+        forward_window: int = 5,
+        won_rr_threshold: float | None = None,
+        symbols: list[str] | None = None,
+    ) -> int:
         """
         Build the 4-level Trie from historical OHLCV data.
 
@@ -187,44 +194,63 @@ class PPMT:
         Args:
             df: OHLCV DataFrame with columns: open, high, low, close, volume
             pattern_length: Number of SAX blocks per pattern sequence
+            forward_window: Number of SAX blocks to look ahead for outcome
+            won_rr_threshold: R:R threshold for won/lost classification (None=move_pct>0)
+            symbols: Pre-computed SAX symbols (skips internal re-encoding).
+                     V7.9: Pass symbols from encode_with_normalization() for
+                     consistent train/test normalization.
 
         Returns:
             Number of patterns inserted
         """
-        # Encode entire history to SAX symbols
-        symbols = self.sax.encode(df)
+        # Use provided symbols or encode internally
+        if symbols is None:
+            symbols = self.sax.encode(df)
 
         if len(symbols) < pattern_length:
             return 0
 
-        # Create overlapping sequences
+        # Create overlapping sequences with forward window for outcome
         count = 0
-        for i in range(len(symbols) - pattern_length):
+        max_i = len(symbols) - pattern_length - forward_window
+        for i in range(max(0, max_i) + 1):
             pattern = symbols[i:i + pattern_length]
             next_sym = symbols[i + pattern_length] if i + pattern_length < len(symbols) else None
 
             # Compute metadata from the actual price data
-            # Map SAX window indices to candle indices
+            # Pattern window: candles from pattern start to pattern end
             start_candle = i * self.sax.window_size
             end_candle = (i + pattern_length) * self.sax.window_size
+            # Forward window: candles after pattern for outcome measurement
+            forward_candle = (i + pattern_length + forward_window) * self.sax.window_size
 
-            if end_candle > len(df):
+            if forward_candle > len(df):
                 break
 
-            window_df = df.iloc[start_candle:end_candle]
+            pattern_df = df.iloc[start_candle:end_candle]
+            forward_df = df.iloc[end_candle:forward_candle]
+            combined_df = df.iloc[start_candle:forward_candle]
 
-            # Compute move, drawdown, favorable from actual prices
-            entry_price = window_df["close"].iloc[0]
-            exit_price = window_df["close"].iloc[-1]
+            # Entry at start of pattern, exit at end of forward window
+            entry_price = pattern_df["close"].iloc[0]
+            exit_price = combined_df["close"].iloc[-1]
             move_pct = ((exit_price - entry_price) / entry_price) * 100.0
 
-            high = window_df["high"].max()
-            low = window_df["low"].min()
+            # Drawdown and favorable over the ENTIRE window (pattern + forward)
+            high = combined_df["high"].max()
+            low = combined_df["low"].min()
             drawdown_pct = ((low - entry_price) / entry_price) * 100.0
             favorable_pct = ((high - entry_price) / entry_price) * 100.0
 
-            duration = len(window_df)
-            won = move_pct > 0  # Simple: positive move = win
+            duration = len(combined_df)
+
+            # Determine won/lost based on R:R or simple move
+            if won_rr_threshold is not None:
+                # R:R based: won if favorable/|drawdown| >= threshold
+                rr = favorable_pct / abs(drawdown_pct) if abs(drawdown_pct) > 1e-10 else 0
+                won = rr >= won_rr_threshold
+            else:
+                won = move_pct > 0  # Simple: positive move = win
 
             # Insert into all 4 levels
             for trie in [self.trie_n1, self.trie_n2, self.trie_n3, self.trie_n4]:
