@@ -138,8 +138,7 @@ def _record_observation(
                 break
 
     if node is None:
-        # Pattern not in Trie at all — shouldn't happen normally
-        # but create the entry as a new pattern
+        # Pattern not in Trie at all — create the entry as a new pattern
         trie.insert_with_observations(
             symbols=trade.matched_pattern,
             move_pct=trade.actual_move_pct,
@@ -158,19 +157,16 @@ def _record_observation(
     duration = max(1, exit_sym_idx - trade.entry_sym_idx) if trade.entry_sym_idx > 0 else 1
     won = trade.pnl_pct > 0
 
-    # For drawdown: if the trade was a loss, the actual move IS the drawdown
-    # If the trade was a win, we don't know the actual drawdown from PnL alone
-    # Use a conservative estimate: if SL was set, SL distance is max drawdown
+    # Drawdown: SL distance is max drawdown estimate
     if trade.sl_price > 0 and trade.entry_price > 0:
         if trade.direction == "LONG":
             max_dd_pct = -(trade.entry_price - trade.sl_price) / trade.entry_price * 100
         else:
             max_dd_pct = -(trade.sl_price - trade.entry_price) / trade.entry_price * 100
     else:
-        # No SL set — approximate drawdown from actual move if negative
         max_dd_pct = min(trade.actual_move_pct, 0)
 
-    # For favorable excursion: if the trade hit TP, the TP distance is max favorable
+    # Favorable: TP distance is max favorable estimate
     if trade.tp_price > 0 and trade.entry_price > 0:
         if trade.direction == "LONG":
             max_fav_pct = (trade.tp_price - trade.entry_price) / trade.entry_price * 100
@@ -179,7 +175,7 @@ def _record_observation(
     else:
         max_fav_pct = max(trade.actual_move_pct, 0)
 
-    # Call update_from_observation on the entry node
+    # Update entry node metadata
     node.metadata.update_from_observation(
         move_pct=trade.actual_move_pct,
         drawdown_pct=max_dd_pct,
@@ -190,16 +186,12 @@ def _record_observation(
     )
     observations += 1
 
-    # 3. If next_symbol is provided and it's NOT already a child,
-    #    add it as a new child node — the Trie GROWS
+    # 3. If next_symbol is NOT already a child, add it — the Trie GROWS
     if next_symbol and not node.has_child(next_symbol):
-        # Create the new extended pattern
         extended_pattern = trade.matched_pattern + [next_symbol]
         child_node = trie.insert(extended_pattern)
-
-        # Give the new child initial metadata from this observation
         child_node.metadata.update_from_observation(
-            move_pct=trade.actual_move_pct * 0.5,  # Partial credit — this is a break
+            move_pct=trade.actual_move_pct * 0.5,
             drawdown_pct=max_dd_pct,
             favorable_pct=max_fav_pct,
             duration=duration,
@@ -236,14 +228,20 @@ class PaperTraderConfig:
     sax_strategy: str = "ohlcv"
     """SAX encoding strategy."""
 
-    min_confidence: float = 0.10
+    min_confidence: float = 0.15
     """Minimum confidence to generate entry signal.
-    Lowered from 0.60 because aggregated Trie metadata
-    produces moderate confidence values (10-40%) that are
-    still meaningful for position sizing."""
+    v0.2.9: raised from 0.10 to 0.15 — filter out low-conviction trades
+    that were dragging down win rate."""
 
-    min_risk_reward: float = 1.5
-    """Minimum risk:reward ratio. With expected_move-based SL, R:R >= 2.0."""
+    min_quality_score: float = 0.10
+    """Minimum quality score to enter a trade.
+    v0.2.9: new filter — signals with quality < 0.10 are rejected.
+    Low quality = poor R:R, low confidence, or low probability."""
+
+    min_risk_reward: float = 1.0
+    """Minimum risk:reward ratio for entry.
+    v0.2.9: lowered from 1.5 to 1.0 to allow SHORT trades with R:R=1.5
+    (SHORT uses wider SL, lower TP, so R:R is inherently lower)."""
 
     start_offset: int = 200
     """Number of initial candles to skip (warm-up for SAX encoding)."""
@@ -253,6 +251,18 @@ class PaperTraderConfig:
     When True, every trade outcome updates the Trie node's metadata,
     and pattern breaks create new child nodes. This makes the Trie
     'alive' — it learns and improves from its own trading results."""
+
+    pattern_break_grace: int = 2
+    """Number of consecutive pattern breaks before closing position.
+    v0.2.9: new — instead of closing on the first pattern break, wait
+    for N consecutive breaks. This avoids closing on temporary noise.
+    A single break may be a false signal; two consecutive breaks
+    confirm the pattern has actually changed."""
+
+    reentry_cooldown: int = 3
+    """Number of SAX symbol steps to wait after a losing trade before
+    entering a new position. v0.2.9: new — prevents revenge trading /
+    tilt by enforcing a cool-down period after losses."""
 
     verbose: bool = True
     """Whether to print step-by-step details."""
@@ -391,29 +401,26 @@ class PaperTrader:
             base_position_size_pct=0.01,  # 1% risk per trade (conservative while tuning)
             max_position_size_pct=0.04,
             min_position_size_pct=0.005,
-            min_risk_reward=1.5,         # ATR-based SL gives R:R=2.0 by default
+            min_risk_reward=1.0,         # v0.2.9: lowered from 1.5 to allow SHORT R:R=1.5
             max_daily_loss_pct=0.10,      # 10% daily loss limit
             max_drawdown_pct=0.80,        # 80% for paper trading (don't block signals while tuning)
-            min_quality_score=0.0,
-            min_confidence=0.0,
+            min_quality_score=0.0,        # Checked in paper_trader, not RiskManager
+            min_confidence=0.0,           # Checked in paper_trader, not RiskManager
         )
 
     def run(self) -> PaperTraderResult:
         """
         Run paper trading simulation on stored historical data.
 
-        Steps:
-        1. Load OHLCV data from storage
-        2. Build PPMT engine from stored Tries (or build from data)
-        3. Propagate metadata so intermediate nodes have statistics
-        4. Step through candles from warm-up offset
-        5. At each candle:
-           a. Encode recent data to SAX
-           b. Match pattern in Trie
-           c. Generate prediction
-           d. If no position and signal is strong → enter
-           e. If in position → check SL/TP/pattern break
-        6. Track all trades and equity curve
+        v0.2.9 improvements:
+        - Intra-symbol SL/TP checking: checks EVERY candle within a SAX window
+          using high/low prices for more accurate stop detection. Previously
+          only checked the LAST candle of each 10-candle window, causing
+          catastrophic losses when price moved sharply intra-window.
+        - Higher min_confidence (0.15) + min_quality_score (0.10) filter
+        - SHORT-specific wider SL (ATR*2.0, min 2.0%) and lower TP (SL*1.5)
+        - Pattern break grace period (2 consecutive breaks before closing)
+        - Re-entry cooldown after losing trades (3 symbol steps)
         """
         cfg = self.config
         storage = PPMTStorage()
@@ -430,6 +437,7 @@ class PaperTrader:
 
         # Try to load existing Tries, or build new ones
         trie = storage.load_trie(cfg.symbol, "n3")
+        initial_pattern_count = 0
         if trie is None:
             console.print(f"[yellow]No Trie for {cfg.symbol}. Building from data...[/yellow]")
             engine = PPMT(
@@ -443,15 +451,14 @@ class PaperTrader:
             engine.build(df, pattern_length=cfg.pattern_length)
             trie = engine.trie_n3
         else:
+            initial_pattern_count = trie.pattern_count
             console.print(f"[green]Loaded N3 Trie for {cfg.symbol} ({trie.pattern_count} patterns)[/green]")
 
         # CRITICAL: Propagate metadata so intermediate nodes have statistics
-        # This must be done after loading (old stored Tries don't have it)
         trie.propagate_metadata()
         console.print(f"[green]Metadata propagated: root now has {trie.root.metadata.historical_count} aggregated observations[/green]")
 
         # Compute ATR for dynamic SL/TP sizing
-        # ATR adapts to current volatility — high ATR = wider stops, low ATR = tighter
         atr_pct = compute_atr_pct(df, period=14)
         valid_atr = atr_pct[atr_pct > 0]
         if len(valid_atr) > 0:
@@ -496,24 +503,36 @@ class PaperTrader:
         trade_counter = 0
         peak_capital = cfg.initial_capital
 
+        # v0.2.9: Pattern break grace period tracking
+        consecutive_breaks = 0
+
+        # v0.2.9: Re-entry cooldown after losing trades
+        last_losing_trade_sym_idx = -999  # Symbol index of last losing trade
+        cooldown_filter_count = 0
+
         # Start from warm-up offset (in candle space)
         start_candle = cfg.start_offset
         if start_candle >= len(df):
             console.print(f"[red]Not enough data. Need at least {start_candle} candles, have {len(df)}.[/red]")
             return result
 
+        living_trie_status = "ON" if cfg.living_trie else "OFF"
         console.print(f"\n[bold cyan]Starting Paper Trading: {cfg.symbol} ({cfg.timeframe})[/bold cyan]")
         console.print(f"  Capital: ${cfg.initial_capital:,.2f}")
         console.print(f"  Data: {len(df)} candles, starting from index {start_candle}")
         console.print(f"  Trie: {trie.pattern_count} patterns")
-        console.print(f"  Min confidence: {cfg.min_confidence:.0%}")
+        console.print(f"  Min confidence: {cfg.min_confidence:.0%} | Min quality: {cfg.min_quality_score:.2f}")
         console.print(f"  Entry: move > 1.0%, probability > 20%, ATR-based SL/TP")
-        console.print(f"  Trailing stop: activates at 50% of TP distance\n")
+        console.print(f"  LONG SL: max(ATR*1.5, 1.5%) cap 5% | SHORT SL: max(ATR*2.0, 2.0%) cap 7%")
+        console.print(f"  Trailing stop: activates at 50% of TP distance")
+        console.print(f"  Pattern break grace: {cfg.pattern_break_grace} consecutive")
+        console.print(f"  Re-entry cooldown: {cfg.reentry_cooldown} symbols after loss")
+        console.print(f"  Living Trie: [bold]{living_trie_status}[/bold]\n")
 
-        # We iterate over SAX symbol positions instead of individual candles
+        # We iterate over SAX symbol positions
         start_sym_idx = start_candle // cfg.sax_window_size
         if start_sym_idx < cfg.pattern_length:
-            start_sym_idx = cfg.pattern_length  # Need at least pattern_length symbols
+            start_sym_idx = cfg.pattern_length
 
         # Track prediction statistics
         pred_count = 0
@@ -527,184 +546,229 @@ class PaperTrader:
         trie_metadata_propagations = 0
 
         # Track current date for daily P&L reset
-        # CRITICAL: Without this, the daily loss limit triggers once
-        # and then blocks ALL subsequent signals forever (across days)
         current_date = None
 
-        for sym_idx in range(start_sym_idx, len(all_sax_symbols)):
-            # Map symbol index back to candle index for price lookup
-            candle_idx = min(sym_idx * cfg.sax_window_size + cfg.sax_window_size - 1, len(df) - 1)
-            current_price = float(df["close"].iloc[candle_idx])
-            current_time = str(df.index[candle_idx]) if hasattr(df.index, 'strftime') else str(candle_idx)
+        # Pre-extract arrays for fast intra-symbol access
+        df_high = df['high'].values.astype(float)
+        df_low = df['low'].values.astype(float)
+        df_close = df['close'].values.astype(float)
 
-            # Check for new day → reset daily P&L tracking
-            # This prevents the daily loss limit from blocking all signals
-            # across multiple days once triggered on a single bad day
+        for sym_idx in range(start_sym_idx, len(all_sax_symbols)):
+            # Candle range for this SAX symbol
+            candle_start = sym_idx * cfg.sax_window_size
+            candle_end = min((sym_idx + 1) * cfg.sax_window_size, len(df))
+            last_candle_idx = candle_end - 1
+
+            # Date check for daily P&L reset (use last candle of window)
+            current_time = str(df.index[last_candle_idx]) if hasattr(df.index, 'strftime') else str(last_candle_idx)
             candle_date = current_time[:10] if len(current_time) >= 10 else None
             if candle_date and candle_date != current_date:
                 if current_date is not None:
                     risk_mgr.reset_daily()
                 current_date = candle_date
 
-            # Current SAX pattern: use the last pattern_length symbols up to sym_idx
+            # Current SAX pattern
             if sym_idx < cfg.pattern_length:
                 continue
             current_symbols = all_sax_symbols[sym_idx - cfg.pattern_length:sym_idx]
 
-            # Check SL/TP for open position
+            # ================================================================
+            # PHASE 1: Intra-symbol SL/TP checking
+            # v0.2.9: Check EVERY candle within the SAX window, not just
+            # the last one. This is critical because a SAX window covers
+            # 10 candles (10 hours on 1h timeframe). Price can move A LOT
+            # in 10 hours, and only checking the last candle means we
+            # might not detect a SL hit until 10 hours late.
+            #
+            # We use HIGH/LOW prices for more accurate detection:
+            #   LONG SL hit if candle LOW <= SL price
+            #   LONG TP hit if candle HIGH >= TP price
+            #   SHORT SL hit if candle HIGH >= SL price
+            #   SHORT TP hit if candle LOW <= TP price
+            # ================================================================
             if current_position is not None:
-                # === Trailing Stop Logic ===
-                # When unrealized profit exceeds 50% of TP distance, activate
-                # trailing stop. This locks in profit and lets winners run.
                 pos = risk_mgr._positions.get(cfg.symbol)
-                if pos and pos.tp_price is not None:
-                    entry = pos.entry_price
-                    if pos.direction == "LONG":
-                        unrealized_pct = (current_price - entry) / entry * 100
-                        tp_distance_pct = (pos.tp_price - entry) / entry * 100
-                    else:
-                        unrealized_pct = (entry - current_price) / entry * 100
-                        tp_distance_pct = (entry - pos.tp_price) / entry * 100
+                if pos is None:
+                    current_position = None
+                    continue
 
-                    # Activate trailing when profit > 50% of TP distance
-                    if not current_position.trailing_activated and tp_distance_pct > 0 and unrealized_pct >= tp_distance_pct * 0.5:
-                        current_position.trailing_activated = True
+                sl_tp_closed = False
 
-                    # If trailing is active, move SL to protect gains
-                    if current_position.trailing_activated:
-                        current_atr = atr_pct[candle_idx] if candle_idx < len(atr_pct) else 2.0
+                for ci in range(candle_start, candle_end):
+                    if ci >= len(df_close):
+                        break
+
+                    candle_h = df_high[ci]
+                    candle_l = df_low[ci]
+                    candle_c = df_close[ci]
+                    check_time = str(df.index[ci]) if hasattr(df.index, 'strftime') else str(ci)
+
+                    # === Trailing stop update (at every candle) ===
+                    if pos.tp_price is not None:
+                        entry = pos.entry_price
                         if pos.direction == "LONG":
-                            # Trail SL at 1.0× ATR below current price
-                            new_sl = max(pos.sl_price, current_price * (1 - current_atr / 100))
+                            unrealized_pct = (candle_c - entry) / entry * 100
+                            tp_distance_pct = (pos.tp_price - entry) / entry * 100
                         else:
-                            # Trail SL at 1.0× ATR above current price
-                            new_sl = min(pos.sl_price, current_price * (1 + current_atr / 100))
-                        pos.sl_price = new_sl
+                            unrealized_pct = (entry - candle_c) / entry * 100
+                            tp_distance_pct = (entry - pos.tp_price) / entry * 100
 
-                sl_hit = risk_mgr.check_stop_loss(cfg.symbol, current_price)
-                tp_hit = risk_mgr.check_take_profit(cfg.symbol, current_price)
+                        if not current_position.trailing_activated and tp_distance_pct > 0 and unrealized_pct >= tp_distance_pct * 0.5:
+                            current_position.trailing_activated = True
 
-                if sl_hit:
-                    # Close at stop loss (or trailing stop)
-                    _, pnl = risk_mgr.close_position(cfg.symbol, current_price)
-                    current_position.exit_price = current_price
-                    current_position.exit_time = current_time
-                    current_position.pnl = pnl
-                    if current_position.direction == "LONG":
-                        current_position.pnl_pct = (current_price - current_position.entry_price) / current_position.entry_price * 100
-                    else:
-                        current_position.pnl_pct = (current_position.entry_price - current_price) / current_position.entry_price * 100
-                    current_position.actual_move_pct = current_position.pnl_pct
-                    current_position.exit_reason = "trailing_stop" if current_position.trailing_activated else "stop_loss"
+                        if current_position.trailing_activated:
+                            current_atr = atr_pct[ci] if ci < len(atr_pct) else 2.0
+                            if pos.direction == "LONG":
+                                new_sl = max(pos.sl_price, candle_c * (1 - current_atr / 100))
+                            else:
+                                new_sl = min(pos.sl_price, candle_c * (1 + current_atr / 100))
+                            pos.sl_price = new_sl
 
-                    # Living Trie: record this trade outcome in the Trie
-                    if cfg.living_trie and current_position.matched_pattern:
-                        obs_result = _record_observation(
-                            trie, current_position, sym_idx,
-                            current_symbols[-1] if current_symbols else None
-                        )
-                        trie_observations_recorded += obs_result["observations"]
-                        trie_new_nodes_created += obs_result["new_nodes"]
+                    # === Check SL/TP using high/low for accurate detection ===
+                    sl_hit = False
+                    tp_hit = False
+                    exit_price = candle_c  # Default to close
 
-                    result.trades.append(current_position)
-                    trade_counter += 1
-                    current_position = None
+                    if pos.direction == "LONG":
+                        # SL: price went below stop loss
+                        if candle_l <= pos.sl_price:
+                            sl_hit = True
+                            exit_price = pos.sl_price  # Assume fills at SL
+                        # TP: price reached take profit
+                        elif candle_h >= pos.tp_price:
+                            tp_hit = True
+                            exit_price = pos.tp_price  # Assume fills at TP
+                    else:  # SHORT
+                        # SL: price went above stop loss
+                        if candle_h >= pos.sl_price:
+                            sl_hit = True
+                            exit_price = pos.sl_price
+                        # TP: price reached take profit
+                        elif candle_l <= pos.tp_price:
+                            tp_hit = True
+                            exit_price = pos.tp_price
 
-                    # Update equity curve
-                    result.equity_curve.append(risk_mgr.capital)
-                    result.capital_history.append(risk_mgr.capital)
-                    if risk_mgr.capital > peak_capital:
-                        peak_capital = risk_mgr.capital
-                    continue
+                    if sl_hit or tp_hit:
+                        # Close position
+                        _, pnl = risk_mgr.close_position(cfg.symbol, exit_price)
+                        current_position.exit_price = exit_price
+                        current_position.exit_time = check_time
+                        current_position.pnl = pnl
+                        if current_position.direction == "LONG":
+                            current_position.pnl_pct = (exit_price - current_position.entry_price) / current_position.entry_price * 100
+                        else:
+                            current_position.pnl_pct = (current_position.entry_price - exit_price) / current_position.entry_price * 100
+                        current_position.actual_move_pct = current_position.pnl_pct
 
-                elif tp_hit:
-                    # Close at take profit
-                    _, pnl = risk_mgr.close_position(cfg.symbol, current_price)
-                    current_position.exit_price = current_price
-                    current_position.exit_time = current_time
-                    current_position.pnl = pnl
-                    if current_position.direction == "LONG":
-                        current_position.pnl_pct = (current_price - current_position.entry_price) / current_position.entry_price * 100
-                    else:
-                        current_position.pnl_pct = (current_position.entry_price - current_price) / current_position.entry_price * 100
-                    current_position.actual_move_pct = current_position.pnl_pct
-                    current_position.exit_reason = "take_profit"
+                        if sl_hit:
+                            current_position.exit_reason = "trailing_stop" if current_position.trailing_activated else "stop_loss"
+                        else:
+                            current_position.exit_reason = "take_profit"
 
-                    # Living Trie: record this trade outcome in the Trie
-                    if cfg.living_trie and current_position.matched_pattern:
-                        obs_result = _record_observation(
-                            trie, current_position, sym_idx,
-                            current_symbols[-1] if current_symbols else None
-                        )
-                        trie_observations_recorded += obs_result["observations"]
-                        trie_new_nodes_created += obs_result["new_nodes"]
+                        # Living Trie: record observation
+                        if cfg.living_trie and current_position.matched_pattern:
+                            next_sym = all_sax_symbols[sym_idx] if sym_idx < len(all_sax_symbols) else None
+                            obs_result = _record_observation(
+                                trie, current_position, sym_idx, next_sym
+                            )
+                            trie_observations_recorded += obs_result["observations"]
+                            trie_new_nodes_created += obs_result["new_nodes"]
 
-                    result.trades.append(current_position)
-                    trade_counter += 1
-                    current_position = None
+                        # Track losing trade for cooldown
+                        if current_position.pnl_pct <= 0:
+                            last_losing_trade_sym_idx = sym_idx
 
-                    result.equity_curve.append(risk_mgr.capital)
-                    result.capital_history.append(risk_mgr.capital)
-                    if risk_mgr.capital > peak_capital:
-                        peak_capital = risk_mgr.capital
-                    continue
+                        result.trades.append(current_position)
+                        trade_counter += 1
+                        current_position = None
+                        sl_tp_closed = True
 
-                # Update position unrealized P&L
-                risk_mgr.update_position(cfg.symbol, current_price)
+                        result.equity_curve.append(risk_mgr.capital)
+                        result.capital_history.append(risk_mgr.capital)
+                        if risk_mgr.capital > peak_capital:
+                            peak_capital = risk_mgr.capital
+                        break  # Exit inner candle loop
 
-            # If in position, check for pattern break
+                if sl_tp_closed:
+                    # Reset pattern break counter when position closes
+                    consecutive_breaks = 0
+                    continue  # Skip to next SAX symbol
+
+                # Update position unrealized P&L (at end of window)
+                risk_mgr.update_position(cfg.symbol, df_close[last_candle_idx])
+
+            # ================================================================
+            # PHASE 2: Pattern break check with grace period
+            # v0.2.9: Instead of closing on the FIRST pattern break, we
+            # wait for N consecutive breaks (default 2). A single break
+            # may be noise; two consecutive breaks confirm the pattern
+            # has actually changed.
+            # ================================================================
             if current_position is not None and len(current_symbols) >= 2:
-                # Check if the latest symbol continues the pattern
                 pattern_to_check = current_symbols[:-1]
                 latest_symbol = current_symbols[-1]
                 continues, _ = trie.check_continuation(pattern_to_check, latest_symbol)
 
                 if not continues and current_position.confidence > 0:
-                    # Pattern break - close position
-                    _, pnl = risk_mgr.close_position(cfg.symbol, current_price)
-                    current_position.exit_price = current_price
-                    current_position.exit_time = current_time
-                    current_position.pnl = pnl
-                    if current_position.direction == "LONG":
-                        current_position.pnl_pct = (current_price - current_position.entry_price) / current_position.entry_price * 100
-                    else:
-                        current_position.pnl_pct = (current_position.entry_price - current_price) / current_position.entry_price * 100
-                    current_position.actual_move_pct = current_position.pnl_pct
-                    current_position.exit_reason = "pattern_break"
+                    consecutive_breaks += 1
+                    if consecutive_breaks >= cfg.pattern_break_grace:
+                        # N consecutive breaks → close position
+                        current_price = df_close[last_candle_idx]
+                        _, pnl = risk_mgr.close_position(cfg.symbol, current_price)
+                        current_position.exit_price = current_price
+                        current_position.exit_time = current_time
+                        current_position.pnl = pnl
+                        if current_position.direction == "LONG":
+                            current_position.pnl_pct = (current_price - current_position.entry_price) / current_position.entry_price * 100
+                        else:
+                            current_position.pnl_pct = (current_position.entry_price - current_price) / current_position.entry_price * 100
+                        current_position.actual_move_pct = current_position.pnl_pct
+                        current_position.exit_reason = "pattern_break"
 
-                    # Living Trie: record outcome AND create new child node
-                    # This is the KEY innovation — the Trie learns from the
-                    # unexpected symbol that broke the pattern.
-                    if cfg.living_trie and current_position.matched_pattern:
-                        obs_result = _record_observation(
-                            trie, current_position, sym_idx,
-                            latest_symbol,  # The new symbol that broke the pattern
-                        )
-                        trie_observations_recorded += obs_result["observations"]
-                        trie_new_nodes_created += obs_result["new_nodes"]
+                        # Living Trie: record AND create new child for the break symbol
+                        if cfg.living_trie and current_position.matched_pattern:
+                            obs_result = _record_observation(
+                                trie, current_position, sym_idx,
+                                latest_symbol,  # The symbol that broke the pattern
+                            )
+                            trie_observations_recorded += obs_result["observations"]
+                            trie_new_nodes_created += obs_result["new_nodes"]
 
-                    result.trades.append(current_position)
-                    trade_counter += 1
-                    current_position = None
+                        if current_position.pnl_pct <= 0:
+                            last_losing_trade_sym_idx = sym_idx
 
-                    result.equity_curve.append(risk_mgr.capital)
-                    result.capital_history.append(risk_mgr.capital)
-                    if risk_mgr.capital > peak_capital:
-                        peak_capital = risk_mgr.capital
+                        result.trades.append(current_position)
+                        trade_counter += 1
+                        current_position = None
+                        consecutive_breaks = 0
+
+                        result.equity_curve.append(risk_mgr.capital)
+                        result.capital_history.append(risk_mgr.capital)
+                        if risk_mgr.capital > peak_capital:
+                            peak_capital = risk_mgr.capital
+                        continue
+                else:
+                    # Pattern continues → reset break counter
+                    consecutive_breaks = 0
+
+            # ================================================================
+            # PHASE 3: Entry signal generation
+            # v0.2.9 improvements:
+            # - min_confidence raised to 0.15
+            # - min_quality_score = 0.10 (new filter)
+            # - SHORT uses wider SL (ATR*2.0, min 2.0%) and lower TP (SL*1.5)
+            # - Re-entry cooldown after losing trades
+            # ================================================================
+            if current_position is None:
+                # v0.2.9: Re-entry cooldown — skip if too soon after a losing trade
+                if sym_idx - last_losing_trade_sym_idx < cfg.reentry_cooldown:
+                    cooldown_filter_count += 1
                     continue
 
-            # If no position, try to generate entry signal
-            if current_position is None:
                 pred_count += 1
 
-                # Use the full current pattern for prediction.
-                # The PredictionEngine._find_best_node() handles prefix matching
-                # internally — it tries exact match, then progressively shorter
-                # prefixes from the root. This is correct because the Trie stores
-                # patterns as paths from root.
-                #
-                # DO NOT use suffix-based shortening (current_symbols[-pat_len:])
-                # because that would search for unrelated patterns in the Trie.
+                current_price = df_close[last_candle_idx]
+
                 try:
                     prediction = pred_engine.predict(
                         current_symbols=current_symbols,
@@ -720,21 +784,16 @@ class PaperTrader:
 
                 pred_with_direction += 1
 
-                # Check if prediction is strong enough for entry
-                # Use min_confidence but allow lower if probability is high
+                # Effective minimum confidence
                 effective_min_conf = cfg.min_confidence
                 if prediction.overall_probability > 0.5:
                     effective_min_conf = max(cfg.min_confidence * 0.5, 0.05)
 
-                # SHORT signals require higher confidence because BTC trends up
-                # and SHORT predictions from the Trie are less reliable.
-                # LONG: min_confidence = cfg.min_confidence (default 10%)
-                # SHORT: min_confidence = max(cfg.min_confidence * 2, 0.20) (at least 20%)
+                # SHORT signals require higher confidence (BTC trends up)
                 if prediction.direction == "SHORT":
-                    effective_min_conf = max(effective_min_conf * 2, 0.20)
+                    effective_min_conf = max(effective_min_conf * 2, 0.25)
 
-                # Minimum expected move: 1.0% (was 0.3%)
-                # Moves < 1% are mostly noise on BTC 1h timeframe
+                # Entry conditions
                 if (prediction.direction != "FLAT"
                     and prediction.confidence >= effective_min_conf
                     and abs(prediction.expected_total_move_pct) > 1.0
@@ -751,21 +810,30 @@ class PaperTrader:
                         else SignalType.ENTRY_SHORT
                     )
 
-                    # Compute SL/TP from ATR (Average True Range)
+                    # === Direction-specific SL/TP ===
+                    # v0.2.9: SHORT uses wider SL and lower TP
                     #
-                    # ATR-based stops adapt to current market volatility:
-                    #   - High ATR (volatile) → wider stops to avoid noise
-                    #   - Low ATR (quiet) → tighter stops for better R:R
+                    # LONG:
+                    #   SL = max(ATR * 1.5, 1.5%), capped at 5%
+                    #   TP = SL * 2.0 (R:R = 2.0)
                     #
-                    # SL = max(1.5 × ATR_pct, 1.5%), capped at 5% max
-                    # TP = SL × 2.0 (R:R = 2.0 by construction)
+                    # SHORT:
+                    #   SL = max(ATR * 2.0, 2.0%), capped at 7%
+                    #   TP = SL * 1.5 (R:R = 1.5)
                     #
-                    # The 5% cap prevents catastrophic single-trade losses.
-                    # The 1.5% floor ensures SL isn't too tight during low-vol periods.
+                    # SHORT needs wider stops because:
+                    # 1. BTC has upward bias — SHORTs fight the trend
+                    # 2. Short squeezes cause sharp upward spikes
+                    # 3. Wider SL prevents premature stop-outs on noise
                     #
-                    current_atr_pct = atr_pct[candle_idx] if candle_idx < len(atr_pct) else 2.0
-                    sl_distance_pct = min(max(current_atr_pct * 1.5, 1.5), 5.0)
-                    tp_distance_pct = sl_distance_pct * 2.0  # R:R = 2.0
+                    current_atr_pct = atr_pct[last_candle_idx] if last_candle_idx < len(atr_pct) else 2.0
+
+                    if prediction.direction == "LONG":
+                        sl_distance_pct = min(max(current_atr_pct * 1.5, 1.5), 5.0)
+                        tp_distance_pct = sl_distance_pct * 2.0  # R:R = 2.0
+                    else:  # SHORT
+                        sl_distance_pct = min(max(current_atr_pct * 2.0, 2.0), 7.0)
+                        tp_distance_pct = sl_distance_pct * 1.5  # R:R = 1.5
 
                     if prediction.direction == "LONG":
                         sl_price = current_price * (1 - sl_distance_pct / 100)
@@ -774,7 +842,7 @@ class PaperTrader:
                         sl_price = current_price * (1 + sl_distance_pct / 100)
                         tp_price = current_price * (1 - tp_distance_pct / 100)
 
-                    # Risk:Reward ratio = expected_move / SL_distance
+                    # Risk:Reward ratio
                     sl_distance_pct = abs(current_price - sl_price) / current_price * 100
                     tp_distance_pct = abs(tp_price - current_price) / current_price * 100
                     risk_reward = tp_distance_pct / sl_distance_pct if sl_distance_pct > 0 else 0
@@ -794,6 +862,11 @@ class PaperTrader:
                     )
                     signal.quality_score = signal.compute_quality_score()
                     signal.sizing_multiplier = signal.compute_sizing_multiplier()
+
+                    # v0.2.9: Quality score filter — reject low-quality signals
+                    if signal.quality_score < cfg.min_quality_score:
+                        risk_reject_reasons["low_quality"] = risk_reject_reasons.get("low_quality", 0) + 1
+                        continue
 
                     # Metadata sizing
                     mock_meta = BlockLifecycleMetadata(
@@ -832,18 +905,15 @@ class PaperTrader:
                             entry_sym_idx=sym_idx,
                         )
                     else:
-                        # Track rejection reasons
                         risk_reject_reasons[reason] = risk_reject_reasons.get(reason, 0) + 1
 
             # Record equity curve periodically
-            # Also re-propagate Trie metadata periodically for living Trie
             if sym_idx % 10 == 0:
                 unrealized_capital = risk_mgr.capital
                 result.equity_curve.append(unrealized_capital)
                 result.capital_history.append(unrealized_capital)
 
             # Living Trie: re-propagate metadata every 200 symbol steps
-            # This ensures parent nodes reflect newly recorded observations
             if cfg.living_trie and trie_observations_recorded > 0 and sym_idx % 200 == 0:
                 trie.propagate_metadata()
                 trie_metadata_propagations += 1
@@ -862,7 +932,7 @@ class PaperTrader:
             current_position.actual_move_pct = current_position.pnl_pct
             current_position.exit_reason = "end_of_data"
 
-            # Living Trie: record the final trade outcome too
+            # Living Trie: record the final trade outcome
             if cfg.living_trie and current_position.matched_pattern:
                 obs_result = _record_observation(
                     trie, current_position, len(all_sax_symbols) - 1, None
@@ -878,15 +948,24 @@ class PaperTrader:
                       f"{pred_passed_threshold} passed threshold[/dim]")
         if risk_reject_reasons:
             console.print(f"[dim]Risk rejections: {risk_reject_reasons}[/dim]")
+        if cooldown_filter_count > 0:
+            console.print(f"[dim]Re-entry cooldown blocks: {cooldown_filter_count}[/dim]")
 
-        # Living Trie statistics
+        # Living Trie statistics and save
         if cfg.living_trie and trie_observations_recorded > 0:
+            # Final metadata propagation
+            trie.propagate_metadata()
+            trie_metadata_propagations += 1
+
             console.print(f"[bold cyan]Living Trie:[/bold cyan] "
                           f"{trie_observations_recorded} observations recorded, "
                           f"{trie_new_nodes_created} new nodes created, "
                           f"{trie_metadata_propagations} metadata propagations")
-            console.print(f"  Trie patterns: {trie.pattern_count} "
-                          f"(was {trie.pattern_count - trie_new_nodes_created} at start)")
+            if initial_pattern_count > 0:
+                growth = trie.pattern_count - initial_pattern_count
+                console.print(f"[bold cyan]Trie growth:[/bold cyan] "
+                              f"{initial_pattern_count} -> {trie.pattern_count} patterns "
+                              f"(+{growth} new patterns discovered)")
 
             # Save updated Trie back to storage
             storage.save_trie(cfg.symbol, "n3", trie)
@@ -926,7 +1005,7 @@ class PaperTrader:
                         max_dd = dd
                 result.max_drawdown = max_dd
 
-            # Sharpe ratio
+            # Sharpe ratio (uses module-level numpy import)
             returns = [t.pnl_pct / 100 for t in result.trades]
             if len(returns) >= 2:
                 mean_ret = np.mean(returns)

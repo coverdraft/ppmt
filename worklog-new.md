@@ -75,3 +75,71 @@ Stage Summary:
 - Living Trie feedback loop working: Trie learns and grows from each trade
 - Major architectural milestone: Trie is now "alive" — it improves with every observation
 - Files modified: paper_trader.py, __init__.py, pyproject.toml, cli/main.py
+
+---
+Task ID: v0.2.9
+Agent: Main
+Task: Improve WR from 47% toward 60%+ — 5 major improvements targeting accuracy and risk
+
+Work Log:
+
+1. INTRA-SYMBOL SL/TP CHECKING WITH HIGH/LOW (CRITICAL FIX)
+   - Problem: v0.2.8 only checked SL/TP at the LAST candle of each SAX window (every 10 candles).
+     Price can move A LOT in 10 hours — catastrophic losses (-10.20%, -9.75%) occurred because
+     we didn't detect SL hits until 10 hours after they happened.
+   - Fix: Check EVERY candle within the SAX window using HIGH/LOW prices:
+     - LONG SL hit if candle LOW <= SL price (not just close)
+     - LONG TP hit if candle HIGH >= TP price
+     - SHORT SL hit if candle HIGH >= SL price
+     - SHORT TP hit if candle LOW <= TP price
+   - This is the single biggest improvement — prevents catastrophic intra-window losses
+   - Trailing stop also updates at every candle (not just at SAX boundaries)
+
+2. HIGHER MIN CONFIDENCE (0.10 → 0.15) + NEW MIN QUALITY SCORE (0.10)
+   - Problem: v0.2.8 entered trades with very low confidence (avg 14.9%) and quality (0.12).
+     These low-conviction trades were dragging down win rate.
+   - Fix: Raised min_confidence from 0.10 to 0.15
+   - Added min_quality_score = 0.10 — signals with quality < 0.10 are rejected
+   - Expected: fewer trades but higher quality → better WR
+
+3. SHORT-SPECIFIC SL WIDENING + LOWER TP
+   - Problem: SHORT SL was same as LONG (ATR*1.5, min 1.5%, cap 5%) but BTC trends UP.
+     SHORTs were getting stopped out prematurely on normal upward noise.
+   - Fix:
+     - LONG SL: max(ATR * 1.5, 1.5%), capped at 5% (unchanged)
+     - LONG TP: SL * 2.0 (R:R = 2.0) (unchanged)
+     - SHORT SL: max(ATR * 2.0, 2.0%), capped at 7% (WIDER)
+     - SHORT TP: SL * 1.5 (R:R = 1.5) (LOWER — more realistic for SHORTs on BTC)
+   - Lowered RiskConfig min_risk_reward from 1.5 to 1.0 to allow SHORT R:R = 1.5
+   - SHORT min_confidence raised: max(conf * 2, 0.25) — only high-conviction SHORTs
+
+4. PATTERN BREAK GRACE PERIOD (2 consecutive breaks)
+   - Problem: v0.2.8 closed on the FIRST pattern break. But a single unexpected SAX symbol
+     could be noise — the pattern might continue on the next symbol.
+   - Fix: Added pattern_break_grace = 2 (configurable). Close only after N CONSECUTIVE
+     pattern breaks. A single break is tolerated; two consecutive breaks confirm the
+     pattern has actually changed.
+   - Counter resets to 0 whenever pattern continues.
+
+5. RE-ENTRY COOLDOWN AFTER LOSING TRADES (3 symbol steps)
+   - Problem: After a losing trade, the system would immediately enter the next signal.
+     This is "revenge trading" / tilt — entering when emotional or when the market
+     regime may have just changed.
+   - Fix: Added reentry_cooldown = 3 (configurable). After a losing trade, wait N SAX
+     symbol steps before entering a new position. This gives the market time to settle
+     and prevents entering during a regime transition.
+
+Config changes:
+- PaperTraderConfig.min_confidence: 0.10 → 0.15
+- PaperTraderConfig.min_quality_score: 0.0 → 0.10 (NEW)
+- PaperTraderConfig.min_risk_reward: 1.5 → 1.0
+- PaperTraderConfig.pattern_break_grace: 2 (NEW)
+- PaperTraderConfig.reentry_cooldown: 3 (NEW)
+- RiskConfig.min_risk_reward: 1.5 → 1.0
+
+Stage Summary:
+- v0.2.9 = MAJOR ACCURACY IMPROVEMENT — 5 targeted fixes
+- #1 (intra-symbol SL/TP) is the most impactful — prevents catastrophic losses
+- Expected: WR should improve from 47% toward 55-60%, Max DD should drop significantly
+- Files modified: paper_trader.py, __init__.py, pyproject.toml, cli/main.py
+- PENDING: Run on user's machine to measure actual improvement
