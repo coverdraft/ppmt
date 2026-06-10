@@ -256,3 +256,86 @@ Stage Summary:
 - P&L lower than v0.2.8 run #2 due to corrupted Trie metadata from v0.2.9
 - NEXT: Run again to let Living Trie overwrite bad metadata
 - Files modified: paper_trader.py, __init__.py, pyproject.toml, cli/main.py
+
+---
+Task ID: v0.3.0
+Agent: Main
+Task: Revert to v0.2.8 SL/TP baseline — fix v0.2.10 regression (+371% vs +1578%)
+
+Work Log:
+
+PROBLEM ANALYSIS:
+v0.2.10 produced +371% P&L (WR 59.7%) vs v0.2.8's +1578% (WR 54.7%).
+While WR improved, P&L collapsed by 76%. Root causes:
+
+1. Catastrophic protection (5%) cut trades that would have reached TP
+   - 12 catastrophic stops with losses of -5.2% to -7.97%
+   - Many of these trades would have reversed to reach TP in v0.2.8
+   - v0.2.8's -9.39% worst trade was an outlier; the avg SL exit was -2-4%
+
+2. Trailing stop activated too early (50% of TP distance)
+   - With ATR=0.84%, trailing SL was only 0.84% from current price
+   - Normal noise hit the trailing SL, locking in tiny +0.5-2% gains
+   - Winners never reached full take_profit (+4-12%)
+
+3. LONG SL floor of 2.0% was wider but counterproductive
+   - Wider SL = larger losses when hit
+   - Combined with trailing stop, created asymmetric risk
+
+4. min_confidence 0.12 filtered valid entries
+   - v0.2.8's 0.10 allowed more trades, including some that hit big TPs
+
+CHANGES (v0.3.0 — revert to v0.2.8 SL/TP behavior):
+
+1. DISABLED catastrophic protection (catastrophic_loss_pct: 5.0 → 0.0)
+   - v0.2.8 with NO catastrophic protection = +1578% P&L
+   - v0.2.10 with catastrophic protection = +371% P&L
+   - Can re-enable with higher threshold (e.g., 8%) if needed
+
+2. Reverted LONG SL floor (2.0% → 1.5%)
+   - v0.2.8 values: SL = max(ATR*1.5, 1.5%), cap 5%
+   - v0.2.10's 2.0% floor increased loss magnitude without reducing frequency
+
+3. Reverted SHORT SL floor (2.5% → 2.0%)
+   - v0.2.8 values: SL = max(ATR*2.0, 2.0%), cap 7%
+   - v0.2.10's 2.5% was too wide, generating larger SHORT losses
+
+4. Trailing stop activates at 75% of TP distance (was 50%)
+   - Only trails when trade is deep in profit (3/4 of the way to TP)
+   - This prevents premature trailing on normal retracements
+
+5. Trailing distance widened (1*ATR → 1.5*ATR)
+   - v0.2.10's 1*ATR = 0.84% was too tight
+   - 1.5*ATR = 1.26% gives trades room to breathe
+
+6. Reverted min_confidence (0.12 → 0.10)
+   - v0.2.8's 0.10 allowed more trades including big winners
+
+7. Disabled min_quality_score (0.05 → 0.0)
+   - Living Trie metadata handles quality filtering through confidence
+   - Explicit thresholds historically caused more harm than good
+
+KEPT from v0.2.9/v0.2.10:
+- Pattern break grace period = 2 (prevents closing on single noise break)
+- Re-entry cooldown = 1 (prevents revenge trading without being too aggressive)
+- Living Trie ON by default (core feature)
+- Direction-specific SL/TP (SHORT gets wider stops)
+- SHORT confidence gate: max(conf*2, 0.20)
+
+Config changes:
+- PaperTraderConfig.min_confidence: 0.12 → 0.10
+- PaperTraderConfig.min_quality_score: 0.05 → 0.0
+- PaperTraderConfig.catastrophic_loss_pct: 5.0 → 0.0
+- LONG SL floor: 2.0% → 1.5%
+- SHORT SL floor: 2.5% → 2.0%
+- Trailing activation: 50% → 75% of TP distance
+- Trailing distance: 1*ATR → 1.5*ATR
+- Versions: __init__.py, pyproject.toml, cli/main.py → 0.3.0
+
+Stage Summary:
+- v0.3.0 = REVERT to v0.2.8 SL/TP behavior with targeted improvements
+- Core insight: v0.2.8's simple SL/TP at SAX boundaries was CORRECT
+- The "improvements" (catastrophic protection, aggressive trailing, wider SL)
+  collectively destroyed the R:R ratio by cutting winners short
+- Target: restore +1578% P&L performance while keeping WR near 55-60%
+- Files modified: paper_trader.py, __init__.py, pyproject.toml, cli/main.py

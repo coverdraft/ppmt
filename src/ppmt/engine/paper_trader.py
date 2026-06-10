@@ -228,16 +228,19 @@ class PaperTraderConfig:
     sax_strategy: str = "ohlcv"
     """SAX encoding strategy."""
 
-    min_confidence: float = 0.12
+    min_confidence: float = 0.10
     """Minimum confidence to generate entry signal.
-    v0.2.10: 0.12 — compromise between 0.10 (too many weak entries) and
-    0.15 (too restrictive, killed 105 entries in v0.2.9). The Living Trie
-    metadata naturally filters bad entries."""
+    v0.3.0: reverted to 0.10 (v0.2.8 value). v0.2.10's 0.12 was too
+    restrictive — it filtered out valid entries that the Living Trie
+    would have learned from. The metadata feedback loop handles
+    quality filtering naturally."""
 
-    min_quality_score: float = 0.05
+    min_quality_score: float = 0.0
     """Minimum quality score to enter a trade.
-    v0.2.10: lowered from 0.10 to 0.05 — v0.2.9's 0.10 was too strict,
-    rejecting 105 trades that could have been winners."""
+    v0.3.0: set to 0.0 — quality filtering is handled by the Living
+    Trie metadata and min_confidence. Explicit quality thresholds
+    have historically caused more harm than good by filtering
+    valid entries."""
 
     min_risk_reward: float = 1.0
     """Minimum risk:reward ratio for entry.
@@ -266,13 +269,13 @@ class PaperTraderConfig:
     A cooldown of 1 still prevents immediate revenge trading while
     allowing the system to capture the next valid signal."""
 
-    catastrophic_loss_pct: float = 5.0
-    """Catastrophic loss threshold (percentage). v0.2.10: if any candle
-    within a SAX window shows an unrealized loss exceeding this threshold,
-    close the position immediately regardless of SL. This prevents the
-    -9.39% type losses from v0.2.8 while still letting normal trades
-    breathe. Default 5.0% means we only intervene on truly catastrophic
-    moves, not normal candle wicks."""
+    catastrophic_loss_pct: float = 0.0
+    """Catastrophic loss threshold (percentage). v0.3.0: DISABLED (0.0).
+    v0.2.10's catastrophic protection cut winners short — trades that
+    temporarily exceeded -5% unrealized loss often reversed to reach
+    take_profit. The v0.2.8 baseline (no catastrophic protection)
+    produced +1578% P&L precisely because it let trades breathe.
+    Set to a non-zero value (e.g., 8.0) to re-enable as a safety net."""
 
     verbose: bool = True
     """Whether to print step-by-step details."""
@@ -422,18 +425,27 @@ class PaperTrader:
         """
         Run paper trading simulation on stored historical data.
 
-        v0.2.10 improvements over v0.2.8:
-        - SL/TP checked at SAX window boundaries (like v0.2.8) PLUS
-          catastrophic intra-window protection: only closes early if
-          unrealized loss exceeds catastrophic_loss_pct (default 5%).
-          v0.2.9's full intra-candle HIGH/LOW checking was too aggressive,
-          cutting winners short by triggering on candle wicks.
-        - min_confidence = 0.12 (compromise between 0.10 and 0.15)
-        - min_quality_score = 0.05 (less strict than v0.2.9's 0.10)
-        - LONG SL floor raised to 2.0% (v0.2.8's 1.5% was too tight)
-        - SHORT-specific wider SL (ATR*2.0, min 2.0%, cap 7%)
-        - Pattern break grace period (2 consecutive breaks before closing)
-        - Re-entry cooldown = 1 symbol step (v0.2.9's 3 was too aggressive)
+        v0.3.0: Revert to v0.2.8 SL/TP behavior for maximum P&L.
+        v0.2.10's "improvements" reduced P&L from +1578% to +371%:
+        - Catastrophic protection (5%) cut trades that would reach TP
+        - Trailing stop activated too early (50% of TP distance)
+        - LONG SL floor of 2.0% was too wide vs v0.2.8's 1.5%
+        - min_confidence 0.12 filtered valid entries
+
+        v0.3.0 changes (back to v0.2.8 baseline):
+        - SL/TP checked at SAX window boundaries ONLY (no intra-window)
+        - No catastrophic protection (disabled by default)
+        - LONG SL: max(ATR*1.5, 1.5%), cap 5% (v0.2.8 values)
+        - SHORT SL: max(ATR*2.0, 2.0%), cap 7% (v0.2.8 values)
+        - Trailing stop activates at 75% of TP distance (not 50%)
+        - min_confidence = 0.10 (v0.2.8 value)
+        - min_quality_score = 0.0 (removed, Living Trie handles this)
+
+        Kept from v0.2.9/v0.2.10:
+        - Pattern break grace period (2 consecutive)
+        - Re-entry cooldown = 1 symbol step
+        - Living Trie (ON by default)
+        - Direction-specific SL/TP (SHORT gets wider stops)
         """
         cfg = self.config
         storage = PPMTStorage()
@@ -536,9 +548,10 @@ class PaperTrader:
         console.print(f"  Trie: {trie.pattern_count} patterns")
         console.print(f"  Min confidence: {cfg.min_confidence:.0%} | Min quality: {cfg.min_quality_score:.2f}")
         console.print(f"  Entry: move > 1.0%, probability > 20%, ATR-based SL/TP")
-        console.print(f"  LONG SL: max(ATR*1.5, 2.0%) cap 5% | SHORT SL: max(ATR*2.0, 2.5%) cap 7%")
-        console.print(f"  Catastrophic protection: close if loss > {cfg.catastrophic_loss_pct:.0f}% intra-window")
-        console.print(f"  Trailing stop: activates at 50% of TP distance")
+        console.print(f"  LONG SL: max(ATR*1.5, 1.5%) cap 5% | SHORT SL: max(ATR*2.0, 2.0%) cap 7%")
+        cat_status = f"{cfg.catastrophic_loss_pct:.0f}%" if cfg.catastrophic_loss_pct > 0 else "OFF"
+        console.print(f"  Catastrophic protection: {cat_status}")
+        console.print(f"  Trailing stop: activates at 75% of TP distance")
         console.print(f"  Pattern break grace: {cfg.pattern_break_grace} consecutive")
         console.print(f"  Re-entry cooldown: {cfg.reentry_cooldown} symbols after loss")
         console.print(f"  Living Trie: [bold]{living_trie_status}[/bold]\n")
@@ -610,55 +623,57 @@ class PaperTrader:
                 current_price = df_close[last_candle_idx]
 
                 # === Step 1: Catastrophic intra-window protection ===
-                # Only close if the loss exceeds catastrophic_loss_pct (default 5%).
-                # This is a SAFETY NET — it prevents -9.39% type losses
-                # without cutting normal trades short on candle wicks.
+                # v0.3.0: DISABLED by default (catastrophic_loss_pct=0.0).
+                # v0.2.10's catastrophic protection at 5% cut trades that
+                # would have reached take_profit. The v0.2.8 baseline with
+                # NO intra-window checking produced +1578% P&L.
+                # Only enable if catastrophic_loss_pct > 0.
                 catastrophic_close = False
-                for ci in range(candle_start, candle_end):
-                    if ci >= len(df_close):
-                        break
-                    candle_c = df_close[ci]
-                    if pos.direction == "LONG":
-                        unrealized_loss_pct = (pos.entry_price - candle_c) / pos.entry_price * 100
-                    else:
-                        unrealized_loss_pct = (candle_c - pos.entry_price) / pos.entry_price * 100
-                    if unrealized_loss_pct >= cfg.catastrophic_loss_pct:
-                        # Catastrophic move — close immediately at this candle's close
-                        cat_time = str(df.index[ci]) if hasattr(df.index, 'strftime') else str(ci)
-                        _, pnl = risk_mgr.close_position(cfg.symbol, candle_c)
-                        current_position.exit_price = candle_c
-                        current_position.exit_time = cat_time
-                        current_position.pnl = pnl
-                        if current_position.direction == "LONG":
-                            current_position.pnl_pct = (candle_c - current_position.entry_price) / current_position.entry_price * 100
+                if cfg.catastrophic_loss_pct > 0:
+                    for ci in range(candle_start, candle_end):
+                        if ci >= len(df_close):
+                            break
+                        candle_c = df_close[ci]
+                        if pos.direction == "LONG":
+                            unrealized_loss_pct = (pos.entry_price - candle_c) / pos.entry_price * 100
                         else:
-                            current_position.pnl_pct = (current_position.entry_price - candle_c) / current_position.entry_price * 100
-                        current_position.actual_move_pct = current_position.pnl_pct
-                        current_position.exit_reason = "catastrophic_stop"
+                            unrealized_loss_pct = (candle_c - pos.entry_price) / pos.entry_price * 100
+                        if unrealized_loss_pct >= cfg.catastrophic_loss_pct:
+                            # Catastrophic move — close immediately
+                            cat_time = str(df.index[ci]) if hasattr(df.index, 'strftime') else str(ci)
+                            _, pnl = risk_mgr.close_position(cfg.symbol, candle_c)
+                            current_position.exit_price = candle_c
+                            current_position.exit_time = cat_time
+                            current_position.pnl = pnl
+                            if current_position.direction == "LONG":
+                                current_position.pnl_pct = (candle_c - current_position.entry_price) / current_position.entry_price * 100
+                            else:
+                                current_position.pnl_pct = (current_position.entry_price - candle_c) / current_position.entry_price * 100
+                            current_position.actual_move_pct = current_position.pnl_pct
+                            current_position.exit_reason = "catastrophic_stop"
 
-                        # Living Trie: record observation
-                        if cfg.living_trie and current_position.matched_pattern:
-                            next_sym = all_sax_symbols[sym_idx] if sym_idx < len(all_sax_symbols) else None
-                            obs_result = _record_observation(
-                                trie, current_position, sym_idx, next_sym
-                            )
-                            trie_observations_recorded += obs_result["observations"]
-                            trie_new_nodes_created += obs_result["new_nodes"]
+                            if cfg.living_trie and current_position.matched_pattern:
+                                next_sym = all_sax_symbols[sym_idx] if sym_idx < len(all_sax_symbols) else None
+                                obs_result = _record_observation(
+                                    trie, current_position, sym_idx, next_sym
+                                )
+                                trie_observations_recorded += obs_result["observations"]
+                                trie_new_nodes_created += obs_result["new_nodes"]
 
-                        if current_position.pnl_pct <= 0:
-                            last_losing_trade_sym_idx = sym_idx
+                            if current_position.pnl_pct <= 0:
+                                last_losing_trade_sym_idx = sym_idx
 
-                        result.trades.append(current_position)
-                        trade_counter += 1
-                        current_position = None
-                        catastrophic_close = True
-                        consecutive_breaks = 0
+                            result.trades.append(current_position)
+                            trade_counter += 1
+                            current_position = None
+                            catastrophic_close = True
+                            consecutive_breaks = 0
 
-                        result.equity_curve.append(risk_mgr.capital)
-                        result.capital_history.append(risk_mgr.capital)
-                        if risk_mgr.capital > peak_capital:
-                            peak_capital = risk_mgr.capital
-                        break
+                            result.equity_curve.append(risk_mgr.capital)
+                            result.capital_history.append(risk_mgr.capital)
+                            if risk_mgr.capital > peak_capital:
+                                peak_capital = risk_mgr.capital
+                            break
 
                 if catastrophic_close:
                     continue  # Skip to next SAX symbol
@@ -675,15 +690,25 @@ class PaperTrader:
                         unrealized_pct = (entry - current_price) / entry * 100
                         tp_distance_pct = (entry - pos.tp_price) / entry * 100
 
-                    if not current_position.trailing_activated and tp_distance_pct > 0 and unrealized_pct >= tp_distance_pct * 0.5:
+                    # v0.3.0: Trailing stop activates at 75% of TP distance
+                    # (v0.2.10's 50% was too aggressive — it triggered on normal
+                    # retracements, locking in tiny gains instead of letting
+                    # winners run to full TP). At 75%, we only trail when
+                    # the trade is deep in profit and close to TP.
+                    if not current_position.trailing_activated and tp_distance_pct > 0 and unrealized_pct >= tp_distance_pct * 0.75:
                         current_position.trailing_activated = True
 
                     if current_position.trailing_activated:
+                        # v0.3.0: Use 1.5*ATR for trailing distance (wider)
+                        # v0.2.10's 1*ATR was too tight — with avg ATR=0.84%,
+                        # the trailing SL was only 0.84% away, getting hit
+                        # by normal noise. 1.5*ATR = 1.26% gives breathing room.
                         current_atr = atr_pct[last_candle_idx] if last_candle_idx < len(atr_pct) else 2.0
+                        trailing_distance = current_atr * 1.5
                         if pos.direction == "LONG":
-                            new_sl = max(pos.sl_price, current_price * (1 - current_atr / 100))
+                            new_sl = max(pos.sl_price, current_price * (1 - trailing_distance / 100))
                         else:
-                            new_sl = min(pos.sl_price, current_price * (1 + current_atr / 100))
+                            new_sl = min(pos.sl_price, current_price * (1 + trailing_distance / 100))
                         pos.sl_price = new_sl
 
                 # === Step 3: Check SL/TP at SAX boundary (like v0.2.8) ===
@@ -893,11 +918,17 @@ class PaperTrader:
                     #
                     current_atr_pct = atr_pct[last_candle_idx] if last_candle_idx < len(atr_pct) else 2.0
 
+                    # v0.3.0: Reverted to v0.2.8 SL/TP parameters
+                    # LONG: SL = max(ATR*1.5, 1.5%), cap 5% → TP = SL*2.0
+                    # SHORT: SL = max(ATR*2.0, 2.0%), cap 7% → TP = SL*1.5
+                    # v0.2.10's LONG SL floor of 2.0% was wider but the
+                    # trailing stop + catastrophic protection combo negated
+                    # the benefit. v0.2.8's 1.5% with simple SL/TP works.
                     if prediction.direction == "LONG":
-                        sl_distance_pct = min(max(current_atr_pct * 1.5, 2.0), 5.0)
+                        sl_distance_pct = min(max(current_atr_pct * 1.5, 1.5), 5.0)
                         tp_distance_pct = sl_distance_pct * 2.0  # R:R = 2.0
                     else:  # SHORT
-                        sl_distance_pct = min(max(current_atr_pct * 2.0, 2.5), 7.0)
+                        sl_distance_pct = min(max(current_atr_pct * 2.0, 2.0), 7.0)
                         tp_distance_pct = sl_distance_pct * 1.5  # R:R = 1.5
 
                     if prediction.direction == "LONG":
@@ -928,9 +959,10 @@ class PaperTrader:
                     signal.quality_score = signal.compute_quality_score()
                     signal.sizing_multiplier = signal.compute_sizing_multiplier()
 
-                    # v0.2.10: Quality score filter — reject very low-quality signals
-                    # (threshold lowered from 0.10 to 0.05 — v0.2.9 was too strict)
-                    if signal.quality_score < cfg.min_quality_score:
+                    # v0.3.0: Quality score filter only if min_quality_score > 0
+                    # (default is 0.0 = disabled). The Living Trie metadata
+                    # naturally handles quality filtering through confidence.
+                    if cfg.min_quality_score > 0 and signal.quality_score < cfg.min_quality_score:
                         risk_reject_reasons["low_quality"] = risk_reject_reasons.get("low_quality", 0) + 1
                         continue
 
