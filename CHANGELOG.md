@@ -2,6 +2,33 @@
 
 All notable changes to the Progressive Pattern Matching Trie (PPMT) project.
 
+## [v0.8.0] - 2026-06-11
+
+### Added - Regime-Aware Position Sizing
+- **RegimeDetector** now connected to PaperTrader pipeline (was standalone, never called)
+- Market regime detected at each SAX boundary: trending_up, trending_down, ranging, volatile
+- Regime feeds into position sizing multipliers:
+  - trending_up: 1.2x (favorable, increase exposure)
+  - ranging: 1.0x (neutral, base sizing)
+  - trending_down: 0.6x (unfavorable, reduce exposure)
+  - volatile: 0.4x (dangerous, minimal exposure)
+- `PaperTrade.regime` and `PaperTrade.regime_confidence` fields track regime at entry
+- Regime column added to trades table output
+- CLI flag: `--regime-aware/--no-regime-aware` (default: enabled)
+- Regime distribution statistics printed after simulation
+- `RegimeDetector` and `RegimeInfo` exported from `ppmt.core.__init__`
+
+### Changed
+- Regime detection uses last 200 candles with 50-candle lookback
+- Hurst exponent + volatility + trend strength combined for classification
+- `AdvancedPositionSizer` already had regime support — now actually receives regime data
+
+### Sync & Maintenance
+- Synced active dev code (`ppmt/src/ppmt/`) to submodule mirror (`ppmt/ppmt/src/ppmt/`)
+- Created `TRACEABILITY.md` as single source of truth document
+- Updated `pyproject.toml` version from 0.3.0 to 0.7.1
+- Verified all previously reported bugs already fixed in current code
+
 ## [v0.7.1] - 2026-06-11
 
 ### Changed

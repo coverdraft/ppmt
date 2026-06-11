@@ -38,6 +38,7 @@ import numpy as np
 from ppmt.data.storage import PPMTStorage
 from ppmt.data.classifier import AssetClassifier
 from ppmt.core.sax import SAXEncoder
+from ppmt.core.regime import RegimeDetector, RegimeInfo
 from ppmt.engine.ppmt import PPMT
 from ppmt.engine.prediction import PredictionEngine
 from ppmt.engine.signal import SignalType, Signal
@@ -302,6 +303,17 @@ class PaperTraderConfig:
     v0.3.0 had disabled it (0.0) because 5% was too tight for BTC's
     volatility. 8% gives ~3x the avg ATR (0.84%) as breathing room."""
 
+    regime_aware: bool = True
+    """v0.8.0: Enable regime-aware position sizing. When True, the paper
+    trader detects the current market regime at each SAX boundary and
+    adjusts position sizing accordingly. Regime multipliers:
+    - trending_up: 1.2x (favorable, increase exposure)
+    - ranging:     1.0x (neutral, base sizing)
+    - trending_down: 0.6x (unfavorable, reduce exposure)
+    - volatile:    0.4x (dangerous, minimal exposure)
+    The AdvancedPositionSizer already supports these multipliers;
+    this flag activates the regime detection that feeds them."""
+
     verbose: bool = True
     """Whether to print step-by-step details."""
 
@@ -339,6 +351,10 @@ class PaperTrade:
     """SAX symbol index at entry (for duration calculation)."""
     trie_updated: bool = False
     """Whether this trade's outcome was recorded in the Trie (living Trie)."""
+    regime: str = ""
+    """Market regime at entry time. v0.8.0: One of trending_up, trending_down, ranging, volatile."""
+    regime_confidence: float = 0.0
+    """Confidence of the regime detection at entry time."""
 
 
 @dataclass
@@ -403,6 +419,7 @@ class PaperTraderResult:
         table.add_column("Quality", justify="right", width=6)
         table.add_column("WR", justify="right", width=5)
         table.add_column("Exit Reason", width=15)
+        table.add_column("Regime", width=8)
 
         for t in self.trades:
             pnl_style = "green" if t.pnl_pct >= 0 else "red"
@@ -417,6 +434,7 @@ class PaperTraderResult:
                 f"{t.quality_score:.2f}",
                 f"{t.win_rate:.0%}",
                 t.exit_reason,
+                t.regime or "-",
             )
 
         return table
@@ -610,7 +628,17 @@ class PaperTrader:
         console.print(f"  Trailing stop: activates at 75% of TP distance")
         console.print(f"  Pattern break grace: {cfg.pattern_break_grace} consecutive")
         console.print(f"  Re-entry cooldown: {cfg.reentry_cooldown} symbols after loss")
-        console.print(f"  Living Trie: [bold]{living_trie_status}[/bold]\n")
+        console.print(f"  Living Trie: [bold]{living_trie_status}[/bold]")
+        console.print(f"  Regime-aware sizing: [bold]{'ON' if cfg.regime_aware else 'OFF'}[/bold]\n")
+
+        # v0.8.0: Regime detection
+        regime_detector = None
+        current_regime = "ranging"
+        regime_info = None
+        regime_stats = {"trending_up": 0, "trending_down": 0, "ranging": 0, "volatile": 0}
+        if cfg.regime_aware:
+            regime_detector = RegimeDetector(lookback=50, vol_threshold=0.6, trend_threshold=0.005)
+            console.print(f"  [dim]Regime detector initialized (lookback=50)[/dim]")
 
         # We iterate over SAX symbol positions
         start_sym_idx = start_candle // cfg.sax_window_size
@@ -657,6 +685,21 @@ class PaperTrader:
             if sym_idx < cfg.pattern_length:
                 continue
             current_symbols = all_sax_symbols[sym_idx - cfg.pattern_length:sym_idx]
+
+            # ================================================================
+            # v0.8.0: Regime detection at each SAX boundary
+            # Detect market regime from recent prices and adjust position
+            # sizing accordingly. Regime is updated once per SAX window
+            # (not per candle) to match the trading decision cadence.
+            # ================================================================
+            if regime_detector is not None:
+                # Use last 200 candles for regime detection (enough for lookback=50)
+                regime_candle_start = max(0, last_candle_idx - 200)
+                regime_prices = df_close[regime_candle_start:last_candle_idx + 1]
+                if len(regime_prices) >= 50:
+                    regime_info = regime_detector.detect_detailed(regime_prices)
+                    current_regime = regime_info.regime
+                    regime_stats[current_regime] = regime_stats.get(current_regime, 0) + 1
 
             # ================================================================
             # PHASE 1: SL/TP checking
@@ -1071,6 +1114,8 @@ class PaperTrader:
                             sl_price=sl_price,
                             tp_price=tp_price,
                             entry_sym_idx=sym_idx,
+                            regime=current_regime,
+                            regime_confidence=regime_info.confidence if regime_info else 0.0,
                         )
                     else:
                         risk_reject_reasons[reason] = risk_reject_reasons.get(reason, 0) + 1
@@ -1118,6 +1163,13 @@ class PaperTrader:
             console.print(f"[dim]Risk rejections: {risk_reject_reasons}[/dim]")
         if cooldown_filter_count > 0:
             console.print(f"[dim]Re-entry cooldown blocks: {cooldown_filter_count}[/dim]")
+        if cfg.regime_aware and regime_stats:
+            total_regime_steps = sum(regime_stats.values())
+            console.print(f"[dim]Regime distribution: "
+                          f"up={regime_stats.get('trending_up', 0)} ({regime_stats.get('trending_up', 0)/max(total_regime_steps,1):.0%}) "
+                          f"down={regime_stats.get('trending_down', 0)} ({regime_stats.get('trending_down', 0)/max(total_regime_steps,1):.0%}) "
+                          f"range={regime_stats.get('ranging', 0)} ({regime_stats.get('ranging', 0)/max(total_regime_steps,1):.0%}) "
+                          f"volatile={regime_stats.get('volatile', 0)} ({regime_stats.get('volatile', 0)/max(total_regime_steps,1):.0%})[/dim]")
 
         # Living Trie statistics and save
         if cfg.living_trie and trie_observations_recorded > 0:

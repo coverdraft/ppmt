@@ -48,7 +48,7 @@ def load_config() -> dict:
 
 
 @click.group()
-@click.version_option(version="0.7.0")
+@click.version_option(version="0.8.0")
 def cli():
     """PPMT - Progressive Pattern Matching Trie Engine"""
     pass
@@ -553,8 +553,9 @@ def predict(symbol: str, timeframe: str, depth: int, price: float):
 @click.option("--end-offset", default=0, type=int, help="End candle index, 0=all (for OOS validation)")
 @click.option("--paa-mean", default=None, type=float, help="SAX normalization mean from training (for OOS)")
 @click.option("--paa-std", default=None, type=float, help="SAX normalization std from training (for OOS)")
+@click.option("--regime-aware/--no-regime-aware", default=True, help="Enable regime-aware position sizing (default: enabled)")
 def run(symbol: str, timeframe: str, paper: bool, capital: float, min_confidence: float,
-        start_offset: int, end_offset: int, paa_mean: float, paa_std: float):
+        start_offset: int, end_offset: int, paa_mean: float, paa_std: float, regime_aware: bool):
     """Run real-time pattern matching (requires exchange connection).
 
     Use --paper to run a paper trading simulation on historical data
@@ -582,6 +583,7 @@ def run(symbol: str, timeframe: str, paper: bool, capital: float, min_confidence
             end_offset=end_offset,
             paa_mean=paa_mean,
             paa_std=paa_std,
+            regime_aware=regime_aware,
         )
 
         trader = PaperTrader(config=pt_config)
