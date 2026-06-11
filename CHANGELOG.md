@@ -2,6 +2,42 @@
 
 All notable changes to the Progressive Pattern Matching Trie (PPMT) project.
 
+## [v0.10.0] - 2026-06-11
+
+### Added - Regime-in-Metadata Architecture
+- **BlockLifecycleMetadata**: `regime` and `regime_distribution` fields
+  - Every trie node now knows which market regimes it was observed in
+  - `regime` = primary regime (most observations)
+  - `regime_distribution` = count per regime (e.g., `{trending_up: 45, ranging: 30}`)
+- **`regime_independence` property**: Normalized Shannon entropy of regime distribution
+  - Independent nodes (spread across regimes) ~ 1.0 = works anywhere
+  - Dependent nodes (concentrated in one regime) ~ 0.0 = needs specific regime
+- **`regime_match_score(current_regime)` method**: Confidence multiplier (0.4-1.5)
+  - Current regime matches primary -> boost (up to 1.2x)
+  - Current regime has no observations -> penalize (0.6x)
+  - Independent nodes less affected (flattened toward 1.0)
+  - Dependent nodes more affected (keep full base score)
+- **N4 regime-specific tries**: `trie_n4_regime: dict[str, PPMTTrie]`
+  - Separate trie per regime: trending_up, trending_down, ranging, volatile
+  - `trie_n4_fallback` for when regime-specific trie has < 50 patterns
+  - Makes N4 truly "Per-Asset+Regime" instead of a copy of N3
+- **PPMT.build()**: Detects regime at each pattern position via `RegimeDetector.detect_series()`
+  - Passes `regime` parameter to all `insert_with_observations()` calls
+  - N1, N2, N3 also receive regime context (stored in metadata)
+  - N4 inserts into the appropriate regime-specific trie
+- **PredictionEngine.predict()**: Accepts `current_regime` parameter
+  - Confidence adjusted by `regime_match_score`
+- **_record_observation()**: Accepts `regime` parameter
+  - Living Trie accumulates regime distribution from trading observations
+- **propagate_metadata()**: Aggregates regime distribution from children
+  - Intermediate nodes inherit regime context from their descendants
+
+### Changed
+- N4 changed from single `PPMTTrie` to `dict[str, PPMTTrie]` + fallback
+- `update_from_observation()` accepts optional `regime` parameter
+- `insert_with_observations()` accepts optional `regime` parameter
+- `_record_observation()` accepts optional `regime` parameter
+
 ## [v0.9.0] - 2026-06-11
 
 ### Added - Real-Time Trading Engine

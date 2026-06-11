@@ -220,13 +220,19 @@ class PredictionEngine:
 
         return None, 0
 
-    def _compute_confidence(self, node: TrieNode, matched_depth: int, total_depth: int) -> float:
+    def _compute_confidence(self, node: TrieNode, matched_depth: int, total_depth: int,
+                           current_regime: str = "") -> float:
         """
         Compute prediction confidence from node metadata and match quality.
 
         After propagate_metadata(), all nodes have meaningful statistics,
         so confidence is computed from the node's own metadata with
         adjustments for match depth and sample size.
+
+        v0.10.0: Added regime_match_score adjustment. If the current regime
+        matches the node's stored regime, confidence is boosted. If not,
+        it's penalized. Independent nodes (spread across regimes) are less
+        affected than dependent nodes (concentrated in one regime).
         """
         if node is None or node.metadata.historical_count == 0:
             return 0.0
@@ -246,7 +252,14 @@ class PredictionEngine:
         import numpy as np
         sample_factor = min(1.0, np.log1p(node.metadata.historical_count) / np.log(100))
 
-        return base_confidence * depth_penalty * (0.7 + 0.3 * cont_bonus) * (0.8 + 0.2 * sample_factor)
+        # v0.10.0: Regime match adjustment
+        # If the node has regime info, adjust confidence based on how well
+        # the current regime matches the node's historical regime distribution.
+        regime_mult = 1.0
+        if current_regime and node.metadata.regime_distribution:
+            regime_mult = node.metadata.regime_match_score(current_regime)
+
+        return base_confidence * depth_penalty * (0.7 + 0.3 * cont_bonus) * (0.8 + 0.2 * sample_factor) * regime_mult
 
     def predict(
         self,
@@ -254,6 +267,7 @@ class PredictionEngine:
         entry_price: Optional[float] = None,
         timeframe_hours: float = 1.0,
         symbol: str = "",
+        current_regime: str = "",
     ) -> Prediction:
         """
         Generate a prediction from the current pattern position.
@@ -263,6 +277,8 @@ class PredictionEngine:
             entry_price: Current price (for price level estimates)
             timeframe_hours: Hours per candle
             symbol: Trading pair name
+            current_regime: Current market regime (v0.10.0).
+                Used to adjust confidence via regime_match_score.
         """
         # Find the best matching node with real metadata
         node, matched_depth = self._find_best_node(current_symbols)
@@ -337,7 +353,7 @@ class PredictionEngine:
         pattern_break_prob = max(0.0, min(1.0, pattern_break_prob))
 
         # Compute confidence
-        confidence = self._compute_confidence(node, matched_depth, len(current_symbols))
+        confidence = self._compute_confidence(node, matched_depth, len(current_symbols), current_regime)
 
         # Compute price levels
         predicted_target = None

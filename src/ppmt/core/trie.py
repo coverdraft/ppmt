@@ -238,6 +238,7 @@ class PPMTTrie:
         duration: int = 0,
         won: bool = False,
         next_symbol: Optional[str] = None,
+        regime: Optional[str] = None,
     ) -> TrieNode:
         """
         Insert a pattern and update metadata from a single observation.
@@ -253,6 +254,9 @@ class PPMTTrie:
             duration: Duration in candles
             won: Whether the pattern completed successfully
             next_symbol: What followed this pattern (for continuation tracking)
+            regime: Market regime at observation time (v0.10.0).
+                One of: trending_up, trending_down, ranging, volatile.
+                Stored in node metadata for regime-aware confidence scoring.
         """
         node = self.insert(symbols)
 
@@ -268,6 +272,7 @@ class PPMTTrie:
             duration=duration,
             won=won,
             next_symbol=next_symbol,
+            regime=regime,
         )
 
         return node
@@ -496,6 +501,18 @@ class PPMTTrie:
         node.metadata.remaining_candles = weighted_duration
         node.metadata.max_drawdown_pct = min_dd
         node.metadata.max_favorable_pct = max_fav
+
+        # v0.10.0: Aggregate regime distribution from children
+        # This propagates regime context upward so intermediate nodes
+        # know which regimes their descendants were observed in.
+        aggregated_regime_dist: dict[str, int] = {}
+        for m in children_with_data:
+            for regime_name, count in m.regime_distribution.items():
+                aggregated_regime_dist[regime_name] = aggregated_regime_dist.get(regime_name, 0) + count
+        if aggregated_regime_dist:
+            node.metadata.regime_distribution = aggregated_regime_dist
+            # Set primary regime to the one with most observations
+            node.metadata.regime = max(aggregated_regime_dist, key=aggregated_regime_dist.get)
 
         # Ensure continuation_nodes include all children
         for sym in node.children:

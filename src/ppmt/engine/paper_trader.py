@@ -94,6 +94,7 @@ def _record_observation(
     trade: PaperTrade,
     exit_sym_idx: int,
     next_symbol: Optional[str] = None,
+    regime: Optional[str] = None,
 ) -> dict:
     """
     Living Trie: Record a trade's outcome back into the Trie.
@@ -148,6 +149,7 @@ def _record_observation(
             duration=max(1, exit_sym_idx - trade.entry_sym_idx) if trade.entry_sym_idx > 0 else 1,
             won=trade.pnl_pct > 0,
             next_symbol=next_symbol,
+            regime=regime,
         )
         new_nodes += 1
         observations += 1
@@ -185,6 +187,7 @@ def _record_observation(
         duration=duration,
         won=won,
         next_symbol=next_symbol,
+        regime=regime,
     )
     observations += 1
     trie.trading_observations += 1
@@ -757,7 +760,8 @@ class PaperTrader:
                             if cfg.living_trie and current_position.matched_pattern:
                                 next_sym = all_sax_symbols[sym_idx] if sym_idx < len(all_sax_symbols) else None
                                 obs_result = _record_observation(
-                                    trie, current_position, sym_idx, next_sym
+                                    trie, current_position, sym_idx, next_sym,
+                                    regime=current_regime,
                                 )
                                 trie_observations_recorded += obs_result["observations"]
                                 trie_new_nodes_created += obs_result["new_nodes"]
@@ -834,7 +838,8 @@ class PaperTrader:
                     if cfg.living_trie and current_position.matched_pattern:
                         next_sym = all_sax_symbols[sym_idx] if sym_idx < len(all_sax_symbols) else None
                         obs_result = _record_observation(
-                            trie, current_position, sym_idx, next_sym
+                            trie, current_position, sym_idx, next_sym,
+                            regime=current_regime,
                         )
                         trie_observations_recorded += obs_result["observations"]
                         trie_new_nodes_created += obs_result["new_nodes"]
@@ -870,7 +875,8 @@ class PaperTrader:
                     if cfg.living_trie and current_position.matched_pattern:
                         next_sym = all_sax_symbols[sym_idx] if sym_idx < len(all_sax_symbols) else None
                         obs_result = _record_observation(
-                            trie, current_position, sym_idx, next_sym
+                            trie, current_position, sym_idx, next_sym,
+                            regime=current_regime,
                         )
                         trie_observations_recorded += obs_result["observations"]
                         trie_new_nodes_created += obs_result["new_nodes"]
@@ -922,6 +928,7 @@ class PaperTrader:
                             obs_result = _record_observation(
                                 trie, current_position, sym_idx,
                                 latest_symbol,  # The symbol that broke the pattern
+                                regime=current_regime,
                             )
                             trie_observations_recorded += obs_result["observations"]
                             trie_new_nodes_created += obs_result["new_nodes"]
@@ -967,6 +974,7 @@ class PaperTrader:
                         entry_price=current_price,
                         timeframe_hours=tf_hours,
                         symbol=cfg.symbol,
+                        current_regime=current_regime,
                     )
                 except Exception:
                     continue
@@ -1167,7 +1175,8 @@ class PaperTrader:
             # Living Trie: record the final trade outcome
             if cfg.living_trie and current_position.matched_pattern:
                 obs_result = _record_observation(
-                    trie, current_position, len(all_sax_symbols) - 1, None
+                    trie, current_position, len(all_sax_symbols) - 1, None,
+                    regime=current_regime,
                 )
                 trie_observations_recorded += obs_result["observations"]
                 trie_new_nodes_created += obs_result["new_nodes"]

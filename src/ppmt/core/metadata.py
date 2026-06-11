@@ -1,15 +1,23 @@
 """
 Block Lifecycle Metadata - The V3 Innovation
 
-Each Trie node carries 12 metadata fields that encode:
+Each Trie node carries 14+ metadata fields that encode:
 - When to enter (trigger_candle)
 - How long the pattern should last (remaining_candles)
 - Expected move and risk parameters
 - Forward continuation and backward context
 - Historical statistics
+- Regime context (which market regimes this pattern was observed in)
 
-This metadata makes PPMT autonomous — all entry/exit/SL/TP decisions
+This metadata makes PPMT autonomous -- all entry/exit/SL/TP decisions
 emerge directly from the Trie without external indicators.
+
+v0.10.0: Added regime fields (regime, regime_distribution) so each node
+knows in which market regimes it was observed. This enables:
+  - Regime-aware confidence: patterns matching current regime get boosted
+  - Independent vs dependent nodes: some patterns work across all regimes,
+    others only in specific regimes
+  - N4 regime-specific tries that actually filter by regime
 """
 
 from __future__ import annotations
@@ -26,11 +34,16 @@ class BlockLifecycleMetadata:
     Block Lifecycle Metadata attached to each Trie node.
 
     This is the core innovation of PPMT V3. Every node in the Trie
-    carries these 12 fields, enabling the Trie itself to make all
+    carries these fields, enabling the Trie itself to make all
     trading decisions without external indicators.
 
     Key insight: If a next SAX block does NOT exist as a child node,
-    the pattern broke BEFORE price hit SL → earliest possible exit signal.
+    the pattern broke BEFORE price hit SL -> earliest possible exit signal.
+
+    v0.10.0: Added regime fields. Each node now knows which market
+    regimes it was observed in, enabling regime-aware confidence scoring.
+    Nodes can be "independent" (work in any regime) or "dependent"
+    (only work in specific regimes).
     """
 
     # === Entry/Exit Timing ===
@@ -82,13 +95,29 @@ class BlockLifecycleMetadata:
     # === Forward/Backward Navigation ===
     continuation_nodes: list[str] = field(default_factory=list)
     """SAX symbols that historically continued this pattern.
-    If the next observed block is in this list → continue holding.
-    These represent the 'forward' metadata — what comes after."""
+    If the next observed block is in this list -> continue holding.
+    These represent the 'forward' metadata -- what comes after."""
 
     break_nodes: list[str] = field(default_factory=list)
     """SAX symbols that historically broke this pattern.
     These represent transitions to a different regime.
-    Not all missing blocks are breaks — some are just noise."""
+    Not all missing blocks are breaks -- some are just noise."""
+
+    # === Regime Context (v0.10.0) ===
+    regime: str = ""
+    """Primary market regime for this pattern.
+    The regime with the most observations. One of:
+    trending_up, trending_down, ranging, volatile.
+    Empty string means no regime info yet."""
+
+    regime_distribution: dict[str, int] = field(default_factory=dict)
+    """Distribution of observations across market regimes.
+    Keys are regime names, values are observation counts.
+    E.g., {'trending_up': 45, 'ranging': 30, 'volatile': 5}
+    This distinguishes:
+      - Independent nodes: spread across many regimes (works anywhere)
+      - Dependent nodes: concentrated in one regime (regime-specific)
+    Children inherit regime context from their observations."""
 
     # === Computed Properties ===
 
@@ -103,7 +132,7 @@ class BlockLifecycleMetadata:
     def confidence(self) -> float:
         """
         Confidence score based on historical observations and win rate.
-        More observations and higher win rate → higher confidence.
+        More observations and higher win rate -> higher confidence.
         Uses Bayesian-inspired shrinking toward 0.5 for low counts.
         """
         if self.historical_count == 0:
@@ -122,13 +151,13 @@ class BlockLifecycleMetadata:
     def expected_profit_ahead(self) -> float:
         """
         Expected profit percentage looking ahead from this block.
-        Combines win_rate × expected_move to give a realistic expectation.
+        Combines win_rate x expected_move to give a realistic expectation.
 
         This is the key metric the Money Manager uses to decide allocation:
-          - High expected_profit_ahead → allocate more capital
-          - Low/negative → allocate less or skip
+          - High expected_profit_ahead -> allocate more capital
+          - Low/negative -> allocate less or skip
 
-        Formula: win_rate × expected_move_pct + (1 - win_rate) × max_drawdown_pct
+        Formula: win_rate x expected_move_pct + (1 - win_rate) x max_drawdown_pct
         This gives the expected value including losses.
         """
         if self.historical_count == 0:
@@ -148,7 +177,7 @@ class BlockLifecycleMetadata:
         uses this as the primary signal for position sizing.
 
         Returns the same Bayesian-adjusted win_rate used in confidence(),
-        but without the count bonus — just the pure probability estimate.
+        but without the count bonus -- just the pure probability estimate.
         """
         if self.historical_count == 0:
             return 0.0
@@ -170,12 +199,12 @@ class BlockLifecycleMetadata:
           - risk_reward_ratio: Is the payoff worth the risk?
 
         Mapping (used by RiskManager):
-          sizing_signal >= 1.5  → 2.0x base position (high conviction)
-          sizing_signal 1.0-1.5 → 1.0x base position (normal)
-          sizing_signal 0.5-1.0 → 0.5x base position (low conviction)
-          sizing_signal < 0.5   → 0.25x or reject (very low)
+          sizing_signal >= 1.5  -> 2.0x base position (high conviction)
+          sizing_signal 1.0-1.5 -> 1.0x base position (normal)
+          sizing_signal 0.5-1.0 -> 0.5x base position (low conviction)
+          sizing_signal < 0.5   -> 0.25x or reject (very low)
 
-        This creates the tight PPMT → RiskManager integration where
+        This creates the tight PPMT -> RiskManager integration where
         the Trie's metadata directly drives capital allocation.
         """
         if self.historical_count == 0:
@@ -202,9 +231,92 @@ class BlockLifecycleMetadata:
         """
         Whether an unknown next block should trigger an exit.
         True when there are continuation_nodes defined but the observed
-        block is NOT among them — meaning pattern broke.
+        block is NOT among them -- meaning pattern broke.
         """
         return len(self.continuation_nodes) > 0
+
+    # === Regime-Aware Properties (v0.10.0) ===
+
+    @property
+    def regime_independence(self) -> float:
+        """
+        How regime-independent this pattern is (0.0 to 1.0).
+
+        A pattern observed equally across all regimes has independence ~ 1.0
+        (works everywhere = independent). A pattern concentrated in one
+        regime has independence ~ 0.0 (regime-dependent).
+
+        Computed using normalized entropy of the regime distribution.
+        High entropy = spread across regimes = independent.
+        Low entropy = concentrated in one regime = dependent.
+
+        Independent patterns are more robust -- they don't need regime
+        matching to work. Dependent patterns need the right regime.
+        """
+        if not self.regime_distribution:
+            return 0.5  # No info -> neutral
+        total = sum(self.regime_distribution.values())
+        if total == 0:
+            return 0.5
+        # Compute Shannon entropy
+        n_regimes = 4  # trending_up, trending_down, ranging, volatile
+        probs = [count / total for count in self.regime_distribution.values()]
+        entropy = -sum(p * np.log2(p) for p in probs if p > 0)
+        # Normalize by max entropy (uniform distribution)
+        max_entropy = np.log2(max(n_regimes, 1))
+        if max_entropy == 0:
+            return 1.0
+        return float(entropy / max_entropy)
+
+    def regime_match_score(self, current_regime: str) -> float:
+        """
+        Score how well the current regime matches this node's history.
+
+        Returns a multiplier (0.0 to 1.5) for adjusting confidence:
+          - Current regime is the primary regime -> 1.2 (boost)
+          - Current regime has some observations -> 1.0 (neutral)
+          - Current regime has NO observations -> 0.6 (penalize)
+          - No regime info available -> 1.0 (neutral, don't adjust)
+
+        For independent nodes (high regime_independence), the score
+        is closer to 1.0 regardless of match -- because they work
+        across all regimes.
+
+        For dependent nodes (low regime_independence), the score
+        varies more -- because they NEED the right regime.
+
+        This creates the "independent vs dependent" node behavior:
+          - Independent: pattern works regardless -> regime barely matters
+          - Dependent: pattern needs specific regime -> regime is critical
+        """
+        if not self.regime_distribution or current_regime == "":
+            return 1.0  # No regime info -> don't adjust
+
+        total = sum(self.regime_distribution.values())
+        if total == 0:
+            return 1.0
+
+        regime_count = self.regime_distribution.get(current_regime, 0)
+        regime_fraction = regime_count / total
+
+        # Base score from regime match fraction
+        if regime_count == 0:
+            # Never seen in this regime -> penalize
+            base_score = 0.6
+        elif current_regime == self.regime:
+            # Current regime is the primary (most common) -> boost
+            base_score = 1.0 + 0.2 * regime_fraction
+        else:
+            # Current regime has some observations -> neutral
+            base_score = 0.8 + 0.2 * regime_fraction
+
+        # Blend with independence: independent nodes stay near 1.0
+        independence = self.regime_independence
+        # Weight: high independence -> flatten toward 1.0
+        #         low independence -> keep the base_score
+        blended = independence * 1.0 + (1.0 - independence) * base_score
+
+        return float(np.clip(blended, 0.4, 1.5))
 
     def update_from_observation(
         self,
@@ -214,6 +326,7 @@ class BlockLifecycleMetadata:
         duration: int,
         won: bool,
         next_symbol: Optional[str] = None,
+        regime: Optional[str] = None,
     ) -> None:
         """
         Update metadata with a new observation using incremental statistics.
@@ -228,6 +341,9 @@ class BlockLifecycleMetadata:
             duration: Actual duration in candles
             won: Whether the pattern completed successfully
             next_symbol: SAX symbol that followed this block (if any)
+            regime: Market regime at observation time (v0.10.0).
+                One of: trending_up, trending_down, ranging, volatile.
+                None means regime info not available (backward compatible).
         """
         n = self.historical_count
         self.historical_count += 1
@@ -257,6 +373,13 @@ class BlockLifecycleMetadata:
         if next_symbol is not None:
             if next_symbol not in self.continuation_nodes:
                 self.continuation_nodes.append(next_symbol)
+
+        # v0.10.0: Track regime distribution
+        if regime is not None and regime != "":
+            self.regime_distribution[regime] = self.regime_distribution.get(regime, 0) + 1
+            # Update primary regime (the one with most observations)
+            if self.regime == "" or self.regime_distribution.get(regime, 0) > self.regime_distribution.get(self.regime, 0):
+                self.regime = regime
 
     def compute_sl_tp(self, entry_price: float, safety_margin: float = 0.2) -> None:
         """
@@ -298,12 +421,15 @@ class BlockLifecycleMetadata:
             "expected_profit_ahead": round(self.expected_profit_ahead, 4),
             "sizing_signal": round(self.sizing_signal, 4),
             "risk_reward_ratio": round(self.risk_reward_ratio, 4),
+            # v0.10.0: Regime context
+            "regime": self.regime,
+            "regime_distribution": self.regime_distribution,
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> BlockLifecycleMetadata:
         """Deserialize metadata from dictionary."""
-        return cls(
+        meta = cls(
             trigger_candle=data.get("trigger_candle", 0),
             remaining_candles=data.get("remaining_candles", 0),
             expected_move_pct=data.get("expected_move_pct", 0.0),
@@ -316,4 +442,7 @@ class BlockLifecycleMetadata:
             tp_price=data.get("tp_price"),
             continuation_nodes=data.get("continuation_nodes", []),
             break_nodes=data.get("break_nodes", []),
+            regime=data.get("regime", ""),
+            regime_distribution=data.get("regime_distribution", {}),
         )
+        return meta

@@ -51,6 +51,7 @@ from ppmt.core.sax import SAXEncoder
 from ppmt.core.trie import PPMTTrie, TrieNode
 from ppmt.core.matcher import FuzzyMatcher, MatchResult
 from ppmt.core.metadata import BlockLifecycleMetadata
+from ppmt.core.regime import RegimeDetector
 from ppmt.engine.weights import AdaptiveWeights, LevelStats, WEIGHT_PROFILES
 from ppmt.engine.signal import SignalGenerator, Signal, SignalType
 from ppmt.engine.prediction import PredictionEngine
@@ -141,7 +142,17 @@ class PPMT:
         self.trie_n1 = PPMTTrie(name=f"universal")
         self.trie_n2 = PPMTTrie(name=f"asset_class:{asset_class}")
         self.trie_n3 = PPMTTrie(name=f"per_asset:{symbol}")
-        self.trie_n4 = PPMTTrie(name=f"per_asset_regime:{symbol}")
+        # v0.10.0: N4 is now a dict of regime-specific tries.
+        # Instead of one generic trie, we have separate tries per regime:
+        #   trending_up, trending_down, ranging, volatile
+        # When matching, we query the trie for the CURRENT regime.
+        # If it has insufficient data, we fall back to the generic trie.
+        self.trie_n4_regime: dict[str, PPMTTrie] = {}
+        self.trie_n4_fallback = PPMTTrie(name=f"per_asset_regime_fallback:{symbol}")
+        for regime_name in RegimeDetector.REGIMES:
+            self.trie_n4_regime[regime_name] = PPMTTrie(
+                name=f"per_asset_regime:{symbol}_{regime_name}"
+            )
 
         # Adaptive weights
         if weight_profile:
@@ -241,6 +252,13 @@ class PPMT:
 
         # Create overlapping sequences
         count = 0
+        # v0.10.0: Regime detection during build.
+        # We detect the market regime at each pattern position and store
+        # it in the node metadata. This enables regime-aware confidence
+        # scoring and regime-specific N4 tries.
+        regime_detector = RegimeDetector(lookback=50, vol_threshold=0.6, trend_threshold=0.005)
+        regimes_series = regime_detector.detect_series(close)
+
         for i in range(len(symbols) - pattern_length):
             pattern = symbols[i:i + pattern_length]
             next_sym = symbols[i + pattern_length] if i + pattern_length < len(symbols) else None
@@ -252,6 +270,11 @@ class PPMT:
 
             if end_candle > len(df):
                 break
+
+            # v0.10.0: Detect regime at this pattern position.
+            # Use the candle at the END of the pattern (where the signal fires).
+            regime_candle_idx = min(end_candle - 1, len(regimes_series) - 1)
+            pattern_regime = regimes_series[regime_candle_idx] if regime_candle_idx >= 0 else "ranging"
 
             window_df = df.iloc[start_candle:end_candle]
 
@@ -282,17 +305,17 @@ class PPMT:
             entry_candle_idx = start_candle
             atr_at_entry = atr_pct[entry_candle_idx] if entry_candle_idx < len(atr_pct) else 2.0
 
-            if move_pct > 0:  # Bullish pattern → LONG trade simulation
+            if move_pct > 0:  # Bullish pattern -> LONG trade simulation
                 sl_dist = min(max(atr_at_entry * 1.5, 1.5), 5.0)
                 tp_dist = sl_dist * 2.0  # R:R = 2.0
                 won = favorable_pct >= tp_dist
-            else:  # Bearish pattern → SHORT trade simulation
+            else:  # Bearish pattern -> SHORT trade simulation
                 sl_dist = min(max(atr_at_entry * 2.0, 2.0), 7.0)
                 tp_dist = sl_dist * 1.5  # R:R = 1.5
                 won = abs(drawdown_pct) >= tp_dist
 
-            # Insert into all 4 levels
-            for trie in [self.trie_n1, self.trie_n2, self.trie_n3, self.trie_n4]:
+            # Insert into N1, N2, N3 with regime context
+            for trie in [self.trie_n1, self.trie_n2, self.trie_n3]:
                 trie.insert_with_observations(
                     symbols=pattern,
                     move_pct=move_pct,
@@ -301,7 +324,36 @@ class PPMT:
                     duration=duration,
                     won=won,
                     next_symbol=next_sym,
+                    regime=pattern_regime,
                 )
+
+            # v0.10.0: Insert into regime-specific N4 trie.
+            # Each regime gets its own N4 trie containing only patterns
+            # observed during that regime. This makes N4 truly
+            # "Per-Asset+Regime" instead of a copy of N3.
+            if pattern_regime in self.trie_n4_regime:
+                self.trie_n4_regime[pattern_regime].insert_with_observations(
+                    symbols=pattern,
+                    move_pct=move_pct,
+                    drawdown_pct=drawdown_pct,
+                    favorable_pct=favorable_pct,
+                    duration=duration,
+                    won=won,
+                    next_symbol=next_sym,
+                    regime=pattern_regime,
+                )
+
+            # Also insert into N4 fallback (contains ALL patterns)
+            self.trie_n4_fallback.insert_with_observations(
+                symbols=pattern,
+                move_pct=move_pct,
+                drawdown_pct=drawdown_pct,
+                favorable_pct=favorable_pct,
+                duration=duration,
+                won=won,
+                next_symbol=next_sym,
+                regime=pattern_regime,
+            )
 
             count += 1
 
@@ -309,8 +361,12 @@ class PPMT:
         # This is critical: after building, only terminal nodes have metadata.
         # Propagation computes aggregate statistics for intermediate nodes
         # so that PredictionEngine can find meaningful data at any depth.
-        for trie in [self.trie_n1, self.trie_n2, self.trie_n3, self.trie_n4]:
+        for trie in [self.trie_n1, self.trie_n2, self.trie_n3]:
             trie.propagate_metadata()
+        # v0.10.0: Propagate metadata for regime-specific N4 tries
+        for regime_name, trie in self.trie_n4_regime.items():
+            trie.propagate_metadata()
+        self.trie_n4_fallback.propagate_metadata()
 
         self._total_patterns_built += count
         return count
@@ -346,8 +402,14 @@ class PPMT:
         n2_match = self.matcher.best_match(self.trie_n2, current_symbols)
         n3_match = self.matcher.best_match(self.trie_n3, current_symbols)
 
-        # N4: regime-specific trie
-        n4_match = self.matcher.best_match(self.trie_n4, current_symbols)
+        # N4: regime-specific trie (v0.10.0)
+        # Use the trie for the current regime. If it has insufficient data
+        # (less than min_observations), fall back to the generic N4 trie.
+        n4_trie = self.trie_n4_regime.get(self._current_regime or "ranging", self.trie_n4_fallback)
+        if n4_trie.pattern_count < 50 and self._current_regime:
+            # Not enough regime-specific data -> use fallback
+            n4_trie = self.trie_n4_fallback
+        n4_match = self.matcher.best_match(n4_trie, current_symbols)
 
         # Get confidence from each level
         n1_conf = n1_match.node.metadata.confidence if n1_match.node else 0.0
@@ -471,11 +533,15 @@ class PPMT:
         to ensure weights reflect the current state of each Trie level.
         """
         stats = {}
+        # v0.10.0: For N4 stats, combine regime-specific tries
+        n4_trie = self.trie_n4_regime.get(self._current_regime or "ranging", self.trie_n4_fallback)
+        if n4_trie.pattern_count < 50:
+            n4_trie = self.trie_n4_fallback
         for key, trie in [
             ("n1", self.trie_n1),
             ("n2", self.trie_n2),
             ("n3", self.trie_n3),
-            ("n4", self.trie_n4),
+            ("n4", n4_trie),
         ]:
             patterns = trie.get_all_patterns(min_count=1)
             if patterns:
@@ -840,6 +906,9 @@ class PPMT:
 
     def get_stats(self) -> dict:
         """Get engine statistics."""
+        n4_trie = self.trie_n4_regime.get(self._current_regime or "ranging", self.trie_n4_fallback)
+        if n4_trie.pattern_count < 50:
+            n4_trie = self.trie_n4_fallback
         return {
             "symbol": self.symbol,
             "asset_class": self.asset_class,
@@ -847,7 +916,9 @@ class PPMT:
             "trie_n1": str(self.trie_n1),
             "trie_n2": str(self.trie_n2),
             "trie_n3": str(self.trie_n3),
-            "trie_n4": str(self.trie_n4),
+            "trie_n4_active": str(n4_trie),
+            "trie_n4_regimes": {r: str(t) for r, t in self.trie_n4_regime.items()},
+            "trie_n4_fallback": str(self.trie_n4_fallback),
             "total_patterns_built": self._total_patterns_built,
             "current_regime": self._current_regime,
         }
