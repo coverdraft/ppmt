@@ -1,9 +1,16 @@
 # TRACEABILITY.md — PPMT Project Audit & Status
 
-**Last Updated**: 2026-06-11 (Full Source Audit)
-**Version**: v0.6.3 (codebase) / V4.4 (metadata)
+**Last Updated**: 2026-06-11 (Session 2 Re-verification)
+**Version**: v0.10.0 (CHANGELOG) / 0.9.0 (pyproject.toml — needs sync) / V4.4 (metadata)
 **Branch**: main
-**Git HEAD**: 6fd7a30 V4.4: Fix regime in new node creation, remove duplicate function, add TRACEABILITY.md
+**Git HEAD**: c22b5b8 V4.4-audit: Full source audit verified all 5 bugs fixed, metadata complete, SAX breakpoints complete
+
+### Session 2 Re-verification (2026-06-11)
+All 13 core source files re-read and verified. All 5 bugs confirmed fixed. Version inconsistency identified:
+- CHANGELOG.md: v0.10.0
+- pyproject.toml: 0.9.0 (needs update to 0.10.0)
+- CLI --version: 0.9.0 (needs update to 0.10.0)
+- GAP-1 (PaperTrader only uses N3) confirmed as critical remaining work.
 
 ---
 
@@ -11,7 +18,7 @@
 
 | Component | File | Status | Version | Notes |
 |-----------|------|--------|---------|-------|
-| PaperTrader | `src/ppmt/engine/paper_trader.py` | ✅ Stable | v0.8.0 | 3 historic bugs FIXED (V4.3). Regime-aware SHORT gate. V4.4: regime in new node creation |
+| PaperTrader | `src/ppmt/engine/paper_trader.py` | ✅ Stable | v0.10.0 | 3 historic bugs FIXED (V4.3). Regime-aware SHORT gate. V4.4: regime in new node creation. ⚠️ GAP-1: Only uses N3 |
 | Living Trie | `src/ppmt/engine/paper_trader.py` (_record_observation) | ✅ Fixed | V4.4 | Now passes regime/regime_confidence when creating new nodes |
 | PPMT Engine | `src/ppmt/engine/ppmt.py` | ✅ Stable | V4.2 | 4-level Trie, bootstrap, regime-aware build |
 | Trie | `src/ppmt/core/trie.py` | ✅ Stable | V4.1 | Propagation, merge, independent/dependent classification |
@@ -200,16 +207,17 @@ No additional fields are needed at this time. The 22 fields + 9 computed propert
 ### Methodology
 Every source file in `src/ppmt/` was read and assessed line-by-line. Key findings:
 
-### paper_trader.py (1321 lines)
-- ✅ No `append.append` found (Bug 1 verified fixed)
-- ✅ SHORT gate is regime-aware with multipliers per regime (Bug 2 verified fixed)
-- ✅ No `len(wins)W` syntax error found (Bug 3 verified fixed)
-- ✅ `_record_observation()` passes `regime`/`regime_confidence` on new node creation (Bug 4 verified fixed)
+### paper_trader.py (1322 lines) — Re-verified Session 2
+- ✅ No `append.append` found (Bug 1 verified fixed — re-confirmed)
+- ✅ SHORT gate is regime-aware V4.3: trending_down=0.85x, ranging=1.1x, trending_up=1.5x, volatile=1.8x (Bug 2 verified fixed — re-confirmed)
+- ✅ No `{len(wins)W}` syntax error found (Bug 3 verified fixed — re-confirmed)
+- ✅ `_record_observation()` passes `regime`/`regime_confidence` on new node creation (Bug 4 verified fixed — re-confirmed)
 - ✅ V4.3: Uses actual `historical_count` from matched node (not hardcoded 100)
 - ✅ V4.1: Regime-aware confidence adjustment via `regime_match_score()`
 - ✅ Catastrophic protection re-enabled at 8% (configurable)
 - ✅ Trailing stop at 75% of TP, 1.5x ATR distance
 - ⚠️ GAP-1: Only loads N3 trie — N1/N2/N4 built but unused in trading loop
+- ⚠️ Version inconsistency: pyproject.toml=0.9.0, CHANGELOG=v0.10.0, CLI=0.9.0
 
 ### trie.py (746 lines)
 - ✅ V4 propagation: regime_distribution, regime_stats, dominant_regime
@@ -260,13 +268,31 @@ Every source file in `src/ppmt/` was read and assessed line-by-line. Key finding
 
 ## 9. Next Steps (Priority Order)
 
-1. **Integrate PPMT.match() into PaperTrader** — Enable 4-level trading (GAP-1)
-2. **Run cross-token diagnostic** — Validate OOS performance with current fixes
-3. **Add walk-forward validation** — Rolling window instead of single split
-4. **Monte Carlo on OOS trades** — Statistical significance of OOS results
-5. **N4 regime-specific search** — Filter patterns by current regime at query time
+1. **Sync version numbers** — pyproject.toml and CLI to 0.10.0
+2. **Integrate PPMT.match() into PaperTrader** — Enable 4-level trading (GAP-1)
+3. **Run cross-token diagnostic** — Validate OOS performance with current fixes
+4. **Add walk-forward validation** — Rolling window instead of single split
+5. **Monte Carlo on OOS trades** — Statistical significance of OOS results
+6. **N4 regime-specific search** — Filter patterns by current regime at query time
+
+---
+
+## 10. Session Log
+
+### Session 1 (2026-06-11)
+- Full source audit completed
+- All 5 bugs verified fixed
+- TRACEABILITY.md created
+- V4.4 fixes committed to GitHub
+
+### Session 2 (2026-06-11)
+- Re-read all 13 core source files (paper_trader.py, trie.py, sax.py, metadata.py, regime.py, monte_carlo.py, main.py, signal.py, weights.py, encoder.py, matcher.py, prediction.py, manager.py)
+- All 5 bugs re-verified as fixed
+- Version inconsistency identified: pyproject.toml=0.9.0 vs CHANGELOG=v0.10.0
+- GAP-1 confirmed as critical remaining work
+- Version sync and GitHub commit pending
 
 ---
 
 *This document is the single source of truth for PPMT project status. Update with every code change.*
-*Last full source audit: 2026-06-11 — all files read and verified line-by-line.*
+*Last full source audit: 2026-06-11 (Session 2) — all 13 core files re-read and verified line-by-line.*
