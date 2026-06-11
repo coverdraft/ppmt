@@ -18,6 +18,30 @@ class RiskAction(Enum):
 
 
 @dataclass
+class RiskConfig:
+    """Configuration for risk management parameters."""
+    base_position_size_pct: float = 0.02
+    max_position_size_pct: float = 0.06
+    min_position_size_pct: float = 0.005
+    max_drawdown_pct: float = 30.0
+    reduction_drawdown_pct: float = 15.0
+    max_daily_trades: int = 10
+    max_consecutive_losses: int = 5
+
+
+@dataclass
+class Position:
+    """Represents an open trading position."""
+    symbol: str = ""
+    direction: str = "LONG"  # LONG or SHORT
+    entry_price: float = 0.0
+    size_pct: float = 0.02
+    entry_time: Optional[float] = None
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+
+
+@dataclass
 class RiskAssessment:
     """Result of risk assessment for a proposed trade."""
     action: RiskAction

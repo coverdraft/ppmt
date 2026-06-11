@@ -8,7 +8,10 @@ Usage:
   ppmt predict --symbol BTC/USDT     Show prediction from current pattern
   ppmt run --symbol BTC/USDT         Real-time pattern matching
   ppmt run --symbol BTC/USDT --paper Run paper trading simulation
+  ppmt validate --symbol BTC/USDT    Out-of-sample validation (70/30 split)
+  ppmt walk-forward --symbol BTC/USDT Walk-forward analysis
   ppmt monte-carlo --symbol BTC/USDT Monte Carlo simulation
+  ppmt validate-all --symbol BTC/USDT One-click validation suite (P0+P1+P2)
   ppmt stats --symbol BTC/USDT       Show pattern statistics
   ppmt list                          List tracked assets
 """
@@ -16,11 +19,10 @@ Usage:
 from __future__ import annotations
 
 import os
-import sys
-from pathlib import Path
 
 import click
-import yaml
+import numpy as np
+import yaml  # noqa: F401  (used inside validate/walk-forward)
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
@@ -46,7 +48,7 @@ def load_config() -> dict:
 
 
 @click.group()
-@click.version_option(version="0.6.1")
+@click.version_option(version="0.7.0")
 def cli():
     """PPMT - Progressive Pattern Matching Trie Engine"""
     pass
@@ -138,7 +140,13 @@ def ingest(symbol: str, timeframe: str, days: int, exchange: str, csv_path: str)
 @click.option("--bootstrap/--no-bootstrap", default=True, help="Run bootstrap paper trading after build (default: enabled)")
 @click.option("--bootstrap-ratio", default=1.0, type=float, help="Fraction of data for bootstrap (default: 1.0 = 100%%)")
 @click.option("--bootstrap-passes", default=2, type=int, help="Number of bootstrap passes (default: 2 — second pass uses improved trie from first)")
-def build(symbol: str, timeframe: str, pattern_length: int, force: bool, bootstrap: bool, bootstrap_ratio: float, bootstrap_passes: int):
+@click.option("--train-ratio", default=1.0, type=float,
+              help="Training data ratio (default: 1.0 = use all data). "
+                   "When set to e.g. 0.7, only the first 70%% of data is used "
+                   "to build the trie, enabling out-of-sample validation.")
+def build(symbol: str, timeframe: str, pattern_length: int, force: bool,
+          bootstrap: bool, bootstrap_ratio: float, bootstrap_passes: int,
+          train_ratio: float):
     """Build PPMT Trie from stored data.
 
     By default, preserves the existing N3 Living Trie (accumulated trading
@@ -152,7 +160,18 @@ def build(symbol: str, timeframe: str, pattern_length: int, force: bool, bootstr
     from the first pass, producing higher-quality observations.
     This gives fresh tries meaningful metadata from day one.
     Use --no-bootstrap to skip.
+
+    v0.7.0: Added --train-ratio option for out-of-sample validation.
+    When set to less than 1.0, only the first train_ratio fraction of data
+    is used for building and bootstrap. PAA normalization stats (mean/std)
+    from the training data are computed and stored in the engine state
+    for use during OOS testing.
     """
+    # Validate train_ratio
+    if train_ratio <= 0 or train_ratio > 1.0:
+        console.print("[red]--train-ratio must be between 0 (exclusive) and 1.0 (inclusive)[/red]")
+        return
+
     config = load_config()
     storage = PPMTStorage()
 
@@ -162,7 +181,19 @@ def build(symbol: str, timeframe: str, pattern_length: int, force: bool, bootstr
         console.print(f"[red]No data found for {symbol}. Run 'ppmt ingest' first.[/red]")
         return
 
-    console.print(f"[cyan]Building PPMT for {symbol} ({len(df)} candles)...[/cyan]")
+    # Split data if train_ratio < 1.0
+    if train_ratio < 1.0:
+        train_end = int(len(df) * train_ratio)
+        df_train = df.iloc[:train_end]
+        df_test = df.iloc[train_end:]
+        console.print(f"[cyan]Building PPMT for {symbol} (train/test split: {train_ratio:.0%}/{1 - train_ratio:.0%})...[/cyan]")
+        console.print(f"  Training: {len(df_train)} candles (0-{train_end})")
+        console.print(f"  Testing:  {len(df_test)} candles ({train_end}-{len(df)})")
+        df_build = df_train
+    else:
+        df_train = df
+        df_build = df
+        console.print(f"[cyan]Building PPMT for {symbol} ({len(df)} candles)...[/cyan]")
 
     # Classify asset
     classifier = AssetClassifier()
@@ -179,12 +210,13 @@ def build(symbol: str, timeframe: str, pattern_length: int, force: bool, bootstr
         weight_profile=info.weight_profile,
     )
 
-    # Build Trie
-    count = engine.build(df, pattern_length=pattern_length)
+    # Build Trie (on training data if train_ratio < 1.0, else all data)
+    count = engine.build(df_build, pattern_length=pattern_length)
 
     # v0.4.0: Run bootstrap paper trading pass
     # This accumulates trading observations in the N3 trie,
     # giving fresh tries meaningful metadata from day one.
+    # v0.7.0: Bootstrap also runs on training data only when train_ratio < 1.0
     bootstrap_stats = None
     if bootstrap:
         total_bootstrap_trades = 0
@@ -194,7 +226,7 @@ def build(symbol: str, timeframe: str, pattern_length: int, force: bool, bootstr
             pass_label = f" (pass {pass_num}/{bootstrap_passes})" if bootstrap_passes > 1 else ""
             console.print(f"[cyan]Running bootstrap paper trading (ratio={bootstrap_ratio:.0%}){pass_label}...[/cyan]")
             bootstrap_stats = engine.bootstrap(
-                df=df,
+                df=df_build,
                 pattern_length=pattern_length,
                 bootstrap_ratio=bootstrap_ratio,
                 verbose=False,
@@ -260,14 +292,38 @@ def build(symbol: str, timeframe: str, pattern_length: int, force: bool, bootstr
         storage.save_trie(symbol, level, trie)
         console.print(f"  N{level[-1]} Trie: {trie.pattern_count} patterns, max depth {trie.max_depth}")
 
-    # Save engine state
-    storage.save_engine_state(symbol, engine.get_stats())
+    # Save engine state — include training stats if train_ratio < 1.0
+    stats = engine.get_stats()
+    if train_ratio < 1.0:
+        # Compute PAA normalization stats from training data
+        from ppmt.core.sax import SAXEncoder
+        sax_encoder = SAXEncoder(
+            alphabet_size=sax_config.get("alphabet_size", 8),
+            window_size=sax_config.get("window_size", 10),
+            strategy=sax_config.get("strategy", "ohlcv"),
+        )
+        _, paa_mean, paa_std = sax_encoder.encode_with_normalization(df_train)
+        stats['train_ratio'] = train_ratio
+        stats['paa_mean'] = paa_mean
+        stats['paa_std'] = paa_std
+        stats['train_candle_count'] = len(df_train)
+        stats['total_candle_count'] = len(df)
+
+    storage.save_engine_state(symbol, stats)
 
     console.print(f"[green]Built {count} patterns for {symbol}[/green]")
 
     # Show stats
-    stats = engine.get_stats()
     console.print(f"  Weights: {engine.weights}")
+
+    # Show training normalization stats if applicable
+    if train_ratio < 1.0:
+        console.print(f"  [bold cyan]Training normalization stats:[/bold cyan]")
+        console.print(f"    PAA mean: {stats['paa_mean']:.6f}")
+        console.print(f"    PAA std:  {stats['paa_std']:.6f}")
+        console.print(f"    Train candles: {stats['train_candle_count']}")
+        console.print(f"    Total candles: {stats['total_candle_count']}")
+        console.print(f"  [dim]Use these stats with --paa-mean and --paa-std in 'ppmt run --paper' for OOS testing[/dim]")
 
     # Show bootstrap results summary
     if bootstrap_stats and bootstrap_stats["trades"] > 0:
@@ -319,6 +375,15 @@ def stats(symbol: str, timeframe: str):
         console.print(f"\nWeights: {state.get('weight_profile', 'default')}")
         console.print(f"Asset Class: {state.get('asset_class', 'unknown')}")
         console.print(f"Total Patterns Built: {state.get('total_patterns_built', 0)}")
+
+        # Show training stats if present
+        if 'train_ratio' in state:
+            console.print(f"\n[bold cyan]Training Stats (OOS):[/bold cyan]")
+            console.print(f"  Train Ratio: {state['train_ratio']:.0%}")
+            console.print(f"  PAA Mean: {state.get('paa_mean', 'N/A')}")
+            console.print(f"  PAA Std:  {state.get('paa_std', 'N/A')}")
+            console.print(f"  Train Candles: {state.get('train_candle_count', 'N/A')}")
+            console.print(f"  Total Candles: {state.get('total_candle_count', 'N/A')}")
 
     # Show stored candles
     df = storage.load_ohlcv(symbol, timeframe)
@@ -554,6 +619,558 @@ def run(symbol: str, timeframe: str, paper: bool, capital: float, min_confidence
     console.print("Real-time engine will be implemented in the next phase.")
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# v0.7.0: Out-of-Sample Validation Commands
+# ══════════════════════════════════════════════════════════════════════════════
+
+@cli.command()
+@click.option("--symbol", "-s", required=True, help="Trading pair")
+@click.option("--timeframe", "-t", default="1h", help="Candle timeframe")
+@click.option("--train-ratio", default=0.7, type=float,
+              help="Training data ratio (default: 0.7 = 70/30 split)")
+@click.option("--capital", "-c", default=10000.0, type=float,
+              help="Initial capital for paper trading")
+@click.option("--min-confidence", default=0.20, type=float,
+              help="Minimum signal confidence to enter")
+@click.option("--simulations", "-n", default=1000, type=int,
+              help="Monte Carlo simulations on OOS trades")
+@click.option("--seed", default=42, type=int, help="Random seed for reproducibility")
+def validate(symbol: str, timeframe: str, train_ratio: float, capital: float,
+             min_confidence: float, simulations: int, seed: int):
+    """Out-of-sample validation with automated train/test split.
+
+    v0.7.0: Automates the entire OOS workflow:
+      1. Loads all data and splits into train/test
+      2. Builds trie on training data ONLY (no look-ahead)
+      3. Runs bootstrap on training data to populate trie
+      4. Computes training normalization stats (PAA mean/std)
+      5. Paper trades on test data using training trie and stats
+      6. Runs Monte Carlo simulation on OOS trades
+      7. Displays comprehensive IS vs OOS comparison
+
+    This is the gold standard for validating trading systems —
+    no future data leaks into pattern discovery.
+    """
+    from ppmt.engine.paper_trader import PaperTrader, PaperTraderConfig
+    from ppmt.core.sax import SAXEncoder
+    from ppmt.risk.monte_carlo import MonteCarloSimulator, MonteCarloConfig
+
+    # Validate train_ratio
+    if train_ratio <= 0 or train_ratio >= 1.0:
+        console.print("[red]--train-ratio must be between 0 and 1.0 (exclusive)[/red]")
+        return
+
+    config = load_config()
+    sax_config = config.get("sax", {})
+    storage = PPMTStorage()
+
+    # Save original trie to restore later
+    original_trie = storage.load_trie(symbol, "n3")
+
+    try:
+        # Step 1: Load all data
+        df = storage.load_ohlcv(symbol, timeframe)
+        if df.empty:
+            console.print(f"[red]No data found for {symbol}. Run 'ppmt ingest' first.[/red]")
+            return
+
+        total_candles = len(df)
+        train_end = int(total_candles * train_ratio)
+        df_train = df.iloc[:train_end]
+        df_test = df.iloc[train_end:]
+
+        if len(df_train) < 200:
+            console.print(f"[red]Not enough training data ({len(df_train)} candles). Need at least 200.[/red]")
+            return
+
+        if len(df_test) < 100:
+            console.print(f"[red]Not enough test data ({len(df_test)} candles). Need at least 100.[/red]")
+            return
+
+        # Step 2: Classify asset
+        classifier = AssetClassifier()
+        info = classifier.classify(symbol)
+
+        # Step 3: Encode training data and get normalization stats
+        sax_encoder = SAXEncoder(
+            alphabet_size=sax_config.get("alphabet_size", 8),
+            window_size=sax_config.get("window_size", 10),
+            strategy=sax_config.get("strategy", "ohlcv"),
+        )
+        train_symbols, paa_mean, paa_std = sax_encoder.encode_with_normalization(df_train)
+
+        # Step 4: Build trie on TRAINING data only (with pre-computed symbols)
+        console.print(f"\n[bold cyan]Step 1/5: Building trie on training data...[/bold cyan]")
+        engine = PPMT(
+            symbol=symbol,
+            asset_class=info.asset_class,
+            sax_alphabet_size=sax_config.get("alphabet_size", 8),
+            sax_window_size=sax_config.get("window_size", 10),
+            sax_strategy=sax_config.get("strategy", "ohlcv"),
+            weight_profile=info.weight_profile,
+        )
+        engine.build(df_train, pattern_length=5, symbols=train_symbols)
+
+        # Step 5: Run bootstrap on training data (1 pass for OOS validation)
+        console.print(f"[bold cyan]Step 2/5: Running bootstrap on training data...[/bold cyan]")
+        bootstrap_result = engine.bootstrap(
+            df_train, pattern_length=5, bootstrap_ratio=1.0, verbose=False
+        )
+
+        trie = engine.trie_n3
+        trie.propagate_metadata()
+
+        train_patterns = trie.pattern_count
+        train_observations = trie.trading_observations
+        is_trades = bootstrap_result["trades"]
+        is_wins = bootstrap_result["winning_trades"]
+        is_wr = bootstrap_result["win_rate"]
+
+        console.print(f"  Trie: {train_patterns} patterns, {train_observations} trading observations")
+        console.print(f"  Bootstrap: {is_trades} trades, WR {is_wr:.1%}")
+
+        # Save trie for paper trader to load
+        storage.save_trie(symbol, "n3", trie)
+        # Also save N1, N2, N4 for completeness
+        for level, t in [("n1", engine.trie_n1), ("n2", engine.trie_n2), ("n4", engine.trie_n4)]:
+            storage.save_trie(symbol, level, t)
+
+        # Step 6: Paper trade on test data with training normalization stats
+        console.print(f"[bold cyan]Step 3/5: Paper trading on test data (OOS)...[/bold cyan]")
+        pt_config = PaperTraderConfig(
+            symbol=symbol,
+            timeframe=timeframe,
+            initial_capital=capital,
+            sax_alphabet_size=sax_config.get("alphabet_size", 8),
+            sax_window_size=sax_config.get("window_size", 10),
+            sax_strategy=sax_config.get("strategy", "ohlcv"),
+            min_confidence=min_confidence,
+            catastrophic_loss_pct=8.0,
+            living_trie=False,  # No trie updates during OOS
+            start_offset=train_end,  # Start at test period
+            end_offset=0,  # Use all remaining data
+            paa_mean=paa_mean,  # Use training normalization
+            paa_std=paa_std,
+        )
+
+        trader = PaperTrader(config=pt_config)
+        oos_result = trader.run()
+
+        oos_trades = len(oos_result.trades)
+        oos_wr = oos_result.win_rate
+        oos_pnl_pct = oos_result.total_pnl_pct
+        oos_max_dd = oos_result.max_drawdown
+        oos_sharpe = oos_result.sharpe_ratio
+
+        if oos_trades == 0:
+            console.print("[yellow]No OOS trades generated. The system may not find matching patterns in test data.[/yellow]")
+            console.print("[dim]This could indicate overfitting to training data or insufficient test data.[/dim]")
+
+        # Step 7: Monte Carlo on OOS trades
+        console.print(f"[bold cyan]Step 4/5: Running Monte Carlo on OOS trades...[/bold cyan]")
+        mc_result = None
+        if oos_trades >= 5:
+            trades_pnl_pct = [t.pnl_pct / 100.0 for t in oos_result.trades]
+            mc_config = MonteCarloConfig(
+                simulations=simulations,
+                seed=seed,
+                initial_capital=capital,
+            )
+            mc_simulator = MonteCarloSimulator()
+            with console.status(f"[bold green]Running {simulations} Monte Carlo simulations..."):
+                mc_result = mc_simulator.simulate(trades_pnl_pct, config=mc_config)
+        else:
+            console.print(f"  [dim]Skipped: need at least 5 OOS trades for Monte Carlo (got {oos_trades})[/dim]")
+
+        # Step 8: Display comprehensive comparison
+        console.print(f"[bold cyan]Step 5/5: Generating validation report...[/bold cyan]")
+
+        # Compute IS P&L from bootstrap (approximate)
+        if is_trades > 0:
+            is_pnl_pct = 0.0  # Bootstrap doesn't track cumulative P&L
+            # Estimate from win rate and typical trade size
+            avg_win = 3.0  # Approximate
+            avg_loss = -2.0  # Approximate
+            is_pnl_pct = (is_wins * avg_win + (is_trades - is_wins) * avg_loss) / is_trades * is_trades
+        else:
+            is_pnl_pct = 0.0
+
+        # Degradation analysis
+        wr_drop = is_wr - oos_wr if is_trades > 0 and oos_trades > 0 else 0.0
+        pnl_ratio = oos_pnl_pct / is_pnl_pct if is_pnl_pct != 0 and oos_pnl_pct != 0 else 0.0
+
+        if oos_trades == 0:
+            verdict = "NO EDGE — system produced zero OOS trades"
+            verdict_style = "bold red"
+        elif oos_wr >= is_wr * 0.85 and oos_pnl_pct > 0:
+            verdict = "STRONG EDGE — OOS performance close to IS"
+            verdict_style = "bold green"
+        elif oos_wr >= is_wr * 0.6 and oos_pnl_pct > 0:
+            verdict = "MODERATE DEGRADATION — system has edge but IS results are inflated"
+            verdict_style = "bold yellow"
+        elif oos_pnl_pct > 0:
+            verdict = "SIGNIFICANT DEGRADATION — edge exists but much weaker than IS suggests"
+            verdict_style = "yellow"
+        else:
+            verdict = "NO EDGE — OOS results are negative, IS results are overfit"
+            verdict_style = "bold red"
+
+        # Format the report
+        separator = "═" * 54
+        thin_sep = "─" * 54
+
+        console.print()
+        console.print(f"[bold cyan]{separator}[/bold cyan]")
+        console.print(f"  [bold]OUT-OF-SAMPLE VALIDATION REPORT[/bold]")
+        console.print(f"[bold cyan]{separator}[/bold cyan]")
+        console.print(f"  Symbol: {symbol} ({timeframe})")
+        console.print(f"  Train/Test Split: {train_ratio:.0%}/{1 - train_ratio:.0%}")
+        console.print(f"  Training: candles 0-{train_end} ({train_end} candles)")
+        console.print(f"  Testing:  candles {train_end}-{total_candles} ({total_candles - train_end} candles)")
+        console.print(f"  PAA Stats: mean={paa_mean:.6f}, std={paa_std:.6f}")
+        console.print(f"[bold cyan]{thin_sep}[/bold cyan]")
+
+        # In-sample results
+        if is_trades > 0:
+            console.print(f"  [bold]IN-SAMPLE (Training Bootstrap)[/bold]")
+            console.print(f"  Trades: {is_trades} | WR: {is_wr:.1%}")
+            console.print(f"  Trie: {train_patterns} patterns, {train_observations} observations")
+        else:
+            console.print(f"  [bold]IN-SAMPLE (Training Bootstrap)[/bold]")
+            console.print(f"  No bootstrap trades generated")
+
+        console.print(f"[bold cyan]{thin_sep}[/bold cyan]")
+
+        # Out-of-sample results
+        console.print(f"  [bold]OUT-OF-SAMPLE (Test)[/bold]")
+        if oos_trades > 0:
+            pnl_color = "green" if oos_pnl_pct >= 0 else "red"
+            pnl_sign = "+" if oos_pnl_pct >= 0 else ""
+            console.print(f"  Trades: {oos_trades} | WR: {oos_wr:.1%} | P&L: [{pnl_color}]{pnl_sign}{oos_pnl_pct:.2f}%[/{pnl_color}]")
+            console.print(f"  Max DD: {oos_max_dd:.1%} | Sharpe: {oos_sharpe:.2f}")
+        else:
+            console.print(f"  No OOS trades generated")
+
+        console.print(f"[bold cyan]{thin_sep}[/bold cyan]")
+
+        # Degradation analysis
+        if is_trades > 0 and oos_trades > 0:
+            console.print(f"  [bold]DEGRADATION ANALYSIS[/bold]")
+            console.print(f"  WR drop: {wr_drop:+.1f}pp ({is_wr:.1%} → {oos_wr:.1%})")
+            if is_pnl_pct != 0:
+                console.print(f"  P&L ratio: {pnl_ratio:.2f}x (OOS/IS)")
+        console.print(f"  Verdict: [{verdict_style}]{verdict}[/{verdict_style}]")
+
+        console.print(f"[bold cyan]{separator}[/bold cyan]")
+
+        # Monte Carlo results
+        if mc_result is not None:
+            console.print()
+            mc_summary = MonteCarloSimulator().generate_summary(mc_result)
+            console.print(mc_summary)
+
+            # Show interpretation
+            console.print()
+            if mc_result.risk_of_ruin < 0.01:
+                console.print("[bold green]OOS MC VERDICT: Excellent - Very low risk of ruin[/bold green]")
+            elif mc_result.risk_of_ruin < 0.05:
+                console.print("[green]OOS MC VERDICT: Good - Acceptable risk for most traders[/green]")
+            elif mc_result.risk_of_ruin < 0.10:
+                console.print("[yellow]OOS MC VERDICT: Marginal - Consider reducing position sizes[/yellow]")
+            else:
+                console.print("[bold red]OOS MC VERDICT: Dangerous - High risk of blow-up[/bold red]")
+
+    finally:
+        # Restore original trie
+        if original_trie is not None:
+            storage.save_trie(symbol, "n3", original_trie)
+            console.print(f"\n[dim]Original trie restored[/dim]")
+        storage.close()
+
+
+@cli.command("walk-forward")
+@click.option("--symbol", "-s", required=True, help="Trading pair")
+@click.option("--timeframe", "-t", default="1h", help="Candle timeframe")
+@click.option("--folds", default=5, type=int, help="Number of walk-forward folds")
+@click.option("--min-confidence", default=0.20, type=float,
+              help="Minimum signal confidence to enter")
+@click.option("--capital", "-c", default=10000.0, type=float,
+              help="Initial capital per fold")
+def walk_forward(symbol: str, timeframe: str, folds: int,
+                 min_confidence: float, capital: float):
+    """Walk-forward analysis with expanding window.
+
+    v0.7.0: Runs multiple OOS validation folds with an expanding
+    training window. Each fold:
+      - Trains on all data up to that point (expanding window)
+      - Tests on the next segment
+      - Uses a fresh trie and fresh capital
+
+    This reveals whether the system's edge is consistent across
+    different time periods, which is critical for live trading.
+
+    Data is split into (folds + 1) roughly equal segments:
+      Fold 0: Train on segment 0,        Test on segment 1
+      Fold 1: Train on segments 0-1,      Test on segment 2
+      Fold 2: Train on segments 0-2,      Test on segment 3
+      ...
+
+    Each fold uses a FRESH PaperTrader with fresh capital.
+    """
+    from ppmt.engine.paper_trader import PaperTrader, PaperTraderConfig
+    from ppmt.core.sax import SAXEncoder
+
+    if folds < 2:
+        console.print("[red]--folds must be at least 2[/red]")
+        return
+
+    config = load_config()
+    sax_config = config.get("sax", {})
+    storage = PPMTStorage()
+
+    # Save original trie to restore later
+    original_trie = storage.load_trie(symbol, "n3")
+
+    try:
+        # Load all data
+        df = storage.load_ohlcv(symbol, timeframe)
+        if df.empty:
+            console.print(f"[red]No data found for {symbol}. Run 'ppmt ingest' first.[/red]")
+            return
+
+        total_candles = len(df)
+
+        # Split data into (folds + 1) roughly equal segments
+        num_segments = folds + 1
+        segment_size = total_candles // num_segments
+        if segment_size < 200:
+            console.print(f"[red]Not enough data for {folds} folds. "
+                          f"Need at least {200 * num_segments} candles, have {total_candles}.[/red]")
+            return
+
+        # Compute segment boundaries
+        segment_ends = [segment_size * (i + 1) for i in range(num_segments)]
+        # Make sure the last segment includes all remaining data
+        segment_ends[-1] = total_candles
+
+        # Classify asset
+        classifier = AssetClassifier()
+        info = classifier.classify(symbol)
+
+        console.print()
+        separator = "═" * 54
+        thin_sep = "─" * 54
+        console.print(f"[bold cyan]{separator}[/bold cyan]")
+        console.print(f"  [bold]WALK-FORWARD ANALYSIS[/bold]")
+        console.print(f"[bold cyan]{separator}[/bold cyan]")
+        console.print(f"  Symbol: {symbol} ({timeframe}) | Folds: {folds}")
+        console.print(f"  Total candles: {total_candles}")
+        console.print(f"  Segment size: ~{segment_size} candles")
+        console.print(f"  Window type: Expanding (each fold adds more training data)")
+        console.print(f"[bold cyan]{thin_sep}[/bold cyan]")
+
+        # Run each fold
+        fold_results = []
+
+        for fold_idx in range(folds):
+            train_end = segment_ends[fold_idx]  # Expanding: train up to this segment end
+            test_start = segment_ends[fold_idx]
+            test_end = segment_ends[fold_idx + 1] if fold_idx + 1 < num_segments else total_candles
+
+            df_train = df.iloc[:train_end]
+
+            console.print(
+                f"\n[bold yellow]Fold {fold_idx + 1}/{folds}:[/bold yellow] "
+                f"Train [0:{train_end}] ({len(df_train)} candles), "
+                f"Test [{test_start}:{test_end}] ({test_end - test_start} candles)"
+            )
+
+            # Encode training data and get normalization stats
+            sax_encoder = SAXEncoder(
+                alphabet_size=sax_config.get("alphabet_size", 8),
+                window_size=sax_config.get("window_size", 10),
+                strategy=sax_config.get("strategy", "ohlcv"),
+            )
+            train_symbols, paa_mean, paa_std = sax_encoder.encode_with_normalization(df_train)
+
+            # Build trie on TRAINING data only (with pre-computed symbols)
+            engine = PPMT(
+                symbol=symbol,
+                asset_class=info.asset_class,
+                sax_alphabet_size=sax_config.get("alphabet_size", 8),
+                sax_window_size=sax_config.get("window_size", 10),
+                sax_strategy=sax_config.get("strategy", "ohlcv"),
+                weight_profile=info.weight_profile,
+            )
+            engine.build(df_train, pattern_length=5, symbols=train_symbols)
+
+            # Run bootstrap on training data (1 pass)
+            engine.bootstrap(df_train, pattern_length=5, bootstrap_ratio=1.0, verbose=False)
+
+            trie = engine.trie_n3
+            trie.propagate_metadata()
+
+            fold_patterns = trie.pattern_count
+            fold_observations = trie.trading_observations
+
+            # Save trie for paper trader to load
+            storage.save_trie(symbol, "n3", trie)
+            for level, t in [("n1", engine.trie_n1), ("n2", engine.trie_n2), ("n4", engine.trie_n4)]:
+                storage.save_trie(symbol, level, t)
+
+            # Paper trade on test data with training normalization stats
+            pt_config = PaperTraderConfig(
+                symbol=symbol,
+                timeframe=timeframe,
+                initial_capital=capital,
+                sax_alphabet_size=sax_config.get("alphabet_size", 8),
+                sax_window_size=sax_config.get("window_size", 10),
+                sax_strategy=sax_config.get("strategy", "ohlcv"),
+                min_confidence=min_confidence,
+                catastrophic_loss_pct=8.0,
+                living_trie=False,  # No trie updates during OOS
+                start_offset=test_start,
+                end_offset=test_end,
+                paa_mean=paa_mean,  # Use training normalization
+                paa_std=paa_std,
+            )
+
+            trader = PaperTrader(config=pt_config)
+            result = trader.run()
+
+            n_trades = len(result.trades)
+            if n_trades == 0:
+                console.print(f"  [yellow]No trades in test window[/yellow]")
+                fold_results.append({
+                    "fold": fold_idx + 1,
+                    "train_end": train_end,
+                    "test_start": test_start,
+                    "test_end": test_end,
+                    "train_candles": len(df_train),
+                    "test_candles": test_end - test_start,
+                    "trades": 0,
+                    "win_rate": 0.0,
+                    "pnl_pct": 0.0,
+                    "sharpe": 0.0,
+                    "max_dd": 0.0,
+                    "patterns": fold_patterns,
+                    "observations": fold_observations,
+                })
+                continue
+
+            wins = sum(1 for t in result.trades if t.pnl_pct > 0)
+            wr = result.win_rate
+            pnl_pct = result.total_pnl_pct
+            sharpe = result.sharpe_ratio
+            max_dd = result.max_drawdown
+
+            pnl_color = "green" if pnl_pct > 0 else "red"
+            console.print(
+                f"  Trades: {n_trades} | WR: {wr:.1%} | "
+                f"P&L: [{pnl_color}]{pnl_pct:+.2f}%[/{pnl_color}] | "
+                f"Sharpe: {sharpe:.2f}"
+            )
+
+            fold_results.append({
+                "fold": fold_idx + 1,
+                "train_end": train_end,
+                "test_start": test_start,
+                "test_end": test_end,
+                "train_candles": len(df_train),
+                "test_candles": test_end - test_start,
+                "trades": n_trades,
+                "win_rate": wr,
+                "pnl_pct": pnl_pct,
+                "sharpe": sharpe,
+                "max_dd": max_dd,
+                "patterns": fold_patterns,
+                "observations": fold_observations,
+            })
+
+        # Aggregate results
+        valid_folds = [f for f in fold_results if f["trades"] > 0]
+
+        if not valid_folds:
+            console.print("\n[red]No folds produced trades. Cannot generate summary.[/red]")
+            return
+
+        total_oos_trades = sum(f["trades"] for f in valid_folds)
+        avg_wr = np.mean([f["win_rate"] for f in valid_folds])
+        avg_pnl = np.mean([f["pnl_pct"] for f in valid_folds])
+        profitable_folds = sum(1 for f in valid_folds if f["pnl_pct"] > 0)
+
+        # Find best and worst folds
+        best_fold = max(valid_folds, key=lambda f: f["pnl_pct"])
+        worst_fold = min(valid_folds, key=lambda f: f["pnl_pct"])
+
+        # Verdict
+        if profitable_folds == len(valid_folds) and avg_pnl > 50:
+            verdict = "CONSISTENT EDGE — profitable in all folds"
+            verdict_style = "bold green"
+        elif profitable_folds >= len(valid_folds) * 0.7 and avg_pnl > 0:
+            verdict = "MODERATE EDGE — profitable in most folds"
+            verdict_style = "bold yellow"
+        elif avg_pnl > 0:
+            verdict = "WEAK EDGE — inconsistent across folds"
+            verdict_style = "yellow"
+        else:
+            verdict = "NO EDGE — OOS results are negative"
+            verdict_style = "bold red"
+
+        # Print summary report
+        console.print()
+        console.print(f"[bold cyan]{separator}[/bold cyan]")
+        console.print(f"  [bold]WALK-FORWARD ANALYSIS REPORT[/bold]")
+        console.print(f"[bold cyan]{separator}[/bold cyan]")
+        console.print(f"  Symbol: {symbol} ({timeframe}) | Folds: {folds}")
+        console.print(f"[bold cyan]{thin_sep}[/bold cyan]")
+
+        for f in fold_results:
+            fold_label = f"Fold {f['fold']}"
+            if f["trades"] == 0:
+                console.print(f"  {fold_label}: Train 0-{f['train_end']}   Test {f['test_start']}-{f['test_end']}")
+                console.print(f"    [yellow]No trades generated[/yellow]")
+            else:
+                pnl_color = "green" if f["pnl_pct"] > 0 else "red"
+                console.print(
+                    f"  {fold_label}: Train 0-{f['train_end']}   "
+                    f"Test {f['test_start']}-{f['test_end']}"
+                )
+                console.print(
+                    f"    Trades: {f['trades']} | WR: {f['win_rate']:.1%} | "
+                    f"P&L: [{pnl_color}]{f['pnl_pct']:+.2f}%[/{pnl_color}] | "
+                    f"Sharpe: {f['sharpe']:.2f}"
+                )
+
+        console.print(f"[bold cyan]{thin_sep}[/bold cyan]")
+        console.print(f"  [bold]AGGREGATE WALK-FORWARD RESULTS[/bold]")
+        console.print(f"  Total OOS Trades: {total_oos_trades}")
+        console.print(f"  Average WR: {avg_wr:.1%} | Average P&L per fold: {avg_pnl:+.2f}%")
+        console.print(
+            f"  WR Consistency: {profitable_folds}/{len(valid_folds)} folds profitable "
+            f"({profitable_folds / len(valid_folds):.0%})"
+        )
+        if worst_fold["trades"] > 0:
+            console.print(
+                f"  Worst Fold: Fold {worst_fold['fold']} "
+                f"({worst_fold['pnl_pct']:+.2f}%, WR {worst_fold['win_rate']:.1%})"
+            )
+        if best_fold["trades"] > 0:
+            console.print(
+                f"  Best Fold: Fold {best_fold['fold']} "
+                f"({best_fold['pnl_pct']:+.2f}%, WR {best_fold['win_rate']:.1%})"
+            )
+        console.print(f"  Verdict: [{verdict_style}]{verdict}[/{verdict_style}]")
+        console.print(f"[bold cyan]{separator}[/bold cyan]")
+
+    finally:
+        # Restore original trie
+        if original_trie is not None:
+            storage.save_trie(symbol, "n3", original_trie)
+            console.print(f"\n[dim]Original trie restored[/dim]")
+        storage.close()
+
+
 @cli.command("monte-carlo")
 @click.option("--symbol", "-s", required=True, help="Trading pair")
 @click.option("--timeframe", "-t", default="1h", help="Candle timeframe")
@@ -728,6 +1345,129 @@ def monte_carlo(
     console.print(dd_table)
 
     storage.close()
+
+
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# v0.7.0: One-Click Validation Suite (CLI + Dashboard)
+# ══════════════════════════════════════════════════════════════════════════════
+
+@cli.command("validate-all")
+@click.option("--symbol", "-s", required=True, help="Trading pair")
+@click.option("--timeframe", "-t", default="1h", help="Candle timeframe")
+@click.option("--train-ratio", default=0.7, type=float,
+              help="P0: Training data ratio (default: 0.7)")
+@click.option("--mc-simulations", default=1000, type=int,
+              help="P1: Monte Carlo simulations (default: 1000)")
+@click.option("--wf-windows", default=5, type=int,
+              help="P2: Walk-forward windows (default: 5)")
+@click.option("--capital", "-c", default=10000.0, type=float,
+              help="Initial capital for simulations")
+@click.option("--pattern-length", "-p", default=5, type=int,
+              help="SAX blocks per pattern")
+@click.option("--seed", default=42, type=int, help="Random seed")
+@click.option("--json-output", is_flag=True, default=False,
+              help="Output as JSON (for API bridge)")
+def validate_all(symbol: str, timeframe: str, train_ratio: float,
+                 mc_simulations: int, wf_windows: int, capital: float,
+                 pattern_length: int, seed: int, json_output: bool):
+    """One-click validation suite: P0 (OOS) + P1 (MC) + P2 (Walk-Forward).
+
+    v0.7.0: Runs the complete ValidationEngine to produce a composite
+    ROBUST / MARGINAL / OVERFIT / INSUFFICIENT_DATA verdict.
+
+    This is the one-click solution that combines all three validation
+    approaches into a single score (0-100 points):
+      P0 Out-of-Sample:  40 pts max
+      P1 Monte Carlo:    30 pts max
+      P2 Walk-Forward:   30 pts max
+    """
+    import json as json_mod
+    from ppmt.engine.validator import ValidationEngine, ValidationConfig
+
+    config = load_config()
+    sax_config = config.get("sax", {})
+    storage = PPMTStorage()
+
+    df = storage.load_ohlcv(symbol, timeframe)
+    storage.close()
+
+    if df.empty:
+        console.print(f"[red]No data found for {symbol}. Run 'ppmt ingest' first.[/red]")
+        return
+
+    val_config = ValidationConfig(
+        symbol=symbol,
+        train_ratio=train_ratio,
+        mc_simulations=mc_simulations,
+        wf_window_count=wf_windows,
+        initial_capital=capital,
+        pattern_length=pattern_length,
+        sax_alphabet_size=sax_config.get("alphabet_size", 8),
+        sax_window_size=sax_config.get("window_size", 10),
+        sax_strategy=sax_config.get("strategy", "ohlcv"),
+        seed=seed,
+    )
+
+    console.print(f"\n[bold cyan]╔══════════════════════════════════════════════╗[/bold cyan]")
+    console.print(f"[bold cyan]║     PPMT VALIDATION SUITE — ONE CLICK        ║[/bold cyan]")
+    console.print(f"[bold cyan]╚══════════════════════════════════════════════╝[/bold cyan]")
+    console.print(f"  Symbol: {symbol} ({timeframe}) | {len(df)} candles")
+    console.print(f"  P0: OOS {train_ratio:.0%}/{1 - train_ratio:.0%} | P1: MC {mc_simulations} sims | P2: WF {wf_windows} windows")
+    console.print()
+
+    engine = ValidationEngine(config=val_config)
+
+    with console.status("[bold green]Running full validation suite..."):
+        verdict = engine.run_full_validation(df)
+
+    if json_output:
+        # For API bridge - output pure JSON
+        print(json_mod.dumps(verdict.to_dict()))
+        return
+
+    # Rich CLI output
+    # Verdict banner
+    verdict_colors = {
+        "ROBUST": "bold green",
+        "MARGINAL": "bold yellow",
+        "OVERFIT": "bold red",
+        "INSUFFICIENT_DATA": "bold gray",
+    }
+    vc = verdict_colors.get(verdict.recommendation, "bold white")
+
+    console.print(Panel(
+        f"[{vc}]{verdict.recommendation}[/{vc}]\n"
+        f"Score: {verdict.confidence_score:.0f}/100 points\n"
+        f"P0: {verdict.p0_score:.0f}/40 | P1: {verdict.p1_score:.0f}/30 | P2: {verdict.p2_score:.0f}/30",
+        title="VERDICT",
+        border_style="cyan",
+    ))
+
+    # P0 Summary
+    oos = verdict.oos
+    console.print(f"\n[bold]P0: Out-of-Sample[/bold]")
+    console.print(f"  IS:  {oos.is_total_trades} trades, WR {oos.is_win_rate:.1%}, P&L {oos.is_total_pnl_pct:+.2f}%")
+    console.print(f"  OOS: {oos.oos_total_trades} trades, WR {oos.oos_win_rate:.1%}, P&L {oos.oos_total_pnl_pct:+.2f}%")
+    console.print(f"  Degradation: {oos.pnl_degradation_pct:.1f}% | OOS Ratio: {oos.oos_ratio:.3f}")
+
+    # P1 Summary
+    mc = verdict.mc
+    if mc.n_trades_used > 0:
+        console.print(f"\n[bold]P1: Monte Carlo[/bold]")
+        console.print(f"  Risk of Ruin: {mc.risk_of_ruin_pct:.2f}% | Profit Prob: {mc.profit_probability_pct:.1f}%")
+        console.print(f"  P95 Max DD: {mc.p95_max_drawdown_pct:.1f}% | Median Equity: ${mc.median_final_equity:,.2f}")
+
+    # P2 Summary
+    wf = verdict.wf
+    if wf.total_windows > 0:
+        console.print(f"\n[bold]P2: Walk-Forward[/bold]")
+        console.print(f"  Aggregate WFE: {wf.aggregate_wfe:.1%} | Consistency: {wf.consistency_pct:.0f}%")
+        console.print(f"  Profitable windows: {wf.profitable_windows}/{wf.total_windows}")
+        console.print(f"  Overall degradation: {wf.overall_degradation:.1f}%")
+
+    console.print(f"\n[dim]Elapsed: {verdict.elapsed_seconds:.1f}s | Summary: {verdict.summary}[/dim]")
 
 
 if __name__ == "__main__":

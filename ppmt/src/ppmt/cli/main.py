@@ -1132,6 +1132,252 @@ def dashboard(port: int, host: str, no_browser: bool):
     )
 
 
+# ===================================================================
+# V10.1: One-Click Validation Suite
+# ===================================================================
+@cli.command()
+@click.option("--symbol", "-s", required=True, help="Trading pair (e.g., BTC/USDT)")
+@click.option("--csv", "csv_path", default=None, help="Path to OHLCV CSV file (optional, uses DB if not specified)")
+@click.option("--timeframe", "-t", default="1h", help="Candle timeframe (for DB lookup)")
+@click.option("--train-ratio", default=0.7, type=float, help="P0: Training data ratio (default: 0.7)")
+@click.option("--mc-simulations", default=1000, type=int, help="P1: Monte Carlo simulations (default: 1000)")
+@click.option("--wf-windows", default=5, type=int, help="P2: Walk-forward windows (default: 5)")
+@click.option("--wf-train-ratio", default=0.7, type=float, help="P2: Train ratio per window (default: 0.7)")
+@click.option("--pattern-length", "-p", default=5, type=int, help="SAX blocks per pattern")
+@click.option("--forward-window", "-f", default=5, type=int, help="Forward window in SAX blocks")
+@click.option("--position-size", default=1.0, type=float, help="Position size multiplier")
+@click.option("--ruin-threshold", default=0.5, type=float, help="Ruin threshold (fraction of capital)")
+@click.option("--seed", default=42, type=int, help="Random seed for reproducibility")
+@click.option("--json-output", is_flag=True, help="Output results as JSON only")
+def validate(
+    symbol: str,
+    csv_path: str | None,
+    timeframe: str,
+    train_ratio: float,
+    mc_simulations: int,
+    wf_windows: int,
+    wf_train_ratio: float,
+    pattern_length: int,
+    forward_window: int,
+    position_size: float,
+    ruin_threshold: float,
+    seed: int,
+    json_output: bool,
+):
+    """
+    One-Click Validation Suite (V10.1).
+
+    Runs three complementary validation tests to determine whether
+    the PPMT system is robust or overfit:
+
+      P0: Out-of-Sample — Train/test split to detect overfitting
+      P1: Monte Carlo — Trade order randomization for robustness
+      P2: Walk-Forward — Rolling window validation for regime consistency
+
+    Produces a composite verdict: ROBUST / MARGINAL / OVERFIT / INSUFFICIENT_DATA
+
+    Examples:
+      ppmt validate -s BTC/USDT
+      ppmt validate -s BTC/USDT --mc-simulations 5000 --wf-windows 8
+      ppmt validate -s BTC/USDT --train-ratio 0.8 --json-output > result.json
+    """
+    from ppmt.engine.validator import ValidationEngine, ValidationConfig
+    from rich.panel import Panel
+
+    # Load data
+    try:
+        df = _load_data(symbol, csv_path, timeframe)
+    except Exception as e:
+        console.print(f"[red]Error loading data: {e}[/red]")
+        return
+
+    if len(df) < 500:
+        console.print(f"[red]Insufficient data: {len(df)} candles. Need at least 500.[/red]")
+        return
+
+    # Build config
+    config = ValidationConfig(
+        symbol=symbol,
+        train_ratio=train_ratio,
+        mc_simulations=mc_simulations,
+        wf_window_count=wf_windows,
+        wf_train_ratio=wf_train_ratio,
+        pattern_length=pattern_length,
+        forward_window=forward_window,
+        position_size_pct=position_size,
+        ruin_threshold=ruin_threshold,
+        seed=seed,
+        # SAX from config
+        sax_alphabet_size=load_config().get("sax", {}).get("alphabet_size", 8),
+        sax_window_size=load_config().get("sax", {}).get("window_size", 10),
+        sax_strategy=load_config().get("sax", {}).get("strategy", "ohlcv"),
+    )
+
+    if not json_output:
+        console.print(Panel(
+            f"[cyan]Symbol:[/cyan]       {symbol}\n"
+            f"[cyan]Data:[/cyan]         {len(df):,} candles\n"
+            f"[cyan]Train Ratio:[/cyan]  {train_ratio:.0%}\n"
+            f"[cyan]MC Sims:[/cyan]      {mc_simulations:,}\n"
+            f"[cyan]WF Windows:[/cyan]   {wf_windows}\n"
+            f"[cyan]Pattern:[/cyan]      {pattern_length} blocks × {forward_window} forward\n"
+            f"[cyan]Seed:[/cyan]         {seed}",
+            title="[bold]PPMT Validation Suite V10.1[/bold]",
+            border_style="gold1",
+        ))
+        console.print()
+
+    # Run validation
+    engine = ValidationEngine(config=config)
+    verdict = engine.run_full_validation(df)
+
+    if json_output:
+        # JSON-only output for API consumption
+        print(json.dumps(verdict.to_dict(), indent=2, default=str))
+        return
+
+    # ── Rich formatted output ──
+
+    # Verdict banner
+    rec_styles = {
+        "ROBUST": ("green", "✓ ROBUST"),
+        "MARGINAL": ("yellow", "⚠ MARGINAL"),
+        "OVERFIT": ("red", "✗ OVERFIT"),
+        "INSUFFICIENT_DATA": ("gray", "? INSUFFICIENT DATA"),
+    }
+    style, label = rec_styles.get(verdict.recommendation, ("white", verdict.recommendation))
+
+    console.print(Panel(
+        f"{label}\n"
+        f"Confidence Score: [bold]{verdict.confidence_score:.0f}[/bold]/100\n"
+        f"P0 (OOS): {verdict.p0_score:.0f}/40  |  "
+        f"P1 (MC): {verdict.p1_score:.0f}/30  |  "
+        f"P2 (WF): {verdict.p2_score:.0f}/30",
+        title="Verdict",
+        border_style=style,
+    ))
+
+    # P0: Out-of-Sample
+    oos = verdict.oos
+    console.print(f"\n[bold cyan]─── P0: Out-of-Sample Validation ───[/bold cyan]")
+    console.print(f"  Train: {oos.train_candles:,} candles → {oos.patterns_trained:,} patterns")
+    console.print(f"  Test:  {oos.test_candles:,} candles")
+
+    if oos.is_total_trades > 0 or oos.oos_total_trades > 0:
+        table = Table(title="P0: In-Sample vs Out-of-Sample")
+        table.add_column("Metric", style="cyan")
+        table.add_column("In-Sample", justify="right")
+        table.add_column("Out-of-Sample", justify="right")
+        table.add_column("Degradation", justify="right")
+
+        def _pnl_style(v):
+            return "green" if v > 0 else "red"
+
+        table.add_row(
+            "Trades",
+            str(oos.is_total_trades),
+            str(oos.oos_total_trades),
+            "-",
+        )
+        table.add_row(
+            "Win Rate",
+            f"{oos.is_win_rate:.1%}",
+            f"{oos.oos_win_rate:.1%}",
+            f"[yellow]-{oos.wr_degradation_pct:.1f}pp[/yellow]",
+        )
+        table.add_row(
+            "Total PnL%",
+            f"[{_pnl_style(oos.is_total_pnl_pct)}]{oos.is_total_pnl_pct:+.2f}%[/{_pnl_style(oos.is_total_pnl_pct)}]",
+            f"[{_pnl_style(oos.oos_total_pnl_pct)}]{oos.oos_total_pnl_pct:+.2f}%[/{_pnl_style(oos.oos_total_pnl_pct)}]",
+            f"[yellow]-{oos.pnl_degradation_pct:.1f}%[/yellow]",
+        )
+        table.add_row("Sharpe", f"{oos.is_sharpe:.2f}", f"{oos.oos_sharpe:.2f}", "-")
+        table.add_row("Max DD", f"{oos.is_max_dd_pct:.1f}%", f"{oos.oos_max_dd_pct:.1f}%", "-")
+        table.add_row(
+            "LONG / SHORT",
+            f"{oos.is_long_trades}/{oos.is_short_trades} "
+            f"(WR: {oos.is_long_wr:.0%}/{oos.is_short_wr:.0%})",
+            f"{oos.oos_long_trades}/{oos.oos_short_trades} "
+            f"(WR: {oos.oos_long_wr:.0%}/{oos.oos_short_wr:.0%})",
+            "-",
+        )
+
+        oos_ratio_style = "green" if oos.oos_ratio >= 0.5 else "yellow" if oos.oos_ratio >= 0.3 else "red"
+        table.add_row(
+            "OOS Ratio (WFE)",
+            "-",
+            f"[{oos_ratio_style}]{oos.oos_ratio:.3f}[/{oos_ratio_style}]",
+            "-",
+        )
+        console.print(table)
+
+    # P1: Monte Carlo
+    mc = verdict.mc
+    console.print(f"\n[bold cyan]─── P1: Monte Carlo Simulation ───[/bold cyan]")
+    if mc.n_trades_used > 0:
+        console.print(f"  Based on {mc.n_trades_used} OOS trades, {mc.n_simulations:,} simulations")
+        console.print(f"  Profit Probability: [{'green' if mc.profit_probability_pct >= 70 else 'yellow' if mc.profit_probability_pct >= 50 else 'red'}]{mc.profit_probability_pct:.1f}%[/]")
+        console.print(f"  Risk of Ruin:       [{'green' if mc.risk_of_ruin_pct < 5 else 'yellow' if mc.risk_of_ruin_pct < 10 else 'red'}]{mc.risk_of_ruin_pct:.2f}%[/]")
+        console.print(f"  P95 Max Drawdown:   {mc.p95_max_drawdown_pct:.1f}%")
+        console.print(f"  Median Final Equity: ${mc.median_final_equity:,.0f}")
+        console.print(f"  CI: ${mc.ci_5:,.0f} / ${mc.ci_25:,.0f} / ${mc.ci_75:,.0f} / ${mc.ci_95:,.0f}")
+    else:
+        console.print("  [yellow]Insufficient OOS trades for Monte Carlo[/yellow]")
+
+    # P2: Walk-Forward
+    wf = verdict.wf
+    console.print(f"\n[bold cyan]─── P2: Walk-Forward Analysis ───[/bold cyan]")
+    if wf.total_windows > 0:
+        console.print(f"  Aggregate WFE: [{'green' if wf.aggregate_wfe >= 0.5 else 'yellow' if wf.aggregate_wfe >= 0.3 else 'red'}]{wf.aggregate_wfe:.1%}[/]")
+        console.print(f"  Consistency:    {wf.consistency_pct:.0f}% profitable windows ({wf.profitable_windows}/{wf.total_windows})")
+        console.print(f"  Avg IS Return:  {wf.avg_is_return:+.1f}%")
+        console.print(f"  Avg OOS Return: {wf.avg_oos_return:+.1f}%")
+        console.print(f"  Degradation:    {wf.overall_degradation:.1f}%")
+
+        if len(wf.windows) > 1:
+            wf_table = Table(title="Per-Window Breakdown")
+            wf_table.add_column("Window", justify="right", style="cyan")
+            wf_table.add_column("IS PnL%", justify="right")
+            wf_table.add_column("OOS PnL%", justify="right")
+            wf_table.add_column("IS Trades", justify="right")
+            wf_table.add_column("OOS Trades", justify="right")
+            wf_table.add_column("WFE", justify="right")
+            wf_table.add_column("Degradation", justify="right")
+
+            for w in wf.windows:
+                is_style = "green" if w.is_return_pct > 0 else "red"
+                oos_style = "green" if w.oos_return_pct > 0 else "red"
+                wfe_style = "green" if w.wfe >= 0.5 else "yellow" if w.wfe >= 0.3 else "red"
+
+                wf_table.add_row(
+                    f"W{w.window_index + 1}",
+                    f"[{is_style}]{w.is_return_pct:+.1f}%[/{is_style}]",
+                    f"[{oos_style}]{w.oos_return_pct:+.1f}%[/{oos_style}]",
+                    str(w.is_trades),
+                    str(w.oos_trades),
+                    f"[{wfe_style}]{w.wfe:.2f}[/{wfe_style}]",
+                    f"{w.degradation_pct:.1f}%",
+                )
+            console.print(wf_table)
+    else:
+        console.print("  [yellow]Insufficient data for walk-forward analysis[/yellow]")
+
+    # Timing
+    console.print(f"\n[dim]Validation completed in {verdict.elapsed_seconds:.1f}s[/dim]")
+
+    # Save results to JSON
+    output_dir = os.path.expanduser("~/.ppmt/validation_results")
+    os.makedirs(output_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_file = os.path.join(
+        output_dir,
+        f"validation_{symbol.replace('/', '_')}_{timestamp}.json"
+    )
+    with open(output_file, "w") as f:
+        json.dump(verdict.to_dict(), f, indent=2, default=str)
+    console.print(f"[green]Results saved to {output_file}[/green]")
+
+
 if __name__ == "__main__":
     cli()
 

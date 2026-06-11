@@ -50,6 +50,7 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import ValidationSuitePanel from '@/components/dashboard/validation-suite-panel';
 
 // ============================================================
 // TYPES
@@ -214,7 +215,7 @@ const TRIE_DESCRIPTIONS: Record<string, string> = {
   N4: 'Regime',
 };
 
-type TabId = 'dashboard' | 'command' | 'backtest';
+type TabId = 'dashboard' | 'command' | 'backtest' | 'validation';
 
 // ============================================================
 // API HOOKS
@@ -2293,6 +2294,7 @@ export default function PPMTDashboard() {
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
     { id: 'command', label: 'Command Center', icon: Terminal },
     { id: 'backtest', label: 'Backtesting Lab', icon: FlaskConical },
+    { id: 'validation', label: 'Validation Suite', icon: Shield },
   ];
 
   return (
@@ -2386,6 +2388,9 @@ export default function PPMTDashboard() {
         )}
         {activeTab === 'backtest' && (
           <BacktestingLabTab status={status} />
+        )}
+        {activeTab === 'validation' && (
+          <ValidationSuitePanel />
         )}
       </div>
     </div>
