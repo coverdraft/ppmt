@@ -43,6 +43,20 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+
+def _pythonify(obj):
+    """Convert numpy types to native Python types for JSON serialization."""
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        return float(obj)
+    if isinstance(obj, (np.bool_,)):
+        return bool(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    return obj
+
+
 from ppmt.core.sax import SAXEncoder
 from ppmt.core.matcher import FuzzyMatcher
 from ppmt.engine.ppmt import PPMT
@@ -514,7 +528,6 @@ class ValidationEngine:
         train_count = engine.build(
             train_df,
             pattern_length=cfg.pattern_length,
-            forward_window=cfg.forward_window,
             symbols=train_symbols,
         )
         result.patterns_trained = train_count
@@ -713,6 +726,7 @@ class ValidationEngine:
 
             # Compute entry/exit from price data
             entry_candle = i * window_size
+            # Use forward_window to determine trade exit point
             exit_candle = (i + cfg.pattern_length + cfg.forward_window) * window_size
 
             if entry_candle >= len(price_df) or exit_candle > len(price_df):
@@ -726,7 +740,7 @@ class ValidationEngine:
             else:
                 pnl_pct = ((entry_price - exit_price) / entry_price) * 100.0 * cfg.position_size_pct
 
-            won = pnl_pct > 0
+            won = bool(pnl_pct > 0)
 
             # R:R computation from price window
             window_df = price_df.iloc[entry_candle:exit_candle]
@@ -744,18 +758,18 @@ class ValidationEngine:
 
             trades.append({
                 "direction": direction,
-                "entry_price": round(entry_price, 2),
-                "exit_price": round(exit_price, 2),
-                "pnl_pct": round(pnl_pct, 4),
-                "won": won,
-                "rr": round(rr, 3),
+                "entry_price": _pythonify(round(entry_price, 2)),
+                "exit_price": _pythonify(round(exit_price, 2)),
+                "pnl_pct": _pythonify(round(pnl_pct, 4)),
+                "won": _pythonify(won),
+                "rr": _pythonify(round(rr, 3)),
                 "pattern": "".join(current_pattern),
                 "match_level": best_level,
-                "candle_idx": entry_candle,
-                "win_rate_historical": round(meta.win_rate, 4),
-                "expected_move": round(meta.expected_move_pct, 4),
-                "sizing_signal": round(meta.sizing_signal, 3),
-                "historical_count": meta.historical_count,
+                "candle_idx": _pythonify(entry_candle),
+                "win_rate_historical": _pythonify(round(meta.win_rate, 4)),
+                "expected_move": _pythonify(round(meta.expected_move_pct, 4)),
+                "sizing_signal": _pythonify(round(meta.sizing_signal, 3)),
+                "historical_count": _pythonify(meta.historical_count),
             })
 
         return trades
@@ -905,7 +919,6 @@ class ValidationEngine:
             train_count = engine.build(
                 train_df,
                 pattern_length=cfg.pattern_length,
-                forward_window=cfg.forward_window,
                 symbols=train_symbols,
             )
 

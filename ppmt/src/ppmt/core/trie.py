@@ -157,6 +157,10 @@ class PPMTTrie:
         self.root = TrieNode(symbol="", depth=0)
         self._pattern_count = 0
         self._max_depth = 0
+        self.trading_observations: int = 0
+        """Number of trading-time observations recorded via Living Trie.
+        Distinguishes fresh builds (0) from tries with accumulated
+        trading metadata (>0). Used for adaptive confidence scaling."""
 
     @property
     def pattern_count(self) -> int:
@@ -392,6 +396,7 @@ class PPMTTrie:
             "name": self.name,
             "pattern_count": self._pattern_count,
             "max_depth": self._max_depth,
+            "trading_observations": self.trading_observations,
             "root": self.root.to_dict(),
         }
 
@@ -401,6 +406,7 @@ class PPMTTrie:
         trie = cls(name=data.get("name", "root"))
         trie._pattern_count = data.get("pattern_count", 0)
         trie._max_depth = data.get("max_depth", 0)
+        trie.trading_observations = data.get("trading_observations", 0)
 
         # Reconstruct children from root
         root_data = data.get("root", {})
@@ -409,6 +415,228 @@ class PPMTTrie:
             trie.root.children[sym] = child
 
         return trie
+
+    def propagate_metadata(self) -> None:
+        """
+        Propagate metadata from terminal nodes up to intermediate nodes.
+
+        After building, only terminal nodes (at the full pattern length depth)
+        have real metadata from observations. Intermediate nodes have
+        historical_count=0 and default values.
+
+        This method walks the Trie bottom-up and computes aggregate statistics
+        for each intermediate node from its terminal descendants. This enables:
+          1. PredictionEngine to find meaningful metadata at any depth
+          2. Better confidence estimates from larger sample sizes
+          3. Forward path walking from intermediate nodes
+
+        Must be called after build() and before saving/loading.
+        Idempotent: calling multiple times produces the same result.
+        """
+        self._propagate_node(self.root)
+
+    def _propagate_node(self, node: TrieNode) -> BlockLifecycleMetadata:
+        """
+        Recursively propagate metadata from children to parent.
+
+        Returns the aggregate metadata for this subtree (including all descendants).
+        """
+        if not node.children:
+            # Leaf node — return its own metadata
+            return node.metadata
+
+        # Recursively propagate to children first (bottom-up)
+        child_metas = []
+        for sym, child in node.children.items():
+            child_meta = self._propagate_node(child)
+            child_metas.append(child_meta)
+
+        # If this node already has real observations, keep them
+        # (terminal nodes have their own observations)
+        if node.metadata.historical_count > 0 and node.depth > 0:
+            # But still ensure continuation_nodes are populated
+            for sym in node.children:
+                if sym not in node.metadata.continuation_nodes:
+                    node.metadata.continuation_nodes.append(sym)
+            return node.metadata
+
+        # Compute aggregate from children that have metadata
+        children_with_data = [m for m in child_metas if m.historical_count > 0]
+
+        if not children_with_data:
+            return node.metadata
+
+        total_count = sum(m.historical_count for m in children_with_data)
+
+        # Weighted average of children's statistics
+        weighted_move = sum(
+            m.expected_move_pct * m.historical_count
+            for m in children_with_data
+        ) / total_count
+
+        weighted_wr = sum(
+            m.win_rate * m.historical_count
+            for m in children_with_data
+        ) / total_count
+
+        weighted_duration = int(sum(
+            m.avg_duration * m.historical_count
+            for m in children_with_data
+        ) / total_count)
+
+        min_dd = min(m.max_drawdown_pct for m in children_with_data)
+
+        max_fav = max(m.max_favorable_pct for m in children_with_data)
+
+        # Update the node's metadata with aggregated values
+        node.metadata.historical_count = total_count
+        node.metadata.expected_move_pct = weighted_move
+        node.metadata.win_rate = weighted_wr
+        node.metadata.avg_duration = weighted_duration
+        node.metadata.remaining_candles = weighted_duration
+        node.metadata.max_drawdown_pct = min_dd
+        node.metadata.max_favorable_pct = max_fav
+
+        # Ensure continuation_nodes include all children
+        for sym in node.children:
+            if sym not in node.metadata.continuation_nodes:
+                node.metadata.continuation_nodes.append(sym)
+
+        return node.metadata
+
+    def merge(self, other: PPMTTrie) -> dict:
+        """
+        Merge another trie into this one, preserving and combining metadata.
+
+        This is critical for the Living Trie: when `ppmt build` creates a fresh
+        trie, we merge it INTO the existing Living Trie rather than replacing it.
+        This preserves all accumulated trading observations while adding any new
+        patterns from the rebuild.
+
+        Merge rules for shared paths:
+        - historical_count: sum of both
+        - expected_move_pct, win_rate, avg_duration: weighted average by count
+        - max_drawdown_pct: min (worst case)
+        - max_favorable_pct: max (best case)
+        - continuation_nodes, break_nodes: set union
+
+        Paths only in `other` are deep-copied into this trie.
+
+        Args:
+            other: The source trie to merge from (typically a fresh build)
+
+        Returns:
+            Dict with merge statistics: 'new_patterns', 'merged_patterns',
+            'total_observations_added'
+        """
+        stats = {"new_patterns": 0, "merged_patterns": 0, "total_observations_added": 0}
+
+        # Collect all terminal patterns from the source trie
+        source_patterns = other.get_all_patterns()
+
+        for symbols, source_node in source_patterns:
+            source_meta = source_node.metadata
+            if source_meta.historical_count == 0:
+                continue
+
+            # Find or create the path in this trie
+            target_node = self.search(symbols)
+
+            if target_node is None or target_node.metadata.historical_count == 0:
+                # Path doesn't exist or has no observations — insert it fresh
+                self.insert_with_observations(
+                    symbols=symbols,
+                    move_pct=source_meta.expected_move_pct,
+                    drawdown_pct=source_meta.max_drawdown_pct,
+                    favorable_pct=source_meta.max_favorable_pct,
+                    duration=source_meta.avg_duration,
+                    won=True,  # Default to won; win_rate will be set below
+                    next_symbol=source_meta.continuation_nodes[0] if source_meta.continuation_nodes else None,
+                )
+                # Override the single-observation stats with the source's aggregate
+                target_node = self.search(symbols)
+                if target_node is not None:
+                    target_node.metadata.historical_count = source_meta.historical_count
+                    target_node.metadata.win_rate = source_meta.win_rate
+                    target_node.metadata.expected_move_pct = source_meta.expected_move_pct
+                    target_node.metadata.avg_duration = source_meta.avg_duration
+                    target_node.metadata.remaining_candles = source_meta.avg_duration
+                    target_node.metadata.max_drawdown_pct = source_meta.max_drawdown_pct
+                    target_node.metadata.max_favorable_pct = source_meta.max_favorable_pct
+                    for sym in source_meta.continuation_nodes:
+                        if sym not in target_node.metadata.continuation_nodes:
+                            target_node.metadata.continuation_nodes.append(sym)
+                    for sym in source_meta.break_nodes:
+                        if sym not in target_node.metadata.break_nodes:
+                            target_node.metadata.break_nodes.append(sym)
+                stats["new_patterns"] += 1
+                stats["total_observations_added"] += source_meta.historical_count
+            else:
+                # Path exists with observations — merge metadata using weighted average
+                t_meta = target_node.metadata
+                s_meta = source_meta
+
+                t_count = t_meta.historical_count
+                s_count = s_meta.historical_count
+                total = t_count + s_count
+
+                # Weighted averages
+                t_meta.expected_move_pct = (
+                    t_meta.expected_move_pct * t_count + s_meta.expected_move_pct * s_count
+                ) / total
+                t_meta.win_rate = (
+                    t_meta.win_rate * t_count + s_meta.win_rate * s_count
+                ) / total
+                t_meta.avg_duration = int(
+                    (t_meta.avg_duration * t_count + s_meta.avg_duration * s_count) / total
+                )
+                t_meta.remaining_candles = t_meta.avg_duration
+
+                # Min/max for extremes
+                t_meta.max_drawdown_pct = min(t_meta.max_drawdown_pct, s_meta.max_drawdown_pct)
+                t_meta.max_favorable_pct = max(t_meta.max_favorable_pct, s_meta.max_favorable_pct)
+
+                # Sum counts
+                t_meta.historical_count = total
+
+                # Set union for navigation lists
+                for sym in s_meta.continuation_nodes:
+                    if sym not in t_meta.continuation_nodes:
+                        t_meta.continuation_nodes.append(sym)
+                for sym in s_meta.break_nodes:
+                    if sym not in t_meta.break_nodes:
+                        t_meta.break_nodes.append(sym)
+
+                stats["merged_patterns"] += 1
+                stats["total_observations_added"] += s_count
+
+        # Merge trading observations count
+        self.trading_observations += other.trading_observations
+
+        # Recompute pattern count and max depth
+        self._recompute_counts()
+
+        # Re-propagate metadata so intermediate nodes are updated
+        self.propagate_metadata()
+
+        return stats
+
+    def _recompute_counts(self) -> None:
+        """Recompute _pattern_count and _max_depth from the actual trie structure."""
+        count = [0]
+        max_depth = [0]
+
+        def _walk(node: TrieNode, depth: int):
+            if depth > 0 and node.metadata.historical_count > 0:
+                count[0] += 1
+            if depth > max_depth[0]:
+                max_depth[0] = depth
+            for child in node.children.values():
+                _walk(child, depth + 1)
+
+        _walk(self.root, 0)
+        self._pattern_count = count[0]
+        self._max_depth = max_depth[0]
 
     def __len__(self) -> int:
         return self._pattern_count

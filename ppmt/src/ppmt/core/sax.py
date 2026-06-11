@@ -188,20 +188,20 @@ class SAXEncoder:
 
         return symbols
 
-    def get_paa_values(self, df: pd.DataFrame) -> np.ndarray:
+    def encode(self, df: pd.DataFrame) -> list[str]:
         """
-        Extract PAA values from OHLCV DataFrame without discretization.
-
-        Useful for obtaining normalization statistics before encoding.
+        Encode an OHLCV DataFrame into SAX symbols.
 
         Args:
             df: DataFrame with columns: open, high, low, close, volume
 
         Returns:
-            Array of PAA values.
+            List of SAX symbols, one per window of candles.
+            Length = len(df) // window_size
         """
         series = self._extract_series(df)
-        return self._paa(series)
+        paa_values = self._paa(series)
+        return self._discretize(paa_values)
 
     def encode_with_normalization(
         self,
@@ -212,10 +212,14 @@ class SAXEncoder:
         """
         Encode an OHLCV DataFrame with explicit z-score normalization.
 
-        V7.9 critical fix: Training z-score stats must be used for test encoding
-        to ensure SAX symbols are consistent between train and test windows.
-        Without this, regime shifts cause different symbol mappings and the
-        trie never matches.
+        v0.6.3 (V7.9 backport): Training z-score stats must be used for test
+        encoding to ensure SAX symbols are consistent between train and test
+        windows. Without this, regime shifts cause different symbol mappings
+        and the trie never matches.
+
+        When called with paa_mean=None, paa_std=None (training mode), computes
+        stats from the current data and returns them. When called with explicit
+        stats (test mode), uses those instead — ensuring consistent symbols.
 
         Args:
             df: DataFrame with columns: open, high, low, close, volume
@@ -250,21 +254,6 @@ class SAXEncoder:
             symbols.append(SAX_ALPHABET[idx])
 
         return symbols, paa_mean, paa_std
-
-    def encode(self, df: pd.DataFrame) -> list[str]:
-        """
-        Encode an OHLCV DataFrame into SAX symbols.
-
-        Args:
-            df: DataFrame with columns: open, high, low, close, volume
-
-        Returns:
-            List of SAX symbols, one per window of candles.
-            Length = len(df) // window_size
-        """
-        series = self._extract_series(df)
-        paa_values = self._paa(series)
-        return self._discretize(paa_values)
 
     def encode_incremental(
         self,
