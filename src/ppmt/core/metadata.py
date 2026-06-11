@@ -221,6 +221,25 @@ class BlockLifecycleMetadata:
     10 is a reasonable default: below 10 observations, the node's
     statistics are too noisy to be reliable on their own."""
 
+    # === V4.2: Observation Freshness ===
+    last_observation_time: float = 0.0
+    """Timestamp (epoch seconds) of the most recent observation.
+    V4.2: Enables observation freshness tracking — patterns that
+    haven't been observed recently can be deprioritized. This is
+    critical for the Living Trie: as market conditions change,
+    old patterns become less relevant. A pattern observed 5000
+    candles ago should carry less weight than one observed 50 candles
+    ago. The freshness_decay property computes a multiplier [0, 1]
+    based on how long since the last observation."""
+
+    observation_timespan: float = 0.0
+    """Time span (in seconds) between the first and last observation.
+    V4.2: Measures how spread out observations are. A pattern observed
+    100 times in one day is less reliable than one observed 100 times
+    over 30 days. Longer timespan = more robust pattern that works
+    across different conditions. Short timespan = potentially overfit
+    to a specific market condition."""
+
     # === Computed Properties ===
 
     @property
@@ -384,6 +403,52 @@ class BlockLifecycleMetadata:
         if abs(self.expected_move_pct) < 1e-10:
             return 0.0
         return self.move_std / abs(self.expected_move_pct)
+
+    @property
+    def freshness_decay(self) -> float:
+        """
+        V4.2: Observation freshness multiplier based on time since last observation.
+
+        Returns a value in [0, 1] that decays as the last observation gets older.
+        Uses exponential decay with a half-life of 7 days (604800 seconds).
+
+        - 0 days old → 1.0 (fresh, fully trusted)
+        - 7 days old → 0.5 (half-weight)
+        - 30 days old → ~0.06 (nearly expired)
+
+        This prevents stale patterns from having the same influence as
+        recently-observed ones. In fast-moving markets, patterns that
+        haven't been seen in weeks may no longer be valid.
+
+        Returns 1.0 if last_observation_time is 0 (not tracked).
+        """
+        if self.last_observation_time <= 0:
+            return 1.0  # No tracking info, assume fresh
+        import time as _time
+        age_seconds = _time.time() - self.last_observation_time
+        if age_seconds <= 0:
+            return 1.0  # Future timestamp or same second
+        # Half-life of 7 days = 604800 seconds
+        half_life = 604800.0
+        return float(np.exp(-0.693 * age_seconds / half_life))  # ln(2) ≈ 0.693
+
+    @property
+    def observation_density(self) -> float:
+        """
+        V4.2: Observations per unit time (observations/day).
+
+        Measures how concentrated observations are. Low density = pattern
+        observed occasionally over a long time (robust). High density =
+        pattern observed many times in a short period (potentially overfit).
+
+        Returns 0.0 if no timespan data.
+        """
+        if self.observation_timespan <= 0 or self.historical_count <= 0:
+            return 0.0
+        days = self.observation_timespan / 86400.0
+        if days < 0.01:  # Less than ~15 minutes
+            return float(self.historical_count) / 0.01  # Cap at 100/day
+        return self.historical_count / days
 
     def regime_match_score(self, current_regime: str) -> float:
         """
@@ -576,6 +641,21 @@ class BlockLifecycleMetadata:
         else:
             self.node_type = "dependent"
 
+        # V4.2: Track observation freshness
+        import time as _time
+        now = _time.time()
+        if n == 0:
+            # First observation — set initial time, timespan is 0
+            self.last_observation_time = now
+            self.observation_timespan = 0.0
+        else:
+            # Update timespan: difference between first and latest observation
+            if self.last_observation_time > 0:
+                self.observation_timespan = max(
+                    self.observation_timespan, now - (self.last_observation_time - self.observation_timespan)
+                )
+            self.last_observation_time = now
+
     def compute_sl_tp(self, entry_price: float, safety_margin: float = 0.2) -> None:
         """
         Compute stop loss and take profit prices from metadata.
@@ -628,6 +708,9 @@ class BlockLifecycleMetadata:
             "move_mean_for_variance": round(self.move_mean_for_variance, 6),
             "node_type": self.node_type,
             "min_independent_count": self.min_independent_count,
+            # V4.2: Observation freshness
+            "last_observation_time": self.last_observation_time,
+            "observation_timespan": self.observation_timespan,
         }
 
     @classmethod
@@ -661,4 +744,7 @@ class BlockLifecycleMetadata:
             move_mean_for_variance=data.get("move_mean_for_variance", 0.0),
             node_type=data.get("node_type", "dependent"),
             min_independent_count=data.get("min_independent_count", 10),
+            # V4.2: Observation freshness
+            last_observation_time=data.get("last_observation_time", 0.0),
+            observation_timespan=data.get("observation_timespan", 0.0),
         )

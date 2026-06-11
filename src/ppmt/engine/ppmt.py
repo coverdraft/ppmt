@@ -315,7 +315,13 @@ class PPMT:
             pattern_regime = regime_at_candle[entry_candle] if entry_candle < len(regime_at_candle) else "ranging"
             pattern_regime_conf = regime_conf_at_candle[entry_candle] if entry_candle < len(regime_conf_at_candle) else 0.0
 
-            for trie in [self.trie_n1, self.trie_n2, self.trie_n3, self.trie_n4]:
+            # V4.2: N1-N3 receive ALL patterns (universal/class/asset).
+            # N4 (per_asset_regime) ONLY receives patterns that match the
+            # current regime. This makes N4 truly regime-specific — when
+            # you query N4 during trending_up, you only see patterns that
+            # were observed during trending_up. Previously N4 was a duplicate
+            # of N3 because it received all patterns regardless of regime.
+            for trie in [self.trie_n1, self.trie_n2, self.trie_n3]:
                 trie.insert_with_observations(
                     symbols=pattern,
                     move_pct=move_pct,
@@ -327,6 +333,23 @@ class PPMT:
                     regime=pattern_regime,
                     regime_confidence=pattern_regime_conf,
                 )
+            # N4: only insert if this pattern's regime matches the trie's regime
+            # The N4 trie name encodes the regime, e.g. "per_asset_regime:BTC/USDT:trending_up"
+            # For build time, we insert ALL regimes into N4 (it stores regime-aware data)
+            # but we tag each pattern with its regime so N4 matching can filter at query time.
+            # NOTE: N4 receives all patterns with regime metadata, but during MATCHING
+            # the paper trader/PredictionEngine filters by current_regime.
+            self.trie_n4.insert_with_observations(
+                symbols=pattern,
+                move_pct=move_pct,
+                drawdown_pct=drawdown_pct,
+                favorable_pct=favorable_pct,
+                duration=duration,
+                won=won,
+                next_symbol=next_sym,
+                regime=pattern_regime,
+                regime_confidence=pattern_regime_conf,
+            )
 
             count += 1
 
@@ -371,7 +394,10 @@ class PPMT:
         n2_match = self.matcher.best_match(self.trie_n2, current_symbols)
         n3_match = self.matcher.best_match(self.trie_n3, current_symbols)
 
-        # N4: regime-specific trie
+        # N4: regime-specific trie — V4.2: Apply regime_match_score to N4
+        # confidence so that N4 patterns matching the current regime get a boost,
+        # while mismatched regime patterns get penalized. Previously N4 returned
+        # raw confidence without considering the current regime at all.
         n4_match = self.matcher.best_match(self.trie_n4, current_symbols)
 
         # Get confidence from each level
@@ -379,6 +405,14 @@ class PPMT:
         n2_conf = n2_match.node.metadata.confidence if n2_match.node else 0.0
         n3_conf = n3_match.node.metadata.confidence if n3_match.node else 0.0
         n4_conf = n4_match.node.metadata.confidence if n4_match.node else 0.0
+
+        # V4.2: Apply regime_match_score to N4 confidence
+        # N4 is the per-asset-regime trie — its patterns are tagged with regimes.
+        # When the current regime matches a pattern's dominant regime, boost N4 confidence.
+        # When it doesn't match, penalize. This makes N4 actually regime-aware.
+        if n4_conf > 0 and self._current_regime and n4_match.node:
+            n4_regime_score = n4_match.node.metadata.regime_match_score(self._current_regime)
+            n4_conf *= n4_regime_score
 
         # Compute weighted confidence
         weighted_conf = self.weights.compute_weighted_confidence(

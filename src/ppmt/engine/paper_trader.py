@@ -971,6 +971,7 @@ class PaperTrader:
                         entry_price=current_price,
                         timeframe_hours=tf_hours,
                         symbol=cfg.symbol,
+                        current_regime=current_regime,  # V4.1: regime-aware confidence
                     )
                 except Exception:
                     continue
@@ -997,6 +998,29 @@ class PaperTrader:
                 # quality SHORTs through. The floor of 0.20 ensures minimum quality.
                 if prediction.direction == "SHORT":
                     effective_min_conf = max(effective_min_conf * 1.2, 0.20)
+
+                # V4.1: Regime-aware confidence adjustment
+                # If the current regime is unfavorable for this pattern (e.g.,
+                # the pattern was observed in trending_up but current regime is
+                # volatile), reduce confidence. This uses the matched node's
+                # regime_match_score() to adjust. The prediction already has
+                # regime-aware confidence from PredictionEngine, but we also
+                # apply the regime effect to the THRESHOLD — making it harder
+                # to enter trades in unfavorable regimes.
+                regime_adjustment = 1.0  # neutral
+                if cfg.regime_aware and current_regime and prediction.confidence > 0:
+                    try:
+                        matched_node = trie.search(current_symbols)
+                        if matched_node and matched_node.metadata.regime_distribution:
+                            regime_adjustment = matched_node.metadata.regime_match_score(current_regime)
+                    except Exception:
+                        pass
+                # Adjust effective min_confidence inversely to regime match:
+                # If regime is favorable (score > 1.0), LOWER the threshold (easier to enter)
+                # If regime is unfavorable (score < 1.0), RAISE the threshold (harder to enter)
+                # This is equivalent to adjusting confidence but via the threshold.
+                if regime_adjustment > 0:
+                    effective_min_conf = effective_min_conf / regime_adjustment
 
                 # Entry conditions
                 # v0.6.1: Reverted probability threshold from >0.25 back to >0.20.
@@ -1083,12 +1107,23 @@ class PaperTrader:
                         risk_reject_reasons["low_quality"] = risk_reject_reasons.get("low_quality", 0) + 1
                         continue
 
-                    # Metadata sizing
+                    # Metadata sizing — use real historical_count from the matched node
+                    # V4.2: Replaced hardcoded historical_count=100 with the actual count
+                    # from the matched Trie node. This ensures the Bayesian shrinkage
+                    # in probability_of_success and sizing_signal uses the real sample
+                    # size, preventing overconfident sizing on rarely-observed patterns.
+                    actual_historical_count = 100  # sensible default if no node found
+                    try:
+                        matched_node_for_sizing = trie.search(current_symbols)
+                        if matched_node_for_sizing and matched_node_for_sizing.metadata.historical_count > 0:
+                            actual_historical_count = matched_node_for_sizing.metadata.historical_count
+                    except Exception:
+                        pass
                     mock_meta = BlockLifecycleMetadata(
                         win_rate=signal.win_rate,
                         expected_move_pct=signal.expected_move_pct,
                         max_drawdown_pct=-sl_distance_pct,
-                        historical_count=100,
+                        historical_count=actual_historical_count,
                     )
                     signal.probability_of_success = mock_meta.probability_of_success
                     signal.expected_profit_ahead = mock_meta.expected_profit_ahead
