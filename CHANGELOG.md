@@ -1,0 +1,113 @@
+# PPMT Changelog
+
+All notable changes to the Progressive Pattern Matching Trie (PPMT) project.
+
+## [v0.7.1] - 2026-06-11
+
+### Changed
+- Converted ppmt/ from git submodule to regular tracked directory
+- Updated .gitignore with egg-info exclusion
+- Force-pushed consolidated project to GitHub
+
+## [v0.7.0] - 2026-06-11
+
+### Added - Phase 1: Python Validation Engine
+- **validator.py**: `ValidationEngine` with P0 (OOS), P1 (Monte Carlo), P2 (Walk-Forward)
+- Composite 100-point scoring system: P0=40pts, P1=30pts, P2=30pts
+- Verdict system: ROBUST (≥70), MARGINAL (≥45), OVERFIT (<45), INSUFFICIENT_DATA
+- `MonteCarloEngine`: numpy-based resampling with `simulate_from_trades()` and `simulate_from_params()`
+- CLI command `ppmt validate-all --json-output` for API bridge integration
+- V7.9 normalization fix: training z-score stats propagate to test encoding for consistent SAX symbol mapping
+
+### Added - Phase 2: API Bridge
+- `/api/validation/run` route calling `ppmt validate-all` via subprocess
+- 5-minute timeout for full validation suite
+- Clean JSON response pipeline for dashboard consumption
+
+### Added - Phase 3: Dashboard
+- `validation-suite-panel.tsx`: Full one-click validation UI
+- `VerdictBanner` with animated score bar and color-coded recommendation
+- `ScoreBreakdown` cards (P0/P1/P2)
+- P0: OOS comparison table (IS vs OOS metrics) + equity curve SVG chart
+- P1: MC metrics cards (profit prob, risk of ruin, P95 DD, median equity) + confidence intervals table
+- P2: WFE trend chart SVG + window-by-window table with degradation metrics
+- Configuration panel with symbol, train ratio, MC simulations, WF windows, seed controls
+- Collapsible config, loading state, empty state with explanatory cards
+
+### Scoring Details
+- P0 Out-of-Sample (40pts max):
+  - OOS profitability: 20pts
+  - OOS win rate: 10pts
+  - OOS ratio (WFE): 10pts
+- P1 Monte Carlo (30pts max):
+  - Profit probability: 15pts
+  - Risk of ruin: 10pts
+  - P95 drawdown: 5pts
+- P2 Walk-Forward (30pts max):
+  - Aggregate WFE: 10pts
+  - Consistency: 10pts
+  - Low degradation: 10pts
+
+## [v0.6.3] - 2026-06-10
+
+### Added
+- SAX z-score propagation: `encode_with_normalization()` method
+- Training stats (paa_mean, paa_std) stored in engine state
+- Strict OOS validation reveals look-ahead bias from z-score recalculation
+
+### Changed
+- PaperTrader: added `paa_mean` and `paa_std` config options
+- Build CLI: `--train-ratio` computes and stores PAA normalization stats
+
+## [v0.6.2] - 2026-06-10
+
+### Added
+- Out-of-sample validation via `ppmt validate` CLI command
+- `end_offset` parameter in PaperTraderConfig for OOS testing
+- Walk-forward analysis via `ppmt walk-forward` CLI command
+- Monte Carlo simulation via `ppmt monte-carlo` CLI command
+- Catastrophic loss protection re-enabled at 8% threshold
+
+### Changed
+- `min_confidence` raised from 0.15 to 0.20 (Cycle 5 regression analysis)
+- SHORT gate relaxed from 1.5x to 1.2x: `max(conf*1.2, 0.20)`
+- Validation results: OOS +295%, MC 0% ruin, WF 6/6 profitable
+
+### Performance
+| Cycle | P&L | WR | Sharpe | Max DD |
+|-------|-----|-----|--------|--------|
+| 6a | +155,150% | 89.2% | 19.96 | 8.3% |
+| 6b | +45,035% | 90.2% | 20.93 | 3.7% |
+
+## [v0.6.1] - 2026-06-09
+
+### Fixed
+- Removed probability bonus that caused v0.6.0 regression
+- Reverted SHORT gate to original
+- Kept min_confidence at 15% from v0.6.0
+
+## [v0.6.0] - 2026-06-09
+
+### Added
+- Probability bonus feature (later removed in v0.6.1 due to regression)
+- min_confidence raised from 10% to 15%
+
+### Regressed
+- P&L dropped from +1434% (Cycle 4) to +86.82% (Cycle 5)
+- Win rate dropped from 50.5% to 44.6%
+
+## [v0.5.0] - 2026-06-08
+
+### Added
+- Bootstrap paper trading: 2-pass simulation to populate Living Trie metadata
+- Fresh tries now have meaningful trading observations from day one
+- Without bootstrap: system collapses to -18.77% P&L
+
+## [v0.4.0] - Earlier
+
+### Added
+- Living Trie concept: Trie learns from own trading results
+- Multi-level trie: N1-N4 with AdaptiveWeights (N1=5%, N2=20%, N3=35%, N4=40%)
+- SAX encoding for K-line to discrete symbol conversion
+- Pattern matching: exact → fuzzy → prefix fallback
+- Risk management: ATR-based SL/TP, trailing stops, position sizing
