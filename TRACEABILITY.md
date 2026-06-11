@@ -6,13 +6,74 @@
 
 ## Project: PPMT — Pattern Prediction Market Trader
 
-**Current Version**: v0.9.0 (base) → V4.2 metadata enhancements  
-**Branch**: main  
+**Current Version**: v0.10.0 (base) → V4.3 robustness fixes & SHORT gate redesign
+**Branch**: main
 **Last Updated**: 2026-06-11  
 
 ---
 
 ## Version History & Changes
+
+### V4.3 — SHORT Gate Redesign & Robustness Fixes (2026-06-11)
+
+**Problem**: Two critical issues found in paper_trader.py:
+1. `historical_count=100` was STILL hardcoded in Signal creation at line 1097, despite the V4.2 attempt to fix it. The V4.2 fix only corrected the `mock_meta` for sizing, but `Signal.compute_quality_score()` and `Signal.compute_sizing_multiplier()` had already been called with the wrong count=100. This meant rare patterns (3 observations) got the same quality score as well-observed patterns (100+ observations), distorting position sizing.
+2. SHORT gate used a fixed 1.2x multiplier regardless of market regime. In trending_up markets, SHORTs fighting the trend need stricter gating; in trending_down, SHORTs are favorable and the fixed 1.2x was unnecessarily restrictive.
+
+**Changes Made**:
+
+| File | Change | Rationale |
+|------|--------|-----------|
+| `ppmt/src/ppmt/engine/paper_trader.py` | Move Trie node lookup BEFORE Signal creation | Historical count is now correct from the moment Signal is created, so `compute_quality_score()` uses the real count. Default changed from 100 to 10 (conservative). |
+| `ppmt/src/ppmt/engine/paper_trader.py` | Replace fixed SHORT 1.2x multiplier with regime-aware gate | trending_down: 0.85x (favored), ranging: 1.1x (cautious), trending_up: 1.5x (fighting trend), volatile: 1.8x (dangerous). Floor of 0.20 always applies. |
+| `ppmt/tests/test_v43_robust.py` | Created 49 robust, non-distorting tests | 10 test classes covering: SHORT gate, historical count, regime propagation, node classification, confidence invariants, regime match score, move variance, SAX consistency, full pipeline, and anti-distortion checks. |
+
+**SHORT Gate Design**:
+```
+Regime           Multiplier  Effect (with min_conf=0.20)
+trending_down    0.85x       0.17 → floored to 0.20 (easier SHORT entry)
+ranging          1.1x        0.22 (slight caution)
+trending_up      1.5x        0.30 (strict — fighting the trend)
+volatile         1.8x        0.36 (very strict — dangerous)
+```
+
+**Key Design Decisions**:
+1. **Conservative default count (10, not 100)**: When no Trie node is found, a count of 10 produces moderate Bayesian shrinkage, preventing overconfident sizing on unknown patterns.
+2. **Regime-aware SHORT gate**: Different regimes have fundamentally different risk profiles for SHORT trades. A fixed multiplier was either too strict (eliminating all SHORTs in downtrends) or too lenient (allowing SHORTs in strong uptrends).
+3. **Anti-distortion tests**: New test class specifically checks that the system doesn't produce misleading results — random data shouldn't produce high confidence, single trades shouldn't produce high confidence, and propagation shouldn't inflate counts.
+
+**Tests**: 49 new V4.3 tests, ALL PASSING. Total: 171+ tests across all test files.
+
+**Metadata Audit Results**:
+
+The V4.3 metadata audit confirmed that node metadata is NOT corrupt. The current structure is comprehensive:
+
+| Metadata Field | Version | Purpose |
+|----------------|---------|---------|
+| `trigger_candle`, `remaining_candles` | V3 | Entry/exit timing |
+| `expected_move_pct`, `max_drawdown_pct`, `max_favorable_pct` | V3 | Price prediction & risk |
+| `win_rate`, `avg_duration`, `historical_count` | V3 | Historical statistics |
+| `sl_price`, `tp_price` | V3 | Dynamic SL/TP |
+| `continuation_nodes`, `break_nodes` | V3 | Forward/backward navigation |
+| `confidence`, `probability_of_success`, `sizing_signal` | V3 | Computed properties for RiskManager |
+| `regime`, `regime_confidence`, `dominant_regime` | V4 | Regime awareness |
+| `regime_distribution` | V4 | Regime frequency histogram |
+| `regime_stats` (RegimeStats) | V4.1 | Per-regime win_rate and expected_move |
+| `move_variance`, `move_mean_for_variance` | V4.1 | Welford's online variance |
+| `move_std`, `move_coefficient_of_variation` | V4.1 | Pattern reliability metrics |
+| `node_type` (independent/dependent) | V4 | Node classification with confidence penalty |
+| `min_independent_count` | V4 | Threshold for independent classification |
+| `last_observation_time` | V4.2 | Freshness tracking |
+| `observation_timespan` | V4.2 | Robustness metric |
+| `freshness_decay` | V4.2 | Time-based decay (7-day half-life) |
+| `observation_density` | V4.2 | Observations per day |
+
+**Recommendation for future metadata additions**:
+- Direction-specific stats (LONG win_rate vs SHORT win_rate per node) — useful for assets that trend strongly
+- Regime transition tracking (what regime follows what) — for predictive regime shifts
+- Time-of-day patterns — for intraday strategies
+
+---
 
 ### V4.2 — Metadata Audit Fixes & Observation Freshness (2026-06-11)
 
@@ -110,15 +171,15 @@ Metadata Flow:
 
 | Module | Path | Status | Tests |
 |--------|------|--------|-------|
-| BlockLifecycleMetadata | `ppmt/src/ppmt/core/metadata.py` | V4.2 ✅ | 21 V4.2 + 23 V4.1 + 8 existing |
+| BlockLifecycleMetadata | `ppmt/src/ppmt/core/metadata.py` | V4.3 ✅ | 21 V4.2 + 23 V4.1 + 8 existing + 49 V4.3 |
 | RegimeStats | `ppmt/src/ppmt/core/metadata.py` | V4.1 ✅ | 4 |
-| PPMTTrie | `ppmt/src/ppmt/core/trie.py` | V4.1 ✅ | 10 |
-| SAXEncoder | `ppmt/src/ppmt/core/sax.py` | Complete ✅ | 10 |
+| PPMTTrie | `ppmt/src/ppmt/core/trie.py` | V4.1 ✅ | 10 + 12 V4.3 |
+| SAXEncoder | `ppmt/src/ppmt/core/sax.py` | Complete ✅ | 10 + 6 V4.3 |
 | FuzzyMatcher | `ppmt/src/ppmt/core/matcher.py` | Complete ✅ | 8 |
-| RegimeDetector | `ppmt/src/ppmt/core/regime.py` | Complete ✅ | — |
-| PredictionEngine | `ppmt/src/ppmt/engine/prediction.py` | V4.2 ✅ | 2 integration |
-| PPMT Engine | `ppmt/src/ppmt/engine/ppmt.py` | V4.2 ✅ | 1 N4 filtering |
-| PaperTrader | `ppmt/src/ppmt/engine/paper_trader.py` | V4.2 ✅ | — |
+| RegimeDetector | `ppmt/src/ppmt/core/regime.py` | Complete ✅ | 2 V4.3 |
+| PredictionEngine | `ppmt/src/ppmt/engine/prediction.py` | V4.2 ✅ | 2 + 3 V4.3 |
+| PPMT Engine | `ppmt/src/ppmt/engine/ppmt.py` | V4.2 ✅ | 1 |
+| PaperTrader | `ppmt/src/ppmt/engine/paper_trader.py` | V4.3 ✅ | 7 V4.3 (SHORT gate + historical count) |
 | SignalGenerator | `ppmt/src/ppmt/engine/signal.py` | Complete ✅ | — |
 | AdaptiveWeights | `ppmt/src/ppmt/engine/weights.py` | Complete ✅ | — |
 | RiskManager | `ppmt/src/ppmt/risk/manager.py` | Complete ✅ | — |
@@ -130,7 +191,9 @@ Metadata Flow:
 | 1 | `process_new_candle()` in ppmt.py returns None (streaming not implemented) | Medium | TODO |
 | 2 | `max_drawdown_pct` stored as negative, used with abs() inconsistently | Low | Documented — works but confusing |
 | 3 | No avg_holding_period (different from avg_duration) | Low | Future |
-| 4 | `freshness_decay` not yet used in confidence computation | Low | Ready to integrate in V4.3 |
+| 4 | `freshness_decay` not yet used in confidence computation | Low | Ready to integrate in V4.4 |
+| 5 | No direction-specific win_rate per node (LONG vs SHORT) | Low | Future — useful for strongly-trending assets |
+| 6 | No regime transition tracking | Low | Future — for predictive regime shifts |
 
 ## Previous Bug Status
 
@@ -142,5 +205,6 @@ Metadata Flow:
 | regime_match_score missing | Method called but not defined | ✅ Fixed in V4.1 |
 | Regime not passed to predict() | paper_trader.py never passed current_regime | ✅ Fixed in V4.2 |
 | N4 redundant with N3 | N4 received all patterns, never filtered by regime | ✅ Fixed in V4.2 — regime_match_score applied at query time |
-| hardcoded historical_count=100 | Signal sizing used fake count of 100 | ✅ Fixed in V4.2 — now uses real node count |
+| hardcoded historical_count=100 | Signal sizing used fake count of 100 | ✅ Fixed in V4.2 (mock_meta), then V4.3 (moved BEFORE Signal creation so quality_score uses real count) |
+| SHORT gate fixed multiplier | 1.2x regardless of regime — too strict in downtrend, too lenient in uptrend | ✅ Fixed in V4.3 — regime-aware gate (0.85x-1.8x based on regime) |
 | No observation freshness | Stale patterns had same weight as fresh | ✅ Fixed in V4.2 — freshness_decay + observation_timespan |

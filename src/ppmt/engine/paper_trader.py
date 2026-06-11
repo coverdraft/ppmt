@@ -989,15 +989,29 @@ class PaperTrader:
                 # 10% confidence trades that had WR of only 32.6%. This defeated the
                 # entire purpose of raising min_confidence.
 
-                # SHORT signals require higher confidence (BTC trends up)
-                # v0.6.2: Relaxed from max(conf*1.5, 0.15) to max(conf*1.2, 0.20).
-                # The 1.5x gate on 15% base = 22.5% min SHORT, which eliminated ALL
-                # SHORT trades in Cycle 5 (0 out of 354). This removed bearish
-                # diversification entirely. With min_confidence now at 20%,
-                # 1.2x = 24% SHORT min — still stricter than LONG but allows
-                # quality SHORTs through. The floor of 0.20 ensures minimum quality.
+                # SHORT signals require regime-aware confidence gating.
+                # V4.3: Replaced the fixed 1.2x multiplier with a regime-aware gate.
+                # Previous versions used a fixed SHORT penalty (1.2x or 1.5x), which
+                # either eliminated all SHORTs (1.5x was too strict) or let bad SHORTs
+                # through (1.2x was too lenient in trending_up). The new approach:
+                #
+                # - trending_down: SHORT is FAVORABLE → lower threshold (0.85x)
+                # - ranging:       SHORT is NEUTRAL   → slight penalty (1.1x)
+                # - trending_up:   SHORT is ADVERSE   → strict penalty (1.5x)
+                # - volatile:      SHORT is DANGEROUS  → hard gate (1.8x)
+                #
+                # The floor of 0.20 always applies regardless of regime, ensuring
+                # minimum quality. This replaces the tautological check that existed
+                # in earlier versions (confidence < max(confidence * 1.2, 0.20) was
+                # always false for conf >= 0.167).
                 if prediction.direction == "SHORT":
-                    effective_min_conf = max(effective_min_conf * 1.2, 0.20)
+                    short_regime_mult = {
+                        "trending_down": 0.85,  # SHORTs favored in downtrend
+                        "ranging": 1.1,         # slight caution
+                        "trending_up": 1.5,     # fighting the trend — strict
+                        "volatile": 1.8,        # high risk — very strict
+                    }.get(current_regime, 1.2)   # default: moderate penalty
+                    effective_min_conf = max(effective_min_conf * short_regime_mult, 0.20)
 
                 # V4.1: Regime-aware confidence adjustment
                 # If the current regime is unfavorable for this pattern (e.g.,
@@ -1084,6 +1098,22 @@ class PaperTrader:
                     tp_distance_pct = abs(tp_price - current_price) / current_price * 100
                     risk_reward = tp_distance_pct / sl_distance_pct if sl_distance_pct > 0 else 0
 
+                    # V4.3: Get actual historical_count from the matched Trie node
+                    # BEFORE creating the Signal. The previous version created the
+                    # Signal with hardcoded historical_count=100, then tried to fix
+                    # it with a separate mock_meta — but the Signal's own
+                    # compute_quality_score() and compute_sizing_multiplier() had
+                    # already used the wrong count. This distorted sizing by making
+                    # rarely-observed patterns appear more reliable than they are.
+                    actual_historical_count = 10  # conservative default if no node found
+                    matched_node_for_sizing = None
+                    try:
+                        matched_node_for_sizing = trie.search(current_symbols)
+                        if matched_node_for_sizing and matched_node_for_sizing.metadata.historical_count > 0:
+                            actual_historical_count = matched_node_for_sizing.metadata.historical_count
+                    except Exception:
+                        pass
+
                     signal = Signal(
                         signal_type=signal_type,
                         confidence=prediction.confidence,
@@ -1094,7 +1124,7 @@ class PaperTrader:
                         expected_move_pct=prediction.expected_total_move_pct,
                         risk_reward_ratio=risk_reward,
                         win_rate=prediction.overall_probability,
-                        historical_count=100,
+                        historical_count=actual_historical_count,
                         matched_pattern=current_symbols,
                     )
                     signal.quality_score = signal.compute_quality_score()
@@ -1107,18 +1137,12 @@ class PaperTrader:
                         risk_reject_reasons["low_quality"] = risk_reject_reasons.get("low_quality", 0) + 1
                         continue
 
-                    # Metadata sizing — use real historical_count from the matched node
-                    # V4.2: Replaced hardcoded historical_count=100 with the actual count
-                    # from the matched Trie node. This ensures the Bayesian shrinkage
-                    # in probability_of_success and sizing_signal uses the real sample
-                    # size, preventing overconfident sizing on rarely-observed patterns.
-                    actual_historical_count = 100  # sensible default if no node found
-                    try:
-                        matched_node_for_sizing = trie.search(current_symbols)
-                        if matched_node_for_sizing and matched_node_for_sizing.metadata.historical_count > 0:
-                            actual_historical_count = matched_node_for_sizing.metadata.historical_count
-                    except Exception:
-                        pass
+                    # Metadata sizing — use the real historical_count for sizing
+                    # The Signal already has the correct count, but we create
+                    # a dedicated BlockLifecycleMetadata for precise Bayesian
+                    # sizing calculations (probability_of_success, sizing_signal).
+                    # V4.3: No longer duplicates the historical_count fix — it's
+                    # already correct in the Signal from creation.
                     mock_meta = BlockLifecycleMetadata(
                         win_rate=signal.win_rate,
                         expected_move_pct=signal.expected_move_pct,
