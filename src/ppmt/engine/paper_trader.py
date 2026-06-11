@@ -94,7 +94,6 @@ def _record_observation(
     trade: PaperTrade,
     exit_sym_idx: int,
     next_symbol: Optional[str] = None,
-    regime: Optional[str] = None,
 ) -> dict:
     """
     Living Trie: Record a trade's outcome back into the Trie.
@@ -149,7 +148,6 @@ def _record_observation(
             duration=max(1, exit_sym_idx - trade.entry_sym_idx) if trade.entry_sym_idx > 0 else 1,
             won=trade.pnl_pct > 0,
             next_symbol=next_symbol,
-            regime=regime,
         )
         new_nodes += 1
         observations += 1
@@ -187,7 +185,8 @@ def _record_observation(
         duration=duration,
         won=won,
         next_symbol=next_symbol,
-        regime=regime,
+        regime=trade.regime if trade.regime else None,
+        regime_confidence=trade.regime_confidence if trade.regime_confidence > 0 else None,
     )
     observations += 1
     trie.trading_observations += 1
@@ -203,6 +202,8 @@ def _record_observation(
             duration=duration,
             won=won,
             next_symbol=None,
+            regime=trade.regime if trade.regime else None,
+            regime_confidence=trade.regime_confidence if trade.regime_confidence > 0 else None,
         )
         new_nodes += 1
 
@@ -760,8 +761,7 @@ class PaperTrader:
                             if cfg.living_trie and current_position.matched_pattern:
                                 next_sym = all_sax_symbols[sym_idx] if sym_idx < len(all_sax_symbols) else None
                                 obs_result = _record_observation(
-                                    trie, current_position, sym_idx, next_sym,
-                                    regime=current_regime,
+                                    trie, current_position, sym_idx, next_sym
                                 )
                                 trie_observations_recorded += obs_result["observations"]
                                 trie_new_nodes_created += obs_result["new_nodes"]
@@ -838,8 +838,7 @@ class PaperTrader:
                     if cfg.living_trie and current_position.matched_pattern:
                         next_sym = all_sax_symbols[sym_idx] if sym_idx < len(all_sax_symbols) else None
                         obs_result = _record_observation(
-                            trie, current_position, sym_idx, next_sym,
-                            regime=current_regime,
+                            trie, current_position, sym_idx, next_sym
                         )
                         trie_observations_recorded += obs_result["observations"]
                         trie_new_nodes_created += obs_result["new_nodes"]
@@ -875,8 +874,7 @@ class PaperTrader:
                     if cfg.living_trie and current_position.matched_pattern:
                         next_sym = all_sax_symbols[sym_idx] if sym_idx < len(all_sax_symbols) else None
                         obs_result = _record_observation(
-                            trie, current_position, sym_idx, next_sym,
-                            regime=current_regime,
+                            trie, current_position, sym_idx, next_sym
                         )
                         trie_observations_recorded += obs_result["observations"]
                         trie_new_nodes_created += obs_result["new_nodes"]
@@ -928,7 +926,6 @@ class PaperTrader:
                             obs_result = _record_observation(
                                 trie, current_position, sym_idx,
                                 latest_symbol,  # The symbol that broke the pattern
-                                regime=current_regime,
                             )
                             trie_observations_recorded += obs_result["observations"]
                             trie_new_nodes_created += obs_result["new_nodes"]
@@ -974,7 +971,6 @@ class PaperTrader:
                         entry_price=current_price,
                         timeframe_hours=tf_hours,
                         symbol=cfg.symbol,
-                        current_regime=current_regime,
                     )
                 except Exception:
                     continue
@@ -1098,30 +1094,27 @@ class PaperTrader:
                     signal.expected_profit_ahead = mock_meta.expected_profit_ahead
                     signal.metadata_sizing_signal = mock_meta.sizing_signal
 
-                    # v0.8.1: Apply regime-aware position sizing multiplier.
-                    # The regime is detected at each SAX boundary but was NOT
-                    # being applied to the sizing signal — the multiplier was
-                    # computed from metadata alone, ignoring regime. Now the
-                    # regime multiplier scales the metadata_sizing_signal so
-                    # that position size reflects both pattern quality AND
-                    # market regime. Multipliers: trending_up=1.2x,
-                    # ranging=1.0x, trending_down=0.6x, volatile=0.4x.
-                    if cfg.regime_aware and current_regime:
-                        regime_mults = {
-                            "trending_up": 1.2,
-                            "ranging": 1.0,
-                            "trending_down": 0.6,
-                            "volatile": 0.4,
-                        }
-                        regime_mult = regime_mults.get(current_regime, 1.0)
-                        signal.metadata_sizing_signal *= regime_mult
-                        signal.sizing_multiplier *= regime_mult
-
                     # Risk check
                     can_open, reason = risk_mgr.can_open(signal, info.asset_class)
                     if can_open:
                         size = risk_mgr.calculate_position_size(signal)
                         position = risk_mgr.open_position(signal, size)
+
+                        # V4: Use matched node's regime info when available
+                        # If the matched Trie node has regime metadata, use it
+                        # as the node-level regime instead of the global regime.
+                        # This provides more granular regime awareness — a pattern
+                        # that historically worked in trending_up should get a
+                        # confidence boost when the current regime is trending_up.
+                        node_regime = current_regime  # default to global
+                        node_regime_conf = regime_info.confidence if regime_info else 0.0
+                        try:
+                            matched_node = trie.search(current_symbols)
+                            if matched_node and matched_node.metadata.dominant_regime:
+                                node_regime = matched_node.metadata.dominant_regime
+                                node_regime_conf = matched_node.metadata.regime_confidence
+                        except Exception:
+                            pass
 
                         current_position = PaperTrade(
                             trade_id=trade_counter + 1,
@@ -1141,8 +1134,8 @@ class PaperTrader:
                             sl_price=sl_price,
                             tp_price=tp_price,
                             entry_sym_idx=sym_idx,
-                            regime=current_regime,
-                            regime_confidence=regime_info.confidence if regime_info else 0.0,
+                            regime=node_regime,
+                            regime_confidence=node_regime_conf,
                         )
                     else:
                         risk_reject_reasons[reason] = risk_reject_reasons.get(reason, 0) + 1
@@ -1175,8 +1168,7 @@ class PaperTrader:
             # Living Trie: record the final trade outcome
             if cfg.living_trie and current_position.matched_pattern:
                 obs_result = _record_observation(
-                    trie, current_position, len(all_sax_symbols) - 1, None,
-                    regime=current_regime,
+                    trie, current_position, len(all_sax_symbols) - 1, None
                 )
                 trie_observations_recorded += obs_result["observations"]
                 trie_new_nodes_created += obs_result["new_nodes"]

@@ -185,6 +185,8 @@ def _record_observation(
         duration=duration,
         won=won,
         next_symbol=next_symbol,
+        regime=trade.regime if trade.regime else None,
+        regime_confidence=trade.regime_confidence if trade.regime_confidence > 0 else None,
     )
     observations += 1
     trie.trading_observations += 1
@@ -200,6 +202,8 @@ def _record_observation(
             duration=duration,
             won=won,
             next_symbol=None,
+            regime=trade.regime if trade.regime else None,
+            regime_confidence=trade.regime_confidence if trade.regime_confidence > 0 else None,
         )
         new_nodes += 1
 
@@ -1096,6 +1100,22 @@ class PaperTrader:
                         size = risk_mgr.calculate_position_size(signal)
                         position = risk_mgr.open_position(signal, size)
 
+                        # V4: Use matched node's regime info when available
+                        # If the matched Trie node has regime metadata, use it
+                        # as the node-level regime instead of the global regime.
+                        # This provides more granular regime awareness — a pattern
+                        # that historically worked in trending_up should get a
+                        # confidence boost when the current regime is trending_up.
+                        node_regime = current_regime  # default to global
+                        node_regime_conf = regime_info.confidence if regime_info else 0.0
+                        try:
+                            matched_node = trie.search(current_symbols)
+                            if matched_node and matched_node.metadata.dominant_regime:
+                                node_regime = matched_node.metadata.dominant_regime
+                                node_regime_conf = matched_node.metadata.regime_confidence
+                        except Exception:
+                            pass
+
                         current_position = PaperTrade(
                             trade_id=trade_counter + 1,
                             symbol=cfg.symbol,
@@ -1114,8 +1134,8 @@ class PaperTrader:
                             sl_price=sl_price,
                             tp_price=tp_price,
                             entry_sym_idx=sym_idx,
-                            regime=current_regime,
-                            regime_confidence=regime_info.confidence if regime_info else 0.0,
+                            regime=node_regime,
+                            regime_confidence=node_regime_conf,
                         )
                     else:
                         risk_reject_reasons[reason] = risk_reject_reasons.get(reason, 0) + 1

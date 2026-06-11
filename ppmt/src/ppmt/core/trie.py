@@ -238,12 +238,17 @@ class PPMTTrie:
         duration: int = 0,
         won: bool = False,
         next_symbol: Optional[str] = None,
+        regime: Optional[str] = None,
+        regime_confidence: Optional[float] = None,
     ) -> TrieNode:
         """
         Insert a pattern and update metadata from a single observation.
 
         This is the primary method for building the Trie from historical data.
         Each call represents one observed instance of the pattern.
+
+        V4: Now accepts regime and regime_confidence parameters to store
+        the market regime under which this pattern was observed.
 
         Args:
             symbols: SAX symbol sequence
@@ -253,6 +258,8 @@ class PPMTTrie:
             duration: Duration in candles
             won: Whether the pattern completed successfully
             next_symbol: What followed this pattern (for continuation tracking)
+            regime: Market regime at observation time (V4)
+            regime_confidence: Confidence of regime detection (V4)
         """
         node = self.insert(symbols)
 
@@ -268,6 +275,8 @@ class PPMTTrie:
             duration=duration,
             won=won,
             next_symbol=next_symbol,
+            regime=regime,
+            regime_confidence=regime_confidence,
         )
 
         return node
@@ -440,9 +449,17 @@ class PPMTTrie:
         Recursively propagate metadata from children to parent.
 
         Returns the aggregate metadata for this subtree (including all descendants).
+
+        V4: Also propagates regime information and classifies nodes as
+        independent or dependent based on their observation count.
         """
         if not node.children:
             # Leaf node — return its own metadata
+            # V4: Classify leaf nodes
+            if node.metadata.historical_count >= node.metadata.min_independent_count:
+                node.metadata.node_type = "independent"
+            else:
+                node.metadata.node_type = "dependent"
             return node.metadata
 
         # Recursively propagate to children first (bottom-up)
@@ -458,6 +475,17 @@ class PPMTTrie:
             for sym in node.children:
                 if sym not in node.metadata.continuation_nodes:
                     node.metadata.continuation_nodes.append(sym)
+            # V4: Classify based on count
+            if node.metadata.historical_count >= node.metadata.min_independent_count:
+                node.metadata.node_type = "independent"
+            else:
+                node.metadata.node_type = "dependent"
+            # V4: Update dominant_regime from distribution if available
+            if node.metadata.regime_distribution:
+                node.metadata.dominant_regime = max(
+                    node.metadata.regime_distribution,
+                    key=node.metadata.regime_distribution.get,
+                )
             return node.metadata
 
         # Compute aggregate from children that have metadata
@@ -501,6 +529,37 @@ class PPMTTrie:
         for sym in node.children:
             if sym not in node.metadata.continuation_nodes:
                 node.metadata.continuation_nodes.append(sym)
+
+        # V4: Aggregate regime distribution from children
+        # Merge all children's regime distributions into this node
+        merged_regime_dist: dict[str, int] = {}
+        for m in children_with_data:
+            for regime_name, count in m.regime_distribution.items():
+                merged_regime_dist[regime_name] = merged_regime_dist.get(regime_name, 0) + count
+        node.metadata.regime_distribution = merged_regime_dist
+
+        # V4: Set dominant_regime from merged distribution
+        if merged_regime_dist:
+            node.metadata.dominant_regime = max(
+                merged_regime_dist, key=merged_regime_dist.get
+            )
+            # Inherit regime from the dominant regime of children
+            if not node.metadata.regime:
+                node.metadata.regime = node.metadata.dominant_regime
+
+        # V4: Aggregate regime_confidence as weighted average
+        total_regime_conf = sum(
+            m.regime_confidence * m.historical_count
+            for m in children_with_data
+        )
+        if total_count > 0:
+            node.metadata.regime_confidence = total_regime_conf / total_count
+
+        # V4: Classify intermediate nodes based on count
+        if node.metadata.historical_count >= node.metadata.min_independent_count:
+            node.metadata.node_type = "independent"
+        else:
+            node.metadata.node_type = "dependent"
 
         return node.metadata
 

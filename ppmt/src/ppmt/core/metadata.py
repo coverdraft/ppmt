@@ -25,12 +25,24 @@ class BlockLifecycleMetadata:
     """
     Block Lifecycle Metadata attached to each Trie node.
 
-    This is the core innovation of PPMT V3. Every node in the Trie
-    carries these 12 fields, enabling the Trie itself to make all
+    This is the core innovation of PPMT V3/V4. Every node in the Trie
+    carries these fields, enabling the Trie itself to make all
     trading decisions without external indicators.
 
     Key insight: If a next SAX block does NOT exist as a child node,
     the pattern broke BEFORE price hit SL → earliest possible exit signal.
+
+    V4 Enhancement: Regime-Aware Node Metadata
+    Each node now stores the market regime(s) under which its pattern
+    was observed. This enables:
+      - Regime-specific pattern matching (N4 Trie segmentation)
+      - Regime-aware confidence scoring (patterns in favorable regimes
+        get higher confidence, unfavorable regimes get lower)
+      - Independent vs Dependent node classification:
+          * Independent: has enough observations (>= min_independent_count)
+            to be self-sufficient — its metadata is reliable on its own
+          * Dependent: relies on parent/ancestor metadata (low count,
+            inherited regime info) — confidence is scaled down
     """
 
     # === Entry/Exit Timing ===
@@ -90,6 +102,48 @@ class BlockLifecycleMetadata:
     These represent transitions to a different regime.
     Not all missing blocks are breaks — some are just noise."""
 
+    # === V4: Regime-Aware Node Metadata ===
+    regime: str = ""
+    """The market regime under which this pattern was observed.
+    One of: trending_up, trending_down, ranging, volatile.
+    Empty string means not yet set (legacy nodes or before V4)."""
+
+    regime_confidence: float = 0.0
+    """Confidence of the regime detection when this pattern was observed.
+    Range [0, 1]. Higher = more certain about the regime classification."""
+
+    dominant_regime: str = ""
+    """The most common regime across all observations of this pattern.
+    For terminal nodes, this is the same as `regime`.
+    For intermediate nodes (after propagation), this is the regime
+    with the highest count in regime_distribution. This enables
+    regime-aware routing at any Trie depth."""
+
+    regime_distribution: dict[str, int] = field(default_factory=dict)
+    """Distribution of regimes across observations of this pattern.
+    E.g., {'trending_up': 45, 'ranging': 30, 'volatile': 5}
+    Used to compute regime-specific win rates and confidence.
+    Enables the trading engine to say: 'This pattern works 60% of
+    the time in trending_up but only 35% in volatile regimes.'"""
+
+    node_type: str = "dependent"
+    """Whether this node is independent or dependent.
+    - 'independent': Has enough observations (>= min_independent_count)
+      to be self-sufficient. Its metadata is reliable on its own.
+      Confidence is used at full strength.
+    - 'dependent': Relies on parent/ancestor metadata. Low count,
+      inherited regime info. Confidence is scaled down by a factor
+      based on the ratio of actual vs minimum observations.
+    Classification is performed during propagate_metadata() and
+    updated during Living Trie observations."""
+
+    min_independent_count: int = 10
+    """Minimum historical_count for a node to be classified as independent.
+    Nodes with count >= this threshold are 'independent'. Below it,
+    they are 'dependent' and their metadata inherits from parents.
+    10 is a reasonable default: below 10 observations, the node's
+    statistics are too noisy to be reliable on their own."""
+
     # === Computed Properties ===
 
     @property
@@ -105,6 +159,12 @@ class BlockLifecycleMetadata:
         Confidence score based on historical observations and win rate.
         More observations and higher win rate → higher confidence.
         Uses Bayesian-inspired shrinking toward 0.5 for low counts.
+
+        V4: Dependent nodes have their confidence scaled down because
+        their metadata is inherited/aggregated rather than directly
+        observed. An independent node with 50 observations is more
+        trustworthy than a dependent node with 3 observations whose
+        statistics were propagated from children.
         """
         if self.historical_count == 0:
             return 0.0
@@ -116,7 +176,22 @@ class BlockLifecycleMetadata:
         )
         # Scale by sqrt of log(count) for sample size bonus
         count_bonus = min(1.0, np.sqrt(np.log1p(self.historical_count) / np.log(1000)))
-        return adjusted_win_rate * count_bonus
+        base_confidence = adjusted_win_rate * count_bonus
+
+        # V4: Dependent node penalty
+        # Dependent nodes have less reliable metadata, so we scale
+        # their confidence down. The penalty is proportional to how
+        # far they are from the minimum independent count.
+        if self.node_type == "dependent" and self.historical_count > 0:
+            dependency_ratio = min(
+                1.0, self.historical_count / self.min_independent_count
+            )
+            # Scale between 0.5 (0 observations toward independent)
+            # and 1.0 (at the threshold)
+            dependency_penalty = 0.5 + 0.5 * dependency_ratio
+            base_confidence *= dependency_penalty
+
+        return base_confidence
 
     @property
     def expected_profit_ahead(self) -> float:
@@ -214,12 +289,18 @@ class BlockLifecycleMetadata:
         duration: int,
         won: bool,
         next_symbol: Optional[str] = None,
+        regime: Optional[str] = None,
+        regime_confidence: Optional[float] = None,
     ) -> None:
         """
         Update metadata with a new observation using incremental statistics.
 
         This method updates all fields incrementally without storing raw data,
         making it memory-efficient for millions of patterns.
+
+        V4: Now also tracks regime information per observation.
+        Each observation can carry the market regime under which it
+        was observed, building the regime_distribution histogram.
 
         Args:
             move_pct: Actual percentage move observed
@@ -228,6 +309,9 @@ class BlockLifecycleMetadata:
             duration: Actual duration in candles
             won: Whether the pattern completed successfully
             next_symbol: SAX symbol that followed this block (if any)
+            regime: Market regime at time of observation
+                    (trending_up, trending_down, ranging, volatile)
+            regime_confidence: Confidence of the regime detection [0, 1]
         """
         n = self.historical_count
         self.historical_count += 1
@@ -257,6 +341,32 @@ class BlockLifecycleMetadata:
         if next_symbol is not None:
             if next_symbol not in self.continuation_nodes:
                 self.continuation_nodes.append(next_symbol)
+
+        # V4: Track regime distribution
+        if regime and regime in ("trending_up", "trending_down", "ranging", "volatile"):
+            self.regime_distribution[regime] = self.regime_distribution.get(regime, 0) + 1
+            # Update dominant_regime to the most common regime
+            if self.regime_distribution:
+                self.dominant_regime = max(
+                    self.regime_distribution, key=self.regime_distribution.get
+                )
+            # On first observation, set the regime directly
+            if n == 0:
+                self.regime = regime
+                self.regime_confidence = regime_confidence if regime_confidence is not None else 0.0
+            else:
+                # Blend regime_confidence incrementally
+                if regime_confidence is not None:
+                    self.regime_confidence = (
+                        (self.regime_confidence * n + regime_confidence)
+                        / self.historical_count
+                    )
+
+        # V4: Update node_type based on count
+        if self.historical_count >= self.min_independent_count:
+            self.node_type = "independent"
+        else:
+            self.node_type = "dependent"
 
     def compute_sl_tp(self, entry_price: float, safety_margin: float = 0.2) -> None:
         """
@@ -298,6 +408,13 @@ class BlockLifecycleMetadata:
             "expected_profit_ahead": round(self.expected_profit_ahead, 4),
             "sizing_signal": round(self.sizing_signal, 4),
             "risk_reward_ratio": round(self.risk_reward_ratio, 4),
+            # V4: Regime-aware node metadata
+            "regime": self.regime,
+            "regime_confidence": round(self.regime_confidence, 4),
+            "dominant_regime": self.dominant_regime,
+            "regime_distribution": self.regime_distribution,
+            "node_type": self.node_type,
+            "min_independent_count": self.min_independent_count,
         }
 
     @classmethod
@@ -316,4 +433,11 @@ class BlockLifecycleMetadata:
             tp_price=data.get("tp_price"),
             continuation_nodes=data.get("continuation_nodes", []),
             break_nodes=data.get("break_nodes", []),
+            # V4: Regime-aware node metadata
+            regime=data.get("regime", ""),
+            regime_confidence=data.get("regime_confidence", 0.0),
+            dominant_regime=data.get("dominant_regime", ""),
+            regime_distribution=data.get("regime_distribution", {}),
+            node_type=data.get("node_type", "dependent"),
+            min_independent_count=data.get("min_independent_count", 10),
         )

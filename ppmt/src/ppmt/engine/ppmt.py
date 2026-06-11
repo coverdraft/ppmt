@@ -51,6 +51,7 @@ from ppmt.core.sax import SAXEncoder
 from ppmt.core.trie import PPMTTrie, TrieNode
 from ppmt.core.matcher import FuzzyMatcher, MatchResult
 from ppmt.core.metadata import BlockLifecycleMetadata
+from ppmt.core.regime import RegimeDetector
 from ppmt.engine.weights import AdaptiveWeights, LevelStats, WEIGHT_PROFILES
 from ppmt.engine.signal import SignalGenerator, Signal, SignalType
 from ppmt.engine.prediction import PredictionEngine
@@ -239,6 +240,20 @@ class PPMT:
                 atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
         atr_pct = np.where(close > 0, atr / close * 100, 0)
 
+        # V4: Pre-compute regime at each candle position using RegimeDetector
+        # This enables storing the market regime in each node's metadata,
+        # making the Trie regime-aware. Each pattern knows what regime
+        # it was observed under, enabling regime-specific matching.
+        regime_detector = RegimeDetector(lookback=50, vol_threshold=0.6, trend_threshold=0.005)
+        regime_at_candle = ["ranging"] * len(close)  # default
+        regime_conf_at_candle = [0.0] * len(close)
+        for ci in range(50, len(close)):
+            regime_prices = close[max(0, ci - 200):ci + 1]
+            if len(regime_prices) >= 50:
+                info = regime_detector.detect_detailed(regime_prices)
+                regime_at_candle[ci] = info.regime
+                regime_conf_at_candle[ci] = info.confidence
+
         # Create overlapping sequences
         count = 0
         for i in range(len(symbols) - pattern_length):
@@ -292,6 +307,14 @@ class PPMT:
                 won = abs(drawdown_pct) >= tp_dist
 
             # Insert into all 4 levels
+            # V4: Detect regime at this pattern's entry position and pass
+            # it to insert_with_observations so each node stores what regime
+            # it was observed under. This is the key V4 enhancement that
+            # makes the Trie regime-aware.
+            entry_candle = start_candle
+            pattern_regime = regime_at_candle[entry_candle] if entry_candle < len(regime_at_candle) else "ranging"
+            pattern_regime_conf = regime_conf_at_candle[entry_candle] if entry_candle < len(regime_conf_at_candle) else 0.0
+
             for trie in [self.trie_n1, self.trie_n2, self.trie_n3, self.trie_n4]:
                 trie.insert_with_observations(
                     symbols=pattern,
@@ -301,6 +324,8 @@ class PPMT:
                     duration=duration,
                     won=won,
                     next_symbol=next_sym,
+                    regime=pattern_regime,
+                    regime_confidence=pattern_regime_conf,
                 )
 
             count += 1

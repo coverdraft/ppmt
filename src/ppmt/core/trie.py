@@ -64,22 +64,13 @@ class TrieNode:
         return self.children.get(symbol)
 
     def add_child(self, symbol: str) -> TrieNode:
-        """Add a new child node and return it.
-        V4: Child inherits regime context from parent if parent has it."""
+        """Add a new child node and return it."""
         if symbol not in self.children:
             child = TrieNode(
                 symbol=symbol,
                 depth=self.depth + 1,
                 parent=self,
             )
-            # V4: Propagate regime context from parent to child
-            if self.metadata.regime:
-                child.metadata.regime = self.metadata.regime
-                child.metadata.is_regime_dependent = self.metadata.is_regime_dependent
-                child.metadata.regime_confidence = self.metadata.regime_confidence
-                child.metadata.volatility_regime = self.metadata.volatility_regime
-                child.metadata.trend_strength = self.metadata.trend_strength
-                child.metadata.hurst_exponent = self.metadata.hurst_exponent
             self.children[symbol] = child
         return self.children[symbol]
 
@@ -248,11 +239,7 @@ class PPMTTrie:
         won: bool = False,
         next_symbol: Optional[str] = None,
         regime: Optional[str] = None,
-        regime_confidence: float = 0.0,
-        trend_strength: float = 0.0,
-        volatility_regime: float = 0.0,
-        hurst_exponent: float = 0.5,
-        is_regime_dependent: bool = False,
+        regime_confidence: Optional[float] = None,
     ) -> TrieNode:
         """
         Insert a pattern and update metadata from a single observation.
@@ -260,8 +247,8 @@ class PPMTTrie:
         This is the primary method for building the Trie from historical data.
         Each call represents one observed instance of the pattern.
 
-        v0.11.0 (V4): Now accepts detailed regime metrics that are stored
-        in node metadata and propagated to child nodes during insertion.
+        V4: Now accepts regime and regime_confidence parameters to store
+        the market regime under which this pattern was observed.
 
         Args:
             symbols: SAX symbol sequence
@@ -271,13 +258,8 @@ class PPMTTrie:
             duration: Duration in candles
             won: Whether the pattern completed successfully
             next_symbol: What followed this pattern (for continuation tracking)
-            regime: Market regime at observation time (v0.10.0).
-                One of: trending_up, trending_down, ranging, volatile.
-            regime_confidence: Confidence of regime detection (v0.11.0)
-            trend_strength: R-squared trend strength (v0.11.0)
-            volatility_regime: Annualized volatility (v0.11.0)
-            hurst_exponent: Hurst exponent (v0.11.0)
-            is_regime_dependent: Whether this node is regime-specific (v0.11.0)
+            regime: Market regime at observation time (V4)
+            regime_confidence: Confidence of regime detection (V4)
         """
         node = self.insert(symbols)
 
@@ -285,7 +267,7 @@ class PPMTTrie:
         if node.metadata.historical_count == 0:
             node.metadata.trigger_candle = len(symbols)  # Pattern fully formed
 
-        # Update metadata from this observation (V4: with regime context)
+        # Update metadata from this observation
         node.metadata.update_from_observation(
             move_pct=move_pct,
             drawdown_pct=drawdown_pct,
@@ -295,40 +277,19 @@ class PPMTTrie:
             next_symbol=next_symbol,
             regime=regime,
             regime_confidence=regime_confidence,
-            trend_strength=trend_strength,
-            volatility_regime=volatility_regime,
-            hurst_exponent=hurst_exponent,
-            is_regime_dependent=is_regime_dependent,
         )
-
-        # V4: Propagate regime context to intermediate nodes
-        if regime is not None and regime != "":
-            current = self.root
-            for sym in symbols:
-                child = current.get_child(sym)
-                if child is not None:
-                    if not child.metadata.regime:
-                        child.metadata.regime = regime
-                        child.metadata.is_regime_dependent = is_regime_dependent
-                    current = child
 
         return node
 
-    def search(self, symbols: list[str], regime: Optional[str] = None) -> Optional[TrieNode]:
+    def search(self, symbols: list[str]) -> Optional[TrieNode]:
         """
         Search for a pattern in the Trie.
 
         Returns the terminal node if found, None otherwise.
         Time complexity: O(k) where k = len(symbols)
 
-        V4: If regime is specified, validates that the found node's
-        regime matches. This prevents using trending_up metadata when
-        the current regime is ranging.
-
         Args:
             symbols: SAX symbol sequence to search for
-            regime: Optional regime filter (V4). If set, only returns
-                    nodes whose regime matches or is regime-agnostic.
         """
         node = self.root
         for symbol in symbols:
@@ -336,11 +297,6 @@ class PPMTTrie:
             if child is None:
                 return None
             node = child
-
-        # V4: Regime validation
-        if regime is not None and node.metadata.regime not in ("", regime):
-            return None
-
         return node
 
     def search_prefix(self, symbols: list[str]) -> tuple[Optional[TrieNode], int]:
@@ -493,9 +449,17 @@ class PPMTTrie:
         Recursively propagate metadata from children to parent.
 
         Returns the aggregate metadata for this subtree (including all descendants).
+
+        V4: Also propagates regime information and classifies nodes as
+        independent or dependent based on their observation count.
         """
         if not node.children:
             # Leaf node — return its own metadata
+            # V4: Classify leaf nodes
+            if node.metadata.historical_count >= node.metadata.min_independent_count:
+                node.metadata.node_type = "independent"
+            else:
+                node.metadata.node_type = "dependent"
             return node.metadata
 
         # Recursively propagate to children first (bottom-up)
@@ -511,6 +475,17 @@ class PPMTTrie:
             for sym in node.children:
                 if sym not in node.metadata.continuation_nodes:
                     node.metadata.continuation_nodes.append(sym)
+            # V4: Classify based on count
+            if node.metadata.historical_count >= node.metadata.min_independent_count:
+                node.metadata.node_type = "independent"
+            else:
+                node.metadata.node_type = "dependent"
+            # V4: Update dominant_regime from distribution if available
+            if node.metadata.regime_distribution:
+                node.metadata.dominant_regime = max(
+                    node.metadata.regime_distribution,
+                    key=node.metadata.regime_distribution.get,
+                )
             return node.metadata
 
         # Compute aggregate from children that have metadata
@@ -550,22 +525,41 @@ class PPMTTrie:
         node.metadata.max_drawdown_pct = min_dd
         node.metadata.max_favorable_pct = max_fav
 
-        # v0.10.0: Aggregate regime distribution from children
-        # This propagates regime context upward so intermediate nodes
-        # know which regimes their descendants were observed in.
-        aggregated_regime_dist: dict[str, int] = {}
-        for m in children_with_data:
-            for regime_name, count in m.regime_distribution.items():
-                aggregated_regime_dist[regime_name] = aggregated_regime_dist.get(regime_name, 0) + count
-        if aggregated_regime_dist:
-            node.metadata.regime_distribution = aggregated_regime_dist
-            # Set primary regime to the one with most observations
-            node.metadata.regime = max(aggregated_regime_dist, key=aggregated_regime_dist.get)
-
         # Ensure continuation_nodes include all children
         for sym in node.children:
             if sym not in node.metadata.continuation_nodes:
                 node.metadata.continuation_nodes.append(sym)
+
+        # V4: Aggregate regime distribution from children
+        # Merge all children's regime distributions into this node
+        merged_regime_dist: dict[str, int] = {}
+        for m in children_with_data:
+            for regime_name, count in m.regime_distribution.items():
+                merged_regime_dist[regime_name] = merged_regime_dist.get(regime_name, 0) + count
+        node.metadata.regime_distribution = merged_regime_dist
+
+        # V4: Set dominant_regime from merged distribution
+        if merged_regime_dist:
+            node.metadata.dominant_regime = max(
+                merged_regime_dist, key=merged_regime_dist.get
+            )
+            # Inherit regime from the dominant regime of children
+            if not node.metadata.regime:
+                node.metadata.regime = node.metadata.dominant_regime
+
+        # V4: Aggregate regime_confidence as weighted average
+        total_regime_conf = sum(
+            m.regime_confidence * m.historical_count
+            for m in children_with_data
+        )
+        if total_count > 0:
+            node.metadata.regime_confidence = total_regime_conf / total_count
+
+        # V4: Classify intermediate nodes based on count
+        if node.metadata.historical_count >= node.metadata.min_independent_count:
+            node.metadata.node_type = "independent"
+        else:
+            node.metadata.node_type = "dependent"
 
         return node.metadata
 
