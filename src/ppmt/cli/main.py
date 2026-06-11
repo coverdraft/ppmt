@@ -1424,7 +1424,21 @@ def validate_all(symbol: str, timeframe: str, train_ratio: float,
 
     if json_output:
         # For API bridge - output pure JSON
-        print(json_mod.dumps(verdict.to_dict()))
+        import json as _json
+
+        class NumpyEncoder(_json.JSONEncoder):
+            def default(self, obj):
+                if isinstance(obj, (np.integer,)):
+                    return int(obj)
+                if isinstance(obj, (np.floating,)):
+                    return float(obj)
+                if isinstance(obj, (np.bool_,)):
+                    return bool(obj)
+                if isinstance(obj, np.ndarray):
+                    return obj.tolist()
+                return super().default(obj)
+
+        print(_json.dumps(verdict.to_dict(), cls=NumpyEncoder))
         return
 
     # Rich CLI output
