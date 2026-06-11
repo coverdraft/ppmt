@@ -2,6 +2,16 @@
 
 All notable changes to the Progressive Pattern Matching Trie (PPMT) project.
 
+## [v0.8.1] - 2026-06-11
+
+### Fixed
+- **Critical**: Regime multiplier was NOT being applied to position sizing
+  - Regime was detected at SAX boundaries and recorded in trades but never scaled the sizing signal
+  - Now `metadata_sizing_signal` and `sizing_multiplier` are multiplied by regime factor
+  - trending_up: 1.2x, ranging: 1.0x, trending_down: 0.6x, volatile: 0.4x
+- pyproject.toml version synced 0.7.0 → 0.8.1
+- CLI --version synced to 0.8.1
+
 ## [v0.8.0] - 2026-06-11
 
 ### Added - Regime-Aware Position Sizing

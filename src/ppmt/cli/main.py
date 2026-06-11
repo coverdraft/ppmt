@@ -48,7 +48,7 @@ def load_config() -> dict:
 
 
 @click.group()
-@click.version_option(version="0.8.0")
+@click.version_option(version="0.8.1")
 def cli():
     """PPMT - Progressive Pattern Matching Trie Engine"""
     pass

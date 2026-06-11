@@ -1090,6 +1090,25 @@ class PaperTrader:
                     signal.expected_profit_ahead = mock_meta.expected_profit_ahead
                     signal.metadata_sizing_signal = mock_meta.sizing_signal
 
+                    # v0.8.1: Apply regime-aware position sizing multiplier.
+                    # The regime is detected at each SAX boundary but was NOT
+                    # being applied to the sizing signal — the multiplier was
+                    # computed from metadata alone, ignoring regime. Now the
+                    # regime multiplier scales the metadata_sizing_signal so
+                    # that position size reflects both pattern quality AND
+                    # market regime. Multipliers: trending_up=1.2x,
+                    # ranging=1.0x, trending_down=0.6x, volatile=0.4x.
+                    if cfg.regime_aware and current_regime:
+                        regime_mults = {
+                            "trending_up": 1.2,
+                            "ranging": 1.0,
+                            "trending_down": 0.6,
+                            "volatile": 0.4,
+                        }
+                        regime_mult = regime_mults.get(current_regime, 1.0)
+                        signal.metadata_sizing_signal *= regime_mult
+                        signal.sizing_multiplier *= regime_mult
+
                     # Risk check
                     can_open, reason = risk_mgr.can_open(signal, info.asset_class)
                     if can_open:

@@ -9,10 +9,10 @@
 
 | Item | Value |
 |------|-------|
-| **Version** | v0.7.1 |
+| **Version** | v0.8.1 |
 | **Branch** | main |
 | **Working Tree** | Clean (uncommitted changes pending sync) |
-| **Last Commit** | `afff845` — fix: numpy JSON serialization in validate-all |
+| **Last Commit** | `01c46f3` — v0.8.0: regime-aware position sizing |
 | **Active Source** | `/ppmt/src/ppmt/` (development), `/ppmt/ppmt/src/ppmt/` (submodule mirror) |
 
 ---
@@ -55,6 +55,14 @@ Components:
 ---
 
 ## Version History & Decisions
+
+### v0.8.1 (2026-06-11)
+- **Bug Fixed**: Regime multiplier was NOT being applied to position sizing
+  - Regime was detected and recorded in trades but never scaled the sizing_signal
+  - Now `metadata_sizing_signal` and `sizing_multiplier` are multiplied by regime factor
+  - trending_up: 1.2x, ranging: 1.0x, trending_down: 0.6x, volatile: 0.4x
+- **Fixed**: pyproject.toml version synced 0.7.0 → 0.8.1
+- **Fixed**: CLI --version synced to 0.8.1
 
 ### v0.7.1 (2026-06-11)
 - **Decision**: Converted ppmt/ from git submodule to regular tracked directory
@@ -121,6 +129,7 @@ Components:
 | BUG-003 | v0.6.3 | v0.6.3 | Z-score recalculation in OOS test caused look-ahead | Added encode_with_normalization() |
 | BUG-004 | v0.5.0 | v0.6.2 | Catastrophic 5% was too tight for BTC volatility | Re-enabled at 8% with more breathing room |
 | BUG-005 | Pre-v0.5 | v0.5.0 | Fresh tries had no metadata → system collapsed | 2-pass bootstrap paper trading |
+| BUG-006 | v0.8.0 | v0.8.1 | Regime detected but not applied to position sizing | Added regime_mult to sizing_signal computation |
 
 ### Verified Clean (2026-06-11 session)
 
@@ -196,13 +205,13 @@ All commands support `--symbol`, `--timeframe`, and appropriate configuration fl
 - [ ] Real-time trading mode (WebSocket exchange connection) — CLI shows TODO
 - [ ] Live trading bridge (paper → live transition)
 - [ ] Multi-asset portfolio mode
-- [ ] Regime detection integration (core/regime.py exists but not connected to paper trader)
+- [x] Regime detection integration (v0.8.0 connected, v0.8.1 fixed sizing multiplier)
 
 ### Architectural Debt
 - Two source trees exist: `/ppmt/src/ppmt/` (active dev) and `/ppmt/ppmt/src/ppmt/` (submodule mirror)
   - Active dev version is more complete (56KB paper_trader.py vs 23KB)
   - Need to reconcile and ensure git tracks the correct version
-- pyproject.toml still shows version 0.3.0 (should be 0.7.1)
+- pyproject.toml version synced to 0.8.1
 
 ---
 
@@ -217,3 +226,4 @@ All commands support `--symbol`, `--timeframe`, and appropriate configuration fl
 | 2026-06-10 | Re-enable catastrophic at 8% | 5% too tight; 8% = 3x avg ATR |
 | 2026-06-10 | Training z-score propagation | OOS requires consistent symbol mapping |
 | 2026-06-11 | Single traceability document | User preference: avoid scattered info |
+| 2026-06-11 | Apply regime multiplier to sizing signal | v0.8.0 detected regime but never used it for sizing |
