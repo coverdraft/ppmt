@@ -745,13 +745,12 @@ class PPMT:
                     continue
 
                 # SHORT requires higher confidence (bootstrap: keep loose to gather
-                # SHORT observations — v0.6.1 reverted from 2.0x/0.20 to 1.5x/0.15
-                # because the tighter gate starved the trie of SHORT observations)
+                # SHORT observations — v0.6.2 relaxed from 1.5x/0.15 to 1.2x/0.15
+                # because the 1.5x gate starved the trie of SHORT observations,
+                # leading to 0 SHORT trades in paper trading)
                 effective_min_conf = 0.10
-                if prediction.overall_probability > 0.5:
-                    effective_min_conf = max(0.10 * 0.5, 0.05)
                 if prediction.direction == "SHORT":
-                    effective_min_conf = max(effective_min_conf * 1.5, 0.15)
+                    effective_min_conf = max(effective_min_conf * 1.2, 0.15)
 
                 if prediction.confidence < effective_min_conf:
                     continue

@@ -230,14 +230,16 @@ class PaperTraderConfig:
     sax_strategy: str = "ohlcv"
     """SAX encoding strategy."""
 
-    min_confidence: float = 0.15
+    min_confidence: float = 0.20
     """Minimum confidence to generate entry signal.
-    v0.6.0: Raised from 0.10 to 0.15 based on Cycle 4 data analysis.
-    Trades with 10-14% confidence had WR of only 32.6% (14W/29L) with
-    avg PnL of -0.44%. Removing these 43 toxic trades improved overall
-    WR from 50.5% to 52.1% in backtesting. The previous v0.4.1 raise
-    to 0.15 failed because it was combined with other aggressive filters;
-    this time it's a standalone change."""
+    v0.6.2: Raised from 0.15 to 0.20 based on Cycle 5 regression analysis.
+    Cycle 5 (v0.6.0 with probability bonus) allowed 10% confidence trades
+    via the bonus loophole, resulting in +86.82% P&L vs Cycle 4's +1434%.
+    v0.6.1 removed the bonus but min_confidence stayed at 15%. Raising
+    to 20% further filters low-quality entries. Cycle 5 data shows trades
+    with 15-19% confidence had WR of ~38% — removing these should
+    improve overall quality. The SHORT gate is also relaxed (1.2x vs 1.5x)
+    to compensate and allow SHORT diversification."""
 
     min_quality_score: float = 0.0
     """Minimum quality score to enter a trade.
@@ -274,13 +276,14 @@ class PaperTraderConfig:
     A cooldown of 1 still prevents immediate revenge trading while
     allowing the system to capture the next valid signal."""
 
-    catastrophic_loss_pct: float = 0.0
-    """Catastrophic loss threshold (percentage). v0.3.0: DISABLED (0.0).
-    v0.2.10's catastrophic protection cut winners short — trades that
-    temporarily exceeded -5% unrealized loss often reversed to reach
-    take_profit. The v0.2.8 baseline (no catastrophic protection)
-    produced +1578% P&L precisely because it let trades breathe.
-    Set to a non-zero value (e.g., 8.0) to re-enable as a safety net."""
+    catastrophic_loss_pct: float = 8.0
+    """Catastrophic loss threshold (percentage). v0.6.2: Re-enabled at 8.0%.
+    Cycle 5 showed several trades with -10%+ losses (worst -10.56%).
+    The old 5% threshold cut winners short, but 8% is high enough to
+    let trades breathe while preventing catastrophic drawdowns.
+    Max DD in Cycle 5 was 41.3% — this safety net should reduce that.
+    v0.3.0 had disabled it (0.0) because 5% was too tight for BTC's
+    volatility. 8% gives ~3x the avg ATR (0.84%) as breathing room."""
 
     verbose: bool = True
     """Whether to print step-by-step details."""
@@ -902,12 +905,14 @@ class PaperTrader:
                 # entire purpose of raising min_confidence.
 
                 # SHORT signals require higher confidence (BTC trends up)
-                # v0.6.1: Reverted from max(conf*2.0, 0.20) back to max(conf*1.5, 0.15).
-                # The 2.0x gate eliminated ALL SHORT trades (0 out of 354), removing
-                # diversification. 1.5x on 15% base = 22.5% min SHORT confidence, which
-                # still filters weak SHORTs while allowing quality ones through.
+                # v0.6.2: Relaxed from max(conf*1.5, 0.15) to max(conf*1.2, 0.20).
+                # The 1.5x gate on 15% base = 22.5% min SHORT, which eliminated ALL
+                # SHORT trades in Cycle 5 (0 out of 354). This removed bearish
+                # diversification entirely. With min_confidence now at 20%,
+                # 1.2x = 24% SHORT min — still stricter than LONG but allows
+                # quality SHORTs through. The floor of 0.20 ensures minimum quality.
                 if prediction.direction == "SHORT":
-                    effective_min_conf = max(effective_min_conf * 1.5, 0.15)
+                    effective_min_conf = max(effective_min_conf * 1.2, 0.20)
 
                 # Entry conditions
                 # v0.6.1: Reverted probability threshold from >0.25 back to >0.20.

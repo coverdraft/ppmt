@@ -483,7 +483,7 @@ def predict(symbol: str, timeframe: str, depth: int, price: float):
 @click.option("--timeframe", "-t", default="1h", help="Candle timeframe")
 @click.option("--paper", is_flag=True, default=False, help="Run in paper trading mode (simulated)")
 @click.option("--capital", "-c", default=10000.0, type=float, help="Initial capital for paper trading")
-@click.option("--min-confidence", default=0.15, type=float, help="Minimum signal confidence to enter (default: 0.15)")
+@click.option("--min-confidence", default=0.20, type=float, help="Minimum signal confidence to enter (default: 0.20)")
 def run(symbol: str, timeframe: str, paper: bool, capital: float, min_confidence: float):
     """Run real-time pattern matching (requires exchange connection).
 
@@ -550,7 +550,7 @@ def run(symbol: str, timeframe: str, paper: bool, capital: float, min_confidence
 @click.option("--seed", default=42, type=int, help="Random seed for reproducibility")
 @click.option("--ruin-threshold", default=0.5, type=float, help="Ruin threshold (fraction of capital)")
 @click.option("--paper-first", is_flag=True, default=False, help="Run paper trading first, then Monte Carlo on results")
-@click.option("--min-confidence", default=0.10, type=float, help="Min confidence for paper trading (with --paper-first)")
+@click.option("--min-confidence", default=0.20, type=float, help="Min confidence for paper trading (with --paper-first)")
 def monte_carlo(
     symbol: str,
     timeframe: str,
