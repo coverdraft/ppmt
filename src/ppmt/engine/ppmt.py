@@ -561,6 +561,95 @@ class PPMT:
 
         self.weights.adapt(stats)
 
+    def set_tries(
+        self,
+        trie_n1: PPMTTrie,
+        trie_n2: PPMTTrie,
+        trie_n3: PPMTTrie,
+        trie_n4: PPMTTrie,
+    ) -> None:
+        """
+        Inject pre-loaded tries into the engine.
+
+        Used by PaperTrader when tries are loaded from storage
+        separately (avoiding a redundant build step).
+
+        Args:
+            trie_n1: Universal trie
+            trie_n2: Asset class trie
+            trie_n3: Per-asset trie
+            trie_n4: Per-asset+regime trie
+        """
+        self.trie_n1 = trie_n1
+        self.trie_n2 = trie_n2
+        self.trie_n3 = trie_n3
+        self.trie_n4 = trie_n4
+
+    def match_raw(
+        self,
+        current_symbols: list[str],
+        current_price: float,
+    ) -> PPMTResult:
+        """
+        Raw 4-level matching without signal generation.
+
+        Returns the PPMTResult with all match details and weighted confidence,
+        but does NOT apply SignalGenerator entry filters (min_confidence,
+        min_risk_reward, etc.). The caller (PaperTrader) applies its own
+        entry logic.
+
+        This is the recommended method for PaperTrader integration —
+        it provides the 4-level weighted confidence while letting the
+        PaperTrader retain full control over entry/exit decisions.
+
+        Args:
+            current_symbols: Current SAX symbol sequence
+            current_price: Current market price
+
+        Returns:
+            PPMTResult with match details and weighted_confidence
+        """
+        start_time = time.perf_counter()
+
+        n1_match = self.matcher.best_match(self.trie_n1, current_symbols)
+        n2_match = self.matcher.best_match(self.trie_n2, current_symbols)
+        n3_match = self.matcher.best_match(self.trie_n3, current_symbols)
+        n4_match = self.matcher.best_match(self.trie_n4, current_symbols)
+
+        n1_conf = n1_match.node.metadata.confidence if n1_match.node else 0.0
+        n2_conf = n2_match.node.metadata.confidence if n2_match.node else 0.0
+        n3_conf = n3_match.node.metadata.confidence if n3_match.node else 0.0
+        n4_conf = n4_match.node.metadata.confidence if n4_match.node else 0.0
+
+        # V4.2: Apply regime_match_score to N4 confidence
+        if n4_conf > 0 and self._current_regime and n4_match.node:
+            n4_regime_score = n4_match.node.metadata.regime_match_score(self._current_regime)
+            n4_conf *= n4_regime_score
+
+        weighted_conf = self.weights.compute_weighted_confidence(
+            n1_confidence=n1_conf,
+            n2_confidence=n2_conf,
+            n3_confidence=n3_conf,
+            n4_confidence=n4_conf,
+        )
+
+        search_time = (time.perf_counter() - start_time) * 1000.0
+
+        return PPMTResult(
+            signal=Signal(signal_type=SignalType.NO_SIGNAL, symbol=self.symbol),
+            n1_match=n1_match,
+            n2_match=n2_match,
+            n3_match=n3_match,
+            n4_match=n4_match,
+            n1_confidence=n1_conf,
+            n2_confidence=n2_conf,
+            n3_confidence=n3_conf,
+            n4_confidence=n4_conf,
+            weighted_confidence=weighted_conf,
+            sax_symbols=current_symbols,
+            search_time_ms=search_time,
+        )
+
     def bootstrap(
         self,
         df: pd.DataFrame,

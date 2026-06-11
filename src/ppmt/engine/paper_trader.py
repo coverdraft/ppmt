@@ -323,6 +323,14 @@ class PaperTraderConfig:
     The AdvancedPositionSizer already supports these multipliers;
     this flag activates the regime detection that feeds them."""
 
+    use_multi_level: bool = True
+    """v0.10.0: Enable 4-level matching (N1+N2+N3+N4) with adaptive weights.
+    When True and all 4 tries are available, uses PPMT.match_raw() to compute
+    weighted confidence across all 4 trie levels. When False or when only N3
+    is available, falls back to single-trie PredictionEngine (backward
+    compatible). This is the fix for GAP-1: PaperTrader previously only
+    used N3, ignoring N1/N2/N4 entirely."""
+
     verbose: bool = True
     """Whether to print step-by-step details."""
 
@@ -513,9 +521,22 @@ class PaperTrader:
         info = classifier.classify(cfg.symbol)
 
         # Try to load existing Tries, or build new ones
-        trie = storage.load_trie(cfg.symbol, "n3")
+        # v0.10.0: Load all 4 levels for GAP-1 4-level matching
+        all_tries = storage.load_all_tries(cfg.symbol)
+        trie_n1 = all_tries["n1"]
+        trie_n2 = all_tries["n2"]
+        trie_n3 = all_tries["n3"]
+        trie_n4 = all_tries["n4"]
+
         initial_pattern_count = 0
-        if trie is None:
+        has_multi_level = (
+            cfg.use_multi_level
+            and trie_n1 is not None
+            and trie_n2 is not None
+            and trie_n4 is not None
+        )
+
+        if trie_n3 is None:
             console.print(f"[yellow]No Trie for {cfg.symbol}. Building from data...[/yellow]")
             engine = PPMT(
                 symbol=cfg.symbol,
@@ -526,13 +547,29 @@ class PaperTrader:
                 weight_profile=info.weight_profile,
             )
             engine.build(df, pattern_length=cfg.pattern_length)
-            trie = engine.trie_n3
+            trie_n1 = engine.trie_n1
+            trie_n2 = engine.trie_n2
+            trie_n3 = engine.trie_n3
+            trie_n4 = engine.trie_n4
+            has_multi_level = True
         else:
-            initial_pattern_count = trie.pattern_count
-            console.print(f"[green]Loaded N3 Trie for {cfg.symbol} ({trie.pattern_count} patterns)[/green]")
+            initial_pattern_count = trie_n3.pattern_count
+            console.print(f"[green]Loaded N3 Trie for {cfg.symbol} ({trie_n3.pattern_count} patterns)[/green]")
+            if has_multi_level:
+                console.print(f"[green]All 4 levels loaded: N1={trie_n1.pattern_count}, "
+                              f"N2={trie_n2.pattern_count}, N3={trie_n3.pattern_count}, "
+                              f"N4={trie_n4.pattern_count}[/green]")
+            else:
+                console.print(f"[yellow]Only N3 trie available — running in single-level mode[/yellow]")
+
+        # Primary trie for PredictionEngine + Living Trie
+        trie = trie_n3
 
         # CRITICAL: Propagate metadata so intermediate nodes have statistics
         trie.propagate_metadata()
+        if has_multi_level:
+            for t in [trie_n1, trie_n2, trie_n4]:
+                t.propagate_metadata()
         console.print(f"[green]Metadata propagated: root now has {trie.root.metadata.historical_count} aggregated observations[/green]")
 
         # Compute ATR for dynamic SL/TP sizing
@@ -569,6 +606,23 @@ class PaperTrader:
         # Create engines
         pred_engine = PredictionEngine(trie, prediction_depth=cfg.pattern_length)
         risk_mgr = RiskManager(capital=cfg.initial_capital, config=self.risk_config)
+
+        # v0.10.0: Create PPMT engine for 4-level matching (GAP-1 fix)
+        ppmt_engine = None
+        if has_multi_level:
+            ppmt_engine = PPMT(
+                symbol=cfg.symbol,
+                asset_class=info.asset_class,
+                sax_alphabet_size=cfg.sax_alphabet_size,
+                sax_window_size=cfg.sax_window_size,
+                sax_strategy=cfg.sax_strategy,
+                weight_profile=info.weight_profile,
+            )
+            # Inject loaded tries instead of building new ones
+            ppmt_engine.set_tries(trie_n1, trie_n2, trie_n3, trie_n4)
+            # Adapt weights based on available data
+            ppmt_engine.adapt_weights()
+            console.print(f"  [bold cyan]4-level matching enabled[/bold cyan]: weights={ppmt_engine.weights}")
 
         # v0.3.3: Reverted adaptive confidence scaling (was raising min_confidence
         # to 0.20 for fresh tries). v0.3.2 proved this was COUNTERPRODUCTIVE:
@@ -638,7 +692,8 @@ class PaperTrader:
         console.print(f"  Pattern break grace: {cfg.pattern_break_grace} consecutive")
         console.print(f"  Re-entry cooldown: {cfg.reentry_cooldown} symbols after loss")
         console.print(f"  Living Trie: [bold]{living_trie_status}[/bold]")
-        console.print(f"  Regime-aware sizing: [bold]{'ON' if cfg.regime_aware else 'OFF'}[/bold]\n")
+        console.print(f"  Regime-aware sizing: [bold]{'ON' if cfg.regime_aware else 'OFF'}[/bold]")
+        console.print(f"  4-level matching: [bold]{'ON' if has_multi_level else 'OFF'}[/bold]\n")
 
         # v0.8.0: Regime detection
         regime_detector = None
@@ -709,6 +764,10 @@ class PaperTrader:
                     regime_info = regime_detector.detect_detailed(regime_prices)
                     current_regime = regime_info.regime
                     regime_stats[current_regime] = regime_stats.get(current_regime, 0) + 1
+
+                    # v0.10.0: Update PPMT engine's regime for N4 matching (GAP-1)
+                    if ppmt_engine is not None:
+                        ppmt_engine.set_regime(current_regime)
 
             # ================================================================
             # PHASE 1: SL/TP checking
@@ -986,6 +1045,37 @@ class PaperTrader:
 
                 pred_with_direction += 1
 
+                # v0.10.0: Get weighted confidence from 4-level matching (GAP-1)
+                # If multi-level is available, use PPMT.match_raw() to compute
+                # confidence across N1/N2/N3/N4 with adaptive weights.
+                # Otherwise, fall back to single-trie prediction confidence.
+                weighted_confidence = prediction.confidence  # default: single-trie
+                match_result = None
+                best_trie_level = "n3"
+
+                if ppmt_engine is not None:
+                    ppmt_result = ppmt_engine.match_raw(
+                        current_symbols=current_symbols,
+                        current_price=current_price,
+                    )
+                    weighted_confidence = ppmt_result.weighted_confidence
+                    match_result = ppmt_result
+
+                    # Determine which level had the best match
+                    level_confs = {
+                        "n1": ppmt_result.n1_confidence,
+                        "n2": ppmt_result.n2_confidence,
+                        "n3": ppmt_result.n3_confidence,
+                        "n4": ppmt_result.n4_confidence,
+                    }
+                    best_trie_level = max(level_confs, key=level_confs.get)
+
+                    # Graceful degradation: if 4-level confidence is 0 but
+                    # PredictionEngine found a direction, fall back to N3-only
+                    if weighted_confidence <= 0 and prediction.confidence > 0:
+                        weighted_confidence = prediction.confidence
+                        best_trie_level = "n3"
+
                 # Effective minimum confidence
                 effective_min_conf = cfg.min_confidence
 
@@ -1046,7 +1136,7 @@ class PaperTrader:
                 # The >0.25 threshold was too aggressive, cutting pass rate from 32.5%
                 # to 13.8% and reducing trades by 32%.
                 if (prediction.direction != "FLAT"
-                    and prediction.confidence >= effective_min_conf
+                    and weighted_confidence >= effective_min_conf
                     and abs(prediction.expected_total_move_pct) > 1.0
                     and prediction.overall_probability > 0.20):
 
@@ -1121,7 +1211,7 @@ class PaperTrader:
 
                     signal = Signal(
                         signal_type=signal_type,
-                        confidence=prediction.confidence,
+                        confidence=weighted_confidence,  # v0.10.0: 4-level weighted confidence (GAP-1)
                         symbol=cfg.symbol,
                         entry_price=current_price,
                         sl_price=sl_price,
@@ -1131,6 +1221,7 @@ class PaperTrader:
                         win_rate=prediction.overall_probability,
                         historical_count=actual_historical_count,
                         matched_pattern=current_symbols,
+                        trie_level=best_trie_level,  # v0.10.0: Which level won
                     )
                     signal.quality_score = signal.compute_quality_score()
                     signal.sizing_multiplier = signal.compute_sizing_multiplier()
@@ -1173,10 +1264,23 @@ class PaperTrader:
                         node_regime = current_regime  # default to global
                         node_regime_conf = regime_info.confidence if regime_info else 0.0
                         try:
-                            matched_node = trie.search(current_symbols)
-                            if matched_node and matched_node.metadata.dominant_regime:
-                                node_regime = matched_node.metadata.dominant_regime
-                                node_regime_conf = matched_node.metadata.regime_confidence
+                            # v0.10.0: Use best-match node from 4-level matching if available
+                            if match_result is not None:
+                                best_match = None
+                                for m in [match_result.n3_match, match_result.n2_match,
+                                          match_result.n1_match, match_result.n4_match]:
+                                    if m is not None and m.node is not None and m.node.metadata.dominant_regime:
+                                        best_match = m
+                                        break
+                                if best_match and best_match.node:
+                                    node_regime = best_match.node.metadata.dominant_regime
+                                    node_regime_conf = best_match.node.metadata.regime_confidence
+                            else:
+                                # Fallback: search N3 trie directly (backward compatible)
+                                matched_node = trie.search(current_symbols)
+                                if matched_node and matched_node.metadata.dominant_regime:
+                                    node_regime = matched_node.metadata.dominant_regime
+                                    node_regime_conf = matched_node.metadata.regime_confidence
                         except Exception:
                             pass
 
@@ -1273,7 +1377,15 @@ class PaperTrader:
 
             # Save updated Trie back to storage
             storage.save_trie(cfg.symbol, "n3", trie)
-            console.print(f"  [green]Updated Trie saved to storage[/green]")
+            console.print(f"  [green]Updated N3 Trie saved to storage[/green]")
+
+            # v0.10.0: Save N1/N2/N4 if loaded (they weren't modified by Living Trie,
+            # but propagation may have updated metadata)
+            if has_multi_level:
+                for level, t in [("n1", trie_n1), ("n2", trie_n2), ("n4", trie_n4)]:
+                    t.propagate_metadata()
+                    storage.save_trie(cfg.symbol, level, t)
+                console.print(f"  [green]All 4 levels saved to storage[/green]")
 
         # Compute final results
         result.final_capital = risk_mgr.capital

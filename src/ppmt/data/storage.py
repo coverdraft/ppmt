@@ -325,6 +325,25 @@ class PPMTStorage:
         except (json.JSONDecodeError, KeyError):
             return None
 
+    def load_all_tries(self, symbol: str) -> dict[str, Optional[PPMTTrie]]:
+        """
+        Load all 4 trie levels for a symbol.
+
+        v0.10.0: Convenience method for PaperTrader 4-level integration.
+
+        Args:
+            symbol: Trading pair
+
+        Returns:
+            Dict with keys 'n1', 'n2', 'n3', 'n4' mapping to PPMTTrie or None.
+        """
+        return {
+            "n1": self.load_trie(symbol, "n1"),
+            "n2": self.load_trie(symbol, "n2"),
+            "n3": self.load_trie(symbol, "n3"),
+            "n4": self.load_trie(symbol, "n4"),
+        }
+
     # === Engine State ===
 
     def save_engine_state(self, symbol: str, state: dict) -> None:
