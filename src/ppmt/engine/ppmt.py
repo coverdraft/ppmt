@@ -739,18 +739,19 @@ class PPMT:
                 # the trie is being built from scratch during bootstrap)
                 if (prediction.direction == "FLAT"
                     or prediction.confidence <= 0
-                    or prediction.confidence < 0.10  # Bootstrap: keep 0.10 to gather more observations
+                    or prediction.confidence < 0.15  # v0.6.0: Bootstrap uses same threshold as trading (0.15)
                     or abs(prediction.expected_total_move_pct) < 1.0  # Bootstrap: keep 1.0 for more coverage
-                    or prediction.overall_probability <= 0.20):  # Bootstrap: keep 0.20
+                    or prediction.overall_probability <= 0.25):  # v0.6.0: Raised from 0.20 to 0.25
                     continue
 
-                # SHORT requires higher confidence (bootstrap: use 1.5x, not 1.8x,
-                # since we want to gather SHORT observations too)
-                effective_min_conf = 0.10
+                # SHORT requires higher confidence (v0.6.0: use 2.0x / 0.20 floor,
+                # matching the paper trader. Bootstrap SHORT observations at low
+                # confidence (45% WR) were poisoning the trie.)
+                effective_min_conf = 0.15
                 if prediction.overall_probability > 0.5:
-                    effective_min_conf = max(0.10 * 0.5, 0.05)
+                    effective_min_conf = max(0.15 * 0.5, 0.075)
                 if prediction.direction == "SHORT":
-                    effective_min_conf = max(effective_min_conf * 1.5, 0.15)
+                    effective_min_conf = max(effective_min_conf * 2.0, 0.20)
 
                 if prediction.confidence < effective_min_conf:
                     continue

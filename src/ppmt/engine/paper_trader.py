@@ -230,14 +230,14 @@ class PaperTraderConfig:
     sax_strategy: str = "ohlcv"
     """SAX encoding strategy."""
 
-    min_confidence: float = 0.10
+    min_confidence: float = 0.15
     """Minimum confidence to generate entry signal.
-    v0.4.2: Reverted to 0.10 (v0.4.0 value). The v0.4.1 tighter threshold
-    (0.15) caused a massive regression: P&L dropped from +3665% to +347%,
-    WR from 53.1% to 46.6%. The Living Trie's metadata naturally
-    produces higher confidence for validated patterns, making this
-    threshold self-adjusting. Raising it artificially removes too many
-    winning trades."""
+    v0.6.0: Raised from 0.10 to 0.15 based on Cycle 4 data analysis.
+    Trades with 10-14% confidence had WR of only 32.6% (14W/29L) with
+    avg PnL of -0.44%. Removing these 43 toxic trades improved overall
+    WR from 50.5% to 52.1% in backtesting. The previous v0.4.1 raise
+    to 0.15 failed because it was combined with other aggressive filters;
+    this time it's a standalone change."""
 
     min_quality_score: float = 0.0
     """Minimum quality score to enter a trade.
@@ -898,24 +898,23 @@ class PaperTrader:
 
                 # Probability bonus: very high probability lowers threshold
                 if prediction.overall_probability > 0.5:
-                    effective_min_conf = max(cfg.min_confidence * 0.5, 0.05)
+                    effective_min_conf = max(cfg.min_confidence * 0.5, 0.075)
 
                 # SHORT signals require higher confidence (BTC trends up)
-                # v0.4.2: Reverted to 1.5x (v0.4.0 value). The v0.4.1 1.8x multiplier
-                # was too restrictive — only a handful of SHORT trades passed, and those
-                # that did had worse performance because the trie didn't get enough
-                # SHORT observations to learn from.
+                # v0.6.0: Raised from max(conf*1.5, 0.15) to max(conf*2.0, 0.20).
+                # Cycle 4 data: SHORT at >=10% conf had 45.2% WR and -0.20% avg PnL
+                # (net negative). SHORT at >=20% conf had 60.7% WR and +1.16% avg PnL.
+                # The 2.0x multiplier ensures SHORT only enters with strong conviction.
                 if prediction.direction == "SHORT":
-                    effective_min_conf = max(effective_min_conf * 1.5, 0.15)
+                    effective_min_conf = max(effective_min_conf * 2.0, 0.20)
 
                 # Entry conditions
-                # v0.4.2: Reverted to v0.4.0 thresholds. The tighter v0.4.1 filters
-                # (1.5% move, 0.25 probability) removed too many winning trades,
-                # causing P&L to drop from +3665% to +347%.
+                # v0.6.0: Probability threshold raised from >0.20 to >0.25.
+                # Reduces marginal signals that pass confidence but have weak probability.
                 if (prediction.direction != "FLAT"
                     and prediction.confidence >= effective_min_conf
                     and abs(prediction.expected_total_move_pct) > 1.0
-                    and prediction.overall_probability > 0.2):
+                    and prediction.overall_probability > 0.25):
 
                     pred_passed_threshold += 1
 

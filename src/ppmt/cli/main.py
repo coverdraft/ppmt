@@ -46,7 +46,7 @@ def load_config() -> dict:
 
 
 @click.group()
-@click.version_option(version="0.5.3")
+@click.version_option(version="0.6.0")
 def cli():
     """PPMT - Progressive Pattern Matching Trie Engine"""
     pass
@@ -483,7 +483,7 @@ def predict(symbol: str, timeframe: str, depth: int, price: float):
 @click.option("--timeframe", "-t", default="1h", help="Candle timeframe")
 @click.option("--paper", is_flag=True, default=False, help="Run in paper trading mode (simulated)")
 @click.option("--capital", "-c", default=10000.0, type=float, help="Initial capital for paper trading")
-@click.option("--min-confidence", default=0.10, type=float, help="Minimum signal confidence to enter (default: 0.10)")
+@click.option("--min-confidence", default=0.15, type=float, help="Minimum signal confidence to enter (default: 0.15)")
 def run(symbol: str, timeframe: str, paper: bool, capital: float, min_confidence: float):
     """Run real-time pattern matching (requires exchange connection).
 
