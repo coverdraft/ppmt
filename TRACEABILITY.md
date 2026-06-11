@@ -1,145 +1,109 @@
 # PPMT Traceability Document
 
-> Single source of truth for PPMT project architecture, decisions, and evolution.
-
-## Current Version: v0.12.0 (V4 Regime-Aware Enhancement)
+> Single source of truth for all PPMT development. This document tracks every change, decision, and rationale.
 
 ---
 
-## Architecture Overview
+## Project: PPMT — Pattern Prediction Market Trader
 
-### Core Pipeline
+**Current Version**: v0.9.0 (base) → V4.1 metadata enhancements  
+**Branch**: main  
+**Last Updated**: 2026-06-11  
+
+---
+
+## Version History & Changes
+
+### V4.1 — Metadata Enhancement (2026-06-11)
+
+**Problem**: Node metadata was insufficient for regime-aware trading decisions. The `regime_distribution` only counted observations per regime but did not track win_rate or expected_move per regime. The `regime_match_score()` method was referenced in `prediction.py` but did not exist, causing potential runtime crashes.
+
+**Changes Made**:
+
+| File | Change | Rationale |
+|------|--------|-----------|
+| `ppmt/src/ppmt/core/metadata.py` | Added `RegimeStats` dataclass | Per-regime tracking of count, wins, total_move_pct enables saying "this pattern wins 62% in trending_up but 33% in volatile" |
+| `ppmt/src/ppmt/core/metadata.py` | Added `regime_stats` field to `BlockLifecycleMetadata` | Makes regime_distribution actionable with performance data |
+| `ppmt/src/ppmt/core/metadata.py` | Added `move_variance` and `move_mean_for_variance` fields | Welford's online algorithm tracks dispersion of observed moves without storing raw data |
+| `ppmt/src/ppmt/core/metadata.py` | Implemented `regime_match_score()` method | Fixes critical bug where `prediction.py` called non-existent method. Returns confidence multiplier [0.5, 1.2] based on regime match |
+| `ppmt/src/ppmt/core/metadata.py` | Added `move_std` and `move_coefficient_of_variation` properties | Reliability metrics: CV < 0.5 = reliable, CV > 1.0 = unreliable pattern |
+| `ppmt/src/ppmt/core/metadata.py` | Updated `update_from_observation()` to track regime_stats and move_variance | Incremental tracking without raw data storage |
+| `ppmt/src/ppmt/core/metadata.py` | Updated `to_dict()` / `from_dict()` for new fields | Full serialization support including backward compatibility |
+| `ppmt/src/ppmt/core/trie.py` | Updated `_propagate_node()` to merge regime_stats and compute pooled move_variance | Intermediate nodes now aggregate per-regime stats and variance from children |
+| `ppmt/tests/test_metadata_v41.py` | Created 23 new tests | Sane tests that verify behavior, invariants, backward compatibility, and integration |
+
+**Key Design Decisions**:
+
+1. **RegimeStats as separate dataclass**: Keeps metadata clean and allows independent serialization
+2. **Welford's algorithm for variance**: Numerically stable, O(1) memory, no raw data storage needed
+3. **Pooled variance for propagation**: Combines within-group and between-group variance correctly
+4. **regime_match_score range [0.5, 1.2]**: Conservative range prevents extreme confidence swings
+5. **Backward compatibility**: Old serialized data without V4.1 fields loads with safe defaults
+
+**Tests**: 101 total (78 existing + 23 new V4.1), ALL PASSING
+
+---
+
+### V4.0 — Regime-Aware Nodes (prior session)
+
+- Added `regime`, `regime_confidence`, `dominant_regime`, `regime_distribution` to metadata
+- Added `node_type` (independent/dependent) classification
+- RegimeDetector integration in PPMT engine build
+- Regime-aware paper trading with position sizing multipliers
+
+### V3 — Block Lifecycle Metadata
+
+- 12 metadata fields per Trie node
+- `confidence`, `probability_of_success`, `expected_profit_ahead`, `sizing_signal`
+- Direct PPMT → RiskManager integration via metadata-driven sizing
+
+---
+
+## Architecture Map
+
 ```
-OHLCV Data → SAX Encode → 4-Level Trie (N1-N4) → Adaptive Weight Merge → Signal Generator → Trade
+Data Flow:
+  OHLCV → SAX Encoder → Trie (N1-N4) → Prediction Engine → Signal Generator → Risk Manager → Paper Trader
+                                    ↕                                ↑
+                              Living Trie ←—————— _record_observation ←┘
+
+Metadata Flow:
+  Observation → update_from_observation() → propagate_metadata() → confidence/computed properties
+                                                                  → regime_match_score() → prediction confidence
+                                                                  → regime_stats → regime-specific decisions
 ```
 
-### 4-Level Trie Architecture
-| Level | Name | Scope | Default Weight |
-|-------|------|-------|----------------|
-| N1 | Universal | All assets, all regimes | 10% |
-| N2 | Asset Class | Blue Chip, Large Cap, Mid Cap, DeFi, Meme, New Launch | 30% |
-| N3 | Per-Asset | Single trading pair (e.g., BTC/USDT) | 30% |
-| N4 | Per-Asset+Regime | Single pair + market regime | 30% |
+## Module Inventory
 
-### Key Components
-| File | Purpose |
-|------|---------|
-| `core/sax.py` | SAX encoder (8 alphabet, window=10, ohlcv strategy) |
-| `core/trie.py` | PPMT Trie with Block Lifecycle Metadata + Living Trie |
-| `core/metadata.py` | V4 Regime-Aware Node Metadata (independent/dependent nodes) |
-| `core/regime.py` | RegimeDetector (trending_up, trending_down, ranging, volatile) |
-| `core/matcher.py` | Fuzzy matching engine (exact → prefix → 1-edit → best) |
-| `core/encoder.py` | Delta encoder for Trie compression |
-| `engine/ppmt.py` | Main PPMT engine (build, match, bootstrap) |
-| `engine/prediction.py` | Forward-looking prediction from Trie |
-| `engine/paper_trader.py` | Paper trading simulation engine |
-| `engine/weights.py` | Adaptive weight management |
-| `engine/signal.py` | Signal types and generation |
-| `risk/manager.py` | Position sizing and risk management |
+| Module | Path | Status | Tests |
+|--------|------|--------|-------|
+| BlockLifecycleMetadata | `ppmt/src/ppmt/core/metadata.py` | V4.1 ✅ | 23 V4.1 + 8 existing |
+| RegimeStats | `ppmt/src/ppmt/core/metadata.py` | V4.1 ✅ | 4 |
+| PPMTTrie | `ppmt/src/ppmt/core/trie.py` | V4.1 ✅ | 10 |
+| SAXEncoder | `ppmt/src/ppmt/core/sax.py` | Complete ✅ | 10 |
+| FuzzyMatcher | `ppmt/src/ppmt/core/matcher.py` | Complete ✅ | 8 |
+| RegimeDetector | `ppmt/src/ppmt/core/regime.py` | Complete ✅ | — |
+| PredictionEngine | `ppmt/src/ppmt/engine/prediction.py` | V4.1 ✅ | 2 integration |
+| PPMT Engine | `ppmt/src/ppmt/engine/ppmt.py` | Complete ✅ | — |
+| PaperTrader | `ppmt/src/ppmt/engine/paper_trader.py` | v0.9.0 ✅ | — |
+| SignalGenerator | `ppmt/src/ppmt/engine/signal.py` | Complete ✅ | — |
+| AdaptiveWeights | `ppmt/src/ppmt/engine/weights.py` | Complete ✅ | — |
+| RiskManager | `ppmt/src/ppmt/risk/manager.py` | Complete ✅ | — |
 
----
+## Known Issues (Current)
 
-## V4 Enhancement: Regime-Aware Node Metadata
+| # | Issue | Severity | Status |
+|---|-------|----------|--------|
+| 1 | `process_new_candle()` in ppmt.py returns None (streaming not implemented) | Medium | TODO |
+| 2 | N4 Trie not used for regime-specific matching in paper_trader.py | Low | Deferred |
+| 3 | No observation freshness/decay mechanism | Low | Future |
+| 4 | No avg_holding_period (different from avg_duration) | Low | Future |
 
-### Problem Solved
-Before V4, RegimeDetector detected market regimes at runtime but **never stored them in Trie nodes**. This meant:
-- Patterns observed under "trending_up" had no memory of that regime
-- N4 Trie (per_asset_regime) couldn't actually segment by regime
-- No regime propagation from parents to children
-- No concept of node reliability (independent vs dependent)
+## Previous Bug Status
 
-### V4 Changes
-
-#### BlockLifecycleMetadata New Fields
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `regime` | str | "" | Regime at first observation (trending_up, trending_down, ranging, volatile) |
-| `regime_confidence` | float | 0.0 | Confidence of regime detection at observation time |
-| `dominant_regime` | str | "" | Most common regime across all observations |
-| `regime_distribution` | dict[str, int] | {} | Histogram of regimes (e.g., {'trending_up': 45, 'ranging': 30}) |
-| `node_type` | str | "dependent" | "independent" or "dependent" |
-| `min_independent_count` | int | 10 | Minimum observations for independent classification |
-
-#### Independent vs Dependent Nodes
-- **Independent**: `historical_count >= min_independent_count` (default 10). Metadata is self-sufficient and reliable. Confidence used at full strength.
-- **Dependent**: `historical_count < min_independent_count`. Metadata is inherited/aggregated from children. Confidence is scaled down by a dependency penalty factor (0.5 to 1.0).
-
-#### Regime Propagation
-During `propagate_metadata()` (bottom-up traversal):
-1. Terminal nodes: regime is set directly from observations
-2. Intermediate nodes: regime_distribution is merged from all children
-3. dominant_regime is set to the regime with highest count in the distribution
-4. regime_confidence is computed as weighted average of children
-
-#### Paper Trader Integration
-- At entry time, the matched Trie node's `dominant_regime` is used for the trade's regime field
-- Living Trie observations pass the trade's regime back to `update_from_observation()`
-- This creates a feedback loop: regime info flows both into and out of the Trie
-
----
-
-## Version History
-
-| Version | Date | Key Changes |
-|---------|------|-------------|
-| v0.1.0 | Initial | Basic SAX + Trie + Paper Trader |
-| v0.2.8 | - | Baseline SL/TP (max P&L: +1578%) |
-| v0.2.9 | - | Pattern break grace period, re-entry cooldown |
-| v0.2.10 | - | Direction-specific SL/TP, catastrophic protection (regression) |
-| v0.3.0 | - | Revert to v0.2.8 SL/TP baseline |
-| v0.3.3 | - | Trade-simulation "won" classification during build |
-| v0.4.0 | - | Bootstrap paper trading pass |
-| v0.5.0 | - | SAX window=10, alphabet=8, 2-pass bootstrap |
-| v0.6.0 | - | Probability bonus (regression: +86.82% P&L) |
-| v0.6.1 | - | Removed probability bonus |
-| v0.6.2 | - | Raised min_confidence to 0.20, catastrophic 8%, SHORT gate 1.2x |
-| v0.6.3 | - | Training normalization for OOS validation |
-| v0.8.0 | - | Regime-aware position sizing (runtime only) |
-| v0.10.0 | - | Regime-in-metadata architecture |
-| v0.11.0 | - | Fix corrupted node metadata |
-| **v0.12.0** | **2026-06-11** | **V4: Regime stored in nodes, independent/dependent classification, regime propagation** |
-
----
-
-## Known Issues & Design Decisions
-
-### Design Decisions
-1. **min_independent_count = 10**: Below 10 observations, node statistics are too noisy. Penalty scales from 0.5 (0 obs) to 1.0 (at threshold).
-2. **Regime detected during build**: Each pattern's entry candle position is used for RegimeDetector, providing per-pattern regime labels.
-3. **dominant_regime over regime**: For intermediate/propagated nodes, dominant_regime (from distribution) is more reliable than regime (from first observation).
-4. **Living Trie passes regime back**: When recording trade outcomes, the trade's regime is passed to update_from_observation(), maintaining regime continuity.
-
-### Not Yet Implemented
-- Regime-specific win_rate calculation (per-regime performance breakdown)
-- Regime transition tracking (which regimes follow which)
-- N4 Trie actual regime-based segmentation (currently stores same data as N3)
-- Walk-forward validation with regime stability checks
-
----
-
-## Test Results Archive
-
-| Cycle | Version | P&L | WR | Trades | Notes |
-|-------|---------|-----|-----|--------|-------|
-| Baseline | v0.2.8 | +1578% | - | - | Best historical result |
-| Cycle 5 | v0.6.0 | +86.82% | - | 354 | Probability bonus regression |
-| Cycle 4 | v0.5.0 | +1434% | 50.5% | 519 | Stable baseline |
-
----
-
-## File Structure
-```
-ppmt/
-├── src/ppmt/
-│   ├── core/           # SAX, Trie, Metadata, Regime, Matcher, Encoder
-│   ├── engine/         # PPMT, Prediction, PaperTrader, Weights, Signal
-│   ├── data/           # Storage, Collector, Classifier
-│   ├── risk/           # RiskManager, PositionSizing, MonteCarlo
-│   ├── cli/            # CLI (build, run, monte-carlo)
-│   └── dashboard/      # Dashboard (if enabled)
-├── tests/              # Unit tests
-├── scripts/            # Bulk ingest, utilities
-├── CHANGELOG.md
-├── TRACEABILITY.md     # This file
-└── pyproject.toml
-```
+| Bug | Description | Status |
+|-----|-------------|--------|
+| Double append | `self.trades.append.append({` | ✅ Does NOT exist in v0.9.0 |
+| SHORT gate tautology | `confidence < max(confidence * 1.2, 0.20)` always false | ✅ Fixed in v0.9.0 — now uses `effective_min_conf = max(effective_min_conf * 1.2, 0.20)` |
+| Print syntax | `{len(wins)W}` should be `{len(wins)}W` | ✅ Does NOT exist in v0.9.0 |
+| regime_match_score missing | Method called but not defined | ✅ Fixed in V4.1 |

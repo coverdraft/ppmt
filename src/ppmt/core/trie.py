@@ -538,6 +538,19 @@ class PPMTTrie:
                 merged_regime_dist[regime_name] = merged_regime_dist.get(regime_name, 0) + count
         node.metadata.regime_distribution = merged_regime_dist
 
+        # V4.1: Aggregate regime_stats from children
+        # Merge per-regime statistics (win_rate, expected_move) from children
+        from ppmt.core.metadata import RegimeStats
+        merged_regime_stats: dict[str, RegimeStats] = {}
+        for m in children_with_data:
+            for regime_name, rs in m.regime_stats.items():
+                if regime_name not in merged_regime_stats:
+                    merged_regime_stats[regime_name] = RegimeStats()
+                merged_regime_stats[regime_name].count += rs.count
+                merged_regime_stats[regime_name].wins += rs.wins
+                merged_regime_stats[regime_name].total_move_pct += rs.total_move_pct
+        node.metadata.regime_stats = merged_regime_stats
+
         # V4: Set dominant_regime from merged distribution
         if merged_regime_dist:
             node.metadata.dominant_regime = max(
@@ -554,6 +567,31 @@ class PPMTTrie:
         )
         if total_count > 0:
             node.metadata.regime_confidence = total_regime_conf / total_count
+
+        # V4.1: Aggregate move variance from children using pooled variance
+        # Pooled variance formula: weighted average of children's variances
+        # plus variance between children's means (between-group variance)
+        if total_count > 1:
+            # Within-group variance (weighted average of children's variances)
+            within_var = sum(
+                m.move_variance * m.historical_count
+                for m in children_with_data
+            ) / total_count if total_count > 0 else 0.0
+
+            # Between-group variance (variance of children's means)
+            if len(children_with_data) > 1:
+                child_means = [m.expected_move_pct for m in children_with_data]
+                child_weights = [m.historical_count for m in children_with_data]
+                weighted_mean = sum(m * w for m, w in zip(child_means, child_weights)) / total_count
+                between_var = sum(
+                    w * (m - weighted_mean) ** 2
+                    for m, w in zip(child_means, child_weights)
+                ) / total_count
+            else:
+                between_var = 0.0
+
+            node.metadata.move_variance = within_var + between_var
+            node.metadata.move_mean_for_variance = weighted_move
 
         # V4: Classify intermediate nodes based on count
         if node.metadata.historical_count >= node.metadata.min_independent_count:
