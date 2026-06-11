@@ -119,6 +119,40 @@ class BlockLifecycleMetadata:
       - Dependent nodes: concentrated in one regime (regime-specific)
     Children inherit regime context from their observations."""
 
+    regime_confidence: float = 0.0
+    """Average confidence of regime detection at observation times (0-1).
+    High regime_confidence means the regime classification was clear.
+    Low regime_confidence suggests ambiguous regime -- trading
+    decisions should be more conservative."""
+
+    trend_strength: float = 0.0
+    """Average trend strength (R-squared) at observation time.
+    0.0 = no trend (ranging/volatile), 1.0 = perfect linear trend.
+    Used by Risk Manager for regime-scaling position sizing."""
+
+    volatility_regime: float = 0.0
+    """Average annualized volatility at observation time.
+    Used to adjust SL/TP distances and position sizing.
+    Higher volatility -> wider stops, smaller positions."""
+
+    hurst_exponent: float = 0.5
+    """Average Hurst exponent at observation time.
+    > 0.5 = trending (momentum works)
+    = 0.5 = random walk
+    < 0.5 = mean-reverting (reversal works)
+    Propagated from parent to child nodes."""
+
+    regime_transitions: dict[str, int] = field(default_factory=dict)
+    """Count of transitions from this node's regime to other regimes.
+    Key = target regime, Value = number of times observed.
+    Critical for detecting regime changes in real-time."""
+
+    is_regime_dependent: bool = False
+    """Whether this node's metadata is regime-specific.
+    True for N3/N4 nodes (per-asset, per-asset+regime).
+    False for N1/N2 nodes (universal, asset class).
+    When True, trading operations should check regime alignment."""
+
     # === Computed Properties ===
 
     @property
@@ -199,10 +233,10 @@ class BlockLifecycleMetadata:
           - risk_reward_ratio: Is the payoff worth the risk?
 
         Mapping (used by RiskManager):
-          sizing_signal >= 1.5  -> 2.0x base position (high conviction)
-          sizing_signal 1.0-1.5 -> 1.0x base position (normal)
-          sizing_signal 0.5-1.0 -> 0.5x base position (low conviction)
-          sizing_signal < 0.5   -> 0.25x or reject (very low)
+          sizing_signal >= 1.5  : 2x base position (high conviction)
+          sizing_signal 1.0-1.5 : 1x base position (normal)
+          sizing_signal 0.5-1.0 : 0.5x base position (low conviction)
+          sizing_signal < 0.5   : 0.25x or reject (very low)
 
         This creates the tight PPMT -> RiskManager integration where
         the Trie's metadata directly drives capital allocation.
@@ -235,7 +269,40 @@ class BlockLifecycleMetadata:
         """
         return len(self.continuation_nodes) > 0
 
-    # === Regime-Aware Properties (v0.10.0) ===
+    # === Regime-Aware Properties (v0.10.0 + v0.11.0 V4) ===
+
+    @property
+    def regime_aligned(self) -> bool:
+        """Whether this node has regime context that should be checked
+        before using its metadata for trading decisions."""
+        return self.regime != "" and self.regime_confidence > 0.3
+
+    @property
+    def suggested_direction(self) -> str:
+        """Suggested trading direction based on regime + expected_move.
+        Combines the regime context with the expected price move
+        to determine the optimal trading direction.
+        Returns: 'LONG', 'SHORT', 'FLAT', or 'AVOID'
+
+        This is what makes nodes 'give info to possible trading operations':
+          - trending_up + bullish expected_move -> LONG (regime confirms)
+          - trending_down + bearish expected_move -> SHORT (regime confirms)
+          - volatile + high confidence -> AVOID (too chaotic)
+          - ranging + small expected_move -> FLAT (no edge)
+        """
+        if self.regime == "volatile" and self.regime_confidence > 0.5:
+            return "AVOID"
+        if self.regime == "trending_up" and self.expected_move_pct > 0:
+            return "LONG"
+        if self.regime == "trending_down" and self.expected_move_pct < 0:
+            return "SHORT"
+        if self.regime == "ranging":
+            if abs(self.expected_move_pct) < 0.5:
+                return "FLAT"
+            return "LONG" if self.expected_move_pct > 0 else "SHORT"
+        if abs(self.expected_move_pct) < 0.5:
+            return "FLAT"
+        return "LONG" if self.expected_move_pct > 0 else "SHORT"
 
     @property
     def regime_independence(self) -> float:
@@ -327,12 +394,21 @@ class BlockLifecycleMetadata:
         won: bool,
         next_symbol: Optional[str] = None,
         regime: Optional[str] = None,
+        regime_confidence: float = 0.0,
+        trend_strength: float = 0.0,
+        volatility_regime: float = 0.0,
+        hurst_exponent: float = 0.5,
+        is_regime_dependent: bool = False,
     ) -> None:
         """
         Update metadata with a new observation using incremental statistics.
 
         This method updates all fields incrementally without storing raw data,
         making it memory-efficient for millions of patterns.
+
+        v0.11.0 (V4): Now also updates regime metrics. If the observation's
+        regime differs from the node's current primary regime, this indicates
+        a potential regime transition that is tracked in regime_transitions.
 
         Args:
             move_pct: Actual percentage move observed
@@ -344,6 +420,11 @@ class BlockLifecycleMetadata:
             regime: Market regime at observation time (v0.10.0).
                 One of: trending_up, trending_down, ranging, volatile.
                 None means regime info not available (backward compatible).
+            regime_confidence: Confidence of regime detection (v0.11.0)
+            trend_strength: R-squared trend strength (v0.11.0)
+            volatility_regime: Annualized volatility (v0.11.0)
+            hurst_exponent: Hurst exponent (v0.11.0)
+            is_regime_dependent: Whether this node is regime-specific (v0.11.0)
         """
         n = self.historical_count
         self.historical_count += 1
@@ -380,6 +461,28 @@ class BlockLifecycleMetadata:
             # Update primary regime (the one with most observations)
             if self.regime == "" or self.regime_distribution.get(regime, 0) > self.regime_distribution.get(self.regime, 0):
                 self.regime = regime
+
+            # v0.11.0 (V4): Track regime transitions
+            if self.regime != "" and regime != self.regime:
+                self.regime_transitions[regime] = self.regime_transitions.get(regime, 0) + 1
+
+            # v0.11.0 (V4): Incremental regime metrics update
+            self.regime_confidence = (
+                (self.regime_confidence * n + regime_confidence) / self.historical_count
+            )
+            self.trend_strength = (
+                (self.trend_strength * n + trend_strength) / self.historical_count
+            )
+            self.volatility_regime = (
+                (self.volatility_regime * n + volatility_regime) / self.historical_count
+            )
+            self.hurst_exponent = (
+                (self.hurst_exponent * n + hurst_exponent) / self.historical_count
+            )
+
+            # Set regime dependency on first observation with it
+            if is_regime_dependent and n == 0:
+                self.is_regime_dependent = True
 
     def compute_sl_tp(self, entry_price: float, safety_margin: float = 0.2) -> None:
         """
@@ -421,9 +524,16 @@ class BlockLifecycleMetadata:
             "expected_profit_ahead": round(self.expected_profit_ahead, 4),
             "sizing_signal": round(self.sizing_signal, 4),
             "risk_reward_ratio": round(self.risk_reward_ratio, 4),
-            # v0.10.0: Regime context
+            # v0.10.0/v0.11.0: Regime context
             "regime": self.regime,
             "regime_distribution": self.regime_distribution,
+            "regime_confidence": round(self.regime_confidence, 4),
+            "trend_strength": round(self.trend_strength, 4),
+            "volatility_regime": round(self.volatility_regime, 4),
+            "hurst_exponent": round(self.hurst_exponent, 4),
+            "regime_transitions": self.regime_transitions,
+            "is_regime_dependent": self.is_regime_dependent,
+            "suggested_direction": self.suggested_direction,
         }
 
     @classmethod
@@ -444,5 +554,11 @@ class BlockLifecycleMetadata:
             break_nodes=data.get("break_nodes", []),
             regime=data.get("regime", ""),
             regime_distribution=data.get("regime_distribution", {}),
+            regime_confidence=data.get("regime_confidence", 0.0),
+            trend_strength=data.get("trend_strength", 0.0),
+            volatility_regime=data.get("volatility_regime", 0.0),
+            hurst_exponent=data.get("hurst_exponent", 0.5),
+            regime_transitions=data.get("regime_transitions", {}),
+            is_regime_dependent=data.get("is_regime_dependent", False),
         )
         return meta

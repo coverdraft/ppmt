@@ -64,13 +64,22 @@ class TrieNode:
         return self.children.get(symbol)
 
     def add_child(self, symbol: str) -> TrieNode:
-        """Add a new child node and return it."""
+        """Add a new child node and return it.
+        V4: Child inherits regime context from parent if parent has it."""
         if symbol not in self.children:
             child = TrieNode(
                 symbol=symbol,
                 depth=self.depth + 1,
                 parent=self,
             )
+            # V4: Propagate regime context from parent to child
+            if self.metadata.regime:
+                child.metadata.regime = self.metadata.regime
+                child.metadata.is_regime_dependent = self.metadata.is_regime_dependent
+                child.metadata.regime_confidence = self.metadata.regime_confidence
+                child.metadata.volatility_regime = self.metadata.volatility_regime
+                child.metadata.trend_strength = self.metadata.trend_strength
+                child.metadata.hurst_exponent = self.metadata.hurst_exponent
             self.children[symbol] = child
         return self.children[symbol]
 
@@ -239,12 +248,20 @@ class PPMTTrie:
         won: bool = False,
         next_symbol: Optional[str] = None,
         regime: Optional[str] = None,
+        regime_confidence: float = 0.0,
+        trend_strength: float = 0.0,
+        volatility_regime: float = 0.0,
+        hurst_exponent: float = 0.5,
+        is_regime_dependent: bool = False,
     ) -> TrieNode:
         """
         Insert a pattern and update metadata from a single observation.
 
         This is the primary method for building the Trie from historical data.
         Each call represents one observed instance of the pattern.
+
+        v0.11.0 (V4): Now accepts detailed regime metrics that are stored
+        in node metadata and propagated to child nodes during insertion.
 
         Args:
             symbols: SAX symbol sequence
@@ -256,7 +273,11 @@ class PPMTTrie:
             next_symbol: What followed this pattern (for continuation tracking)
             regime: Market regime at observation time (v0.10.0).
                 One of: trending_up, trending_down, ranging, volatile.
-                Stored in node metadata for regime-aware confidence scoring.
+            regime_confidence: Confidence of regime detection (v0.11.0)
+            trend_strength: R-squared trend strength (v0.11.0)
+            volatility_regime: Annualized volatility (v0.11.0)
+            hurst_exponent: Hurst exponent (v0.11.0)
+            is_regime_dependent: Whether this node is regime-specific (v0.11.0)
         """
         node = self.insert(symbols)
 
@@ -264,7 +285,7 @@ class PPMTTrie:
         if node.metadata.historical_count == 0:
             node.metadata.trigger_candle = len(symbols)  # Pattern fully formed
 
-        # Update metadata from this observation
+        # Update metadata from this observation (V4: with regime context)
         node.metadata.update_from_observation(
             move_pct=move_pct,
             drawdown_pct=drawdown_pct,
@@ -273,19 +294,41 @@ class PPMTTrie:
             won=won,
             next_symbol=next_symbol,
             regime=regime,
+            regime_confidence=regime_confidence,
+            trend_strength=trend_strength,
+            volatility_regime=volatility_regime,
+            hurst_exponent=hurst_exponent,
+            is_regime_dependent=is_regime_dependent,
         )
+
+        # V4: Propagate regime context to intermediate nodes
+        if regime is not None and regime != "":
+            current = self.root
+            for sym in symbols:
+                child = current.get_child(sym)
+                if child is not None:
+                    if not child.metadata.regime:
+                        child.metadata.regime = regime
+                        child.metadata.is_regime_dependent = is_regime_dependent
+                    current = child
 
         return node
 
-    def search(self, symbols: list[str]) -> Optional[TrieNode]:
+    def search(self, symbols: list[str], regime: Optional[str] = None) -> Optional[TrieNode]:
         """
         Search for a pattern in the Trie.
 
         Returns the terminal node if found, None otherwise.
         Time complexity: O(k) where k = len(symbols)
 
+        V4: If regime is specified, validates that the found node's
+        regime matches. This prevents using trending_up metadata when
+        the current regime is ranging.
+
         Args:
             symbols: SAX symbol sequence to search for
+            regime: Optional regime filter (V4). If set, only returns
+                    nodes whose regime matches or is regime-agnostic.
         """
         node = self.root
         for symbol in symbols:
@@ -293,6 +336,11 @@ class PPMTTrie:
             if child is None:
                 return None
             node = child
+
+        # V4: Regime validation
+        if regime is not None and node.metadata.regime not in ("", regime):
+            return None
+
         return node
 
     def search_prefix(self, symbols: list[str]) -> tuple[Optional[TrieNode], int]:

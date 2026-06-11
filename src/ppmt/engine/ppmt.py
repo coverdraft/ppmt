@@ -314,8 +314,21 @@ class PPMT:
                 tp_dist = sl_dist * 1.5  # R:R = 1.5
                 won = abs(drawdown_pct) >= tp_dist
 
+            # Detect detailed regime info for V4 metrics
+            regime_info = None
+            regime_candle_idx = min(end_candle - 1, len(close) - 1)
+            if regime_candle_idx >= regime_detector.lookback:
+                regime_info = regime_detector.detect_detailed(close[:regime_candle_idx + 1])
+
             # Insert into N1, N2, N3 with regime context
-            for trie in [self.trie_n1, self.trie_n2, self.trie_n3]:
+            # N1/N2: regime-agnostic (is_regime_dependent=False)
+            # N3: regime-dependent (is_regime_dependent=True)
+            for trie_idx, trie in enumerate([self.trie_n1, self.trie_n2, self.trie_n3]):
+                is_dep = (trie_idx == 2)  # Only N3 is regime-dependent
+                r_conf = regime_info.confidence if regime_info else 0.0
+                r_trend = regime_info.trend_strength if regime_info else 0.0
+                r_vol = regime_info.volatility if regime_info else 0.0
+                r_hurst = regime_info.hurst_exponent if regime_info else 0.5
                 trie.insert_with_observations(
                     symbols=pattern,
                     move_pct=move_pct,
@@ -325,13 +338,21 @@ class PPMT:
                     won=won,
                     next_symbol=next_sym,
                     regime=pattern_regime,
+                    regime_confidence=r_conf,
+                    trend_strength=r_trend,
+                    volatility_regime=r_vol,
+                    hurst_exponent=r_hurst,
+                    is_regime_dependent=is_dep,
                 )
 
-            # v0.10.0: Insert into regime-specific N4 trie.
+            # v0.10.0/v0.11.0: Insert into regime-specific N4 trie.
             # Each regime gets its own N4 trie containing only patterns
-            # observed during that regime. This makes N4 truly
-            # "Per-Asset+Regime" instead of a copy of N3.
+            # observed during that regime. V4: now passes detailed regime metrics.
             if pattern_regime in self.trie_n4_regime:
+                r_conf = regime_info.confidence if regime_info else 0.0
+                r_trend = regime_info.trend_strength if regime_info else 0.0
+                r_vol = regime_info.volatility if regime_info else 0.0
+                r_hurst = regime_info.hurst_exponent if regime_info else 0.5
                 self.trie_n4_regime[pattern_regime].insert_with_observations(
                     symbols=pattern,
                     move_pct=move_pct,
@@ -341,9 +362,18 @@ class PPMT:
                     won=won,
                     next_symbol=next_sym,
                     regime=pattern_regime,
+                    regime_confidence=r_conf,
+                    trend_strength=r_trend,
+                    volatility_regime=r_vol,
+                    hurst_exponent=r_hurst,
+                    is_regime_dependent=True,
                 )
 
             # Also insert into N4 fallback (contains ALL patterns)
+            r_conf = regime_info.confidence if regime_info else 0.0
+            r_trend = regime_info.trend_strength if regime_info else 0.0
+            r_vol = regime_info.volatility if regime_info else 0.0
+            r_hurst = regime_info.hurst_exponent if regime_info else 0.5
             self.trie_n4_fallback.insert_with_observations(
                 symbols=pattern,
                 move_pct=move_pct,
@@ -353,6 +383,11 @@ class PPMT:
                 won=won,
                 next_symbol=next_sym,
                 regime=pattern_regime,
+                regime_confidence=r_conf,
+                trend_strength=r_trend,
+                volatility_regime=r_vol,
+                hurst_exponent=r_hurst,
+                is_regime_dependent=True,
             )
 
             count += 1
