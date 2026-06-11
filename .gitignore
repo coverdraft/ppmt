@@ -50,5 +50,4 @@ htmlcov/
 node_modules/
 next-env.d.ts
 
-# PPMT Python package (has its own git repo)
-ppmt/
+*.egg-info/
