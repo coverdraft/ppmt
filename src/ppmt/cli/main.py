@@ -484,11 +484,16 @@ def predict(symbol: str, timeframe: str, depth: int, price: float):
 @click.option("--paper", is_flag=True, default=False, help="Run in paper trading mode (simulated)")
 @click.option("--capital", "-c", default=10000.0, type=float, help="Initial capital for paper trading")
 @click.option("--min-confidence", default=0.20, type=float, help="Minimum signal confidence to enter (default: 0.20)")
-def run(symbol: str, timeframe: str, paper: bool, capital: float, min_confidence: float):
+@click.option("--start-offset", default=200, type=int, help="Start candle index (default: 200)")
+@click.option("--end-offset", default=0, type=int, help="End candle index, 0=all (for OOS validation)")
+def run(symbol: str, timeframe: str, paper: bool, capital: float, min_confidence: float, start_offset: int, end_offset: int):
     """Run real-time pattern matching (requires exchange connection).
 
     Use --paper to run a paper trading simulation on historical data
     without real money. This validates PPMT predictions before going live.
+
+    Use --start-offset and --end-offset for out-of-sample validation:
+    build on all data, then trade only on a specific portion.
     """
     if paper:
         # Paper trading mode
@@ -505,6 +510,8 @@ def run(symbol: str, timeframe: str, paper: bool, capital: float, min_confidence
             sax_window_size=sax_config.get("window_size", 10),
             sax_strategy=sax_config.get("strategy", "ohlcv"),
             min_confidence=min_confidence,
+            start_offset=start_offset,
+            end_offset=end_offset,
         )
 
         trader = PaperTrader(config=pt_config)

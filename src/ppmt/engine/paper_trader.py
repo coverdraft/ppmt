@@ -256,6 +256,13 @@ class PaperTraderConfig:
     start_offset: int = 200
     """Number of initial candles to skip (warm-up for SAX encoding)."""
 
+    end_offset: int = 0
+    """Maximum candle index for trading (0 = use all data).
+    v0.6.2: Added for out-of-sample validation. When set to a non-zero
+    value, the paper trader will only trade up to this candle index.
+    This allows building a trie on full data but only trading on a
+    specific portion (e.g., the last 30% for OOS testing)."""
+
     living_trie: bool = True
     """Whether to update the Trie with observations during paper trading.
     When True, every trade outcome updates the Trie node's metadata,
@@ -563,10 +570,17 @@ class PaperTrader:
             console.print(f"[red]Not enough data. Need at least {start_candle} candles, have {len(df)}.[/red]")
             return result
 
+        # v0.6.2: End offset for out-of-sample validation
+        end_candle = cfg.end_offset if cfg.end_offset > 0 else len(df)
+        if end_candle > len(df):
+            end_candle = len(df)
+
         living_trie_status = "ON" if cfg.living_trie else "OFF"
+        oos_status = f", ending at index {end_candle}" if cfg.end_offset > 0 else ""
         console.print(f"\n[bold cyan]Starting Paper Trading: {cfg.symbol} ({cfg.timeframe})[/bold cyan]")
         console.print(f"  Capital: ${cfg.initial_capital:,.2f}")
-        console.print(f"  Data: {len(df)} candles, starting from index {start_candle}")
+        console.print(f"  Data: {len(df)} candles, starting from index {start_candle}{oos_status}")
+        console.print(f"  Trading range: candles {start_candle}-{end_candle} ({end_candle - start_candle} candles)")
         console.print(f"  Trie: {trie.pattern_count} patterns")
         console.print(f"  Min confidence: {cfg.min_confidence:.0%} | Min quality: {cfg.min_quality_score:.2f}")
         console.print(f"  Entry: move > 1.0%, probability > 20%, ATR-based SL/TP")
@@ -582,6 +596,9 @@ class PaperTrader:
         start_sym_idx = start_candle // cfg.sax_window_size
         if start_sym_idx < cfg.pattern_length:
             start_sym_idx = cfg.pattern_length
+
+        # v0.6.2: End symbol index for out-of-sample
+        end_sym_idx = end_candle // cfg.sax_window_size
 
         # Track prediction statistics
         pred_count = 0
@@ -602,7 +619,7 @@ class PaperTrader:
         df_low = df['low'].values.astype(float)
         df_close = df['close'].values.astype(float)
 
-        for sym_idx in range(start_sym_idx, len(all_sax_symbols)):
+        for sym_idx in range(start_sym_idx, end_sym_idx):
             # Candle range for this SAX symbol
             candle_start = sym_idx * cfg.sax_window_size
             candle_end = min((sym_idx + 1) * cfg.sax_window_size, len(df))
