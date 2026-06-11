@@ -1419,3 +1419,98 @@ Stage Summary:
 - Merge cycle working: each iteration accumulates more metadata
 - P&L target EXCEEDED (+4401% >> 1400%), WR improving (54.0% → need 60%+)
 - Next: continue iterative merge cycles to push WR toward 60%+ and trades toward 960+
+
+---
+Task ID: v0.5.3-merge-cycle2
+Agent: Main
+Task: Second merge cycle — REGRESSION, bootstrap observations poisoning Living Trie
+
+Work Log:
+
+USER TEST:
+- `ppmt build -s BTC/USDT && ppmt run --symbol BTC/USDT --paper` (2nd merge cycle, no --force)
+- Living Trie detected: existing N3 has 4216 patterns vs 3136 new
+- Merged: 0 new patterns, 3915 patterns merged, 25837 observations added
+- N3 Trie: 4216 → 4216 patterns (no growth from merge)
+- Root: 14382 aggregated observations (was 9588 in cycle 1)
+- 4570 trading observations — metadata quality: good
+
+v0.5.3 MERGE CYCLE 2 PAPER TRADING RESULTS:
+- Capital: $10,000.00 → $56,546.34 (+465.46%)
+- Trades: 647 (W:308 L:339)
+- Win Rate: 47.6%
+- Profit Factor: 1.21
+- Max DD: 37.9%
+- Sharpe: 1.35
+- Avg Trade: +0.39%
+- Best Trade: +14.65%
+- Worst Trade: -12.88%
+- Avg Confidence: 25.5%
+- Avg Quality: 0.19
+- Prediction stats: 1194 attempts, 1037 with direction, 705 passed threshold
+- Risk rejections: Daily loss limit reached: 58
+- Living Trie: 647 observations, 218 new nodes, 19 metadata propagations
+- Trie growth: 4216 → 4434 patterns (+218 new patterns)
+
+COMPARISON — Merge cycles:
+
+| Metric | --force | Cycle 1 | Cycle 2 | Trend |
+|--------|---------|---------|---------|-------|
+| Trades | 519 | 598 | 647 | Increasing |
+| WR | 50.5% | 54.0% | 47.6% | PEAK then DROP |
+| P&L | +1434% | +4401% | +465% | PEAK then CRASH |
+| Sharpe | 2.27 | 3.08 | 1.35 | PEAK then DROP |
+| Max DD | 29.2% | 25.6% | 37.9% | PEAK then WORSE |
+| Avg Conf | 21.5% | 23.8% | 25.5% | Still increasing |
+| Patterns | 3222 | 4001 | 4216 | Increasing |
+| Trading Obs | 1151 | 2821 | 4570 | Increasing |
+
+ROOT CAUSE ANALYSIS:
+1. Each `ppmt build` runs 2 bootstrap passes → adds ~1151 observations at ~45.8% WR
+2. Merge combines these LOW QUALITY bootstrap observations with existing Living Trie
+3. Result: each merge cycle dilutes good trading metadata with mediocre bootstrap data
+4. Evidence: confidence keeps rising (21.5% → 23.8% → 25.5%) but WR drops
+   → overconfidence from noisy metadata, not genuine signal improvement
+5. Bootstrap WR is only 44-47% vs trading WR of 50-54%
+   → bootstrap observations are WORSE than random for predicting trading outcomes
+6. The first merge worked because the existing trie had 519 good trading observations
+   that weren't yet diluted. Cycle 2 diluted them with 25837 more bootstrap observations.
+
+PARALLELS TO BOOTSTRAP DEGRADATION:
+- v0.5.2: More bootstrap passes → worse results (pass 3-5 degraded WR)
+- v0.5.3 cycle 2: More merge cycles → worse results (bootstrap obs dilution)
+- SAME ROOT CAUSE: Low-quality metadata poisons the prediction engine
+
+SOLUTION OPTIONS:
+A. Use --no-bootstrap on merge cycles (skip bootstrap, only keep trading observations)
+B. Only merge TRADING observations (not bootstrap observations) into Living Trie
+C. Weight trading observations higher than bootstrap observations in merge
+D. Add a flag to skip bootstrap during merge builds
+
+OPTION A is simplest and most likely to work. The command would be:
+  ppmt build --no-bootstrap -s BTC/USDT && ppmt run --symbol BTC/USDT --paper
+
+This preserves the Living Trie's accumulated TRADING metadata without diluting it
+with bootstrap noise. The bootstrap was designed for fresh builds (--force), not
+for enriching an already-rich Living Trie.
+
+COMPLETE RESULTS HISTORY (updated):
+
+| Version | Build Method | Trades | WR | P&L | Sharpe | Max DD |
+|---------|-------------|--------|------|------|--------|--------|
+| v0.4.0 | build+bootstrap+merge | 601 | 53.1% | +3665% | 2.80 | 22.9% |
+| v0.4.1 | build+bootstrap+merge | 566 | 46.6% | +347.7% | 0.88 | 44.3% |
+| v0.4.2 | build+bootstrap+merge | 627 | 48.2% | +665.6% | 1.51 | 35.9% |
+| v0.5.0 | 2-pass bootstrap, no merge | 519 | 50.5% | +1434% | 2.27 | 29.2% |
+| v0.5.2 | 5-pass, --force | 628 | 48.9% | -29.52% | -0.30 | 40.7% |
+| v0.5.3 | 2-pass, --force | 519 | 50.5% | +1434% | 2.27 | 29.2% |
+| v0.5.3 | 2-pass, MERGE cycle 1 | 598 | 54.0% | +4401% | 3.08 | 25.6% |
+| v0.5.3 | 2-pass, MERGE cycle 2 | 647 | 47.6% | +465% | 1.35 | 37.9% |
+
+Stage Summary:
+- v0.5.3 merge cycle 2 = MAJOR REGRESSION from cycle 1
+- Root cause: bootstrap observations (44-47% WR) poison Living Trie metadata
+- Each merge cycle adds ~25837 low-quality bootstrap observations
+- Cycle 1 worked because Living Trie wasn't yet diluted
+- FIX: Use --no-bootstrap on merge cycles to avoid diluting trading metadata
+- Next: Test ppmt build --no-bootstrap to confirm fix
