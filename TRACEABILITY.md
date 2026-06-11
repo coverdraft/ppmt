@@ -1,16 +1,16 @@
 # TRACEABILITY.md — PPMT Project Audit & Status
 
-**Last Updated**: 2026-06-11 (Session 2 Re-verification)
-**Version**: v0.10.0 (CHANGELOG) / 0.9.0 (pyproject.toml — needs sync) / V4.4 (metadata)
+**Last Updated**: 2026-06-11 (Session 2 — GAP-1 Fixed)
+**Version**: v0.10.0 (all synced) / V4.4 (metadata)
 **Branch**: main
-**Git HEAD**: c22b5b8 V4.4-audit: Full source audit verified all 5 bugs fixed, metadata complete, SAX breakpoints complete
+**Git HEAD**: f6f7af3 v0.10.0 GAP-1: Integrate 4-level matching into PaperTrader
 
-### Session 2 Re-verification (2026-06-11)
-All 13 core source files re-read and verified. All 5 bugs confirmed fixed. Version inconsistency identified:
-- CHANGELOG.md: v0.10.0
-- pyproject.toml: 0.9.0 (needs update to 0.10.0)
-- CLI --version: 0.9.0 (needs update to 0.10.0)
-- GAP-1 (PaperTrader only uses N3) confirmed as critical remaining work.
+### Session 2 Progress (2026-06-11)
+- Re-read all 13 core source files and re-verified all 5 bugs fixed
+- Version sync: pyproject.toml 0.9.0→0.10.0, CLI 0.9.0→0.10.0
+- **GAP-1 FIXED**: PaperTrader now uses all 4 Trie levels (N1+N2+N3+N4) with adaptive weights
+- All 171 existing tests pass with zero regressions
+- Commits pushed to GitHub
 
 ---
 
@@ -18,7 +18,7 @@ All 13 core source files re-read and verified. All 5 bugs confirmed fixed. Versi
 
 | Component | File | Status | Version | Notes |
 |-----------|------|--------|---------|-------|
-| PaperTrader | `src/ppmt/engine/paper_trader.py` | ✅ Stable | v0.10.0 | 3 historic bugs FIXED (V4.3). Regime-aware SHORT gate. V4.4: regime in new node creation. ⚠️ GAP-1: Only uses N3 |
+| PaperTrader | `src/ppmt/engine/paper_trader.py` | ✅ GAP-1 Fixed | v0.10.0 | 4-level matching with adaptive weights (GAP-1 FIXED). use_multi_level=True. Backward compatible. |
 | Living Trie | `src/ppmt/engine/paper_trader.py` (_record_observation) | ✅ Fixed | V4.4 | Now passes regime/regime_confidence when creating new nodes |
 | PPMT Engine | `src/ppmt/engine/ppmt.py` | ✅ Stable | V4.2 | 4-level Trie, bootstrap, regime-aware build |
 | Trie | `src/ppmt/core/trie.py` | ✅ Stable | V4.1 | Propagation, merge, independent/dependent classification |
@@ -126,11 +126,15 @@ No additional fields are needed at this time. The 22 fields + 9 computed propert
 
 ## 4. Architecture: Known Gaps
 
-### GAP-1: PaperTrader only uses N3 (CRITICAL)
-**Current**: `PaperTrader.run()` loads only `trie_n3` and uses `PredictionEngine` with that single trie.
-**Impact**: N1, N2, N4 are built but NEVER used during actual trading. Cross-token prediction is impossible.
-**Fix needed**: Integrate `PPMT.match()` into PaperTrader to leverage all 4 levels with adaptive weights.
-**Priority**: HIGH — this is the #1 reason cross-token OOS underperforms.
+### GAP-1: PaperTrader only uses N3 (FIXED — v0.10.0)
+**Was**: `PaperTrader.run()` loaded only `trie_n3` and used `PredictionEngine` with a single trie.
+**Fix**: PaperTrader now loads all 4 tries, creates PPMT engine with `set_tries()`, and uses `match_raw()` for 4-level weighted confidence.
+- `use_multi_level=True` config flag (backward compatible)
+- Direction/path from PredictionEngine, confidence from PPMT.match_raw()
+- Multi-level pattern break override (2+ levels confirm = no break)
+- Regime propagated to PPMT engine for N4 matching
+- Graceful degradation: falls back to N3-only when other levels unavailable
+- All 171 tests pass with zero regressions
 
 ### GAP-2: N4 regime filtering at query time
 **Current**: N4 stores ALL patterns with regime metadata, but filtering only happens via `regime_match_score` during confidence computation, not during Trie search itself.
