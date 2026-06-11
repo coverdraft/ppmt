@@ -838,12 +838,11 @@ def run_full_diagnostic(symbols_to_test: list[str] | None = None) -> DiagnosticR
     else:
         print("  ⚠️  Datos insuficientes para determinar robustez.")
     
-    # Critical gap
-    print(f"\n  🔧 GAP CRÍTICO DETECTADO:")
-    print(f"  PaperTrader solo usa N3 (per-asset trie). N1 y N2 NO se usan")
-    print(f"  durante el trading. Esto significa que un token nuevo NO puede")
-    print(f"  beneficiarse de patrones universales o de clase de otros tokens.")
-    print(f"  RECOMENDACIÓN: Conectar PPMT.match() (4 niveles) al PaperTrader.")
+    # Status: GAP-1 resolved
+    print(f"\n  🔧 ESTADO DE GAPS:")
+    print(f"  ✅ GAP-1 RESUELTO (v0.10.0): PaperTrader ahora usa N1+N2+N3+N4 con AdaptiveWeights.")
+    print(f"  ⚠️  GAP-2 pendiente: N4 regime filtering at query time (actualmente vía regime_match_score)")
+    print(f"  ⚠️  GAP-3 pendiente: PaperTrader no usa encode_with_normalization por defecto")
     
     storage.close()
     return report
