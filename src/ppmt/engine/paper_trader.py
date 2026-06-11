@@ -896,25 +896,27 @@ class PaperTrader:
                 # Effective minimum confidence
                 effective_min_conf = cfg.min_confidence
 
-                # Probability bonus: very high probability lowers threshold
-                if prediction.overall_probability > 0.5:
-                    effective_min_conf = max(cfg.min_confidence * 0.5, 0.075)
+                # v0.6.1: REMOVED probability bonus that was undermining min_confidence.
+                # The bonus lowered threshold from 15% to 7.5% when prob>50%, allowing
+                # 10% confidence trades that had WR of only 32.6%. This defeated the
+                # entire purpose of raising min_confidence.
 
                 # SHORT signals require higher confidence (BTC trends up)
-                # v0.6.0: Raised from max(conf*1.5, 0.15) to max(conf*2.0, 0.20).
-                # Cycle 4 data: SHORT at >=10% conf had 45.2% WR and -0.20% avg PnL
-                # (net negative). SHORT at >=20% conf had 60.7% WR and +1.16% avg PnL.
-                # The 2.0x multiplier ensures SHORT only enters with strong conviction.
+                # v0.6.1: Reverted from max(conf*2.0, 0.20) back to max(conf*1.5, 0.15).
+                # The 2.0x gate eliminated ALL SHORT trades (0 out of 354), removing
+                # diversification. 1.5x on 15% base = 22.5% min SHORT confidence, which
+                # still filters weak SHORTs while allowing quality ones through.
                 if prediction.direction == "SHORT":
-                    effective_min_conf = max(effective_min_conf * 2.0, 0.20)
+                    effective_min_conf = max(effective_min_conf * 1.5, 0.15)
 
                 # Entry conditions
-                # v0.6.0: Probability threshold raised from >0.20 to >0.25.
-                # Reduces marginal signals that pass confidence but have weak probability.
+                # v0.6.1: Reverted probability threshold from >0.25 back to >0.20.
+                # The >0.25 threshold was too aggressive, cutting pass rate from 32.5%
+                # to 13.8% and reducing trades by 32%.
                 if (prediction.direction != "FLAT"
                     and prediction.confidence >= effective_min_conf
                     and abs(prediction.expected_total_move_pct) > 1.0
-                    and prediction.overall_probability > 0.25):
+                    and prediction.overall_probability > 0.20):
 
                     pred_passed_threshold += 1
 
