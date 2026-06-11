@@ -177,7 +177,8 @@ class PPMT:
         """Set the current market regime for N4 Trie selection."""
         self._current_regime = regime
 
-    def build(self, df: pd.DataFrame, pattern_length: int = 5) -> int:
+    def build(self, df: pd.DataFrame, pattern_length: int = 5,
+             symbols: list[str] | None = None) -> int:
         """
         Build the 4-level Trie from historical OHLCV data.
 
@@ -193,15 +194,23 @@ class PPMT:
         trading-time win_rate, producing more differentiated confidence
         scores across patterns.
 
+        v0.6.3: Added `symbols` parameter (V7.9 backport). When provided,
+        uses pre-computed SAX symbols instead of re-encoding. This enables
+        out-of-sample validation where training normalization stats are
+        propagated to test encoding via encode_with_normalization().
+
         Args:
             df: OHLCV DataFrame with columns: open, high, low, close, volume
             pattern_length: Number of SAX blocks per pattern sequence
+            symbols: Pre-computed SAX symbols (optional, v0.6.3). When None,
+                     calls self.sax.encode(df) as before.
 
         Returns:
             Number of patterns inserted
         """
         # Encode entire history to SAX symbols
-        symbols = self.sax.encode(df)
+        if symbols is None:
+            symbols = self.sax.encode(df)
 
         if len(symbols) < pattern_length:
             return 0

@@ -263,6 +263,16 @@ class PaperTraderConfig:
     This allows building a trie on full data but only trading on a
     specific portion (e.g., the last 30% for OOS testing)."""
 
+    paa_mean: float | None = None
+    """SAX normalization mean from training data. v0.6.3: When set (along
+    with paa_std), the SAX encoder uses encode_with_normalization() with
+    these training stats instead of computing z-scores from current data.
+    This ensures consistent symbol mapping between training and test periods,
+    which is critical for out-of-sample validation."""
+
+    paa_std: float | None = None
+    """SAX normalization std from training data. See paa_mean docs."""
+
     living_trie: bool = True
     """Whether to update the Trie with observations during paper trading.
     When True, every trade outcome updates the Trie node's metadata,
@@ -511,8 +521,18 @@ class PaperTrader:
             strategy=cfg.sax_strategy,
         )
 
-        # Encode the FULL DataFrame once (same z-score context as during build)
-        all_sax_symbols = sax_encoder.encode(df)
+        # Encode the FULL DataFrame
+        # v0.6.3: Use encode_with_normalization() when training stats are provided.
+        # This ensures consistent symbol mapping between train and test periods.
+        if cfg.paa_mean is not None and cfg.paa_std is not None:
+            all_sax_symbols, _, _ = sax_encoder.encode_with_normalization(
+                df, paa_mean=cfg.paa_mean, paa_std=cfg.paa_std
+            )
+            console.print(f"  SAX encoding: using training normalization "
+                          f"(mean={cfg.paa_mean:.6f}, std={cfg.paa_std:.6f})")
+        else:
+            all_sax_symbols = sax_encoder.encode(df)
+
         if not all_sax_symbols:
             console.print(f"[red]Could not SAX encode data for {cfg.symbol}.[/red]")
             return PaperTraderResult(symbol=cfg.symbol, timeframe=cfg.timeframe)

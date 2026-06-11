@@ -486,7 +486,10 @@ def predict(symbol: str, timeframe: str, depth: int, price: float):
 @click.option("--min-confidence", default=0.20, type=float, help="Minimum signal confidence to enter (default: 0.20)")
 @click.option("--start-offset", default=200, type=int, help="Start candle index (default: 200)")
 @click.option("--end-offset", default=0, type=int, help="End candle index, 0=all (for OOS validation)")
-def run(symbol: str, timeframe: str, paper: bool, capital: float, min_confidence: float, start_offset: int, end_offset: int):
+@click.option("--paa-mean", default=None, type=float, help="SAX normalization mean from training (for OOS)")
+@click.option("--paa-std", default=None, type=float, help="SAX normalization std from training (for OOS)")
+def run(symbol: str, timeframe: str, paper: bool, capital: float, min_confidence: float,
+        start_offset: int, end_offset: int, paa_mean: float, paa_std: float):
     """Run real-time pattern matching (requires exchange connection).
 
     Use --paper to run a paper trading simulation on historical data
@@ -512,6 +515,8 @@ def run(symbol: str, timeframe: str, paper: bool, capital: float, min_confidence
             min_confidence=min_confidence,
             start_offset=start_offset,
             end_offset=end_offset,
+            paa_mean=paa_mean,
+            paa_std=paa_std,
         )
 
         trader = PaperTrader(config=pt_config)

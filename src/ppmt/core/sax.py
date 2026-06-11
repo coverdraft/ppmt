@@ -203,6 +203,58 @@ class SAXEncoder:
         paa_values = self._paa(series)
         return self._discretize(paa_values)
 
+    def encode_with_normalization(
+        self,
+        df: pd.DataFrame,
+        paa_mean: float | None = None,
+        paa_std: float | None = None,
+    ) -> tuple[list[str], float, float]:
+        """
+        Encode an OHLCV DataFrame with explicit z-score normalization.
+
+        v0.6.3 (V7.9 backport): Training z-score stats must be used for test
+        encoding to ensure SAX symbols are consistent between train and test
+        windows. Without this, regime shifts cause different symbol mappings
+        and the trie never matches.
+
+        When called with paa_mean=None, paa_std=None (training mode), computes
+        stats from the current data and returns them. When called with explicit
+        stats (test mode), uses those instead — ensuring consistent symbols.
+
+        Args:
+            df: DataFrame with columns: open, high, low, close, volume
+            paa_mean: If provided, use this mean instead of computing from data
+            paa_std: If provided, use this std instead of computing from data
+
+        Returns:
+            Tuple of (symbols, paa_mean, paa_std) where the stats can be
+            reused for consistent encoding of test data.
+        """
+        series = self._extract_series(df)
+        paa_values = self._paa(series)
+
+        if len(paa_values) == 0:
+            return [], 0.0, 1.0
+
+        # Use provided stats or compute from current data
+        if paa_mean is None:
+            paa_mean = float(np.mean(paa_values))
+        if paa_std is None:
+            paa_std = float(np.std(paa_values))
+
+        if paa_std < 1e-10:
+            mid = self.alphabet_size // 2
+            return [SAX_ALPHABET[mid]] * len(paa_values), paa_mean, paa_std
+
+        z_scores = (paa_values - paa_mean) / paa_std
+
+        symbols = []
+        for z in z_scores:
+            idx = int(np.searchsorted(self.breakpoints, z))
+            symbols.append(SAX_ALPHABET[idx])
+
+        return symbols, paa_mean, paa_std
+
     def encode_incremental(
         self,
         new_candles: pd.DataFrame,
