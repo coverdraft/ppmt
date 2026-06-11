@@ -892,22 +892,25 @@ class PPMT:
                 except Exception:
                     continue
 
-                # Entry conditions (v0.4.1: bootstrap uses looser thresholds since
-                # the trie is being built from scratch during bootstrap)
+                # Entry conditions (v0.4.1→v0.11.0: bootstrap uses very loose thresholds
+                # since the trie is being built from scratch. The whole PURPOSE of
+                # bootstrap is to accumulate observations, so we must be very permissive.
+                # v0.10.0's 0.10 threshold produced 0 trades because fresh tries with
+                # historical_count=1 per node produce max confidence ~0.07 (due to
+                # Bayesian shrinkage + dependency penalty). Lowering to 0.03 ensures
+                # bootstrap can always generate observations on fresh tries.)
                 if (prediction.direction == "FLAT"
                     or prediction.confidence <= 0
-                    or prediction.confidence < 0.10  # Bootstrap: keep 0.10 to gather MORE observations
-                    or abs(prediction.expected_total_move_pct) < 1.0  # Bootstrap: keep 1.0 for more coverage
-                    or prediction.overall_probability <= 0.20):  # Bootstrap: keep 0.20
+                    or prediction.confidence < 0.03  # v0.11.0: lowered from 0.10 → 0.03 for fresh tries
+                    or abs(prediction.expected_total_move_pct) < 0.5  # v0.11.0: lowered from 1.0 → 0.5
+                    or prediction.overall_probability <= 0.10):  # v0.11.0: lowered from 0.20 → 0.10
                     continue
 
-                # SHORT requires higher confidence (bootstrap: keep loose to gather
-                # SHORT observations — v0.6.2 relaxed from 1.5x/0.15 to 1.2x/0.15
-                # because the 1.5x gate starved the trie of SHORT observations,
-                # leading to 0 SHORT trades in paper trading)
-                effective_min_conf = 0.10
+                # SHORT requires slightly higher confidence but still very permissive
+                # for bootstrap — the goal is to gather SHORT observations.
+                effective_min_conf = 0.03
                 if prediction.direction == "SHORT":
-                    effective_min_conf = max(effective_min_conf * 1.2, 0.15)
+                    effective_min_conf = 0.04  # v0.11.0: minimal SHORT penalty for bootstrap
 
                 if prediction.confidence < effective_min_conf:
                     continue

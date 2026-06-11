@@ -35,8 +35,22 @@ class RegimeDetector:
     def __init__(self, lookback: int = 50, vol_threshold: float = 0.6,
                  trend_threshold: float = 0.005):
         self.lookback = lookback
-        self.vol_threshold = vol_threshold
-        self.trend_threshold = trend_threshold
+        # v0.11.0: Auto-calibrate vol_threshold for crypto if left at default.
+        # The default 0.6 (60% annualized vol) was designed for stocks.
+        # Crypto has much higher base volatility (BTC ~11%, alts ~30-100%),
+        # so 0.6 was NEVER triggered. We now use 0.15 (15% annualized) as the
+        # default for crypto-appropriate regime detection. At 0.15:
+        #   - BTC normal: ~8-15% vol → ranging (below threshold)
+        #   - BTC volatile: >15% vol → volatile regime
+        #   - Alt coins: >20-30% vol → volatile regime
+        self.vol_threshold = vol_threshold if vol_threshold != 0.6 else 0.15
+        # v0.11.0: Auto-calibrate trend_threshold for crypto.
+        # The default 0.005 (0.5% per candle relative slope) was too high for
+        # high-priced assets like BTC. At $60k, rel_slope > 0.005 requires a
+        # $300/candle slope (25% move over 50 candles). Lowering to 0.001
+        # (0.1% per candle) makes trending detection work for crypto:
+        #   - 0.001 * $60k = $60/candle → 5% move over 50 candles → trending
+        self.trend_threshold = trend_threshold if trend_threshold != 0.005 else 0.001
 
     def compute_hurst(self, prices: np.ndarray, max_lag: int = 20) -> float:
         """Compute Hurst exponent using R/S analysis."""

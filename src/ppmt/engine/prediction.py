@@ -259,7 +259,25 @@ class PredictionEngine:
         if current_regime and node.metadata.regime_distribution:
             regime_mult = node.metadata.regime_match_score(current_regime)
 
-        return base_confidence * depth_penalty * (0.7 + 0.3 * cont_bonus) * (0.8 + 0.2 * sample_factor) * regime_mult
+        # v0.11.0: Fresh trie boost
+        # When ALL nodes have count=1 (fresh build), the Bayesian shrinkage
+        # + dependency penalty + sample_factor compound to produce confidence
+        # in the 0.03-0.07 range, which is below every practical threshold.
+        # For nodes with count >= min_independent_count, this is 1.0 (no boost).
+        # For fresh tries where count=1 and node_type="dependent", we boost
+        # by the inverse of the dependency penalty, restoring the confidence
+        # to what it would be without the dependency classification — because
+        # during bootstrap ALL nodes are "dependent" and penalizing them all
+        # equally is counterproductive.
+        fresh_boost = 1.0
+        if node.metadata.node_type == "dependent" and node.metadata.historical_count > 0:
+            # Reverse the dependency penalty applied in metadata.confidence
+            dependency_ratio = min(1.0, node.metadata.historical_count / node.metadata.min_independent_count)
+            dependency_penalty = 0.5 + 0.5 * dependency_ratio
+            if dependency_penalty > 0:
+                fresh_boost = 1.0 / dependency_penalty  # 1.0-2.0x boost
+
+        return base_confidence * depth_penalty * (0.7 + 0.3 * cont_bonus) * (0.8 + 0.2 * sample_factor) * regime_mult * fresh_boost
 
     def predict(
         self,
