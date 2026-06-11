@@ -2,6 +2,34 @@
 
 All notable changes to the Progressive Pattern Matching Trie (PPMT) project.
 
+## [v0.9.0] - 2026-06-11
+
+### Added - Real-Time Trading Engine
+- **engine/realtime.py**: Complete real-time trading engine with incremental SAX
+  - `ReplayConfig`: Replay historical data through streaming pipeline
+  - `LiveConfig`: Connect to exchange via ccxt for live trading
+  - `RealtimeTrader`: Processes candles one at a time through incremental SAX encoder
+  - Streaming pattern buffer for real-time pattern matching
+  - Regime-aware position sizing applied in real-time
+  - Callbacks: `on_signal`, `on_trade`, `on_candle` for external integrations
+  - Speed control: 0=max speed, 1=real-time, 10=10x playback
+- **CLI `ppmt replay`**: Replay historical data through streaming pipeline
+  - Validates the incremental SAX + real-time signal pipeline
+  - `--speed` for configurable playback speed
+  - `--regime-aware` for regime-based position sizing
+- **CLI `ppmt live`**: Connect to exchange and trade in real-time
+  - Requires ccxt (`pip install ccxt>=4.0.0`, Python 3.10+)
+  - `--testnet` (default) for exchange paper trading
+  - `--dry-run` (default) processes signals without executing orders
+  - `--execute` with confirmation prompt for real trading
+  - 30-second polling interval for new candles
+- **`ppmt run` (without --paper)**: Now redirects to replay mode
+  - Previously showed a "TODO" message
+  - Now actually runs the streaming pipeline
+
+### Fixed
+- BUG-006 (v0.8.1): Regime multiplier applied to sizing signal
+
 ## [v0.8.1] - 2026-06-11
 
 ### Fixed

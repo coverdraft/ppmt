@@ -9,10 +9,10 @@
 
 | Item | Value |
 |------|-------|
-| **Version** | v0.8.1 |
+| **Version** | v0.9.0 |
 | **Branch** | main |
 | **Working Tree** | Clean (uncommitted changes pending sync) |
-| **Last Commit** | `01c46f3` — v0.8.0: regime-aware position sizing |
+| **Last Commit** | `fcbb7d5` — v0.8.1: fix regime multiplier |
 | **Active Source** | `/ppmt/src/ppmt/` (development), `/ppmt/ppmt/src/ppmt/` (submodule mirror) |
 
 ---
@@ -55,6 +55,15 @@ Components:
 ---
 
 ## Version History & Decisions
+
+### v0.9.0 (2026-06-11)
+- **Added**: Real-time trading engine (`engine/realtime.py`)
+  - Replay mode: stream historical data through incremental SAX pipeline
+  - Live mode: connect to exchange via ccxt for real-time trading
+  - Streaming pattern buffer for real-time matching
+  - CLI `ppmt replay` and `ppmt live` commands
+  - `ppmt run` (without --paper) now runs replay instead of showing TODO
+- **Added**: Callbacks (`on_signal`, `on_trade`, `on_candle`) for integrations
 
 ### v0.8.1 (2026-06-11)
 - **Bug Fixed**: Regime multiplier was NOT being applied to position sizing
@@ -166,7 +175,8 @@ The following bugs from a previous session's analysis were verified as already f
 | PPMT Engine | `src/ppmt/engine/ppmt.py` | ~800 | Complete |
 | Prediction | `src/ppmt/engine/prediction.py` | ~400 | Complete |
 | Signal | `src/ppmt/engine/signal.py` | ~500 | Complete |
-| Paper Trader | `src/ppmt/engine/paper_trader.py` | 1185 | Complete |
+| Paper Trader | `src/ppmt/engine/paper_trader.py` | 1200 | Complete |
+| Realtime Trader | `src/ppmt/engine/realtime.py` | 530 | Complete (v0.9.0) |
 | Weights | `src/ppmt/engine/weights.py` | ~200 | Complete |
 | Monte Carlo (engine) | `src/ppmt/engine/monte_carlo.py` | ~390 | Complete |
 | Monte Carlo (risk) | `src/ppmt/risk/monte_carlo.py` | — | Complete |
@@ -193,6 +203,8 @@ The CLI provides these single-command analysis workflows:
 | `ppmt monte-carlo` | Monte Carlo resampling simulation | v0.6.2 |
 | `ppmt build` | Build trie + 2-pass bootstrap (default) | v0.5.0 |
 | `ppmt run --paper` | Paper trading simulation | v0.4.0 |
+| `ppmt replay` | Stream historical data through real-time pipeline | v0.9.0 |
+| `ppmt live` | Connect to exchange for live trading | v0.9.0 |
 
 All commands support `--symbol`, `--timeframe`, and appropriate configuration flags.
 
@@ -202,7 +214,7 @@ All commands support `--symbol`, `--timeframe`, and appropriate configuration fl
 
 ### Pending
 - [ ] Sync ppmt/ppmt/ submodule with ppmt/src/ active development code
-- [ ] Real-time trading mode (WebSocket exchange connection) — CLI shows TODO
+- [x] Real-time trading mode — v0.9.0: replay + live (ccxt) modes
 - [ ] Live trading bridge (paper → live transition)
 - [ ] Multi-asset portfolio mode
 - [x] Regime detection integration (v0.8.0 connected, v0.8.1 fixed sizing multiplier)

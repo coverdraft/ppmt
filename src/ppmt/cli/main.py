@@ -48,7 +48,7 @@ def load_config() -> dict:
 
 
 @click.group()
-@click.version_option(version="0.8.1")
+@click.version_option(version="0.9.0")
 def cli():
     """PPMT - Progressive Pattern Matching Trie Engine"""
     pass
@@ -608,17 +608,173 @@ def run(symbol: str, timeframe: str, paper: bool, capital: float, min_confidence
 
     # Real-time mode (requires exchange connection)
     console.print(f"[cyan]Starting PPMT real-time matching for {symbol}...[/cyan]")
-    console.print("[yellow]Real-time mode requires exchange API connection.[/yellow]")
-    console.print("[yellow]Use --paper to run a paper trading simulation instead.[/yellow]")
+    console.print("[yellow]Use 'ppmt replay' for replay mode or 'ppmt live' for exchange connection.[/yellow]")
+    console.print("[dim]The 'ppmt run' command without --paper now redirects to 'ppmt replay'.[/dim]")
 
-    # TODO: Implement real-time loop with WebSocket
-    # 1. Load engine state and Tries from storage
-    # 2. Connect to exchange WebSocket
-    # 3. Process each new candle through SAX -> match -> signal
-    # 4. Pass signals to RiskManager
-    # 5. Execute trades if risk allows
+    # Default: run replay mode (same data, streaming pipeline)
+    from ppmt.engine.realtime import RealtimeTrader, ReplayConfig
 
-    console.print("Real-time engine will be implemented in the next phase.")
+    config = load_config()
+    sax_config = config.get("sax", {})
+
+    replay_config = ReplayConfig(
+        symbol=symbol,
+        timeframe=timeframe,
+        initial_capital=capital,
+        sax_alphabet_size=sax_config.get("alphabet_size", 8),
+        sax_window_size=sax_config.get("window_size", 10),
+        sax_strategy=sax_config.get("strategy", "ohlcv"),
+        min_confidence=min_confidence,
+        start_offset=start_offset,
+        regime_aware=regime_aware,
+        speed=0,  # Maximum speed for CLI
+    )
+
+    trader = RealtimeTrader(config=replay_config)
+    result = trader.run_replay()
+
+    from ppmt.engine.realtime import format_realtime_result
+    console.print()
+    console.print(Panel(format_realtime_result(result), title="Replay Results", border_style="cyan"))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# v0.9.0: Real-Time Trading Commands
+# ══════════════════════════════════════════════════════════════════════════════
+
+@cli.command()
+@click.option("--symbol", "-s", required=True, help="Trading pair")
+@click.option("--timeframe", "-t", default="1h", help="Candle timeframe")
+@click.option("--capital", "-c", default=10000.0, type=float, help="Initial capital")
+@click.option("--min-confidence", default=0.20, type=float, help="Minimum signal confidence to enter")
+@click.option("--speed", default=0.0, type=float, help="Replay speed (0=max, 1=real-time, 10=10x)")
+@click.option("--start-offset", default=200, type=int, help="Start candle index (default: 200)")
+@click.option("--regime-aware/--no-regime-aware", default=True, help="Regime-aware position sizing")
+def replay(symbol: str, timeframe: str, capital: float, min_confidence: float,
+           speed: float, start_offset: int, regime_aware: bool):
+    """Replay historical data through the streaming PPMT pipeline.
+
+    Unlike 'ppmt run --paper' which batch-processes all data, replay
+    processes candles one at a time through the incremental SAX encoder,
+    exactly as the live trading engine would. This validates the streaming
+    pipeline before connecting to an exchange.
+
+    v0.9.0: New command for real-time pipeline validation.
+    """
+    from ppmt.engine.realtime import RealtimeTrader, ReplayConfig, format_realtime_result
+
+    config = load_config()
+    sax_config = config.get("sax", {})
+
+    replay_config = ReplayConfig(
+        symbol=symbol,
+        timeframe=timeframe,
+        initial_capital=capital,
+        sax_alphabet_size=sax_config.get("alphabet_size", 8),
+        sax_window_size=sax_config.get("window_size", 10),
+        sax_strategy=sax_config.get("strategy", "ohlcv"),
+        min_confidence=min_confidence,
+        start_offset=start_offset,
+        regime_aware=regime_aware,
+        speed=speed,
+    )
+
+    trader = RealtimeTrader(config=replay_config)
+    result = trader.run_replay()
+
+    console.print()
+    console.print(Panel(format_realtime_result(result), title="Replay Results", border_style="cyan"))
+
+    if result.trades:
+        console.print()
+        table = Table(title=f"Replay Trades: {symbol}")
+        table.add_column("#", justify="right", width=4)
+        table.add_column("Dir", width=5)
+        table.add_column("Entry", justify="right", width=12)
+        table.add_column("Exit", justify="right", width=12)
+        table.add_column("PnL%", justify="right", width=8)
+        table.add_column("Conf", justify="right", width=6)
+        table.add_column("Exit Reason", width=15)
+        table.add_column("Regime", width=8)
+
+        for t in result.trades:
+            pnl_style = "green" if t.pnl_pct >= 0 else "red"
+            dir_style = "green" if t.direction == "LONG" else "red"
+            table.add_row(
+                str(t.trade_id),
+                f"[{dir_style}]{t.direction}[/{dir_style}]",
+                f"${t.entry_price:,.2f}",
+                f"${t.exit_price:,.2f}",
+                f"[{pnl_style}]{t.pnl_pct:+.2f}%[/{pnl_style}]",
+                f"{t.confidence:.0%}",
+                t.exit_reason,
+                t.regime or "-",
+            )
+
+        console.print(table)
+
+
+@cli.command()
+@click.option("--symbol", "-s", required=True, help="Trading pair")
+@click.option("--timeframe", "-t", default="1h", help="Candle timeframe")
+@click.option("--capital", "-c", default=10000.0, type=float, help="Initial capital")
+@click.option("--exchange", "-e", default="binance", help="Exchange name")
+@click.option("--api-key", default="", help="Exchange API key")
+@click.option("--api-secret", default="", help="Exchange API secret")
+@click.option("--min-confidence", default=0.20, type=float, help="Minimum signal confidence")
+@click.option("--testnet/--mainnet", default=True, help="Use testnet (default: True)")
+@click.option("--dry-run/--execute", default=True, help="Dry run mode (no real orders, default: True)")
+@click.option("--regime-aware/--no-regime-aware", default=True, help="Regime-aware position sizing")
+def live(symbol: str, timeframe: str, capital: float, exchange: str,
+         api_key: str, api_secret: str, min_confidence: float,
+         testnet: bool, dry_run: bool, regime_aware: bool):
+    """Connect to an exchange and trade in real-time using PPMT.
+
+    Requires ccxt (pip install ccxt>=4.0.0, Python 3.10+).
+
+    By default runs in DRY RUN mode (--dry-run) which processes signals
+    but does not execute real orders. Use --execute to enable real trading.
+
+    Use --testnet (default) for exchange testnet/paper trading.
+
+    v0.9.0: New command for live exchange trading.
+    """
+    from ppmt.engine.realtime import RealtimeTrader, LiveConfig
+
+    config = load_config()
+    sax_config = config.get("sax", {})
+
+    live_config = LiveConfig(
+        symbol=symbol,
+        timeframe=timeframe,
+        initial_capital=capital,
+        exchange=exchange,
+        api_key=api_key,
+        api_secret=api_secret,
+        sax_alphabet_size=sax_config.get("alphabet_size", 8),
+        sax_window_size=sax_config.get("window_size", 10),
+        sax_strategy=sax_config.get("strategy", "ohlcv"),
+        min_confidence=min_confidence,
+        testnet=testnet,
+        dry_run=dry_run,
+        regime_aware=regime_aware,
+    )
+
+    if not dry_run:
+        console.print("[bold red]⚠ WARNING: LIVE TRADING MODE[/bold red]")
+        console.print("[red]Real orders will be executed. This can result in actual financial loss.[/red]")
+        console.print("[red]PPMT is experimental software. Use at your own risk.[/red]")
+        console.print()
+        click.confirm("Are you sure you want to trade with real money?", abort=True)
+
+    trader = RealtimeTrader(config=live_config)
+
+    import asyncio
+    result = asyncio.run(trader.run_live())
+
+    from ppmt.engine.realtime import format_realtime_result
+    console.print()
+    console.print(Panel(format_realtime_result(result), title="Live Trading Results", border_style="cyan"))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
