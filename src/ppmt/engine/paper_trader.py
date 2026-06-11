@@ -140,6 +140,9 @@ def _record_observation(
 
     if node is None:
         # Pattern not in Trie at all — create the entry as a new pattern
+        # V4.4: Pass regime/regime_confidence so new nodes inherit regime context.
+        # Previously these were missing, causing newly-created Living Trie nodes
+        # to have empty regime info, which broke regime-aware confidence scoring.
         trie.insert_with_observations(
             symbols=trade.matched_pattern,
             move_pct=trade.actual_move_pct,
@@ -148,6 +151,8 @@ def _record_observation(
             duration=max(1, exit_sym_idx - trade.entry_sym_idx) if trade.entry_sym_idx > 0 else 1,
             won=trade.pnl_pct > 0,
             next_symbol=next_symbol,
+            regime=trade.regime if trade.regime else None,
+            regime_confidence=trade.regime_confidence if trade.regime_confidence > 0 else None,
         )
         new_nodes += 1
         observations += 1
