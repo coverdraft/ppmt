@@ -1,194 +1,133 @@
-# PPMT v0.6.2 — TRACEABILITY DOCUMENT
+# PPMT v0.6.2 — TRACEABILITY
 
-> Last updated: 2026-06-12
-> Data source: Binance BTC/USDT 1h (10,000 real candles)
-
----
-
-## 1. CRITICAL DISCOVERY: OHLCV vs Close Overlap
-
-### Problem Statement
-The OHLCV SAX strategy produces **1.01x overlap** (each pattern is unique), while the "close" strategy produces **13.85x overlap** (patterns repeat ~14x on average). The question: Is the 13.85x overlap correct for PPMT, or is it a bug?
-
-### Root Cause Analysis
-
-| Metric | OHLCV (alpha=10) | Close (alpha=10) |
-|--------|------------------|-------------------|
-| Unique patterns | 1,980 | 144 |
-| Overlap ratio | 1.01x | 13.85x |
-| Mean observations/pattern | 1.0 | 13.9 |
-| Patterns with count>=5 | 0 (0%) | 53 (36.8%) |
-| Patterns with count=1 | 1,965 (99.2%) | 53 (36.8%) |
-| Mean confidence | 0.159 | 0.223 |
-| **OOS match rate** | **2.0%** | **95.9%** |
-| **OOS exact break rate** | **98.0%** | **4.1%** |
-
-### Key Finding: OHLCV with alpha=10 is BROKEN for Prediction
-
-The OHLCV strategy with `alphabet_size=10` and `window_size=5` produces **near-zero overlap**, meaning each 5-symbol pattern is essentially unique. This causes:
-
-1. **98% OOS miss rate** — When paper trading encounters a new pattern, it almost never matches anything in the trie
-2. **Unreliable metadata** — 99.2% of patterns have only 1 observation, making win_rate/confidence meaningless (0% or 100%)
-3. **No pattern breaks** — Since patterns never match, the pattern break detection mechanism is useless
-4. **No predictive power** — The trie cannot predict because it never sees the same pattern twice
-
-The "close" strategy works better for matching (95.9% OOS match) but **loses critical candlestick information** (body size, wicks, volume, direction strength).
-
-### Solution: OHLCV with Smaller Alphabet
-
-Tested OHLCV with different alphabet sizes using 8,000 candles for training, 2,000 for OOS testing:
-
-| Config | Overlap | OOS Match% | Break% | Avg Confidence | Avg WR | Avg Hist Count |
-|--------|---------|-----------|--------|---------------|--------|---------------|
-| **ohlcv/a3** | **6.56x** | **100.0%** | **0.0%** | **0.268** | **51.7%** | **6.6** |
-| ohlcv/a4 | 2.00x | 79.2% | 20.8% | 0.192 | 48.7% | 2.1 |
-| ohlcv/a5 | 1.29x | 39.0% | 61.0% | 0.167 | 47.6% | 1.2 |
-| ohlcv/a8 | 1.02x | 7.8% | 92.2% | 0.159 | 48.4% | 1.0 |
-| ohlcv/a10 | 1.01x | 2.0% | 98.0% | 0.151 | 25.0% | 1.0 |
-| close/a10 | 10.22x | 95.9% | 4.1% | 0.344 | 46.4% | 104.8 |
-
-### RECOMMENDATION
-
-**Change default `sax_alphabet_size` from 10 to 3 or 4 when using OHLCV strategy.**
-
-- **ohlcv/a3**: Best overall — 100% match rate, 6.56x overlap, mean 6.6 observations per pattern, 51.7% WR (above random). Maps to 3 clear market states: bearish / neutral / bullish.
-- **ohlcv/a4**: Good balance — 79.2% match rate, 2.0x overlap. Maps to: strong_bearish / weak_bearish / weak_bullish / strong_bullish.
-
-The current default (ohlcv/a10) is effectively broken because 10 symbols with the OHLCV composite creates too much diversity for the trie to find repeating patterns.
-
-### Why the 13.85x "Close" Overlap is NOT Correct Either
-
-The close strategy's 13.85x overlap comes from **information loss**, not from correct pattern grouping. It collapses all candlestick information into a single close price, losing:
-- Candle body size (open vs close gap)
-- Wicks (high/low extremes)
-- Volume (market participation)
-- Direction strength (body center x direction)
-
-This is why close/a10 has higher match rate but lower win rate (46.4%) compared to ohlcv/a3 (51.7%).
+## Registro de cambios, hallazgos y decisiones
 
 ---
 
-## 2. Node Block Matching: Exact vs Similar
+## 2026-06-12 — Investigación del Overlap OHLCV vs Close (1.03x vs 13.54x)
 
-### Current State
-- `paper_trader.py` uses **exact matching** for pattern break detection: `trie.check_continuation()`
-- `PPMT.match()` uses **FuzzyMatcher** for entry signals: `matcher.best_match()`
-- This mismatch means entry signals can be fuzzy but exits are exact
+### Contexto
+Se detectó que la estrategia SAX "ohlcv" produce 1.03x overlap (casi cada patrón es único) mientras que la estrategia "close" produce 13.54x overlap. Se investigaron ambas hipótesis: (a) es un bug, (b) es comportamiento esperado por la arquitectura multi-nodo de PPMT.
 
-### Fuzzy Continuation Impact (OOS)
+### Hallazgo CRÍTICO: Bug en la fórmula del composite OHLCV
 
-| Strategy | Exact Break% | Fuzzy Break% | Reduction |
-|----------|-------------|-------------|-----------|
-| ohlcv/a10 | 98.0% | 93.4% | 4.7% |
-| close/a10 | 4.1% | 4.1% | 0.0% |
+**El composite OHLCV tiene una distribución degenerada.** La fórmula actual:
 
-Fuzzy matching provides minimal improvement when overlap is already very low. The real fix is increasing overlap through alphabet size, not relying on fuzzy matching alone.
+```python
+composite = body_center * direction * (0.5 + 0.5 * vol_ratio)
+```
 
-### Recommendation
-- Use `FuzzyMatcher.check_continuation()` in paper_trader instead of `trie.check_continuation()`
-- This provides a safety net for similar patterns, even with better alphabet sizing
-- Keep threshold at 0.85 (current default)
+Produce los siguientes problemas matemáticos:
 
----
+1. **55.1% de los valores están dentro de ±0.10 de cero** — pico masivo en 0
+2. **74.0% de los valores están dentro de ±0.20** — casi toda la data concentrada cerca de 0
+3. **Rango extremo: [-1348.7, 0.7]** — outliers por multiplicación
+4. **Con alphabet_size=8, el 92.5% de los símbolos caen en el símbolo central** → destrucción de información
 
-## 3. Trie Fixes Applied (v0.6.2)
+**Causa raíz:** La multiplicación `body_center × direction` hace que cuando `direction ≈ 0` (59.6% de las velas tienen |direction| < 0.3), el composite colapsa a ~0 independientemente del body_center o el volumen. Esto destruye la información de posición del cuerpo y volumen.
 
-### 3.1 Missing `trading_observations` attribute
-- **File**: `src/ppmt/core/trie.py`
-- **Problem**: `paper_trader.py` references `trie.trading_observations` but `PPMTTrie.__init__` didn't have it
-- **Fix**: Added `self.trading_observations: int = 0` to `__init__`
-- **Status**: FIXED
+**Por qué "close" funciona mejor:** Los precios de cierre tienen autocorrelación natural, creando PAA values más suaves que, tras z-scoring, se distribuyen mejor entre los breakpoints Gaussianos de SAX.
 
-### 3.2 Missing `propagate_metadata()` method
-- **File**: `src/ppmt/core/trie.py`
-- **Problem**: `paper_trader.py` calls `trie.propagate_metadata()` but `PPMTTrie` didn't have it
-- **Fix**: Added `propagate_metadata()` and `_propagate_node()` methods with recursive aggregation
-- **Aggregation logic**: Leaf nodes return own metadata; internal nodes aggregate children with weighted averages; own observations take precedence
-- **Status**: FIXED
+### Evaluación de la crítica de otra IA
 
-### 3.3 Missing serialization of `trading_observations`
-- **File**: `src/ppmt/core/trie.py`
-- **Problem**: `to_dict()` and `from_dict()` didn't handle `trading_observations`
-- **Fix**: Updated both methods to include the field
-- **Status**: FIXED
+Se recibió crítica externa con 4 puntos. Evaluación contra nuestra arquitectura:
 
----
+| Punto de la IA | Validez | Aplica a PPMT? | Decisión |
+|---|---|---|---|
+| "El objetivo no es maximizar match rate, sino Información × Repetición" | ✅ Correcto | Sí, framework correcto | ADOPTAR como principio guía |
+| "Elegir 3 es arbitrario, probar 3-6" | ✅ Correcto | Sí, pero no es solo el tamaño | ADOPTAR — testear múltiples tamaños |
+| "Mapeo bullish-neutral-bearish es muy simple" | ⚠️ Parcialmente | No usamos B/N/B, usamos SAX estándar | NO APLICA — nuestra codificación es SAX, no B/N/B |
+| "Codificar body/wick/volume por separado (Versión 3)" | ✅ Correcto en principio | Sí, pero requiere cambio arquitectónico | ADOPTAR para V0.7 — el análisis demuestra que el composite multiplicativo destruye información |
 
-## 4. Known Issues NOT Yet Fixed
+### Lo que SÍ vale de la crítica
 
-### 4.1 SAX alphabet_size mismatch with OHLCV strategy
-- **Severity**: CRITICAL
-- **Impact**: 98% OOS pattern miss rate with current defaults
-- **Fix needed**: Change default `sax_alphabet_size` from 10 to 3-4 for OHLCV
-- **Status**: NOT FIXED — awaiting user decision on alpha=3 vs alpha=4
+1. **Information × Repetition** como métrica de optimización — no maximizar match rate
+2. **Testear múltiples alphabet_sizes** (3, 4, 5, 6, 8) con datos reales
+3. **Codificar features por separado** — el composite multiplicativo es la causa raíz del problema
+4. **Percentiles adaptativos** — los breakpoints Gaussianos no funcionan bien con distribuciones no-Gaussianas
 
-### 4.2 regime.py in wrong location
-- **File**: Only exists in `ppmt/ppmt/src/ppmt/core/regime.py` (nested duplicate)
-- **Fix needed**: Copy to primary source tree `src/ppmt/core/regime.py`
-- **Status**: NOT FIXED
+### Lo que NO aplica de la crítica
 
-### 4.3 BlockLifecycleMetadata lacks regime tracking
-- **File**: `src/ppmt/core/metadata.py`
-- **Problem**: No regime field (trending_up, ranging, trending_down, volatile)
-- **Fix needed**: Add `regime: str = ""` field
-- **Status**: NOT FIXED
+1. La IA asume que usamos "bullish/neutral/bearish" — PPMT usa SAX con z-score breakpoints
+2. La IA no conoce nuestra arquitectura de 4 niveles (N1-N4) con AdaptiveWeights
+3. La IA no conoce nuestro FuzzyMatcher que ya provee tolerancia a ruido
+4. La IA sugiere "estados adaptativos" pero no especifica cómo integrarlos con SAX
 
-### 4.4 SHORT confidence gate is weak
-- **File**: `src/ppmt/engine/paper_trader.py` line 908-909
-- **Current**: `effective_min_conf = max(effective_min_conf * 1.2, 0.10)`
-- **Problem**: 1.2x multiplier barely filters; floor of 0.10 is too low
-- **Fix needed**: Make it regime-aware (stricter in trending_up, looser in trending_down)
-- **Status**: NOT FIXED
+### Solución propuesta (3 fases)
 
-### 4.5 catastrophic_loss_pct disabled
-- **File**: `src/ppmt/engine/paper_trader.py` line 277
-- **Current**: `catastrophic_loss_pct: float = 0.0`
-- **Problem**: No hard stop for extreme losses
-- **Fix needed**: Re-enable with 8% as safety net
-- **Status**: NOT FIXED
+#### Fase 1 — Fix inmediato (V0.6.2)
+- **Reemplazar composite multiplicativo por aditivo** en `_extract_series()`:
+  ```python
+  # ANTES (degenerado):
+  composite = body_center * direction * vol_composite
 
-### 4.6 Pattern break uses exact matching
-- **File**: `src/ppmt/engine/paper_trader.py` line 819
-- **Current**: `continues, _ = trie.check_continuation(pattern_to_check, latest_symbol)` — exact match
-- **Fix needed**: Use FuzzyMatcher.check_continuation() for noise tolerance
-- **Status**: NOT FIXED
+  # DESPUÉS (preserva información):
+  composite = body_center * 0.4 + direction * 0.35 + vol_norm * 0.25
+  ```
+- Esto mantiene la arquitectura de un solo stream SAX
+- La distribución aditiva es casi-Gaussiana (33.5% dentro de |z|<0.5 vs 38% teórico)
+
+#### Fase 2 — Mejora (V0.6.3)
+- **Añadir breakpoints adaptativos** (empirical quantiles) como opción en SAXConfig
+- **Testear alphabet_size 3-8** con datos reales de Binance
+- **Métrica de evaluación:** Information × Repetition (entropía × overlap)
+
+#### Fase 3 — Evolución (V0.7)
+- **Multi-feature encoding:** body_size (3 estados) + direction (3 estados) + volume (3 estados) = 27 símbolos compuestos
+- Cada feature se discretiza independientemente con percentiles adaptativos
+- Los símbolos compuestos se integran en el Trie existente sin cambios arquitectónicos
+- Esto es equivalente a la "Versión 3" de la otra IA pero adaptada a nuestra arquitectura
 
 ---
 
-## 5. Data Source Verification
+## 2026-06-12 — Fixes en trie.py
 
-All analysis in this document uses **real Binance data**:
-- Symbol: BTC/USDT
-- Timeframe: 1h
-- Candles: 10,000 (2025-04-21 to 2026-06-12)
-- Price range: $59,396 - $126,011
-- Source: Binance API (klines endpoint)
-- Storage: Local SQLite at `~/.ppmt/ppmt.db`
-- No synthetic/mock data was used
+### Cambios aplicados
 
----
+1. **Añadido `trading_observations: int = 0`** a `PPMTTrie.__init__()`
+   - Distingue observaciones de build-time vs trading-time
+   - Permite escalar confianza para tries frescos
 
-## 6. Historical Decision Log
+2. **Añadido `propagate_metadata()`** a `PPMTTrie`
+   - Propaga metadata desde hojas hasta la raíz
+   - Agrega: historical_count, win_rate, expected_move_pct, max_drawdown_pct, max_favorable_pct, avg_duration, continuation_nodes
+   - Los nodos internos ahora tienen estadísticas significativas
 
-| Version | Decision | Rationale | Result |
-|---------|----------|-----------|--------|
-| v0.2.8 | No catastrophic protection | Let trades breathe | +1578% P&L |
-| v0.2.9 | Pattern break grace=2 | Avoid noise exits | Improved stability |
-| v0.2.10 | Catastrophic 5%, tight trailing | "Improve" risk management | P&L dropped to +371% |
-| v0.3.0 | Reverted to v0.2.8 baseline | v0.2.10 was worse | P&L recovered |
-| v0.4.1 | min_confidence=0.15 | Filter low-quality signals | P&L dropped from +3665% to +347% |
-| v0.4.2 | Reverted min_confidence=0.10 | v0.4.1 was worse | P&L recovered |
-| v0.5.2 | SHORT gate 1.2x (was 1.5x) | Balance LONG/SHORT distribution | More balanced |
-| **v0.6.2** | **OHLCV alpha=3-4 recommended** | **alpha=10 has 98% miss rate** | **Pending user decision** |
+3. **Añadido `_propagate_node()`** helper recursivo
+   - Los nodos HOJA retornan su propia metadata
+   - Los nodos INTERNOS agregan la de sus hijos con promedios ponderados
+   - Las observaciones PROPIAS del nodo tienen precedencia
 
-**Key Pattern**: Every time we tried to "improve" filtering (higher thresholds, tighter stops), it made results worse. The system works best with LOW thresholds and HIGH data quality. The real fix is always better data/encoding, not stricter filters.
+4. **Actualizado `to_dict()` y `from_dict()`** para `trading_observations`
+
+### Pendiente en trie.py
+- BlockLifecycleMetadata carece de campos de regime tracking
+- Falta integración con RegimeDetector
 
 ---
 
-## 7. Test Infrastructure Status
+## Pendientes (Backlog)
 
-- **No tests exist yet** in the `tests/` directory for the PPMT engine
-- All current analysis was done via ad-hoc diagnostic scripts
-- Need: Integration tests using real Binance data
-- Need: OOS validation framework (build on 80%, test on 20%)
-- Need: Cross-token validation (BTC, ETH, SOL, etc.)
+| # | Tarea | Prioridad | Estado |
+|---|---|---|---|
+| 1 | Fix composite OHLCV (multiplicativo → aditivo) | ALTA | Pendiente |
+| 2 | Copiar regime.py de ppmt/ppmt/ a src/ppmt/core/ | ALTA | Pendiente |
+| 3 | Añadir regime tracking a BlockLifecycleMetadata | MEDIA | Pendiente |
+| 4 | Rediseñar SHORT confidence gate (regime-aware) | MEDIA | Pendiente |
+| 5 | Re-habilitar catastrophic_loss_pct con hard stop 8% | MEDIA | Pendiente |
+| 6 | Sincronizar directorios duplicados | BAJA | Pendiente |
+| 7 | Tests no-distorsionantes con datos reales (Binance) | ALTA | Pendiente |
+| 8 | Validación OOS cross-token (4 niveles) | ALTA | Pendiente |
+| 9 | Testear alphabet_sizes 3-8 con datos reales | ALTA | Pendiente |
+| 10 | Añadir breakpoints adaptativos (empirical quantiles) | MEDIA | Pendiente (V0.6.3) |
+| 11 | Multi-feature encoding (body/wick/volume separados) | MEDIA | Pendiente (V0.7) |
+
+---
+
+## Principios del Proyecto
+
+1. **Solo datos reales** — Nunca datos sintéticos. Siempre Binance.
+2. **Repo local + DB local** — Sin dependencias externas persistentes
+3. **Trazabilidad** — Todo cambio documentado aquí
+4. **GitHub** — Commit después de cada paso
+5. **Information × Repetition** — Métrica guía, no maximizar match rate

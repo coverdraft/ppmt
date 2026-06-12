@@ -103,11 +103,23 @@ class SAXEncoder:
             return ((df["high"] + df["low"] + df["close"]) / 3.0).values.astype(float)
 
         elif self.strategy == "ohlcv":
-            # Weighted composite capturing candlestick body, wicks, and volume
-            # Body: |C - O| / range (relative body size)
-            # Direction: sign(C - O)
-            # Wick ratio: (H - max(O,C)) / range and (min(O,C) - L) / range
-            # Volume: normalized volume change
+            # Additive composite capturing candlestick body, wicks, and volume.
+            #
+            # V0.6.2 FIX: Replaced multiplicative composite with additive.
+            #
+            # The previous formula `body_center * direction * vol_ratio` was
+            # DEGENERATE: when direction ≈ 0 (small-body candles, 60%+ of data),
+            # the entire composite collapsed to ~0, destroying body position and
+            # volume information. After z-scoring, 92.5% of symbols mapped to
+            # the middle symbol, producing near-zero information.
+            #
+            # The additive formula preserves all three features independently:
+            #   - body_position (0.4 weight): WHERE in the range the body sits
+            #   - direction (0.35 weight): WHICH WAY the candle moved
+            #   - volume_signal (0.25 weight): HOW MUCH volume vs normal
+            #
+            # The resulting distribution is near-Gaussian, which matches the
+            # SAX breakpoint assumptions and produces well-distributed symbols.
             o = df["open"].values.astype(float)
             h = df["high"].values.astype(float)
             l = df["low"].values.astype(float)
@@ -118,24 +130,40 @@ class SAXEncoder:
             rng = h - l
             rng = np.where(rng == 0, 1e-10, rng)
 
-            # Body center relative to range: (C+O)/2 - L / range → [0, 1]
-            body_center = ((c + o) / 2.0 - l) / rng
+            # Feature 1: Body position within range (0 to 1, ~0.5 for doji)
+            # Captures WHERE the candle body sits relative to the full range.
+            # A value near 0 = body near the low, near 1 = body near the high.
+            body_position = ((c + o) / 2.0 - l) / rng
 
-            # Direction: -1 to +1
+            # Feature 2: Direction strength (-1 to +1)
+            # Captures both direction AND body size.
+            # Near 0 = small body (doji), near ±1 = large body in one direction.
             direction = (c - o) / rng
 
-            # Volume weight: relative to rolling mean
-            # Use adaptive window size to avoid convolve shape mismatch
+            # Feature 3: Relative volume signal (normalized to ~0-1 range)
+            # Captures whether this candle had above/below average volume.
             vol_window = min(20, len(v))
             if vol_window > 0 and len(v) > 0:
                 vol_mean = np.convolve(v, np.ones(vol_window) / vol_window, mode="same")
                 vol_mean = np.where(vol_mean == 0, 1.0, vol_mean)
                 vol_ratio = np.clip(v / vol_mean, 0.5, 2.0)
+                # Normalize to [0, 1]: vol_ratio 0.5→0.0, 1.0→0.33, 2.0→1.0
+                vol_signal = (vol_ratio - 0.5) / 1.5
             else:
-                vol_ratio = np.ones_like(v)
+                vol_signal = np.full_like(v, 0.33)
 
-            # Composite: body_center * direction * vol_ratio
-            composite = body_center * direction * (0.5 + 0.5 * vol_ratio)
+            # Additive composite: preserves all three features independently.
+            # Weights prioritize body position (most stable) and direction
+            # (most predictive), with volume as confirming signal.
+            # Range: body_position [0,1] × 0.4 = [0, 0.4]
+            #        direction [-1,1] × 0.35 = [-0.35, 0.35]
+            #        vol_signal [0,1] × 0.25 = [0, 0.25]
+            # Total range: [-0.35, 1.0], near-Gaussian after z-scoring
+            composite = (
+                body_position * 0.4
+                + direction * 0.35
+                + vol_signal * 0.25
+            )
             return composite
 
         else:
