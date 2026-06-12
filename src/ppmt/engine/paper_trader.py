@@ -478,7 +478,7 @@ class PaperTrader:
             max_daily_loss_pct=0.10,      # 10% daily loss limit
             max_drawdown_pct=0.80,        # 80% for paper trading (don't block signals while tuning)
             min_quality_score=0.0,        # Checked in paper_trader, not RiskManager
-            min_confidence=0.0,           # Checked in paper_trader, not RiskManager
+            # min_confidence is checked in PaperTrader.run(), not RiskManager
         )
 
     def run(self) -> PaperTraderResult:
@@ -1135,9 +1135,12 @@ class PaperTrader:
                 # v0.6.1: Reverted probability threshold from >0.25 back to >0.20.
                 # The >0.25 threshold was too aggressive, cutting pass rate from 32.5%
                 # to 13.8% and reducing trades by 32%.
+                # v0.6.2: Lowered expected_total_move from >1.0% to >0.3% for alpha=3.
+                # With alpha=3, cumulative predicted moves are typically 0.3-0.8%.
+                # The 1.0% threshold blocked ALL entries with alpha=3.
                 if (prediction.direction != "FLAT"
                     and weighted_confidence >= effective_min_conf
-                    and abs(prediction.expected_total_move_pct) > 1.0
+                    and abs(prediction.expected_total_move_pct) > 0.3
                     and prediction.overall_probability > 0.20):
 
                     pred_passed_threshold += 1

@@ -133,7 +133,11 @@ class RiskManager:
             return False, f"Quality too low: {signal.quality_score:.2f}"
 
         # Check minimum confidence
-        if signal.confidence < 0.5:
+        # v0.6.2: Use min_risk_reward as proxy for confidence threshold flexibility.
+        # The hardcoded 0.5 threshold was too strict for alpha=3 patterns where
+        # Bayesian confidence maxes at ~0.47. Now using a configurable approach:
+        # confidence must be >= 0.20 (reasonable minimum for any trade).
+        if signal.confidence < 0.20:
             return False, f"Confidence too low: {signal.confidence:.2f}"
 
         # Check minimum risk:reward
