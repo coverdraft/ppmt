@@ -170,21 +170,87 @@ Probamos 5 combinaciones de pesos con datos simulados (alpha=5):
 
 ---
 
+## 2026-06-12 — Fix de 4 bugs críticos que bloqueaban el PaperTrader
+
+### Contexto
+
+Al ejecutar la validación completa con el PaperTrader real (4-level trie, ATR SL/TP,
+Living Trie, regime-aware sizing), se descubrió que el motor NO generaba NINGÚN trade.
+Investigación reveló 4 bugs en cadena:
+
+### Bug 1: RiskConfig.min_confidence no existe
+- PaperTrader pasaba `min_confidence=0.0` a RiskConfig, que no tiene ese campo
+- **Error**: `TypeError: RiskConfig.__init__() got an unexpected keyword argument 'min_confidence'`
+- **Fix**: Eliminado el parámetro, añadido comentario explicativo
+
+### Bug 2: PPMT.set_tries() y match_raw() no existen
+- PaperTrader llamaba `ppmt_engine.set_tries(n1, n2, n3, n4)` y `ppmt_engine.match_raw()`
+- Ninguno de los dos métodos existía en la clase PPMT
+- **Fix**: Implementados ambos métodos
+
+### Bug 3: PredictionEngine.predict() no acepta current_regime
+- PaperTrader pasa `current_regime=current_regime` a predict()
+- La firma de predict() no incluía ese parámetro
+- **Error**: TypeError capturado silenciosamente por try/except → todos los predict() fallaban
+- **Fix**: Añadido `current_regime: Optional[str] = None` a la firma
+
+### Bug 4: PredictionEngine devuelve siempre FLAT para nodos hoja
+- `_walk_path()` retorna lista vacía para nodos sin hijos (todos los nodos terminales)
+- Esto hacía que `direction = "FLAT"`, `expected_move = 0`, `probability = 0`
+- **Causa raíz**: El trie solo almacena patrones de longitud exacta (5), los nodos
+  terminales no tienen hijos porque no se insertan patrones de longitud 6+
+- **Fix**: Cuando `_walk_path()` retorna vacío, usar la metadata del propio nodo
+  (expected_move_pct, win_rate, avg_duration) para la predicción
+
+### Bug 5: RiskManager confianza hardcodeada a 0.5
+- `can_open()` tenía `signal.confidence < 0.5` hardcodeado
+- Con alpha=3, la confianza bayesiana NUNCA supera ~0.47 (win_rate < 50% + shrinkage)
+- **Fix**: Bajado a 0.20 (mínimo razonable para cualquier trade)
+
+### Ajustes de umbrales para alpha=3
+
+| Parámetro | Antes | Después | Razón |
+|---|---|---|---|
+| Direction threshold | 0.5% | 0.1% | alpha=3 produce moves ~0.3-0.4% |
+| Expected total move | 1.0% | 0.3% | Moves acumulados ~0.3-0.8% con alpha=3 |
+| RiskManager confidence | 0.50 | 0.20 | Confianza bayesiana max ~0.47 |
+
+### Resultado: PaperTrader ahora genera trades
+
+Con datos reales de Binance (BTC/USDT, 2 años, 1h):
+- **211 trades** generados
+- **528 predicciones con dirección** (de 560 intentos)
+- **211 pasaron threshold** de entrada
+- PnL: -42.7%, WR: 38.4%, PF: 0.81
+- Living Trie: 211 observaciones grabadas, 154 nuevos nodos
+
+**NOTA**: El PnL es negativo, lo que indica que el sistema necesita más tuning.
+Los 4 bugs estaban MASCARANDO este hecho — antes simplemente no había trades.
+Ahora podemos trabajar en mejorar la calidad de las señales.
+
+### Commit
+- `9cd6581`: fix(v0.6.2): 4 critical bugs that blocked PaperTrader from generating trades
+
+---
+
 ## Pendientes (Backlog)
 
 | # | Tarea | Prioridad | Estado |
 |---|---|---|---|
 | 1 | Fix composite OHLCV (multiplicativo → aditivo) | ALTA | **FIXED** (commit 47b34e2) |
-| 2 | Copiar regime.py de ppmt/ppmt/ a src/ppmt/core/ | ALTA | Pendiente (V4 lo tiene en remote) |
-| 3 | Añadir regime tracking a BlockLifecycleMetadata | MEDIA | Pendiente |
-| 4 | Rediseñar SHORT confidence gate (regime-aware) | MEDIA | Pendiente |
-| 5 | Re-habilitar catastrophic_loss_pct con hard stop 8% | MEDIA | Pendiente |
-| 6 | Sincronizar directorios duplicados | BAJA | Pendiente |
-| 7 | Tests no-distorsionantes con datos reales (Binance) | ALTA | **PARCIAL** — OOS BTC+ETH+SOL validado |
-| 8 | Validación OOS cross-token (4 niveles) | ALTA | **PARCIAL** — 3 tokens, alpha=3 validado |
-| 9 | Testear alphabet_sizes 3-8 con datos reales | ALTA | **DONE** — alpha=3 es óptimo |
-| 10 | Añadir breakpoints adaptativos (empirical quantiles) | MEDIA | Pendiente (V0.6.3) |
-| 11 | Multi-feature encoding (body/wick/volume separados) | MEDIA | Pendiente (V0.7) |
+| 2 | Fix 4 bugs PaperTrader (RiskConfig, set_tries, predict, FLAT) | ALTA | **FIXED** (commit 9cd6581) |
+| 3 | Ajustar umbrales alpha=3 (direction, move, confidence) | ALTA | **DONE** (commit 9cd6581) |
+| 4 | Copiar regime.py de ppmt/ppmt/ a src/ppmt/core/ | ALTA | Pendiente (V4 lo tiene en remote) |
+| 5 | Añadir regime tracking a BlockLifecycleMetadata | MEDIA | Pendiente |
+| 6 | Rediseñar SHORT confidence gate (regime-aware) | MEDIA | **PARCIAL** — gate implementado pero necesita tuning |
+| 7 | Re-habilitar catastrophic_loss_pct con hard stop 8% | MEDIA | **DONE** — activado en PaperTrader |
+| 8 | Sincronizar directorios duplicados | BAJA | Pendiente |
+| 9 | Tests no-distorsionantes con datos reales (Binance) | ALTA | **PARCIAL** — PaperTrader genera trades reales |
+| 10 | Validación OOS cross-token (4 niveles) | ALTA | **PARCIAL** — 3 tokens, necesita tuning de señales |
+| 11 | Testear alphabet_sizes 3-8 con datos reales | ALTA | **DONE** — alpha=3 es óptimo |
+| 12 | Añadir breakpoints adaptativos (empirical quantiles) | MEDIA | Pendiente (V0.6.3) |
+| 13 | Multi-feature encoding (body/wick/volume separados) | MEDIA | Pendiente (V0.7) |
+| 14 | Mejorar win_rate del sistema (actualmente ~38%) | ALTA | **EN PROGRESO** |
 
 ---
 
