@@ -110,15 +110,15 @@ Se recibió crítica externa con 4 puntos. Evaluación contra nuestra arquitectu
 
 | # | Tarea | Prioridad | Estado |
 |---|---|---|---|
-| 1 | Fix composite OHLCV (multiplicativo → aditivo) | ALTA | Pendiente |
-| 2 | Copiar regime.py de ppmt/ppmt/ a src/ppmt/core/ | ALTA | Pendiente |
+| 1 | Fix composite OHLCV (multiplicativo → aditivo) | ALTA | **FIXED** (commit 47b34e2) |
+| 2 | Copiar regime.py de ppmt/ppmt/ a src/ppmt/core/ | ALTA | Pendiente (V4 lo tiene en remote) |
 | 3 | Añadir regime tracking a BlockLifecycleMetadata | MEDIA | Pendiente |
 | 4 | Rediseñar SHORT confidence gate (regime-aware) | MEDIA | Pendiente |
 | 5 | Re-habilitar catastrophic_loss_pct con hard stop 8% | MEDIA | Pendiente |
 | 6 | Sincronizar directorios duplicados | BAJA | Pendiente |
 | 7 | Tests no-distorsionantes con datos reales (Binance) | ALTA | Pendiente |
 | 8 | Validación OOS cross-token (4 niveles) | ALTA | Pendiente |
-| 9 | Testear alphabet_sizes 3-8 con datos reales | ALTA | Pendiente |
+| 9 | Testear alphabet_sizes 3-8 con datos reales | ALTA | Pendiente (requiere datos Binance) |
 | 10 | Añadir breakpoints adaptativos (empirical quantiles) | MEDIA | Pendiente (V0.6.3) |
 | 11 | Multi-feature encoding (body/wick/volume separados) | MEDIA | Pendiente (V0.7) |
 
