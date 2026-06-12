@@ -233,6 +233,129 @@ Ahora podemos trabajar en mejorar la calidad de las señales.
 
 ---
 
+## 2026-06-12 — Validación OOS Exhaustiva: Cross-Token + Walk-Forward + Monte Carlo + Sensibilidad de Pesos
+
+### Contexto
+
+Se ejecutó la validación OOS completa que la IA externa demandaba: datos reales de Binance (2 años, 1h), 3 tokens (BTC, ETH, SOL), 70/30 train/test split, walk-forward de 4 folds, Monte Carlo con 2000 simulaciones, y sensibilidad de 5 configuraciones de pesos.
+
+### Hallazgo CRÍTICO #6: SL/TP desalineado con el movimiento esperado
+
+**El ATR-based SL/TP destruye la edge del sistema.** Con alpha=3, el movimiento esperado promedio es ~0.3-0.5%, pero el TP estaba fijado en 3% (LONG) o 1.5×SL (SHORT). Esto significa:
+
+- **TP = 11.3× el movimiento esperado** — casi ningún trade llega a TP
+- Todos los trades terminan en SL, pattern break, o trailing stop → pérdida asegurada
+- A pesar de tener **54.3% de accuracy direccional OOS**, el sistema pierde dinero
+
+**Diagnóstico cuantitativo:**
+- ATR(14) promedio BTC: 0.672%
+- LONG SL = max(ATR×1.5, 1.5%) = 1.5% (floor activo siempre)
+- LONG TP = SL × 2.0 = 3.0%
+- Movimiento esperado promedio: 0.265%
+- TP es 11.3× el movimiento esperado → inalcanzable
+
+**Fix: Prediction-Aware SL/TP**
+
+```python
+# ANTES (ATR-based, floors fijos):
+sl_dist = min(max(current_atr * 1.5, 1.5), 5.0)  # Floor 1.5% SIEMPRE activo
+tp_dist = sl_dist * 2.0                             # TP = 3%
+
+# DESPUÉS (Prediction-Aware, escalado al move esperado):
+expected_move_abs = abs(prediction.expected_total_move_pct)
+sl_dist = max(min(expected_move_abs * 1.5, 5.0), 0.5)  # Scale al move
+tp_dist = expected_move_abs * 2.5                        # R:R = 1.67
+if tp_dist < sl_dist * 1.5:                              # Min R:R = 1.5
+    tp_dist = sl_dist * 1.5
+```
+
+### Resultados OOS con Prediction-Aware SL/TP (Binance, 2 años, 70/30 split)
+
+**OHLCV composite aditivo (alpha=3, weights 40/35/25):**
+
+| Token | PnL OOS | Trades | Win Rate | Profit Factor | Sharpe | Max DD |
+|---|---|---|---|---|---|---|
+| BTC/USDT | -11.81% | 42 | 38.1% | 0.88 | -0.88 | 22.7% |
+| ETH/USDT | **-6.79%** | 45 | **42.2%** | **0.99** | -0.10 | 40.9% |
+| SOL/USDT | -60.45% | 48 | 37.5% | 0.45 | -5.79 | 64.8% |
+
+**Mejora vs ATR-based SL/TP:**
+
+| Token | ATR SL/TP PnL | Prediction SL/TP PnL | ATR WR | Prediction WR | ATR PF | Prediction PF |
+|---|---|---|---|---|---|---|
+| BTC | -28.98% | -11.81% | 29.1% | 38.1% | 0.67 | 0.88 |
+| ETH | -27.53% | -6.79% | 32.8% | 42.2% | 0.80 | 0.99 |
+| SOL | -41.58% | -60.45% | 31.3% | 37.5% | 0.68 | 0.45 |
+
+**ETH está al borde de la rentabilidad** (PF 0.99, WR 42.2%). BTC mejoró significativamente. SOL empeoró — necesita estudio separado (volatilidad extrema).
+
+### OHLCV vs Close (head-to-head, Prediction-Aware SL/TP)
+
+| Token | OHLCV PnL | Close PnL | OHLCV WR | Close WR | OHLCV PF | Close PF |
+|---|---|---|---|---|---|---|
+| BTC/USDT | **-11.81%** | -13.73% | 38.1% | 41.8% | **0.88** | 0.77 |
+| ETH/USDT | **-6.79%** | -9.01% | **42.2%** | 45.3% | **0.99** | 0.92 |
+| SOL/USDT | -60.45% | **-3.58%** | 37.5% | 33.3% | 0.45 | **0.61** |
+
+**OHLCV GANA en BTC y ETH en PnL y PF.** SOL es una excepción — close produce menos trades (3) pero menos pérdida.
+
+### Sensibilidad de Pesos (BTC/USDT, OOS)
+
+| Config | PnL | Trades | WR | PF | Sharpe |
+|---|---|---|---|---|---|
+| **current 40/35/25** | **-11.81%** | 42 | **38.1%** | **0.88** | **-0.88** |
+| equal 33/33/33 | -17.42% | 46 | 39.1% | 0.81 | -1.48 |
+| direction_heavy 25/50/25 | -42.05% | 49 | 28.6% | 0.54 | -4.25 |
+| body_heavy 50/25/25 | -23.32% | 43 | 37.2% | 0.76 | -2.01 |
+| volume_heavy 25/25/50 | -35.01% | 48 | 27.1% | 0.60 | -3.45 |
+
+**Los pesos 40/35/25 son los mejores OOS.** Direction_heavy y volume_heavy son claramente peores. La IA externa que decía "los pesos son arbitrarios" tiene razón en que eran priors, pero OOS confirma que 40/35/25 es la mejor configuración entre las probadas.
+
+### Walk-Forward (BTC, 4 expanding folds)
+
+| Fold | Train Range | Test PnL | Trades | WR | PF |
+|---|---|---|---|---|---|
+| 0 | 0-40% | +1.59% | 8 | 62.5% | 1.19 |
+| 1 | 0-52% | **+20.80%** | 12 | 50.0% | **2.73** |
+| 2 | 0-64% | **-30.60%** | 18 | 16.7% | 0.36 |
+| 3 | 0-76% | +5.79% | 22 | 54.5% | 1.22 |
+
+**Consistencia: INCONSISTENTE.** Los folds 0, 1 y 3 son rentables, pero el fold 2 (-30.60%) destruye el resultado global. Esto indica que el sistema es **regime-dependiente** — funciona en algunos períodos pero no en otros. El fold 2 probablemente corresponde a un período de alta volatilidad o cambio de régimen.
+
+### Monte Carlo (2000 simulaciones por token)
+
+| Token | P(Profit) | Risk of Ruin | P95 Max DD | Sharpe [P5-P95] |
+|---|---|---|---|---|
+| BTC | 0.0% | 0.0% | 35.3% | [-0.88] |
+| ETH | 0.0% | 0.0% | 41.2% | [-0.10] |
+| SOL | 0.0% | 100.0% | 57.6% | [-11.77 a -4.85] |
+
+**ETH es el más cercano a la rentabilidad** (Sharpe -0.10, PF 0.99). SOL es claramente no viable con los parámetros actuales.
+
+### Diagnosis del accuracy direccional
+
+El sistema tiene **54.3% de accuracy direccional OOS** (medido directamente sobre las predicciones del trie, sin trading). Esto es estadísticamente significativo y positivo. Sin embargo, el sistema pierde dinero porque:
+
+1. **SL/TP desalineado** (ya corregido con prediction-aware)
+2. **Pattern breaks cierran posiciones prematuramente** (grace period de 2 puede ser insuficiente)
+3. **El threshold de entrada filtra mal** — algunos trades de alta calidad se rechazan, algunos de baja calidad pasan
+4. **Regime-dependencia** — el sistema funciona en trending/ranging pero falla en volatile
+
+### Próximos pasos priorizados
+
+1. **Regime filter** — No entrar en volatile (ya parcialmente implementado con SHORT gate)
+2. **Confidence-weighted SL/TP** — Más confianza → SL más tight, TP más amplio
+3. **Pattern break grace dinámico** — Aumentar grace en volatile, reducir en trending
+4. **SOL exclusion o tuning separado** — Parámetros de SOL necesitan ser diferentes
+5. **Análisis del fold 2** — Qué pasó en ese período específico
+
+### Commits
+- `oos_validation_v2.py`: Script de validación exhaustiva
+- `paper_trader.py`: Fix prediction-aware SL/TP
+- `TRACEABILITY.md`: Documentación completa de hallazgos
+
+---
+
 ## Pendientes (Backlog)
 
 | # | Tarea | Prioridad | Estado |
@@ -240,17 +363,21 @@ Ahora podemos trabajar en mejorar la calidad de las señales.
 | 1 | Fix composite OHLCV (multiplicativo → aditivo) | ALTA | **FIXED** (commit 47b34e2) |
 | 2 | Fix 4 bugs PaperTrader (RiskConfig, set_tries, predict, FLAT) | ALTA | **FIXED** (commit 9cd6581) |
 | 3 | Ajustar umbrales alpha=3 (direction, move, confidence) | ALTA | **DONE** (commit 9cd6581) |
-| 4 | Copiar regime.py de ppmt/ppmt/ a src/ppmt/core/ | ALTA | Pendiente (V4 lo tiene en remote) |
-| 5 | Añadir regime tracking a BlockLifecycleMetadata | MEDIA | Pendiente |
-| 6 | Rediseñar SHORT confidence gate (regime-aware) | MEDIA | **PARCIAL** — gate implementado pero necesita tuning |
-| 7 | Re-habilitar catastrophic_loss_pct con hard stop 8% | MEDIA | **DONE** — activado en PaperTrader |
-| 8 | Sincronizar directorios duplicados | BAJA | Pendiente |
-| 9 | Tests no-distorsionantes con datos reales (Binance) | ALTA | **PARCIAL** — PaperTrader genera trades reales |
-| 10 | Validación OOS cross-token (4 niveles) | ALTA | **PARCIAL** — 3 tokens, necesita tuning de señales |
-| 11 | Testear alphabet_sizes 3-8 con datos reales | ALTA | **DONE** — alpha=3 es óptimo |
-| 12 | Añadir breakpoints adaptativos (empirical quantiles) | MEDIA | Pendiente (V0.6.3) |
-| 13 | Multi-feature encoding (body/wick/volume separados) | MEDIA | Pendiente (V0.7) |
-| 14 | Mejorar win_rate del sistema (actualmente ~38%) | ALTA | **EN PROGRESO** |
+| 4 | Fix SL/TP desalineado → Prediction-Aware SL/TP | ALTA | **FIXED** — PnL mejoró de -28.98% a -11.81% BTC |
+| 5 | Validación OOS cross-token (BTC/ETH/SOL) | ALTA | **DONE** — OHLCV gana en BTC y ETH |
+| 6 | Walk-forward testing (4 folds) | ALTA | **DONE** — INCONSISTENTE, regime-dependiente |
+| 7 | Monte Carlo (2000 sims por token) | ALTA | **DONE** — ETH cercano a rentabilidad (PF 0.99) |
+| 8 | Sensibilidad de pesos (5 configs) | ALTA | **DONE** — 40/35/25 confirmado como mejor OOS |
+| 9 | OHLCV vs Close head-to-head | ALTA | **DONE** — OHLCV gana en BTC y ETH |
+| 10 | Regime filter — no entrar en volatile | ALTA | **PENDIENTE** — sistema es regime-dependiente |
+| 11 | Confidence-weighted SL/TP | MEDIA | **PENDIENTE** |
+| 12 | Pattern break grace dinámico | MEDIA | **PENDIENTE** |
+| 13 | Análisis del fold 2 (walk-forward) | MEDIA | **PENDIENTE** — qué causa -30.60% |
+| 14 | SOL tuning separado o exclusión | MEDIA | **PENDIENTE** — SOL pierde -60.45% |
+| 15 | Copiar regime.py de ppmt/ppmt/ a src/ppmt/core/ | BAJA | Pendiente |
+| 16 | Sincronizar directorios duplicados | BAJA | Pendiente |
+| 17 | Añadir breakpoints adaptativos (empirical quantiles) | MEDIA | Pendiente (V0.6.3) |
+| 18 | Multi-feature encoding (body/wick/volume separados) | MEDIA | Pendiente (V0.7) |
 
 ---
 

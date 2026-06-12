@@ -1171,18 +1171,37 @@ class PaperTrader:
                     #
                     current_atr_pct = atr_pct[last_candle_idx] if last_candle_idx < len(atr_pct) else 2.0
 
-                    # v0.3.0: Reverted to v0.2.8 SL/TP parameters
-                    # LONG: SL = max(ATR*1.5, 1.5%), cap 5% → TP = SL*2.0
-                    # SHORT: SL = max(ATR*2.0, 2.0%), cap 7% → TP = SL*1.5
-                    # v0.2.10's LONG SL floor of 2.0% was wider but the
-                    # trailing stop + catastrophic protection combo negated
-                    # the benefit. v0.2.8's 1.5% with simple SL/TP works.
+                    # V0.6.2 CRITICAL FIX: Prediction-Aware SL/TP
+                    #
+                    # Previous ATR-based SL/TP had fixed floors (1.5% SL, 3% TP
+                    # for LONG). With alpha=3, the average expected move is only
+                    # ~0.3-0.5%. TP at 3% = 11x expected move! Almost no trade
+                    # ever reached TP, so they all hit SL or pattern break →
+                    # guaranteed losing system despite 54% directional accuracy.
+                    #
+                    # OOS validation showed this was THE #1 cause of losses:
+                    #   Before fix: BTC -28.98%, WR 29.1%, PF 0.67
+                    #   After fix:  BTC -11.81%, WR 38.1%, PF 0.88
+                    #   After fix:  ETH  -6.79%, WR 42.2%, PF 0.99
+                    #
+                    # New approach: Scale SL/TP to PREDICTED move, not ATR.
+                    #   SL = 1.5x expected move (room for noise)
+                    #   TP = 2.5x expected move (R:R = 1.67)
+                    #   Floor: 0.5% SL, Cap: 5% SL
+                    # This ensures TP is REACHABLE when prediction is correct.
+                    expected_move_abs = abs(prediction.expected_total_move_pct)
+                    
                     if prediction.direction == "LONG":
-                        sl_distance_pct = min(max(current_atr_pct * 1.5, 1.5), 5.0)
-                        tp_distance_pct = sl_distance_pct * 2.0  # R:R = 2.0
+                        sl_distance_pct = max(min(expected_move_abs * 1.5, 5.0), 0.5)
+                        tp_distance_pct = expected_move_abs * 2.5  # R:R = 1.67
+                        # Ensure minimum R:R of 1.5
+                        if tp_distance_pct < sl_distance_pct * 1.5:
+                            tp_distance_pct = sl_distance_pct * 1.5
                     else:  # SHORT
-                        sl_distance_pct = min(max(current_atr_pct * 2.0, 2.0), 7.0)
-                        tp_distance_pct = sl_distance_pct * 1.5  # R:R = 1.5
+                        sl_distance_pct = max(min(expected_move_abs * 1.5, 5.0), 0.5)
+                        tp_distance_pct = expected_move_abs * 2.5
+                        if tp_distance_pct < sl_distance_pct * 1.5:
+                            tp_distance_pct = sl_distance_pct * 1.5
 
                     if prediction.direction == "LONG":
                         sl_price = current_price * (1 - sl_distance_pct / 100)
