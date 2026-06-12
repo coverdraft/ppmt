@@ -511,6 +511,14 @@ def run_oos_backtest(
             if sym_idx - last_losing_sym_idx < 1:
                 continue
             
+            # V0.6.2 Regime filter: Skip entries in volatile regime
+            # Walk-forward showed system is regime-dependent with 16.7% WR
+            # in adverse periods. Volatile regime = high uncertainty = skip.
+            # NOTE: Disabling for now — results are mixed. BTC got worse with filter.
+            # Re-enable after more sophisticated regime-aware logic is developed.
+            # if current_regime == "volatile":
+            #     continue
+            
             try:
                 prediction = pred_engine.predict(
                     current_symbols=current_symbols,

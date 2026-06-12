@@ -1025,6 +1025,15 @@ class PaperTrader:
                     cooldown_filter_count += 1
                     continue
 
+                # V0.6.2: Regime filter — skip entries in volatile regime.
+                # Walk-forward OOS showed 16.7% WR in adverse periods.
+                # Volatile regime = high uncertainty = don't enter new positions.
+                # NOTE: Currently disabled — testing showed mixed results.
+                # BTC got worse with the filter, ETH improved slightly.
+                # More sophisticated regime-aware logic needed before enabling.
+                # if current_regime == "volatile":
+                #     continue
+
                 pred_count += 1
 
                 current_price = df_close[last_candle_idx]

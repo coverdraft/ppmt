@@ -343,7 +343,7 @@ El sistema tiene **54.3% de accuracy direccional OOS** (medido directamente sobr
 
 ### Próximos pasos priorizados
 
-1. **Regime filter** — No entrar en volatile (ya parcialmente implementado con SHORT gate)
+1. **Regime filter** — No entrar en volatile (ya parcialmente implementado con SHORT gate). NOTA: Test inicial del regime filter dio resultados mixtos — BTC empeoró de -11.81% a -29.23%, ETH mejoró de -6.79% a -5.08% (PF 1.01, WR 46.5%, Sharpe +0.05!). Se necesita lógica más sofisticada.
 2. **Confidence-weighted SL/TP** — Más confianza → SL más tight, TP más amplio
 3. **Pattern break grace dinámico** — Aumentar grace en volatile, reducir en trending
 4. **SOL exclusion o tuning separado** — Parámetros de SOL necesitan ser diferentes
