@@ -197,6 +197,7 @@ class PredictionEngine:
         entry_price: Optional[float] = None,
         timeframe_hours: float = 1.0,
         symbol: str = "",
+        current_regime: Optional[str] = None,
     ) -> Prediction:
         """
         Generate a prediction from the current pattern position.
@@ -238,7 +239,11 @@ class PredictionEngine:
             overall_prob = main_path[-1].cumulative_probability if main_path else 0.0
             total_move = main_path[-1].cumulative_move_pct if main_path else 0.0
             total_candles = main_path[-1].total_candles_remaining if main_path else 0
-            direction = "LONG" if total_move > 0.5 else "SHORT" if total_move < -0.5 else "FLAT"
+            # v0.6.2: Lowered direction threshold from 0.5% to 0.1%
+            # With alpha=3, expected moves are ~0.3-0.4% — the 0.5% threshold
+            # made ALL predictions FLAT, producing 0 trades. Alpha=3 captures
+            # coarser but more frequent patterns with smaller individual moves.
+            direction = "LONG" if total_move > 0.1 else "SHORT" if total_move < -0.1 else "FLAT"
 
             # Pattern break probability = 1 - probability of any continuation
             if node.metadata.historical_count > 0:
@@ -250,6 +255,17 @@ class PredictionEngine:
                 pattern_break_prob = 1.0 - (continuation_count / node.metadata.historical_count)
             else:
                 pattern_break_prob = 1.0
+        elif node.metadata and node.metadata.historical_count > 0:
+            # v0.6.2 FIX: When the terminal node has NO children (leaf node),
+            # use the node's own metadata for direction and move prediction.
+            # Previously, _walk_path() returned empty for leaf nodes, causing
+            # ALL predictions to be FLAT with 0 confidence and 0 move.
+            # This was the root cause of "0 trades" in the PaperTrader.
+            total_move = node.metadata.expected_move_pct
+            total_candles = node.metadata.avg_duration
+            direction = "LONG" if total_move > 0.1 else "SHORT" if total_move < -0.1 else "FLAT"
+            overall_prob = node.metadata.win_rate  # Use win_rate as proxy for probability
+            pattern_break_prob = 1.0  # Leaf node = no known continuation
 
         # Compute price levels
         predicted_target = None

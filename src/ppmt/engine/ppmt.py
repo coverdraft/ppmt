@@ -172,6 +172,72 @@ class PPMT:
         }
         return profile_map.get(asset_class, "default")
 
+    @staticmethod
+    def _detect_simple_regime(window_df: pd.DataFrame) -> str:
+        """
+        Detect simple market regime from a window of OHLCV data.
+
+        Uses price direction and volatility to classify the window:
+        - trending_up: Strong upward move with low relative volatility
+        - trending_down: Strong downward move with low relative volatility
+        - volatile: High volatility regardless of direction
+        - ranging: Low volatility, no clear direction
+
+        This is intentionally simple — the full RegimeDetector is available
+        for production use. This gives the trie enough regime info to
+        make V4 regime-aware features work.
+        """
+        if len(window_df) < 2:
+            return "ranging"
+
+        entry = window_df["close"].iloc[0]
+        exit_price = window_df["close"].iloc[-1]
+        high = window_df["high"].max()
+        low = window_df["low"].min()
+
+        # Direction
+        move_pct = (exit_price - entry) / entry if entry > 0 else 0.0
+
+        # Volatility: range as % of entry
+        if entry > 0:
+            volatility = (high - low) / entry
+        else:
+            volatility = 0.0
+
+        # Classify
+        if volatility > 0.08:  # 8%+ range = volatile
+            return "volatile"
+        elif move_pct > 0.02:  # 2%+ up = trending up
+            return "trending_up"
+        elif move_pct < -0.02:  # 2%+ down = trending down
+            return "trending_down"
+        else:
+            return "ranging"
+
+    def set_tries(
+        self,
+        trie_n1: PPMTTrie,
+        trie_n2: PPMTTrie,
+        trie_n3: PPMTTrie,
+        trie_n4: PPMTTrie,
+    ) -> None:
+        """
+        Inject pre-built Tries into the engine.
+
+        Used by PaperTrader to load serialized Tries from storage
+        instead of building new ones from scratch.
+
+        Args:
+            trie_n1: Universal Trie
+            trie_n2: Asset Class Trie
+            trie_n3: Per-Asset Trie
+            trie_n4: Per-Asset+Regime Trie
+        """
+        self.trie_n1 = trie_n1
+        self.trie_n2 = trie_n2
+        self.trie_n3 = trie_n3
+        self.trie_n4 = trie_n4
+
     def set_regime(self, regime: str) -> None:
         """Set the current market regime for N4 Trie selection."""
         self._current_regime = regime
@@ -226,6 +292,10 @@ class PPMT:
             duration = len(window_df)
             won = move_pct > 0  # Simple: positive move = win
 
+            # V4 FIX: Detect simple regime from price action for this window
+            # This pipes regime into insert_with_observations (was dead code before)
+            regime = self._detect_simple_regime(window_df)
+
             # Insert into all 4 levels
             for trie in [self.trie_n1, self.trie_n2, self.trie_n3, self.trie_n4]:
                 trie.insert_with_observations(
@@ -236,12 +306,72 @@ class PPMT:
                     duration=duration,
                     won=won,
                     next_symbol=next_sym,
+                    regime=regime,
                 )
 
             count += 1
 
         self._total_patterns_built += count
         return count
+
+    def match_raw(
+        self,
+        current_symbols: list[str],
+        current_price: float = 0.0,
+    ) -> PPMTResult:
+        """
+        Raw 4-level match without signal generation.
+
+        Used by PaperTrader to compute weighted confidence across all
+        4 trie levels. Returns match results with confidence values
+        but does NOT generate a trading signal (that's done by the
+        PaperTrader's own entry logic).
+
+        Args:
+            current_symbols: Current SAX symbol sequence
+            current_price: Current market price (unused, for compatibility)
+
+        Returns:
+            PPMTResult with match details and weighted confidence
+        """
+        start_time = time.perf_counter()
+
+        # Search all 4 levels
+        n1_match = self.matcher.best_match(self.trie_n1, current_symbols)
+        n2_match = self.matcher.best_match(self.trie_n2, current_symbols)
+        n3_match = self.matcher.best_match(self.trie_n3, current_symbols)
+        n4_match = self.matcher.best_match(self.trie_n4, current_symbols)
+
+        # Get confidence from each level
+        n1_conf = n1_match.node.metadata.confidence if n1_match.node else 0.0
+        n2_conf = n2_match.node.metadata.confidence if n2_match.node else 0.0
+        n3_conf = n3_match.node.metadata.confidence if n3_match.node else 0.0
+        n4_conf = n4_match.node.metadata.confidence if n4_match.node else 0.0
+
+        # Compute weighted confidence
+        weighted_conf = self.weights.compute_weighted_confidence(
+            n1_confidence=n1_conf,
+            n2_confidence=n2_conf,
+            n3_confidence=n3_conf,
+            n4_confidence=n4_conf,
+        )
+
+        search_time = (time.perf_counter() - start_time) * 1000.0
+
+        return PPMTResult(
+            signal=Signal(signal_type=SignalType.NO_SIGNAL, symbol=self.symbol),
+            n1_match=n1_match,
+            n2_match=n2_match,
+            n3_match=n3_match,
+            n4_match=n4_match,
+            n1_confidence=n1_conf,
+            n2_confidence=n2_conf,
+            n3_confidence=n3_conf,
+            n4_confidence=n4_conf,
+            weighted_confidence=weighted_conf,
+            sax_symbols=current_symbols,
+            search_time_ms=search_time,
+        )
 
     def match(
         self,

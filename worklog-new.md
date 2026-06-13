@@ -1336,3 +1336,313 @@ Stage Summary:
 - SHORT multiplier reduced for better LONG/SHORT balance
 - Commit: 18e0f9d "v0.5.2: Loosen entry filters for window=5 regime"
 - PENDING: User needs to git pull, pip3 install -e ., and test with --force
+
+---
+Task ID: v0.5.3-merge
+Agent: Main
+Task: First merge cycle — ppmt build without --force to preserve Living Trie metadata
+
+Work Log:
+
+USER TEST:
+- `ppmt build -s BTC/USDT && ppmt run --symbol BTC/USDT --paper` (NO --force)
+- Living Trie detected: existing N3 has 3222 patterns vs 3136 new
+- Merged: 0 new patterns, 3915 merged, 25837 observations added
+- N3 Trie: 3222 → 4001 patterns
+- Bootstrap: pass 1/2: 600 trades, WR 44.2%; pass 2/2: 551 trades, WR 47.5%
+- 2821 trading observations — metadata quality: good
+
+v0.5.3 MERGE PAPER TRADING RESULTS:
+- Capital: $10,000.00 → $450,090.12 (+4400.90%)
+- Trades: 598 (W:323 L:275)
+- Win Rate: 54.0%
+- Profit Factor: 1.56
+- Max DD: 25.6%
+- Sharpe: 3.08
+- Avg Trade: +0.86%
+- Best Trade: +17.46%
+- Worst Trade: -12.89%
+- Avg Confidence: 23.8%
+- Avg Quality: 0.18
+- Prediction stats: 1429 attempts, 1233 with direction, 661 passed threshold
+- Risk rejections: Daily loss limit reached: 63
+- Living Trie: 598 observations, 215 new nodes, 19 metadata propagations
+- Trie growth: 4001 → 4216 patterns (+215 new patterns discovered)
+
+COMPARISON — v0.5.3 --force vs v0.5.3 merge:
+
+| Metric | v0.5.3 --force | v0.5.3 Merge | Improvement |
+|--------|---------------|-------------|-------------|
+| Trades | 519 | 598 | +79 (+15%) |
+| WR | 50.5% | 54.0% | +3.5pp |
+| P&L | +1434% | +4401% | +2967pp |
+| Sharpe | 2.27 | 3.08 | +0.81 |
+| Max DD | 29.2% | 25.6% | -3.6pp |
+| Profit Factor | 1.38 | 1.56 | +0.18 |
+| Avg Confidence | 21.5% | 23.8% | +2.3pp |
+| Patterns | 3222 | 4001 | +779 |
+| Trading Obs | 1151 | 2821 | +1670 |
+
+KEY INSIGHTS:
+1. Merge is 3x better P&L than --force — Living Trie metadata is EVERYTHING
+2. More trades (598 vs 519) because richer Trie finds more valid patterns
+3. Higher WR (54.0% vs 50.5%) because predictions are calibrated with real trading data
+4. More SHORT trades winning — many visible in trade list
+5. Worst trade -12.89% (vs -9.79% with --force) — larger loss but overall better risk profile
+6. Avg confidence 23.8% means predictions are meaningfully better
+
+REMAINING GAPS vs TARGET:
+- Trades: 598 vs 960+ target (need +362 more)
+- WR: 54.0% vs 60%+ target (need +6pp more)
+- P&L: +4401% vs 1400%+ target (MET ✅✅✅)
+
+NEXT STEP: Second merge cycle — each cycle accumulates more Living Trie metadata.
+v0.3.1 showed that with enough cycles, merged build reached 64.8% WR and +37,397% P&L.
+
+COMPLETE RESULTS HISTORY (updated):
+
+| Version | Build Method | Trades | WR | P&L | Sharpe | Max DD |
+|---------|-------------|--------|------|------|--------|--------|
+| v0.4.0 | build+bootstrap+merge | 601 | 53.1% | +3665% | 2.80 | 22.9% |
+| v0.4.1 | build+bootstrap+merge | 566 | 46.6% | +347.7% | 0.88 | 44.3% |
+| v0.4.2 | build+bootstrap+merge | 627 | 48.2% | +665.6% | 1.51 | 35.9% |
+| v0.5.0 | 2-pass bootstrap, no merge | 519 | 50.5% | +1434% | 2.27 | 29.2% |
+| v0.5.1 | 3-pass, --force | 83 | 59.0% | +14.18% | 0.62 | 17.9% |
+| v0.5.1 | 3-pass, merge | 263 | 49.8% | +20.50% | 0.78 | 21.4% |
+| v0.5.2 | 5-pass, --force | 628 | 48.9% | -29.52% | -0.30 | 40.7% |
+| v0.5.3 | 2-pass, --force (reverted) | 519 | 50.5% | +1434% | 2.27 | 29.2% |
+| **v0.5.3** | **2-pass, MERGE (1st cycle)** | **598** | **54.0%** | **+4401%** | **3.08** | **25.6%** |
+
+Stage Summary:
+- v0.5.3 merge = BEST RESULT with current baseline code
+- 3x P&L improvement over --force by preserving Living Trie metadata
+- Merge cycle working: each iteration accumulates more metadata
+- P&L target EXCEEDED (+4401% >> 1400%), WR improving (54.0% → need 60%+)
+- Next: continue iterative merge cycles to push WR toward 60%+ and trades toward 960+
+
+---
+Task ID: v0.5.3-merge-cycle2
+Agent: Main
+Task: Second merge cycle — REGRESSION, bootstrap observations poisoning Living Trie
+
+Work Log:
+
+USER TEST:
+- `ppmt build -s BTC/USDT && ppmt run --symbol BTC/USDT --paper` (2nd merge cycle, no --force)
+- Living Trie detected: existing N3 has 4216 patterns vs 3136 new
+- Merged: 0 new patterns, 3915 patterns merged, 25837 observations added
+- N3 Trie: 4216 → 4216 patterns (no growth from merge)
+- Root: 14382 aggregated observations (was 9588 in cycle 1)
+- 4570 trading observations — metadata quality: good
+
+v0.5.3 MERGE CYCLE 2 PAPER TRADING RESULTS:
+- Capital: $10,000.00 → $56,546.34 (+465.46%)
+- Trades: 647 (W:308 L:339)
+- Win Rate: 47.6%
+- Profit Factor: 1.21
+- Max DD: 37.9%
+- Sharpe: 1.35
+- Avg Trade: +0.39%
+- Best Trade: +14.65%
+- Worst Trade: -12.88%
+- Avg Confidence: 25.5%
+- Avg Quality: 0.19
+- Prediction stats: 1194 attempts, 1037 with direction, 705 passed threshold
+- Risk rejections: Daily loss limit reached: 58
+- Living Trie: 647 observations, 218 new nodes, 19 metadata propagations
+- Trie growth: 4216 → 4434 patterns (+218 new patterns)
+
+COMPARISON — Merge cycles:
+
+| Metric | --force | Cycle 1 | Cycle 2 | Trend |
+|--------|---------|---------|---------|-------|
+| Trades | 519 | 598 | 647 | Increasing |
+| WR | 50.5% | 54.0% | 47.6% | PEAK then DROP |
+| P&L | +1434% | +4401% | +465% | PEAK then CRASH |
+| Sharpe | 2.27 | 3.08 | 1.35 | PEAK then DROP |
+| Max DD | 29.2% | 25.6% | 37.9% | PEAK then WORSE |
+| Avg Conf | 21.5% | 23.8% | 25.5% | Still increasing |
+| Patterns | 3222 | 4001 | 4216 | Increasing |
+| Trading Obs | 1151 | 2821 | 4570 | Increasing |
+
+ROOT CAUSE ANALYSIS:
+1. Each `ppmt build` runs 2 bootstrap passes → adds ~1151 observations at ~45.8% WR
+2. Merge combines these LOW QUALITY bootstrap observations with existing Living Trie
+3. Result: each merge cycle dilutes good trading metadata with mediocre bootstrap data
+4. Evidence: confidence keeps rising (21.5% → 23.8% → 25.5%) but WR drops
+   → overconfidence from noisy metadata, not genuine signal improvement
+5. Bootstrap WR is only 44-47% vs trading WR of 50-54%
+   → bootstrap observations are WORSE than random for predicting trading outcomes
+6. The first merge worked because the existing trie had 519 good trading observations
+   that weren't yet diluted. Cycle 2 diluted them with 25837 more bootstrap observations.
+
+PARALLELS TO BOOTSTRAP DEGRADATION:
+- v0.5.2: More bootstrap passes → worse results (pass 3-5 degraded WR)
+- v0.5.3 cycle 2: More merge cycles → worse results (bootstrap obs dilution)
+- SAME ROOT CAUSE: Low-quality metadata poisons the prediction engine
+
+SOLUTION OPTIONS:
+A. Use --no-bootstrap on merge cycles (skip bootstrap, only keep trading observations)
+B. Only merge TRADING observations (not bootstrap observations) into Living Trie
+C. Weight trading observations higher than bootstrap observations in merge
+D. Add a flag to skip bootstrap during merge builds
+
+OPTION A is simplest and most likely to work. The command would be:
+  ppmt build --no-bootstrap -s BTC/USDT && ppmt run --symbol BTC/USDT --paper
+
+This preserves the Living Trie's accumulated TRADING metadata without diluting it
+with bootstrap noise. The bootstrap was designed for fresh builds (--force), not
+for enriching an already-rich Living Trie.
+
+COMPLETE RESULTS HISTORY (updated):
+
+| Version | Build Method | Trades | WR | P&L | Sharpe | Max DD |
+|---------|-------------|--------|------|------|--------|--------|
+| v0.4.0 | build+bootstrap+merge | 601 | 53.1% | +3665% | 2.80 | 22.9% |
+| v0.4.1 | build+bootstrap+merge | 566 | 46.6% | +347.7% | 0.88 | 44.3% |
+| v0.4.2 | build+bootstrap+merge | 627 | 48.2% | +665.6% | 1.51 | 35.9% |
+| v0.5.0 | 2-pass bootstrap, no merge | 519 | 50.5% | +1434% | 2.27 | 29.2% |
+| v0.5.2 | 5-pass, --force | 628 | 48.9% | -29.52% | -0.30 | 40.7% |
+| v0.5.3 | 2-pass, --force | 519 | 50.5% | +1434% | 2.27 | 29.2% |
+| v0.5.3 | 2-pass, MERGE cycle 1 | 598 | 54.0% | +4401% | 3.08 | 25.6% |
+| v0.5.3 | 2-pass, MERGE cycle 2 | 647 | 47.6% | +465% | 1.35 | 37.9% |
+
+Stage Summary:
+- v0.5.3 merge cycle 2 = MAJOR REGRESSION from cycle 1
+- Root cause: bootstrap observations (44-47% WR) poison Living Trie metadata
+- Each merge cycle adds ~25837 low-quality bootstrap observations
+- Cycle 1 worked because Living Trie wasn't yet diluted
+- FIX: Use --no-bootstrap on merge cycles to avoid diluting trading metadata
+- Next: Test ppmt build --no-bootstrap to confirm fix
+
+---
+Task ID: v0.5.3-merge-cycle4
+Agent: Main
+Task: Cycle 4 — ppmt build --force with 2-pass bootstrap (CONFIRMS bootstrap is essential)
+
+Work Log:
+
+TEST COMMAND:
+  ppmt build --force -s BTC/USDT && ppmt run --symbol BTC/USDT --paper
+
+BOOTSTRAP RESULTS (2 passes):
+- Pass 1: 600 trades simulated, WR 44.2%, 600 observations recorded
+- Pass 2: 551 trades simulated, WR 47.5%, 551 observations recorded
+- N3 Trie after bootstrap: 3136 patterns (2420 base + 716 from bootstrap)
+- Bootstrap result: N3 trie has 1151 trading observations (WR 45.8%)
+
+PAPER TRADING RESULTS:
+- 519 trades, W:262 L:257, WR 50.5%
+- Capital: $10,000 -> $153,412.09 (+1434.12% P&L)
+- Profit Factor: 1.38
+- Max DD: 29.2%
+- Sharpe: 2.27
+- Avg Trade: +0.62%
+- Best Trade: +17.46%
+- Worst Trade: -9.79%
+- Avg Confidence: 21.5%
+- Avg Quality: 0.16
+- Prediction stats: 2000 attempts, 1726 with direction, 561 passed threshold
+- Risk rejections: {'Daily loss limit reached': 42}
+- Living Trie: 519 observations, 86 new nodes, 19 metadata propagations
+- Trie growth: 3136 -> 3222 patterns (+86 new patterns discovered)
+
+FOUR-CYCLE COMPARISON (all v0.5.3 baseline, SAX window=10, alphabet=8):
+
+| Metric       | Cycle 4 (--force) | Cycle 1 (merge) | Cycle 2 (merge) | Cycle 3 (--no-bootstrap) |
+|-------------|-------------------|------------------|------------------|---------------------------|
+| Build Method | --force + 2-pass  | build (merge)    | build (merge)    | --no-bootstrap            |
+| Bootstrap    | YES (2 passes)    | YES (2 passes)   | YES (2 passes)   | NO                        |
+| Trades       | 519               | 598              | 647              | 669                       |
+| Win Rate     | 50.5%             | 54.0%            | 47.6%            | 41.1%                     |
+| P&L          | +1434%            | +4401%           | +465%            | -18.77%                   |
+| Profit Factor| 1.38              | -                | -                | 0.93                      |
+| Max DD       | 29.2%             | 25.6%            | 37.9%            | 59.3%                     |
+| Sharpe       | 2.27              | 3.08             | 1.35             | -                         |
+| Avg Conf     | 21.5%             | 23.8%            | 25.5%            | 28.0%                     |
+| Patterns     | 3222              | 4001             | 4216             | 4545                      |
+| Trading Obs  | 1151              | 2821             | 4570             | 0 (no bootstrap)          |
+| Direction    | PROFITABLE        | BEST             | DECLINING        | NET LOSS                  |
+
+ROOT CAUSE CONFIRMED — Bootstrap is the system's lifeline:
+
+1. Cycle 3 used --no-bootstrap, skipping the 2-pass bootstrap that pre-populates
+   the N3 trie with trading observations. Without bootstrap, the trie has 0
+   trading observations and confidence scores are uncalibrated, producing
+   catastrophic results (-18.77% P&L, 41.1% WR, 59.3% Max DD).
+
+2. Cycle 4 (this test) used --force WITH bootstrap (2 passes, 1151 observations).
+   This restored the system to profitability (+1434% P&L, 50.5% WR).
+
+3. The bootstrap provides the statistical foundation that the prediction engine
+   needs — without trading observations, pattern node win_rates and confidence
+   scores are meaningless.
+
+REMAINING ISSUES (from Cycle 4 data):
+
+1. Entry filters still too loose:
+   - Avg Confidence 21.5%, Avg Quality 0.16 — both low
+   - Many 10% confidence trades enter and lose (trades 58, 109, 126, 129, etc.)
+   - 1726 predictions with direction, only 561 passed threshold (32.5% pass rate)
+   - But of those 561, 257 still lost (54% pass but WR only 50.5%)
+
+2. SHORT trades continue to underperform:
+   - Multiple SHORT stop_losses visible (trades 5, 9, 16, 32, 37, etc.)
+   - SHORT on BTC is inherently harder (long-term uptrend bias)
+
+3. Daily loss limit triggered 42 times:
+   - System has consecutive losing streaks that hit the daily cap
+   - Suggests certain market regimes produce very poor signals
+
+4. Confidence does NOT correlate with outcome quality:
+   - Trade 46: 35% conf -> trailing_stop +2.50% (good)
+   - Trade 58: 10% conf -> stop_loss -5.58% (bad)
+   - Trade 150: 36% conf -> stop_loss -1.93% (bad despite high conf)
+   - The prediction engine's confidence scores still lack discriminative power
+
+PROPOSED NEXT STEPS (priority order):
+
+P0 — Raise minimum confidence threshold from 10% to 25%:
+  - Filter out the 10-20% confidence trades that consistently lose
+  - Expected: fewer trades but higher WR
+
+P0 — Raise probability threshold from >20% to >30%:
+  - Current threshold lets too many marginal signals through
+  - Works synergistically with higher confidence floor
+
+P1 — Consider disabling or restricting SHORT direction:
+  - SHORT trades have significantly higher stop_loss rate
+  - Options: disable SHORT entirely, or require >35% confidence for SHORTs
+
+P1 — Enable Catastrophic Protection:
+  - Current OFF, Max DD 29.2% is acceptable but could be better
+  - Setting catastrophic_loss_pct to ~8% would cap worst losses without
+    cutting normal winners (v0.2.10 showed 5% was too aggressive)
+
+P2 — Increase bootstrap passes from 2 to 3-4:
+  - 2 passes produce 1151 observations at 45.8% WR
+  - More passes would enrich the trie's statistical base
+  - Risk: bootstrap WR is only 44-47%, too many passes add noise
+
+COMPLETE RESULTS HISTORY (updated):
+
+| Version | Build Method             | Trades | WR    | P&L      | Sharpe | Max DD |
+|---------|--------------------------|--------|-------|----------|--------|--------|
+| v0.4.0  | build+bootstrap+merge    | 601    | 53.1% | +3665%   | 2.80   | 22.9%  |
+| v0.4.1  | build+bootstrap+merge    | 566    | 46.6% | +347.7%  | 0.88   | 44.3%  |
+| v0.4.2  | build+bootstrap+merge    | 627    | 48.2% | +665.6%  | 1.51   | 35.9%  |
+| v0.5.0  | 2-pass bootstrap, fresh  | 519    | 50.5% | +1434%   | 2.27   | 29.2%  |
+| v0.5.2  | 5-pass, --force          | 628    | 48.9% | -29.52%  | -0.30  | 40.7%  |
+| v0.5.3  | 2-pass, --force (C4)     | 519    | 50.5% | +1434%   | 2.27   | 29.2%  |
+| v0.5.3  | 2-pass, MERGE cycle 1    | 598    | 54.0% | +4401%   | 3.08   | 25.6%  |
+| v0.5.3  | 2-pass, MERGE cycle 2    | 647    | 47.6% | +465%    | 1.35   | 37.9%  |
+| v0.5.3  | --no-bootstrap (C3)      | 669    | 41.1% | -18.77%  | -      | 59.3%  |
+
+Stage Summary:
+- Cycle 4 CONFIRMS: Bootstrap is indispensable for PPMT system performance
+- Without bootstrap: catastrophic (-18.77% P&L, 59.3% Max DD)
+- With bootstrap: solid profitability (+1434% P&L, 50.5% WR, Sharpe 2.27)
+- Merge cycle 1 is still the best result (+4401%), but merge cycles degrade
+  due to bootstrap observation dilution (Cycle 2: +465%, Cycle 3 w/o bootstrap: loss)
+- Optimal workflow: ppmt build --force (with bootstrap) -> ppmt run
+- Next optimization target: raise entry thresholds to improve WR from 50% toward 60%

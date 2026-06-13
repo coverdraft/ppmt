@@ -51,8 +51,10 @@ from ppmt.core.sax import SAXEncoder
 from ppmt.core.trie import PPMTTrie, TrieNode
 from ppmt.core.matcher import FuzzyMatcher, MatchResult
 from ppmt.core.metadata import BlockLifecycleMetadata
+from ppmt.core.regime import RegimeDetector
 from ppmt.engine.weights import AdaptiveWeights, LevelStats, WEIGHT_PROFILES
 from ppmt.engine.signal import SignalGenerator, Signal, SignalType
+from ppmt.engine.prediction import PredictionEngine
 
 
 @dataclass
@@ -176,14 +178,8 @@ class PPMT:
         """Set the current market regime for N4 Trie selection."""
         self._current_regime = regime
 
-    def build(
-        self,
-        df: pd.DataFrame,
-        pattern_length: int = 5,
-        forward_window: int = 5,
-        won_rr_threshold: float | None = None,
-        symbols: list[str] | None = None,
-    ) -> int:
+    def build(self, df: pd.DataFrame, pattern_length: int = 5,
+             symbols: list[str] | None = None) -> int:
         """
         Build the 4-level Trie from historical OHLCV data.
 
@@ -191,68 +187,134 @@ class PPMT:
         overlapping pattern sequences and inserts them into all
         4 Trie levels with Block Lifecycle Metadata.
 
+        v0.3.3: Uses trade-simulation "won" classification instead of
+        the crude move_pct > 0. Now computes ATR at each position and
+        classifies "won" based on whether the price would have reached
+        the take-profit level before the stop-loss, exactly as the
+        paper trader does. This aligns build-time win_rate with
+        trading-time win_rate, producing more differentiated confidence
+        scores across patterns.
+
+        v0.6.3: Added `symbols` parameter (V7.9 backport). When provided,
+        uses pre-computed SAX symbols instead of re-encoding. This enables
+        out-of-sample validation where training normalization stats are
+        propagated to test encoding via encode_with_normalization().
+
         Args:
             df: OHLCV DataFrame with columns: open, high, low, close, volume
             pattern_length: Number of SAX blocks per pattern sequence
-            forward_window: Number of SAX blocks to look ahead for outcome
-            won_rr_threshold: R:R threshold for won/lost classification (None=move_pct>0)
-            symbols: Pre-computed SAX symbols (skips internal re-encoding).
-                     V7.9: Pass symbols from encode_with_normalization() for
-                     consistent train/test normalization.
+            symbols: Pre-computed SAX symbols (optional, v0.6.3). When None,
+                     calls self.sax.encode(df) as before.
 
         Returns:
             Number of patterns inserted
         """
-        # Use provided symbols or encode internally
+        # Encode entire history to SAX symbols
         if symbols is None:
             symbols = self.sax.encode(df)
 
         if len(symbols) < pattern_length:
             return 0
 
-        # Create overlapping sequences with forward window for outcome
+        # Pre-compute ATR for trade-simulation "won" classification
+        # ATR measures volatility — we use it to determine what SL/TP
+        # would have been at each position, then check if the price
+        # reached TP (won) or not.
+        high = df['high'].values.astype(float)
+        low = df['low'].values.astype(float)
+        close = df['close'].values.astype(float)
+        prev_close = np.roll(close, 1)
+        prev_close[0] = close[0]
+        tr = np.maximum(
+            high - low,
+            np.maximum(
+                np.abs(high - prev_close),
+                np.abs(low - prev_close)
+            )
+        )
+        atr = np.zeros_like(tr)
+        period = 14
+        if len(tr) >= period:
+            atr[period - 1] = np.mean(tr[:period])
+            for i in range(period, len(tr)):
+                atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
+        atr_pct = np.where(close > 0, atr / close * 100, 0)
+
+        # V4: Pre-compute regime at each candle position using RegimeDetector
+        # This enables storing the market regime in each node's metadata,
+        # making the Trie regime-aware. Each pattern knows what regime
+        # it was observed under, enabling regime-specific matching.
+        regime_detector = RegimeDetector(lookback=50, vol_threshold=0.6, trend_threshold=0.005)
+        regime_at_candle = ["ranging"] * len(close)  # default
+        regime_conf_at_candle = [0.0] * len(close)
+        for ci in range(50, len(close)):
+            regime_prices = close[max(0, ci - 200):ci + 1]
+            if len(regime_prices) >= 50:
+                info = regime_detector.detect_detailed(regime_prices)
+                regime_at_candle[ci] = info.regime
+                regime_conf_at_candle[ci] = info.confidence
+
+        # Create overlapping sequences
         count = 0
-        max_i = len(symbols) - pattern_length - forward_window
-        for i in range(max(0, max_i) + 1):
+        for i in range(len(symbols) - pattern_length):
             pattern = symbols[i:i + pattern_length]
             next_sym = symbols[i + pattern_length] if i + pattern_length < len(symbols) else None
 
             # Compute metadata from the actual price data
-            # Pattern window: candles from pattern start to pattern end
+            # Map SAX window indices to candle indices
             start_candle = i * self.sax.window_size
             end_candle = (i + pattern_length) * self.sax.window_size
-            # Forward window: candles after pattern for outcome measurement
-            forward_candle = (i + pattern_length + forward_window) * self.sax.window_size
 
-            if forward_candle > len(df):
+            if end_candle > len(df):
                 break
 
-            pattern_df = df.iloc[start_candle:end_candle]
-            forward_df = df.iloc[end_candle:forward_candle]
-            combined_df = df.iloc[start_candle:forward_candle]
+            window_df = df.iloc[start_candle:end_candle]
 
-            # Entry at start of pattern, exit at end of forward window
-            entry_price = pattern_df["close"].iloc[0]
-            exit_price = combined_df["close"].iloc[-1]
+            # Compute move, drawdown, favorable from actual prices
+            entry_price = window_df["close"].iloc[0]
+            exit_price = window_df["close"].iloc[-1]
             move_pct = ((exit_price - entry_price) / entry_price) * 100.0
 
-            # Drawdown and favorable over the ENTIRE window (pattern + forward)
-            high = combined_df["high"].max()
-            low = combined_df["low"].min()
-            drawdown_pct = ((low - entry_price) / entry_price) * 100.0
-            favorable_pct = ((high - entry_price) / entry_price) * 100.0
+            win_high = window_df["high"].max()
+            win_low = window_df["low"].min()
+            drawdown_pct = ((win_low - entry_price) / entry_price) * 100.0
+            favorable_pct = ((win_high - entry_price) / entry_price) * 100.0
 
-            duration = len(combined_df)
+            duration = len(window_df)
 
-            # Determine won/lost based on R:R or simple move
-            if won_rr_threshold is not None:
-                # R:R based: won if favorable/|drawdown| >= threshold
-                rr = favorable_pct / abs(drawdown_pct) if abs(drawdown_pct) > 1e-10 else 0
-                won = rr >= won_rr_threshold
-            else:
-                won = move_pct > 0  # Simple: positive move = win
+            # v0.3.3: Trade-simulation "won" classification
+            # Instead of crude move_pct > 0 (which gives ~50% win_rate for
+            # random data), simulate whether a trade would have hit TP.
+            # This aligns build-time win_rate with trading-time reality.
+            #
+            # For LONG (move_pct > 0):
+            #   SL = max(ATR*1.5, 1.5%) cap 5%, TP = SL*2.0
+            #   won = favorable_pct >= TP_distance (would have hit LONG TP)
+            #
+            # For SHORT (move_pct <= 0):
+            #   SL = max(ATR*2.0, 2.0%) cap 7%, TP = SL*1.5
+            #   won = |drawdown_pct| >= TP_distance (would have hit SHORT TP)
+            entry_candle_idx = start_candle
+            atr_at_entry = atr_pct[entry_candle_idx] if entry_candle_idx < len(atr_pct) else 2.0
+
+            if move_pct > 0:  # Bullish pattern → LONG trade simulation
+                sl_dist = min(max(atr_at_entry * 1.5, 1.5), 5.0)
+                tp_dist = sl_dist * 2.0  # R:R = 2.0
+                won = favorable_pct >= tp_dist
+            else:  # Bearish pattern → SHORT trade simulation
+                sl_dist = min(max(atr_at_entry * 2.0, 2.0), 7.0)
+                tp_dist = sl_dist * 1.5  # R:R = 1.5
+                won = abs(drawdown_pct) >= tp_dist
 
             # Insert into all 4 levels
+            # V4: Detect regime at this pattern's entry position and pass
+            # it to insert_with_observations so each node stores what regime
+            # it was observed under. This is the key V4 enhancement that
+            # makes the Trie regime-aware.
+            entry_candle = start_candle
+            pattern_regime = regime_at_candle[entry_candle] if entry_candle < len(regime_at_candle) else "ranging"
+            pattern_regime_conf = regime_conf_at_candle[entry_candle] if entry_candle < len(regime_conf_at_candle) else 0.0
+
             for trie in [self.trie_n1, self.trie_n2, self.trie_n3, self.trie_n4]:
                 trie.insert_with_observations(
                     symbols=pattern,
@@ -262,9 +324,18 @@ class PPMT:
                     duration=duration,
                     won=won,
                     next_symbol=next_sym,
+                    regime=pattern_regime,
+                    regime_confidence=pattern_regime_conf,
                 )
 
             count += 1
+
+        # Propagate metadata from terminal nodes to intermediate nodes
+        # This is critical: after building, only terminal nodes have metadata.
+        # Propagation computes aggregate statistics for intermediate nodes
+        # so that PredictionEngine can find meaningful data at any depth.
+        for trie in [self.trie_n1, self.trie_n2, self.trie_n3, self.trie_n4]:
+            trie.propagate_metadata()
 
         self._total_patterns_built += count
         return count
@@ -455,6 +526,342 @@ class PPMT:
             )
 
         self.weights.adapt(stats)
+
+    def bootstrap(
+        self,
+        df: pd.DataFrame,
+        pattern_length: int = 5,
+        bootstrap_ratio: float = 0.7,
+        verbose: bool = True,
+    ) -> dict:
+        """
+        Run a bootstrap paper trading pass on historical data.
+
+        v0.4.0: After building the trie from historical patterns, automatically
+        run a simplified paper trading simulation on a portion of the data.
+        This accumulates trading observations in the N3 trie BEFORE the user
+        runs `ppmt run`, giving fresh tries meaningful metadata from day one.
+
+        The bootstrap uses the SAME SL/TP logic as PaperTrader to align metadata:
+          LONG:  SL = max(ATR*1.5, 1.5%) cap 5%, TP = SL*2.0
+          SHORT: SL = max(ATR*2.0, 2.0%) cap 7%, TP = SL*1.5
+
+        The simulation is simplified compared to the full PaperTrader:
+          - No risk management, no position sizing, no capital tracking
+          - No catastrophic protection
+          - SAX boundary SL/TP checking (like v0.2.8)
+          - Trailing stop at 75% of TP distance
+          - Pattern break grace = 2
+          - Re-entry cooldown = 1
+          - Living Trie = ON (recording observations)
+
+        Only the N3 (per-asset) trie receives Living Trie treatment.
+        N1, N2, N4 tries are NOT modified.
+
+        Args:
+            df: OHLCV DataFrame with columns: open, high, low, close, volume
+            pattern_length: Number of SAX blocks per pattern sequence
+            bootstrap_ratio: Fraction of data to use for bootstrap (0.7 = 70%)
+            verbose: Whether to print progress
+
+        Returns:
+            Dict with bootstrap statistics:
+            - trades: total number of simulated trades
+            - winning_trades: number of winning trades
+            - win_rate: win rate as fraction
+            - observations_recorded: number of Living Trie observations
+            - new_nodes_created: number of new trie nodes from pattern breaks
+        """
+        # Lazy imports to avoid circular dependency
+        # (ppmt.py ← paper_trader.py ← ppmt.py)
+        from ppmt.engine.paper_trader import PaperTrade, compute_atr_pct, _record_observation
+
+        # Encode entire history to SAX symbols
+        symbols = self.sax.encode(df)
+
+        if len(symbols) < pattern_length + 1:
+            if verbose:
+                print(f"  Bootstrap: skipped (not enough SAX symbols: {len(symbols)})")
+            return {"trades": 0, "winning_trades": 0, "win_rate": 0.0,
+                    "observations_recorded": 0, "new_nodes_created": 0}
+
+        # Compute ATR for SL/TP calculation
+        atr_pct = compute_atr_pct(df, period=14)
+
+        # Pre-extract price arrays for fast access
+        df_close = df['close'].values.astype(float)
+        df_high = df['high'].values.astype(float)
+        df_low = df['low'].values.astype(float)
+
+        # Create prediction engine using the N3 trie
+        trie = self.trie_n3
+        pred_engine = PredictionEngine(trie, prediction_depth=pattern_length)
+
+        # Determine bootstrap boundary (in SAX symbol space)
+        bootstrap_end_sym_idx = int(len(symbols) * bootstrap_ratio)
+
+        # Warm-up offset: skip first few SAX symbols for warm-up
+        start_sym_idx = pattern_length
+
+        # Simulation state
+        current_position = None  # PaperTrade when in position
+        trade_counter = 0
+        winning_trades = 0
+        consecutive_breaks = 0
+        last_losing_trade_sym_idx = -999
+        observations_recorded = 0
+        new_nodes_created = 0
+
+        # Trailing stop state
+        trailing_sl_pct = 0.0  # current trailing SL as distance from entry in %
+
+        for sym_idx in range(start_sym_idx, bootstrap_end_sym_idx):
+            # Candle range for this SAX symbol
+            candle_start = sym_idx * self.sax.window_size
+            candle_end = min((sym_idx + 1) * self.sax.window_size, len(df))
+            last_candle_idx = candle_end - 1
+
+            if last_candle_idx < 0 or last_candle_idx >= len(df_close):
+                continue
+
+            current_price = df_close[last_candle_idx]
+
+            # Current SAX pattern
+            current_symbols = symbols[sym_idx - pattern_length:sym_idx]
+
+            # ============================================================
+            # PHASE 1: SL/TP checking (SAX boundary, like v0.2.8)
+            # ============================================================
+            if current_position is not None:
+                entry_price = current_position.entry_price
+                direction = current_position.direction
+                sl_price = current_position.sl_price
+                tp_price = current_position.tp_price
+
+                # Trailing stop update
+                if tp_price is not None and entry_price is not None:
+                    if direction == "LONG":
+                        unrealized_pct = (current_price - entry_price) / entry_price * 100
+                        tp_distance_pct = (tp_price - entry_price) / entry_price * 100
+                    else:
+                        unrealized_pct = (entry_price - current_price) / entry_price * 100
+                        tp_distance_pct = (entry_price - tp_price) / entry_price * 100
+
+                    # Trailing stop activates at 75% of TP distance
+                    if not current_position.trailing_activated and tp_distance_pct > 0 and unrealized_pct >= tp_distance_pct * 0.75:
+                        current_position.trailing_activated = True
+
+                    if current_position.trailing_activated:
+                        current_atr = atr_pct[last_candle_idx] if last_candle_idx < len(atr_pct) else 2.0
+                        trailing_distance = current_atr * 1.5
+                        if direction == "LONG":
+                            new_sl = max(sl_price, current_price * (1 - trailing_distance / 100))
+                        else:
+                            new_sl = min(sl_price, current_price * (1 + trailing_distance / 100))
+                        current_position.sl_price = new_sl
+                        sl_price = new_sl
+
+                # Check SL/TP at SAX boundary
+                sl_hit = False
+                tp_hit = False
+
+                if direction == "LONG":
+                    if current_price <= sl_price:
+                        sl_hit = True
+                    elif current_price >= tp_price:
+                        tp_hit = True
+                else:  # SHORT
+                    if current_price >= sl_price:
+                        sl_hit = True
+                    elif current_price <= tp_price:
+                        tp_hit = True
+
+                if sl_hit or tp_hit:
+                    # Close position
+                    current_position.exit_price = current_price
+                    if direction == "LONG":
+                        current_position.pnl_pct = (current_price - entry_price) / entry_price * 100
+                    else:
+                        current_position.pnl_pct = (entry_price - current_price) / entry_price * 100
+                    current_position.actual_move_pct = current_position.pnl_pct
+
+                    if tp_hit:
+                        current_position.exit_reason = "take_profit"
+                    elif current_position.trailing_activated:
+                        current_position.exit_reason = "trailing_stop"
+                    else:
+                        current_position.exit_reason = "stop_loss"
+
+                    # Record observation via Living Trie mechanism
+                    next_sym = symbols[sym_idx] if sym_idx < len(symbols) else None
+                    obs_result = _record_observation(
+                        trie, current_position, sym_idx, next_sym
+                    )
+                    observations_recorded += obs_result["observations"]
+                    new_nodes_created += obs_result["new_nodes"]
+
+                    if current_position.pnl_pct > 0:
+                        winning_trades += 1
+                    else:
+                        last_losing_trade_sym_idx = sym_idx
+
+                    trade_counter += 1
+                    current_position = None
+                    consecutive_breaks = 0
+                    continue
+
+            # ============================================================
+            # PHASE 2: Pattern break check with grace period
+            # ============================================================
+            if current_position is not None and len(current_symbols) >= 2:
+                pattern_to_check = current_symbols[:-1]
+                latest_symbol = current_symbols[-1]
+                continues, _ = trie.check_continuation(pattern_to_check, latest_symbol)
+
+                if not continues and current_position.confidence > 0:
+                    consecutive_breaks += 1
+                    if consecutive_breaks >= 2:  # pattern_break_grace = 2
+                        # Close position due to pattern break
+                        entry_price = current_position.entry_price
+                        direction = current_position.direction
+                        if direction == "LONG":
+                            current_position.pnl_pct = (current_price - entry_price) / entry_price * 100
+                        else:
+                            current_position.pnl_pct = (entry_price - current_price) / entry_price * 100
+                        current_position.actual_move_pct = current_position.pnl_pct
+                        current_position.exit_price = current_price
+                        current_position.exit_reason = "pattern_break"
+
+                        # Record observation with the break symbol as next_symbol
+                        obs_result = _record_observation(
+                            trie, current_position, sym_idx, latest_symbol
+                        )
+                        observations_recorded += obs_result["observations"]
+                        new_nodes_created += obs_result["new_nodes"]
+
+                        if current_position.pnl_pct > 0:
+                            winning_trades += 1
+                        else:
+                            last_losing_trade_sym_idx = sym_idx
+
+                        trade_counter += 1
+                        current_position = None
+                        consecutive_breaks = 0
+                        continue
+                else:
+                    consecutive_breaks = 0
+
+            # ============================================================
+            # PHASE 3: Entry signal generation
+            # ============================================================
+            if current_position is None:
+                # Re-entry cooldown = 1 symbol step
+                if sym_idx - last_losing_trade_sym_idx < 1:
+                    continue
+
+                try:
+                    prediction = pred_engine.predict(
+                        current_symbols=current_symbols,
+                        entry_price=current_price,
+                        timeframe_hours=1,
+                        symbol=self.symbol,
+                    )
+                except Exception:
+                    continue
+
+                # Entry conditions (v0.4.1: bootstrap uses looser thresholds since
+                # the trie is being built from scratch during bootstrap)
+                if (prediction.direction == "FLAT"
+                    or prediction.confidence <= 0
+                    or prediction.confidence < 0.10  # Bootstrap: keep 0.10 to gather MORE observations
+                    or abs(prediction.expected_total_move_pct) < 1.0  # Bootstrap: keep 1.0 for more coverage
+                    or prediction.overall_probability <= 0.20):  # Bootstrap: keep 0.20
+                    continue
+
+                # SHORT requires higher confidence (bootstrap: keep loose to gather
+                # SHORT observations — v0.6.2 relaxed from 1.5x/0.15 to 1.2x/0.15
+                # because the 1.5x gate starved the trie of SHORT observations,
+                # leading to 0 SHORT trades in paper trading)
+                effective_min_conf = 0.10
+                if prediction.direction == "SHORT":
+                    effective_min_conf = max(effective_min_conf * 1.2, 0.15)
+
+                if prediction.confidence < effective_min_conf:
+                    continue
+
+                # Direction-specific SL/TP (SAME as PaperTrader)
+                current_atr_pct_val = atr_pct[last_candle_idx] if last_candle_idx < len(atr_pct) else 2.0
+
+                if prediction.direction == "LONG":
+                    sl_distance_pct = min(max(current_atr_pct_val * 1.5, 1.5), 5.0)
+                    tp_distance_pct = sl_distance_pct * 2.0  # R:R = 2.0
+                    sl_price = current_price * (1 - sl_distance_pct / 100)
+                    tp_price = current_price * (1 + tp_distance_pct / 100)
+                else:  # SHORT
+                    sl_distance_pct = min(max(current_atr_pct_val * 2.0, 2.0), 7.0)
+                    tp_distance_pct = sl_distance_pct * 1.5  # R:R = 1.5
+                    sl_price = current_price * (1 + sl_distance_pct / 100)
+                    tp_price = current_price * (1 - tp_distance_pct / 100)
+
+                # Open position
+                current_position = PaperTrade(
+                    trade_id=trade_counter + 1,
+                    symbol=self.symbol,
+                    direction=prediction.direction,
+                    entry_price=current_price,
+                    exit_price=0.0,
+                    confidence=prediction.confidence,
+                    win_rate=prediction.overall_probability,
+                    expected_move_pct=prediction.expected_total_move_pct,
+                    matched_pattern=list(current_symbols),
+                    sl_price=sl_price,
+                    tp_price=tp_price,
+                    entry_sym_idx=sym_idx,
+                )
+
+        # Close any open position at end of bootstrap
+        if current_position is not None:
+            entry_price = current_position.entry_price
+            direction = current_position.direction
+            last_price = df_close[min(bootstrap_end_sym_idx * self.sax.window_size - 1, len(df_close) - 1)]
+            if direction == "LONG":
+                current_position.pnl_pct = (last_price - entry_price) / entry_price * 100
+            else:
+                current_position.pnl_pct = (entry_price - last_price) / entry_price * 100
+            current_position.actual_move_pct = current_position.pnl_pct
+            current_position.exit_price = last_price
+            current_position.exit_reason = "end_of_data"
+
+            # Record final observation
+            obs_result = _record_observation(
+                trie, current_position, bootstrap_end_sym_idx, None
+            )
+            observations_recorded += obs_result["observations"]
+            new_nodes_created += obs_result["new_nodes"]
+
+            if current_position.pnl_pct > 0:
+                winning_trades += 1
+            trade_counter += 1
+
+        # Re-propagate metadata so intermediate nodes are updated
+        trie.propagate_metadata()
+
+        # Compute results
+        win_rate = winning_trades / trade_counter if trade_counter > 0 else 0.0
+
+        result = {
+            "trades": trade_counter,
+            "winning_trades": winning_trades,
+            "win_rate": win_rate,
+            "observations_recorded": observations_recorded,
+            "new_nodes_created": new_nodes_created,
+        }
+
+        if verbose:
+            print(f"  Bootstrap: {trade_counter} trades simulated, "
+                  f"WR {win_rate:.1%}, {observations_recorded} observations recorded")
+
+        return result
 
     def get_stats(self) -> dict:
         """Get engine statistics."""

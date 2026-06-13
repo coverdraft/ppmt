@@ -21,16 +21,83 @@ import numpy as np
 
 
 @dataclass
+class RegimeStats:
+    """
+    Statistics for a single regime within a node's observation history.
+
+    Tracks win_rate, expected_move, and count separately for each regime,
+    enabling the trading engine to make regime-aware decisions like:
+      "This pattern wins 62% in trending_up but only 33% in volatile."
+
+    This is the key V4.1 enhancement that makes regime_distribution actionable.
+    Without per-regime win_rate, we only know HOW MANY times a pattern was
+    observed in each regime, but not WHETHER IT WON there.
+    """
+    count: int = 0
+    """Number of observations in this regime."""
+
+    wins: int = 0
+    """Number of winning observations in this regime."""
+
+    total_move_pct: float = 0.0
+    """Cumulative expected_move across all observations in this regime.
+    Used to compute average expected_move per regime."""
+
+    @property
+    def win_rate(self) -> float:
+        """Win rate within this regime."""
+        if self.count == 0:
+            return 0.0
+        return self.wins / self.count
+
+    @property
+    def avg_move_pct(self) -> float:
+        """Average expected_move within this regime."""
+        if self.count == 0:
+            return 0.0
+        return self.total_move_pct / self.count
+
+    def to_dict(self) -> dict:
+        """Serialize to dictionary."""
+        return {
+            "count": self.count,
+            "wins": self.wins,
+            "total_move_pct": round(self.total_move_pct, 4),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> RegimeStats:
+        """Deserialize from dictionary."""
+        return cls(
+            count=data.get("count", 0),
+            wins=data.get("wins", 0),
+            total_move_pct=data.get("total_move_pct", 0.0),
+        )
+
+
+@dataclass
 class BlockLifecycleMetadata:
     """
     Block Lifecycle Metadata attached to each Trie node.
 
-    This is the core innovation of PPMT V3. Every node in the Trie
-    carries these 12 fields, enabling the Trie itself to make all
+    This is the core innovation of PPMT V3/V4. Every node in the Trie
+    carries these fields, enabling the Trie itself to make all
     trading decisions without external indicators.
 
     Key insight: If a next SAX block does NOT exist as a child node,
     the pattern broke BEFORE price hit SL → earliest possible exit signal.
+
+    V4 Enhancement: Regime-Aware Node Metadata
+    Each node now stores the market regime(s) under which its pattern
+    was observed. This enables:
+      - Regime-specific pattern matching (N4 Trie segmentation)
+      - Regime-aware confidence scoring (patterns in favorable regimes
+        get higher confidence, unfavorable regimes get lower)
+      - Independent vs Dependent node classification:
+          * Independent: has enough observations (>= min_independent_count)
+            to be self-sufficient — its metadata is reliable on its own
+          * Dependent: relies on parent/ancestor metadata (low count,
+            inherited regime info) — confidence is scaled down
     """
 
     # === Entry/Exit Timing ===
@@ -90,6 +157,89 @@ class BlockLifecycleMetadata:
     These represent transitions to a different regime.
     Not all missing blocks are breaks — some are just noise."""
 
+    # === V4: Regime-Aware Node Metadata ===
+    regime: str = ""
+    """The market regime under which this pattern was observed.
+    One of: trending_up, trending_down, ranging, volatile.
+    Empty string means not yet set (legacy nodes or before V4)."""
+
+    regime_confidence: float = 0.0
+    """Confidence of the regime detection when this pattern was observed.
+    Range [0, 1]. Higher = more certain about the regime classification."""
+
+    dominant_regime: str = ""
+    """The most common regime across all observations of this pattern.
+    For terminal nodes, this is the same as `regime`.
+    For intermediate nodes (after propagation), this is the regime
+    with the highest count in regime_distribution. This enables
+    regime-aware routing at any Trie depth."""
+
+    regime_distribution: dict[str, int] = field(default_factory=dict)
+    """Distribution of regimes across observations of this pattern.
+    E.g., {'trending_up': 45, 'ranging': 30, 'volatile': 5}
+    Used to compute regime-specific win rates and confidence.
+    Enables the trading engine to say: 'This pattern works 60% of
+    the time in trending_up but only 35% in volatile regimes.'"""
+
+    regime_stats: dict[str, RegimeStats] = field(default_factory=dict)
+    """V4.1: Per-regime statistics including win_rate and expected_move.
+    While regime_distribution only counts observations, regime_stats tracks
+    the actual performance within each regime. This is critical because:
+    - A pattern observed 50 times in trending_up with 60% WR is valuable
+    - A pattern observed 50 times in volatile with 30% WR is dangerous
+    Without this, the trading engine cannot make regime-aware decisions.
+    Key: regime name (e.g., 'trending_up'), Value: RegimeStats."""
+
+    # === V4.1: Move Variance Tracking ===
+    move_variance: float = 0.0
+    """Variance of observed moves (Welford's online algorithm).
+    High variance = unreliable pattern (move_pct swings wildly).
+    Low variance = reliable pattern (consistent outcomes).
+    Used to compute move_std which adjusts confidence downward
+    for patterns with inconsistent historical outcomes."""
+
+    move_mean_for_variance: float = 0.0
+    """Running mean used by Welford's algorithm for move_variance.
+    Not the same as expected_move_pct (which is the incremental mean).
+    This is maintained separately for the Welford M2 computation."""
+
+    node_type: str = "dependent"
+    """Whether this node is independent or dependent.
+    - 'independent': Has enough observations (>= min_independent_count)
+      to be self-sufficient. Its metadata is reliable on its own.
+      Confidence is used at full strength.
+    - 'dependent': Relies on parent/ancestor metadata. Low count,
+      inherited regime info. Confidence is scaled down by a factor
+      based on the ratio of actual vs minimum observations.
+    Classification is performed during propagate_metadata() and
+    updated during Living Trie observations."""
+
+    min_independent_count: int = 10
+    """Minimum historical_count for a node to be classified as independent.
+    Nodes with count >= this threshold are 'independent'. Below it,
+    they are 'dependent' and their metadata inherits from parents.
+    10 is a reasonable default: below 10 observations, the node's
+    statistics are too noisy to be reliable on their own."""
+
+    # === V4.2: Observation Freshness ===
+    last_observation_time: float = 0.0
+    """Timestamp (epoch seconds) of the most recent observation.
+    V4.2: Enables observation freshness tracking — patterns that
+    haven't been observed recently can be deprioritized. This is
+    critical for the Living Trie: as market conditions change,
+    old patterns become less relevant. A pattern observed 5000
+    candles ago should carry less weight than one observed 50 candles
+    ago. The freshness_decay property computes a multiplier [0, 1]
+    based on how long since the last observation."""
+
+    observation_timespan: float = 0.0
+    """Time span (in seconds) between the first and last observation.
+    V4.2: Measures how spread out observations are. A pattern observed
+    100 times in one day is less reliable than one observed 100 times
+    over 30 days. Longer timespan = more robust pattern that works
+    across different conditions. Short timespan = potentially overfit
+    to a specific market condition."""
+
     # === Computed Properties ===
 
     @property
@@ -105,6 +255,12 @@ class BlockLifecycleMetadata:
         Confidence score based on historical observations and win rate.
         More observations and higher win rate → higher confidence.
         Uses Bayesian-inspired shrinking toward 0.5 for low counts.
+
+        V4: Dependent nodes have their confidence scaled down because
+        their metadata is inherited/aggregated rather than directly
+        observed. An independent node with 50 observations is more
+        trustworthy than a dependent node with 3 observations whose
+        statistics were propagated from children.
         """
         if self.historical_count == 0:
             return 0.0
@@ -116,7 +272,22 @@ class BlockLifecycleMetadata:
         )
         # Scale by sqrt of log(count) for sample size bonus
         count_bonus = min(1.0, np.sqrt(np.log1p(self.historical_count) / np.log(1000)))
-        return adjusted_win_rate * count_bonus
+        base_confidence = adjusted_win_rate * count_bonus
+
+        # V4: Dependent node penalty
+        # Dependent nodes have less reliable metadata, so we scale
+        # their confidence down. The penalty is proportional to how
+        # far they are from the minimum independent count.
+        if self.node_type == "dependent" and self.historical_count > 0:
+            dependency_ratio = min(
+                1.0, self.historical_count / self.min_independent_count
+            )
+            # Scale between 0.5 (0 observations toward independent)
+            # and 1.0 (at the threshold)
+            dependency_penalty = 0.5 + 0.5 * dependency_ratio
+            base_confidence *= dependency_penalty
+
+        return base_confidence
 
     @property
     def expected_profit_ahead(self) -> float:
@@ -206,6 +377,159 @@ class BlockLifecycleMetadata:
         """
         return len(self.continuation_nodes) > 0
 
+    @property
+    def move_std(self) -> float:
+        """
+        Standard deviation of observed moves.
+        Computed from move_variance using Welford's online algorithm.
+        High std = unpredictable pattern = lower effective confidence.
+        Low std = consistent pattern = higher effective confidence.
+        Returns 0.0 if fewer than 2 observations (can't compute variance).
+        """
+        if self.historical_count < 2:
+            return 0.0
+        return float(np.sqrt(self.move_variance / (self.historical_count - 1)))
+
+    @property
+    def move_coefficient_of_variation(self) -> float:
+        """
+        Coefficient of variation (CV) of observed moves.
+        CV = std / |mean|. Normalized measure of dispersion.
+        CV < 0.5 = tight clustering around the mean (reliable)
+        CV 0.5-1.0 = moderate dispersion (acceptable)
+        CV > 1.0 = high dispersion (unreliable — move direction uncertain)
+        Returns 0.0 if expected_move_pct is zero (can't normalize).
+        """
+        if abs(self.expected_move_pct) < 1e-10:
+            return 0.0
+        return self.move_std / abs(self.expected_move_pct)
+
+    @property
+    def freshness_decay(self) -> float:
+        """
+        V4.2: Observation freshness multiplier based on time since last observation.
+
+        Returns a value in [0, 1] that decays as the last observation gets older.
+        Uses exponential decay with a half-life of 7 days (604800 seconds).
+
+        - 0 days old → 1.0 (fresh, fully trusted)
+        - 7 days old → 0.5 (half-weight)
+        - 30 days old → ~0.06 (nearly expired)
+
+        This prevents stale patterns from having the same influence as
+        recently-observed ones. In fast-moving markets, patterns that
+        haven't been seen in weeks may no longer be valid.
+
+        Returns 1.0 if last_observation_time is 0 (not tracked).
+        """
+        if self.last_observation_time <= 0:
+            return 1.0  # No tracking info, assume fresh
+        import time as _time
+        age_seconds = _time.time() - self.last_observation_time
+        if age_seconds <= 0:
+            return 1.0  # Future timestamp or same second
+        # Half-life of 7 days = 604800 seconds
+        half_life = 604800.0
+        return float(np.exp(-0.693 * age_seconds / half_life))  # ln(2) ≈ 0.693
+
+    @property
+    def observation_density(self) -> float:
+        """
+        V4.2: Observations per unit time (observations/day).
+
+        Measures how concentrated observations are. Low density = pattern
+        observed occasionally over a long time (robust). High density =
+        pattern observed many times in a short period (potentially overfit).
+
+        Returns 0.0 if no timespan data.
+        """
+        if self.observation_timespan <= 0 or self.historical_count <= 0:
+            return 0.0
+        days = self.observation_timespan / 86400.0
+        if days < 0.01:  # Less than ~15 minutes
+            return float(self.historical_count) / 0.01  # Cap at 100/day
+        return self.historical_count / days
+
+    def regime_match_score(self, current_regime: str) -> float:
+        """
+        V4.1: Compute a confidence multiplier based on regime match.
+
+        If the current market regime matches the node's dominant regime,
+        confidence is boosted (up to 1.2x). If the current regime is
+        unfavorable for this pattern, confidence is penalized (down to 0.5x).
+
+        The scoring uses both regime_distribution (how often) AND
+        regime_stats (how well it performed):
+
+        1. If current regime matches dominant_regime → boost (1.0 to 1.2)
+           Boost is proportional to how dominant the regime is.
+        2. If current regime exists but is not dominant → neutral (0.8 to 1.0)
+           Scaled by the ratio of observations in that regime.
+        3. If current regime has NO observations → penalty (0.5 to 0.7)
+           Unknown territory, reduce confidence.
+        4. If regime_stats available, further adjust by regime-specific win_rate
+           vs overall win_rate. A regime where the pattern underperforms
+           gets an additional penalty.
+
+        For independent nodes (sufficient observations), the regime match
+        has MORE impact because we have reliable per-regime data.
+        For dependent nodes (few observations), we apply less adjustment
+        because the per-regime data is unreliable.
+
+        Args:
+            current_regime: Current market regime string
+
+        Returns:
+            Multiplier in range [0.5, 1.2] to apply to confidence
+        """
+        if not current_regime:
+            return 1.0  # No regime info available, neutral
+
+        if not self.regime_distribution:
+            return 1.0  # No regime data on this node, neutral
+
+        total_obs = sum(self.regime_distribution.values())
+        if total_obs == 0:
+            return 1.0
+
+        current_count = self.regime_distribution.get(current_regime, 0)
+        current_ratio = current_count / total_obs
+
+        # Determine adjustment based on whether current regime is known
+        if current_count == 0:
+            # Regime never observed for this pattern — penalty
+            # Less severe for independent nodes (more diverse data)
+            base_mult = 0.7 if self.node_type == "independent" else 0.5
+            return base_mult
+
+        # Regime has been observed — compute base multiplier
+        if current_regime == self.dominant_regime:
+            # Current regime is the dominant one — boost
+            # Boost proportional to dominance (how concentrated)
+            boost = 1.0 + 0.2 * current_ratio  # 1.0 to 1.2
+        else:
+            # Regime exists but not dominant — neutral to slight penalty
+            # Scale by how rare this regime is for this pattern
+            base_mult = 0.8 + 0.2 * current_ratio  # 0.8 to 1.0
+            boost = base_mult
+
+        # V4.1: Further adjust using regime-specific win_rate if available
+        if current_regime in self.regime_stats:
+            rs = self.regime_stats[current_regime]
+            if rs.count >= 3:  # Need at least 3 obs for reliable regime WR
+                regime_wr = rs.win_rate
+                overall_wr = self.win_rate
+                if overall_wr > 0:
+                    wr_ratio = regime_wr / overall_wr
+                    # If regime WR is much worse than overall, penalize more
+                    # If regime WR is better, slight extra boost
+                    # Clamp wr_adjustment to [0.8, 1.1] to avoid extreme swings
+                    wr_adjustment = max(0.8, min(1.1, wr_ratio ** 0.5))
+                    boost *= wr_adjustment
+
+        # Clamp final result
+        return max(0.5, min(1.2, boost))
+
     def update_from_observation(
         self,
         move_pct: float,
@@ -214,12 +538,18 @@ class BlockLifecycleMetadata:
         duration: int,
         won: bool,
         next_symbol: Optional[str] = None,
+        regime: Optional[str] = None,
+        regime_confidence: Optional[float] = None,
     ) -> None:
         """
         Update metadata with a new observation using incremental statistics.
 
         This method updates all fields incrementally without storing raw data,
         making it memory-efficient for millions of patterns.
+
+        V4: Now also tracks regime information per observation.
+        Each observation can carry the market regime under which it
+        was observed, building the regime_distribution histogram.
 
         Args:
             move_pct: Actual percentage move observed
@@ -228,6 +558,9 @@ class BlockLifecycleMetadata:
             duration: Actual duration in candles
             won: Whether the pattern completed successfully
             next_symbol: SAX symbol that followed this block (if any)
+            regime: Market regime at time of observation
+                    (trending_up, trending_down, ranging, volatile)
+            regime_confidence: Confidence of the regime detection [0, 1]
         """
         n = self.historical_count
         self.historical_count += 1
@@ -257,6 +590,71 @@ class BlockLifecycleMetadata:
         if next_symbol is not None:
             if next_symbol not in self.continuation_nodes:
                 self.continuation_nodes.append(next_symbol)
+
+        # V4.1: Track move variance using Welford's online algorithm
+        # This is numerically stable and doesn't require storing raw data.
+        # After n observations, move_variance holds the M2 statistic
+        # (sum of squared differences from the running mean).
+        if self.historical_count >= 2:
+            delta = move_pct - self.move_mean_for_variance
+            self.move_mean_for_variance = (
+                (self.move_mean_for_variance * (self.historical_count - 1) + move_pct)
+                / self.historical_count
+            )
+            delta2 = move_pct - self.move_mean_for_variance
+            self.move_variance += delta * delta2
+        elif self.historical_count == 1:
+            self.move_mean_for_variance = move_pct
+            self.move_variance = 0.0
+
+        # V4: Track regime distribution
+        if regime and regime in ("trending_up", "trending_down", "ranging", "volatile"):
+            self.regime_distribution[regime] = self.regime_distribution.get(regime, 0) + 1
+            # V4.1: Track per-regime statistics (win_rate, expected_move)
+            if regime not in self.regime_stats:
+                self.regime_stats[regime] = RegimeStats()
+            rs = self.regime_stats[regime]
+            rs.count += 1
+            rs.total_move_pct += move_pct
+            if won:
+                rs.wins += 1
+            # Update dominant_regime to the most common regime
+            if self.regime_distribution:
+                self.dominant_regime = max(
+                    self.regime_distribution, key=self.regime_distribution.get
+                )
+            # On first observation, set the regime directly
+            if n == 0:
+                self.regime = regime
+                self.regime_confidence = regime_confidence if regime_confidence is not None else 0.0
+            else:
+                # Blend regime_confidence incrementally
+                if regime_confidence is not None:
+                    self.regime_confidence = (
+                        (self.regime_confidence * n + regime_confidence)
+                        / self.historical_count
+                    )
+
+        # V4: Update node_type based on count
+        if self.historical_count >= self.min_independent_count:
+            self.node_type = "independent"
+        else:
+            self.node_type = "dependent"
+
+        # V4.2: Track observation freshness
+        import time as _time
+        now = _time.time()
+        if n == 0:
+            # First observation — set initial time, timespan is 0
+            self.last_observation_time = now
+            self.observation_timespan = 0.0
+        else:
+            # Update timespan: difference between first and latest observation
+            if self.last_observation_time > 0:
+                self.observation_timespan = max(
+                    self.observation_timespan, now - (self.last_observation_time - self.observation_timespan)
+                )
+            self.last_observation_time = now
 
     def compute_sl_tp(self, entry_price: float, safety_margin: float = 0.2) -> None:
         """
@@ -298,6 +696,21 @@ class BlockLifecycleMetadata:
             "expected_profit_ahead": round(self.expected_profit_ahead, 4),
             "sizing_signal": round(self.sizing_signal, 4),
             "risk_reward_ratio": round(self.risk_reward_ratio, 4),
+            # V4: Regime-aware node metadata
+            "regime": self.regime,
+            "regime_confidence": round(self.regime_confidence, 4),
+            "dominant_regime": self.dominant_regime,
+            "regime_distribution": self.regime_distribution,
+            # V4.1: Per-regime statistics
+            "regime_stats": {k: v.to_dict() for k, v in self.regime_stats.items()},
+            # V4.1: Move variance tracking
+            "move_variance": round(self.move_variance, 6),
+            "move_mean_for_variance": round(self.move_mean_for_variance, 6),
+            "node_type": self.node_type,
+            "min_independent_count": self.min_independent_count,
+            # V4.2: Observation freshness
+            "last_observation_time": self.last_observation_time,
+            "observation_timespan": self.observation_timespan,
         }
 
     @classmethod
@@ -316,4 +729,22 @@ class BlockLifecycleMetadata:
             tp_price=data.get("tp_price"),
             continuation_nodes=data.get("continuation_nodes", []),
             break_nodes=data.get("break_nodes", []),
+            # V4: Regime-aware node metadata
+            regime=data.get("regime", ""),
+            regime_confidence=data.get("regime_confidence", 0.0),
+            dominant_regime=data.get("dominant_regime", ""),
+            regime_distribution=data.get("regime_distribution", {}),
+            # V4.1: Per-regime statistics
+            regime_stats={
+                k: RegimeStats.from_dict(v) if isinstance(v, dict) else RegimeStats()
+                for k, v in data.get("regime_stats", {}).items()
+            },
+            # V4.1: Move variance tracking
+            move_variance=data.get("move_variance", 0.0),
+            move_mean_for_variance=data.get("move_mean_for_variance", 0.0),
+            node_type=data.get("node_type", "dependent"),
+            min_independent_count=data.get("min_independent_count", 10),
+            # V4.2: Observation freshness
+            last_observation_time=data.get("last_observation_time", 0.0),
+            observation_timespan=data.get("observation_timespan", 0.0),
         )

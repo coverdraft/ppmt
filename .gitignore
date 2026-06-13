@@ -46,3 +46,8 @@ config/local.yaml
 .coverage
 htmlcov/
 .pytest_cache/
+.next/
+node_modules/
+next-env.d.ts
+
+*.egg-info/

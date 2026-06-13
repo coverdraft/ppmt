@@ -38,6 +38,7 @@ import numpy as np
 from ppmt.data.storage import PPMTStorage
 from ppmt.data.classifier import AssetClassifier
 from ppmt.core.sax import SAXEncoder
+from ppmt.core.regime import RegimeDetector, RegimeInfo
 from ppmt.engine.ppmt import PPMT
 from ppmt.engine.prediction import PredictionEngine
 from ppmt.engine.signal import SignalType, Signal
@@ -139,6 +140,9 @@ def _record_observation(
 
     if node is None:
         # Pattern not in Trie at all — create the entry as a new pattern
+        # V4.4: Pass regime/regime_confidence so new nodes inherit regime context.
+        # Previously these were missing, causing newly-created Living Trie nodes
+        # to have empty regime info, which broke regime-aware confidence scoring.
         trie.insert_with_observations(
             symbols=trade.matched_pattern,
             move_pct=trade.actual_move_pct,
@@ -147,6 +151,8 @@ def _record_observation(
             duration=max(1, exit_sym_idx - trade.entry_sym_idx) if trade.entry_sym_idx > 0 else 1,
             won=trade.pnl_pct > 0,
             next_symbol=next_symbol,
+            regime=trade.regime if trade.regime else None,
+            regime_confidence=trade.regime_confidence if trade.regime_confidence > 0 else None,
         )
         new_nodes += 1
         observations += 1
@@ -184,6 +190,8 @@ def _record_observation(
         duration=duration,
         won=won,
         next_symbol=next_symbol,
+        regime=trade.regime if trade.regime else None,
+        regime_confidence=trade.regime_confidence if trade.regime_confidence > 0 else None,
     )
     observations += 1
     trie.trading_observations += 1
@@ -199,6 +207,8 @@ def _record_observation(
             duration=duration,
             won=won,
             next_symbol=None,
+            regime=trade.regime if trade.regime else None,
+            regime_confidence=trade.regime_confidence if trade.regime_confidence > 0 else None,
         )
         new_nodes += 1
 
@@ -221,23 +231,25 @@ class PaperTraderConfig:
     pattern_length: int = 5
     """SAX blocks per pattern."""
 
-    sax_alphabet_size: int = 10
+    sax_alphabet_size: int = 8
     """SAX alphabet size."""
 
-    sax_window_size: int = 5
+    sax_window_size: int = 10
     """SAX window size."""
 
     sax_strategy: str = "ohlcv"
     """SAX encoding strategy."""
 
-    min_confidence: float = 0.10
+    min_confidence: float = 0.20
     """Minimum confidence to generate entry signal.
-    v0.4.2: Reverted to 0.10 (v0.4.0 value). The v0.4.1 tighter threshold
-    (0.15) caused a massive regression: P&L dropped from +3665% to +347%,
-    WR from 53.1% to 46.6%. The Living Trie's metadata naturally
-    produces higher confidence for validated patterns, making this
-    threshold self-adjusting. Raising it artificially removes too many
-    winning trades."""
+    v0.6.2: Raised from 0.15 to 0.20 based on Cycle 5 regression analysis.
+    Cycle 5 (v0.6.0 with probability bonus) allowed 10% confidence trades
+    via the bonus loophole, resulting in +86.82% P&L vs Cycle 4's +1434%.
+    v0.6.1 removed the bonus but min_confidence stayed at 15%. Raising
+    to 20% further filters low-quality entries. Cycle 5 data shows trades
+    with 15-19% confidence had WR of ~38% — removing these should
+    improve overall quality. The SHORT gate is also relaxed (1.2x vs 1.5x)
+    to compensate and allow SHORT diversification."""
 
     min_quality_score: float = 0.0
     """Minimum quality score to enter a trade.
@@ -253,6 +265,23 @@ class PaperTraderConfig:
 
     start_offset: int = 200
     """Number of initial candles to skip (warm-up for SAX encoding)."""
+
+    end_offset: int = 0
+    """Maximum candle index for trading (0 = use all data).
+    v0.6.2: Added for out-of-sample validation. When set to a non-zero
+    value, the paper trader will only trade up to this candle index.
+    This allows building a trie on full data but only trading on a
+    specific portion (e.g., the last 30% for OOS testing)."""
+
+    paa_mean: float | None = None
+    """SAX normalization mean from training data. v0.6.3: When set (along
+    with paa_std), the SAX encoder uses encode_with_normalization() with
+    these training stats instead of computing z-scores from current data.
+    This ensures consistent symbol mapping between training and test periods,
+    which is critical for out-of-sample validation."""
+
+    paa_std: float | None = None
+    """SAX normalization std from training data. See paa_mean docs."""
 
     living_trie: bool = True
     """Whether to update the Trie with observations during paper trading.
@@ -274,13 +303,33 @@ class PaperTraderConfig:
     A cooldown of 1 still prevents immediate revenge trading while
     allowing the system to capture the next valid signal."""
 
-    catastrophic_loss_pct: float = 0.0
-    """Catastrophic loss threshold (percentage). v0.3.0: DISABLED (0.0).
-    v0.2.10's catastrophic protection cut winners short — trades that
-    temporarily exceeded -5% unrealized loss often reversed to reach
-    take_profit. The v0.2.8 baseline (no catastrophic protection)
-    produced +1578% P&L precisely because it let trades breathe.
-    Set to a non-zero value (e.g., 8.0) to re-enable as a safety net."""
+    catastrophic_loss_pct: float = 8.0
+    """Catastrophic loss threshold (percentage). v0.6.2: Re-enabled at 8.0%.
+    Cycle 5 showed several trades with -10%+ losses (worst -10.56%).
+    The old 5% threshold cut winners short, but 8% is high enough to
+    let trades breathe while preventing catastrophic drawdowns.
+    Max DD in Cycle 5 was 41.3% — this safety net should reduce that.
+    v0.3.0 had disabled it (0.0) because 5% was too tight for BTC's
+    volatility. 8% gives ~3x the avg ATR (0.84%) as breathing room."""
+
+    regime_aware: bool = True
+    """v0.8.0: Enable regime-aware position sizing. When True, the paper
+    trader detects the current market regime at each SAX boundary and
+    adjusts position sizing accordingly. Regime multipliers:
+    - trending_up: 1.2x (favorable, increase exposure)
+    - ranging:     1.0x (neutral, base sizing)
+    - trending_down: 0.6x (unfavorable, reduce exposure)
+    - volatile:    0.4x (dangerous, minimal exposure)
+    The AdvancedPositionSizer already supports these multipliers;
+    this flag activates the regime detection that feeds them."""
+
+    use_multi_level: bool = True
+    """v0.10.0: Enable 4-level matching (N1+N2+N3+N4) with adaptive weights.
+    When True and all 4 tries are available, uses PPMT.match_raw() to compute
+    weighted confidence across all 4 trie levels. When False or when only N3
+    is available, falls back to single-trie PredictionEngine (backward
+    compatible). This is the fix for GAP-1: PaperTrader previously only
+    used N3, ignoring N1/N2/N4 entirely."""
 
     verbose: bool = True
     """Whether to print step-by-step details."""
@@ -319,6 +368,10 @@ class PaperTrade:
     """SAX symbol index at entry (for duration calculation)."""
     trie_updated: bool = False
     """Whether this trade's outcome was recorded in the Trie (living Trie)."""
+    regime: str = ""
+    """Market regime at entry time. v0.8.0: One of trending_up, trending_down, ranging, volatile."""
+    regime_confidence: float = 0.0
+    """Confidence of the regime detection at entry time."""
 
 
 @dataclass
@@ -383,6 +436,7 @@ class PaperTraderResult:
         table.add_column("Quality", justify="right", width=6)
         table.add_column("WR", justify="right", width=5)
         table.add_column("Exit Reason", width=15)
+        table.add_column("Regime", width=8)
 
         for t in self.trades:
             pnl_style = "green" if t.pnl_pct >= 0 else "red"
@@ -397,6 +451,7 @@ class PaperTraderResult:
                 f"{t.quality_score:.2f}",
                 f"{t.win_rate:.0%}",
                 t.exit_reason,
+                t.regime or "-",
             )
 
         return table
@@ -423,7 +478,7 @@ class PaperTrader:
             max_daily_loss_pct=0.10,      # 10% daily loss limit
             max_drawdown_pct=0.80,        # 80% for paper trading (don't block signals while tuning)
             min_quality_score=0.0,        # Checked in paper_trader, not RiskManager
-            min_confidence=0.0,           # Checked in paper_trader, not RiskManager
+            # min_confidence is checked in PaperTrader.run(), not RiskManager
         )
 
     def run(self) -> PaperTraderResult:
@@ -466,9 +521,22 @@ class PaperTrader:
         info = classifier.classify(cfg.symbol)
 
         # Try to load existing Tries, or build new ones
-        trie = storage.load_trie(cfg.symbol, "n3")
+        # v0.10.0: Load all 4 levels for GAP-1 4-level matching
+        all_tries = storage.load_all_tries(cfg.symbol)
+        trie_n1 = all_tries["n1"]
+        trie_n2 = all_tries["n2"]
+        trie_n3 = all_tries["n3"]
+        trie_n4 = all_tries["n4"]
+
         initial_pattern_count = 0
-        if trie is None:
+        has_multi_level = (
+            cfg.use_multi_level
+            and trie_n1 is not None
+            and trie_n2 is not None
+            and trie_n4 is not None
+        )
+
+        if trie_n3 is None:
             console.print(f"[yellow]No Trie for {cfg.symbol}. Building from data...[/yellow]")
             engine = PPMT(
                 symbol=cfg.symbol,
@@ -479,13 +547,29 @@ class PaperTrader:
                 weight_profile=info.weight_profile,
             )
             engine.build(df, pattern_length=cfg.pattern_length)
-            trie = engine.trie_n3
+            trie_n1 = engine.trie_n1
+            trie_n2 = engine.trie_n2
+            trie_n3 = engine.trie_n3
+            trie_n4 = engine.trie_n4
+            has_multi_level = True
         else:
-            initial_pattern_count = trie.pattern_count
-            console.print(f"[green]Loaded N3 Trie for {cfg.symbol} ({trie.pattern_count} patterns)[/green]")
+            initial_pattern_count = trie_n3.pattern_count
+            console.print(f"[green]Loaded N3 Trie for {cfg.symbol} ({trie_n3.pattern_count} patterns)[/green]")
+            if has_multi_level:
+                console.print(f"[green]All 4 levels loaded: N1={trie_n1.pattern_count}, "
+                              f"N2={trie_n2.pattern_count}, N3={trie_n3.pattern_count}, "
+                              f"N4={trie_n4.pattern_count}[/green]")
+            else:
+                console.print(f"[yellow]Only N3 trie available — running in single-level mode[/yellow]")
+
+        # Primary trie for PredictionEngine + Living Trie
+        trie = trie_n3
 
         # CRITICAL: Propagate metadata so intermediate nodes have statistics
         trie.propagate_metadata()
+        if has_multi_level:
+            for t in [trie_n1, trie_n2, trie_n4]:
+                t.propagate_metadata()
         console.print(f"[green]Metadata propagated: root now has {trie.root.metadata.historical_count} aggregated observations[/green]")
 
         # Compute ATR for dynamic SL/TP sizing
@@ -501,8 +585,18 @@ class PaperTrader:
             strategy=cfg.sax_strategy,
         )
 
-        # Encode the FULL DataFrame once (same z-score context as during build)
-        all_sax_symbols = sax_encoder.encode(df)
+        # Encode the FULL DataFrame
+        # v0.6.3: Use encode_with_normalization() when training stats are provided.
+        # This ensures consistent symbol mapping between train and test periods.
+        if cfg.paa_mean is not None and cfg.paa_std is not None:
+            all_sax_symbols, _, _ = sax_encoder.encode_with_normalization(
+                df, paa_mean=cfg.paa_mean, paa_std=cfg.paa_std
+            )
+            console.print(f"  SAX encoding: using training normalization "
+                          f"(mean={cfg.paa_mean:.6f}, std={cfg.paa_std:.6f})")
+        else:
+            all_sax_symbols = sax_encoder.encode(df)
+
         if not all_sax_symbols:
             console.print(f"[red]Could not SAX encode data for {cfg.symbol}.[/red]")
             return PaperTraderResult(symbol=cfg.symbol, timeframe=cfg.timeframe)
@@ -512,6 +606,23 @@ class PaperTrader:
         # Create engines
         pred_engine = PredictionEngine(trie, prediction_depth=cfg.pattern_length)
         risk_mgr = RiskManager(capital=cfg.initial_capital, config=self.risk_config)
+
+        # v0.10.0: Create PPMT engine for 4-level matching (GAP-1 fix)
+        ppmt_engine = None
+        if has_multi_level:
+            ppmt_engine = PPMT(
+                symbol=cfg.symbol,
+                asset_class=info.asset_class,
+                sax_alphabet_size=cfg.sax_alphabet_size,
+                sax_window_size=cfg.sax_window_size,
+                sax_strategy=cfg.sax_strategy,
+                weight_profile=info.weight_profile,
+            )
+            # Inject loaded tries instead of building new ones
+            ppmt_engine.set_tries(trie_n1, trie_n2, trie_n3, trie_n4)
+            # Adapt weights based on available data
+            ppmt_engine.adapt_weights()
+            console.print(f"  [bold cyan]4-level matching enabled[/bold cyan]: weights={ppmt_engine.weights}")
 
         # v0.3.3: Reverted adaptive confidence scaling (was raising min_confidence
         # to 0.20 for fresh tries). v0.3.2 proved this was COUNTERPRODUCTIVE:
@@ -560,25 +671,46 @@ class PaperTrader:
             console.print(f"[red]Not enough data. Need at least {start_candle} candles, have {len(df)}.[/red]")
             return result
 
+        # v0.6.2: End offset for out-of-sample validation
+        end_candle = cfg.end_offset if cfg.end_offset > 0 else len(df)
+        if end_candle > len(df):
+            end_candle = len(df)
+
         living_trie_status = "ON" if cfg.living_trie else "OFF"
+        oos_status = f", ending at index {end_candle}" if cfg.end_offset > 0 else ""
         console.print(f"\n[bold cyan]Starting Paper Trading: {cfg.symbol} ({cfg.timeframe})[/bold cyan]")
         console.print(f"  Capital: ${cfg.initial_capital:,.2f}")
-        console.print(f"  Data: {len(df)} candles, starting from index {start_candle}")
+        console.print(f"  Data: {len(df)} candles, starting from index {start_candle}{oos_status}")
+        console.print(f"  Trading range: candles {start_candle}-{end_candle} ({end_candle - start_candle} candles)")
         console.print(f"  Trie: {trie.pattern_count} patterns")
         console.print(f"  Min confidence: {cfg.min_confidence:.0%} | Min quality: {cfg.min_quality_score:.2f}")
-        console.print(f"  Entry: move > 0.5%, probability > 15%, ATR-based SL/TP")
+        console.print(f"  Entry: move > 1.0%, probability > 20%, ATR-based SL/TP")
         console.print(f"  LONG SL: max(ATR*1.5, 1.5%) cap 5% | SHORT SL: max(ATR*2.0, 2.0%) cap 7%")
         cat_status = f"{cfg.catastrophic_loss_pct:.0f}%" if cfg.catastrophic_loss_pct > 0 else "OFF"
         console.print(f"  Catastrophic protection: {cat_status}")
         console.print(f"  Trailing stop: activates at 75% of TP distance")
         console.print(f"  Pattern break grace: {cfg.pattern_break_grace} consecutive")
         console.print(f"  Re-entry cooldown: {cfg.reentry_cooldown} symbols after loss")
-        console.print(f"  Living Trie: [bold]{living_trie_status}[/bold]\n")
+        console.print(f"  Living Trie: [bold]{living_trie_status}[/bold]")
+        console.print(f"  Regime-aware sizing: [bold]{'ON' if cfg.regime_aware else 'OFF'}[/bold]")
+        console.print(f"  4-level matching: [bold]{'ON' if has_multi_level else 'OFF'}[/bold]\n")
+
+        # v0.8.0: Regime detection
+        regime_detector = None
+        current_regime = "ranging"
+        regime_info = None
+        regime_stats = {"trending_up": 0, "trending_down": 0, "ranging": 0, "volatile": 0}
+        if cfg.regime_aware:
+            regime_detector = RegimeDetector(lookback=50, vol_threshold=0.6, trend_threshold=0.005)
+            console.print(f"  [dim]Regime detector initialized (lookback=50)[/dim]")
 
         # We iterate over SAX symbol positions
         start_sym_idx = start_candle // cfg.sax_window_size
         if start_sym_idx < cfg.pattern_length:
             start_sym_idx = cfg.pattern_length
+
+        # v0.6.2: End symbol index for out-of-sample
+        end_sym_idx = end_candle // cfg.sax_window_size
 
         # Track prediction statistics
         pred_count = 0
@@ -599,7 +731,7 @@ class PaperTrader:
         df_low = df['low'].values.astype(float)
         df_close = df['close'].values.astype(float)
 
-        for sym_idx in range(start_sym_idx, len(all_sax_symbols)):
+        for sym_idx in range(start_sym_idx, end_sym_idx):
             # Candle range for this SAX symbol
             candle_start = sym_idx * cfg.sax_window_size
             candle_end = min((sym_idx + 1) * cfg.sax_window_size, len(df))
@@ -617,6 +749,25 @@ class PaperTrader:
             if sym_idx < cfg.pattern_length:
                 continue
             current_symbols = all_sax_symbols[sym_idx - cfg.pattern_length:sym_idx]
+
+            # ================================================================
+            # v0.8.0: Regime detection at each SAX boundary
+            # Detect market regime from recent prices and adjust position
+            # sizing accordingly. Regime is updated once per SAX window
+            # (not per candle) to match the trading decision cadence.
+            # ================================================================
+            if regime_detector is not None:
+                # Use last 200 candles for regime detection (enough for lookback=50)
+                regime_candle_start = max(0, last_candle_idx - 200)
+                regime_prices = df_close[regime_candle_start:last_candle_idx + 1]
+                if len(regime_prices) >= 50:
+                    regime_info = regime_detector.detect_detailed(regime_prices)
+                    current_regime = regime_info.regime
+                    regime_stats[current_regime] = regime_stats.get(current_regime, 0) + 1
+
+                    # v0.10.0: Update PPMT engine's regime for N4 matching (GAP-1)
+                    if ppmt_engine is not None:
+                        ppmt_engine.set_regime(current_regime)
 
             # ================================================================
             # PHASE 1: SL/TP checking
@@ -874,6 +1025,15 @@ class PaperTrader:
                     cooldown_filter_count += 1
                     continue
 
+                # V0.6.2: Regime filter — skip entries in volatile regime.
+                # Walk-forward OOS showed 16.7% WR in adverse periods.
+                # Volatile regime = high uncertainty = don't enter new positions.
+                # NOTE: Currently disabled — testing showed mixed results.
+                # BTC got worse with the filter, ETH improved slightly.
+                # More sophisticated regime-aware logic needed before enabling.
+                # if current_regime == "volatile":
+                #     continue
+
                 pred_count += 1
 
                 current_price = df_close[last_candle_idx]
@@ -884,6 +1044,7 @@ class PaperTrader:
                         entry_price=current_price,
                         timeframe_hours=tf_hours,
                         symbol=cfg.symbol,
+                        current_regime=current_regime,  # V4.1: regime-aware confidence
                     )
                 except Exception:
                     continue
@@ -893,32 +1054,103 @@ class PaperTrader:
 
                 pred_with_direction += 1
 
+                # v0.10.0: Get weighted confidence from 4-level matching (GAP-1)
+                # If multi-level is available, use PPMT.match_raw() to compute
+                # confidence across N1/N2/N3/N4 with adaptive weights.
+                # Otherwise, fall back to single-trie prediction confidence.
+                weighted_confidence = prediction.confidence  # default: single-trie
+                match_result = None
+                best_trie_level = "n3"
+
+                if ppmt_engine is not None:
+                    ppmt_result = ppmt_engine.match_raw(
+                        current_symbols=current_symbols,
+                        current_price=current_price,
+                    )
+                    weighted_confidence = ppmt_result.weighted_confidence
+                    match_result = ppmt_result
+
+                    # Determine which level had the best match
+                    level_confs = {
+                        "n1": ppmt_result.n1_confidence,
+                        "n2": ppmt_result.n2_confidence,
+                        "n3": ppmt_result.n3_confidence,
+                        "n4": ppmt_result.n4_confidence,
+                    }
+                    best_trie_level = max(level_confs, key=level_confs.get)
+
+                    # Graceful degradation: if 4-level confidence is 0 but
+                    # PredictionEngine found a direction, fall back to N3-only
+                    if weighted_confidence <= 0 and prediction.confidence > 0:
+                        weighted_confidence = prediction.confidence
+                        best_trie_level = "n3"
+
                 # Effective minimum confidence
                 effective_min_conf = cfg.min_confidence
 
-                # Probability bonus: very high probability lowers threshold
-                if prediction.overall_probability > 0.5:
-                    effective_min_conf = max(cfg.min_confidence * 0.5, 0.05)
+                # v0.6.1: REMOVED probability bonus that was undermining min_confidence.
+                # The bonus lowered threshold from 15% to 7.5% when prob>50%, allowing
+                # 10% confidence trades that had WR of only 32.6%. This defeated the
+                # entire purpose of raising min_confidence.
 
-                # SHORT signals require higher confidence (BTC trends up)
-                # v0.5.2: Reduced to 1.2x with floor 0.10 (was 1.5x/0.15).
-                # The 1.5x multiplier was too restrictive with window=5 SAX params,
-                # producing a heavy SHORT bias (64 SHORT vs 19 LONG trades in v0.5.1).
-                # Lower multiplier allows more balanced LONG/SHORT distribution.
+                # SHORT signals require regime-aware confidence gating.
+                # V4.3: Replaced the fixed 1.2x multiplier with a regime-aware gate.
+                # Previous versions used a fixed SHORT penalty (1.2x or 1.5x), which
+                # either eliminated all SHORTs (1.5x was too strict) or let bad SHORTs
+                # through (1.2x was too lenient in trending_up). The new approach:
+                #
+                # - trending_down: SHORT is FAVORABLE → lower threshold (0.85x)
+                # - ranging:       SHORT is NEUTRAL   → slight penalty (1.1x)
+                # - trending_up:   SHORT is ADVERSE   → strict penalty (1.5x)
+                # - volatile:      SHORT is DANGEROUS  → hard gate (1.8x)
+                #
+                # The floor of 0.20 always applies regardless of regime, ensuring
+                # minimum quality. This replaces the tautological check that existed
+                # in earlier versions (confidence < max(confidence * 1.2, 0.20) was
+                # always false for conf >= 0.167).
                 if prediction.direction == "SHORT":
-                    effective_min_conf = max(effective_min_conf * 1.2, 0.10)
+                    short_regime_mult = {
+                        "trending_down": 0.85,  # SHORTs favored in downtrend
+                        "ranging": 1.1,         # slight caution
+                        "trending_up": 1.5,     # fighting the trend — strict
+                        "volatile": 1.8,        # high risk — very strict
+                    }.get(current_regime, 1.2)   # default: moderate penalty
+                    effective_min_conf = max(effective_min_conf * short_regime_mult, 0.20)
+
+                # V4.1: Regime-aware confidence adjustment
+                # If the current regime is unfavorable for this pattern (e.g.,
+                # the pattern was observed in trending_up but current regime is
+                # volatile), reduce confidence. This uses the matched node's
+                # regime_match_score() to adjust. The prediction already has
+                # regime-aware confidence from PredictionEngine, but we also
+                # apply the regime effect to the THRESHOLD — making it harder
+                # to enter trades in unfavorable regimes.
+                regime_adjustment = 1.0  # neutral
+                if cfg.regime_aware and current_regime and prediction.confidence > 0:
+                    try:
+                        matched_node = trie.search(current_symbols)
+                        if matched_node and matched_node.metadata.regime_distribution:
+                            regime_adjustment = matched_node.metadata.regime_match_score(current_regime)
+                    except Exception:
+                        pass
+                # Adjust effective min_confidence inversely to regime match:
+                # If regime is favorable (score > 1.0), LOWER the threshold (easier to enter)
+                # If regime is unfavorable (score < 1.0), RAISE the threshold (harder to enter)
+                # This is equivalent to adjusting confidence but via the threshold.
+                if regime_adjustment > 0:
+                    effective_min_conf = effective_min_conf / regime_adjustment
 
                 # Entry conditions
-                # v0.5.2: Lowered move threshold to 0.5% (was 1.0%) and probability
-                # to 15% (was 20%). With SAX window=5, predictions have shorter
-                # time horizons and smaller expected moves. The old filters
-                # rejected 98.1% of predictions (83/4445 in v0.5.1), producing
-                # too few trades (83) for meaningful compounding. Loosening
-                # these should increase trade count toward 960+ target.
+                # v0.6.1: Reverted probability threshold from >0.25 back to >0.20.
+                # The >0.25 threshold was too aggressive, cutting pass rate from 32.5%
+                # to 13.8% and reducing trades by 32%.
+                # v0.6.2: Lowered expected_total_move from >1.0% to >0.3% for alpha=3.
+                # With alpha=3, cumulative predicted moves are typically 0.3-0.8%.
+                # The 1.0% threshold blocked ALL entries with alpha=3.
                 if (prediction.direction != "FLAT"
-                    and prediction.confidence >= effective_min_conf
-                    and abs(prediction.expected_total_move_pct) > 0.5
-                    and prediction.overall_probability > 0.15):
+                    and weighted_confidence >= effective_min_conf
+                    and abs(prediction.expected_total_move_pct) > 0.3
+                    and prediction.overall_probability > 0.20):
 
                     pred_passed_threshold += 1
 
@@ -948,18 +1180,37 @@ class PaperTrader:
                     #
                     current_atr_pct = atr_pct[last_candle_idx] if last_candle_idx < len(atr_pct) else 2.0
 
-                    # v0.3.0: Reverted to v0.2.8 SL/TP parameters
-                    # LONG: SL = max(ATR*1.5, 1.5%), cap 5% → TP = SL*2.0
-                    # SHORT: SL = max(ATR*2.0, 2.0%), cap 7% → TP = SL*1.5
-                    # v0.2.10's LONG SL floor of 2.0% was wider but the
-                    # trailing stop + catastrophic protection combo negated
-                    # the benefit. v0.2.8's 1.5% with simple SL/TP works.
+                    # V0.6.2 CRITICAL FIX: Prediction-Aware SL/TP
+                    #
+                    # Previous ATR-based SL/TP had fixed floors (1.5% SL, 3% TP
+                    # for LONG). With alpha=3, the average expected move is only
+                    # ~0.3-0.5%. TP at 3% = 11x expected move! Almost no trade
+                    # ever reached TP, so they all hit SL or pattern break →
+                    # guaranteed losing system despite 54% directional accuracy.
+                    #
+                    # OOS validation showed this was THE #1 cause of losses:
+                    #   Before fix: BTC -28.98%, WR 29.1%, PF 0.67
+                    #   After fix:  BTC -11.81%, WR 38.1%, PF 0.88
+                    #   After fix:  ETH  -6.79%, WR 42.2%, PF 0.99
+                    #
+                    # New approach: Scale SL/TP to PREDICTED move, not ATR.
+                    #   SL = 1.5x expected move (room for noise)
+                    #   TP = 2.5x expected move (R:R = 1.67)
+                    #   Floor: 0.5% SL, Cap: 5% SL
+                    # This ensures TP is REACHABLE when prediction is correct.
+                    expected_move_abs = abs(prediction.expected_total_move_pct)
+                    
                     if prediction.direction == "LONG":
-                        sl_distance_pct = min(max(current_atr_pct * 1.5, 1.5), 5.0)
-                        tp_distance_pct = sl_distance_pct * 2.0  # R:R = 2.0
+                        sl_distance_pct = max(min(expected_move_abs * 1.5, 5.0), 0.5)
+                        tp_distance_pct = expected_move_abs * 2.5  # R:R = 1.67
+                        # Ensure minimum R:R of 1.5
+                        if tp_distance_pct < sl_distance_pct * 1.5:
+                            tp_distance_pct = sl_distance_pct * 1.5
                     else:  # SHORT
-                        sl_distance_pct = min(max(current_atr_pct * 2.0, 2.0), 7.0)
-                        tp_distance_pct = sl_distance_pct * 1.5  # R:R = 1.5
+                        sl_distance_pct = max(min(expected_move_abs * 1.5, 5.0), 0.5)
+                        tp_distance_pct = expected_move_abs * 2.5
+                        if tp_distance_pct < sl_distance_pct * 1.5:
+                            tp_distance_pct = sl_distance_pct * 1.5
 
                     if prediction.direction == "LONG":
                         sl_price = current_price * (1 - sl_distance_pct / 100)
@@ -973,9 +1224,25 @@ class PaperTrader:
                     tp_distance_pct = abs(tp_price - current_price) / current_price * 100
                     risk_reward = tp_distance_pct / sl_distance_pct if sl_distance_pct > 0 else 0
 
+                    # V4.3: Get actual historical_count from the matched Trie node
+                    # BEFORE creating the Signal. The previous version created the
+                    # Signal with hardcoded historical_count=100, then tried to fix
+                    # it with a separate mock_meta — but the Signal's own
+                    # compute_quality_score() and compute_sizing_multiplier() had
+                    # already used the wrong count. This distorted sizing by making
+                    # rarely-observed patterns appear more reliable than they are.
+                    actual_historical_count = 10  # conservative default if no node found
+                    matched_node_for_sizing = None
+                    try:
+                        matched_node_for_sizing = trie.search(current_symbols)
+                        if matched_node_for_sizing and matched_node_for_sizing.metadata.historical_count > 0:
+                            actual_historical_count = matched_node_for_sizing.metadata.historical_count
+                    except Exception:
+                        pass
+
                     signal = Signal(
                         signal_type=signal_type,
-                        confidence=prediction.confidence,
+                        confidence=weighted_confidence,  # v0.10.0: 4-level weighted confidence (GAP-1)
                         symbol=cfg.symbol,
                         entry_price=current_price,
                         sl_price=sl_price,
@@ -983,8 +1250,9 @@ class PaperTrader:
                         expected_move_pct=prediction.expected_total_move_pct,
                         risk_reward_ratio=risk_reward,
                         win_rate=prediction.overall_probability,
-                        historical_count=100,
+                        historical_count=actual_historical_count,
                         matched_pattern=current_symbols,
+                        trie_level=best_trie_level,  # v0.10.0: Which level won
                     )
                     signal.quality_score = signal.compute_quality_score()
                     signal.sizing_multiplier = signal.compute_sizing_multiplier()
@@ -996,12 +1264,17 @@ class PaperTrader:
                         risk_reject_reasons["low_quality"] = risk_reject_reasons.get("low_quality", 0) + 1
                         continue
 
-                    # Metadata sizing
+                    # Metadata sizing — use the real historical_count for sizing
+                    # The Signal already has the correct count, but we create
+                    # a dedicated BlockLifecycleMetadata for precise Bayesian
+                    # sizing calculations (probability_of_success, sizing_signal).
+                    # V4.3: No longer duplicates the historical_count fix — it's
+                    # already correct in the Signal from creation.
                     mock_meta = BlockLifecycleMetadata(
                         win_rate=signal.win_rate,
                         expected_move_pct=signal.expected_move_pct,
                         max_drawdown_pct=-sl_distance_pct,
-                        historical_count=100,
+                        historical_count=actual_historical_count,
                     )
                     signal.probability_of_success = mock_meta.probability_of_success
                     signal.expected_profit_ahead = mock_meta.expected_profit_ahead
@@ -1012,6 +1285,35 @@ class PaperTrader:
                     if can_open:
                         size = risk_mgr.calculate_position_size(signal)
                         position = risk_mgr.open_position(signal, size)
+
+                        # V4: Use matched node's regime info when available
+                        # If the matched Trie node has regime metadata, use it
+                        # as the node-level regime instead of the global regime.
+                        # This provides more granular regime awareness — a pattern
+                        # that historically worked in trending_up should get a
+                        # confidence boost when the current regime is trending_up.
+                        node_regime = current_regime  # default to global
+                        node_regime_conf = regime_info.confidence if regime_info else 0.0
+                        try:
+                            # v0.10.0: Use best-match node from 4-level matching if available
+                            if match_result is not None:
+                                best_match = None
+                                for m in [match_result.n3_match, match_result.n2_match,
+                                          match_result.n1_match, match_result.n4_match]:
+                                    if m is not None and m.node is not None and m.node.metadata.dominant_regime:
+                                        best_match = m
+                                        break
+                                if best_match and best_match.node:
+                                    node_regime = best_match.node.metadata.dominant_regime
+                                    node_regime_conf = best_match.node.metadata.regime_confidence
+                            else:
+                                # Fallback: search N3 trie directly (backward compatible)
+                                matched_node = trie.search(current_symbols)
+                                if matched_node and matched_node.metadata.dominant_regime:
+                                    node_regime = matched_node.metadata.dominant_regime
+                                    node_regime_conf = matched_node.metadata.regime_confidence
+                        except Exception:
+                            pass
 
                         current_position = PaperTrade(
                             trade_id=trade_counter + 1,
@@ -1031,6 +1333,8 @@ class PaperTrader:
                             sl_price=sl_price,
                             tp_price=tp_price,
                             entry_sym_idx=sym_idx,
+                            regime=node_regime,
+                            regime_confidence=node_regime_conf,
                         )
                     else:
                         risk_reject_reasons[reason] = risk_reject_reasons.get(reason, 0) + 1
@@ -1078,6 +1382,13 @@ class PaperTrader:
             console.print(f"[dim]Risk rejections: {risk_reject_reasons}[/dim]")
         if cooldown_filter_count > 0:
             console.print(f"[dim]Re-entry cooldown blocks: {cooldown_filter_count}[/dim]")
+        if cfg.regime_aware and regime_stats:
+            total_regime_steps = sum(regime_stats.values())
+            console.print(f"[dim]Regime distribution: "
+                          f"up={regime_stats.get('trending_up', 0)} ({regime_stats.get('trending_up', 0)/max(total_regime_steps,1):.0%}) "
+                          f"down={regime_stats.get('trending_down', 0)} ({regime_stats.get('trending_down', 0)/max(total_regime_steps,1):.0%}) "
+                          f"range={regime_stats.get('ranging', 0)} ({regime_stats.get('ranging', 0)/max(total_regime_steps,1):.0%}) "
+                          f"volatile={regime_stats.get('volatile', 0)} ({regime_stats.get('volatile', 0)/max(total_regime_steps,1):.0%})[/dim]")
 
         # Living Trie statistics and save
         if cfg.living_trie and trie_observations_recorded > 0:
@@ -1097,7 +1408,15 @@ class PaperTrader:
 
             # Save updated Trie back to storage
             storage.save_trie(cfg.symbol, "n3", trie)
-            console.print(f"  [green]Updated Trie saved to storage[/green]")
+            console.print(f"  [green]Updated N3 Trie saved to storage[/green]")
+
+            # v0.10.0: Save N1/N2/N4 if loaded (they weren't modified by Living Trie,
+            # but propagation may have updated metadata)
+            if has_multi_level:
+                for level, t in [("n1", trie_n1), ("n2", trie_n2), ("n4", trie_n4)]:
+                    t.propagate_metadata()
+                    storage.save_trie(cfg.symbol, level, t)
+                console.print(f"  [green]All 4 levels saved to storage[/green]")
 
         # Compute final results
         result.final_capital = risk_mgr.capital
