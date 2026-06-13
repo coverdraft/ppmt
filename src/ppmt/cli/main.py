@@ -7,8 +7,6 @@ Usage:
   ppmt build --symbol BTC/USDT       Build Trie from stored data
   ppmt predict --symbol BTC/USDT     Show prediction from current pattern
   ppmt run --symbol BTC/USDT         Real-time pattern matching
-  ppmt run --symbol BTC/USDT --paper Run paper trading simulation
-  ppmt monte-carlo --symbol BTC/USDT Monte Carlo simulation
   ppmt stats --symbol BTC/USDT       Show pattern statistics
   ppmt list                          List tracked assets
 """
@@ -23,7 +21,6 @@ import click
 import yaml
 from rich.console import Console
 from rich.table import Table
-from rich.panel import Panel
 
 from ppmt.data.storage import PPMTStorage
 from ppmt.data.collector import DataCollector
@@ -46,7 +43,7 @@ def load_config() -> dict:
 
 
 @click.group()
-@click.version_option(version="0.5.2")
+@click.version_option(version="0.1.0")
 def cli():
     """PPMT - Progressive Pattern Matching Trie Engine"""
     pass
@@ -71,7 +68,7 @@ def init():
         else:
             # Write minimal config
             with open(CONFIG_FILE, "w") as f:
-                yaml.dump({"sax": {"alphabet_size": 10, "window_size": 5}}, f)
+                yaml.dump({"sax": {"alphabet_size": 8, "window_size": 10}}, f)
             console.print(f"[green]Created minimal config at {CONFIG_FILE}[/green]")
     else:
         console.print(f"[yellow]Config already exists at {CONFIG_FILE}[/yellow]")
@@ -122,7 +119,7 @@ def ingest(symbol: str, timeframe: str, days: int, exchange: str, csv_path: str)
         console.print(f"  Asset Class: {info.asset_class}")
         console.print(f"  Weight Profile: {info.weight_profile}")
         if not df.empty and hasattr(df, 'index') and len(df.index) > 0:
-            console.print(f"  Date Range: {df.index[0]} -> {df.index[-1]}")
+            console.print(f"  Date Range: {df.index[0]} → {df.index[-1]}")
 
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
@@ -134,25 +131,8 @@ def ingest(symbol: str, timeframe: str, days: int, exchange: str, csv_path: str)
 @click.option("--symbol", "-s", required=True, help="Trading pair")
 @click.option("--timeframe", "-t", default="1h", help="Candle timeframe")
 @click.option("--pattern-length", "-p", default=5, type=int, help="SAX blocks per pattern")
-@click.option("--force", "-f", is_flag=True, default=False, help="Force rebuild (discard Living Trie data)")
-@click.option("--bootstrap/--no-bootstrap", default=True, help="Run bootstrap paper trading after build (default: enabled)")
-@click.option("--bootstrap-ratio", default=1.0, type=float, help="Fraction of data for bootstrap (default: 1.0 = 100%%)")
-@click.option("--bootstrap-passes", default=5, type=int, help="Number of bootstrap passes (default: 5 — each pass improves trie from previous)")
-@click.option("--sax-alphabet", default=10, type=int, help="SAX alphabet size (default: 10, more = finer patterns)")
-@click.option("--sax-window", default=5, type=int, help="SAX window size in candles (default: 5, smaller = more symbols = more trades)")
-def build(symbol: str, timeframe: str, pattern_length: int, force: bool, bootstrap: bool, bootstrap_ratio: float, bootstrap_passes: int, sax_alphabet: int, sax_window: int):
-    """Build PPMT Trie from stored data.
-
-    By default, preserves the existing N3 Living Trie (accumulated trading
-    metadata) by merging the new build into it. Use --force to discard
-    the Living Trie and rebuild from scratch.
-
-    v0.5.2: Entry filters lowered for window=5 regime (move > 0.5%, prob > 15%).
-    Bootstrap passes increased to 5 with much looser entry thresholds to
-    accumulate more observations. SHORT confidence multiplier reduced to
-    1.2x (was 1.5x). Merge now checks SAX parameter compatibility.
-    Use --no-bootstrap to skip, --sax-alphabet/--sax-window to override.
-    """
+def build(symbol: str, timeframe: str, pattern_length: int):
+    """Build PPMT Trie from stored data."""
     config = load_config()
     storage = PPMTStorage()
 
@@ -168,113 +148,25 @@ def build(symbol: str, timeframe: str, pattern_length: int, force: bool, bootstr
     classifier = AssetClassifier()
     info = classifier.classify(symbol)
 
-    # Create engine — CLI options override config.yaml
+    # Create engine
     sax_config = config.get("sax", {})
     engine = PPMT(
         symbol=symbol,
         asset_class=info.asset_class,
-        sax_alphabet_size=sax_alphabet or sax_config.get("alphabet_size", 10),
-        sax_window_size=sax_window or sax_config.get("window_size", 5),
+        sax_alphabet_size=sax_config.get("alphabet_size", 8),
+        sax_window_size=sax_config.get("window_size", 10),
         sax_strategy=sax_config.get("strategy", "ohlcv"),
         weight_profile=info.weight_profile,
     )
-    console.print(f"  SAX config: alphabet={engine.sax.alphabet_size}, window={engine.sax.window_size}")
 
     # Build Trie
     count = engine.build(df, pattern_length=pattern_length)
-
-    # v0.4.0: Run bootstrap paper trading pass
-    # This accumulates trading observations in the N3 trie,
-    # giving fresh tries meaningful metadata from day one.
-    bootstrap_stats = None
-    if bootstrap:
-        total_bootstrap_trades = 0
-        total_bootstrap_obs = 0
-        total_bootstrap_wins = 0
-        for pass_num in range(1, bootstrap_passes + 1):
-            pass_label = f" (pass {pass_num}/{bootstrap_passes})" if bootstrap_passes > 1 else ""
-            console.print(f"[cyan]Running bootstrap paper trading (ratio={bootstrap_ratio:.0%}){pass_label}...[/cyan]")
-            bootstrap_stats = engine.bootstrap(
-                df=df,
-                pattern_length=pattern_length,
-                bootstrap_ratio=bootstrap_ratio,
-                verbose=False,
-            )
-            total_bootstrap_trades += bootstrap_stats["trades"]
-            total_bootstrap_obs += bootstrap_stats["observations_recorded"]
-            total_bootstrap_wins += bootstrap_stats["winning_trades"]
-            if bootstrap_stats["trades"] > 0:
-                wr_color = "green" if bootstrap_stats["win_rate"] >= 0.5 else "yellow"
-                console.print(
-                    f"  [bold]Bootstrap{pass_label}:[/bold] {bootstrap_stats['trades']} trades simulated, "
-                    f"WR [{wr_color}]{bootstrap_stats['win_rate']:.1%}[/{wr_color}], "
-                    f"{bootstrap_stats['observations_recorded']} observations recorded"
-                )
-            else:
-                console.print(f"  [yellow]Bootstrap{pass_label}: no trades generated (data may be insufficient)[/yellow]")
-                break  # No point running more passes if no trades
-        # Combine stats for display
-        combined_wr = total_bootstrap_wins / total_bootstrap_trades if total_bootstrap_trades > 0 else 0.0
-        bootstrap_stats = {
-            "trades": total_bootstrap_trades,
-            "winning_trades": total_bootstrap_wins,
-            "win_rate": combined_wr,
-            "observations_recorded": total_bootstrap_obs,
-            "new_nodes_created": bootstrap_stats["new_nodes_created"] if bootstrap_stats else 0,
-        }
-    else:
-        console.print(f"  [dim]Bootstrap: skipped (--no-bootstrap)[/dim]")
-
-    # For N3: check if existing Living Trie should be preserved
-    # v0.5.1: ALWAYS merge existing Living Trie into new build to preserve
-    # valuable trading observations. Never replace — metadata is too precious.
-    existing_n3 = storage.load_trie(symbol, "n3")
-    n3_to_save = engine.trie_n3
-
-    if existing_n3 is not None and not force:
-        existing_count = existing_n3.pattern_count
-        new_count = engine.trie_n3.pattern_count
-        existing_obs = existing_n3.trading_observations
-
-        # v0.5.2: Check SAX parameter compatibility before merging.
-        # If existing trie was built with different SAX params (e.g., window=10
-        # vs window=5), its patterns don't align with the new build. Merging
-        # such tries introduces conflicting observations that dilute quality
-        # (v0.5.1 merge dropped WR from 59% to 49.8%).
-        # Check: existing trie's max depth indicates different SAX params.
-        # With window=5, pattern_length=5, max_depth should be ~5-6.
-        # With window=10, max_depth is also ~5-6 but pattern count differs.
-        # Use pattern count ratio as a heuristic for SAX param mismatch.
-        expected_pattern_range = (new_count * 0.5, new_count * 2.0)  # Allow 50-200% of new
-        sax_compatible = expected_pattern_range[0] <= existing_count <= expected_pattern_range[1]
-
-        if not sax_compatible and existing_obs > 0:
-            console.print(f"[yellow]Existing N3 has {existing_count} patterns (new: {new_count}) — SAX params likely differ[/yellow]")
-            console.print(f"[yellow]Merging would introduce conflicting observations. Using --force logic.[/yellow]")
-            n3_to_save = engine.trie_n3
-        elif existing_obs > 0:
-            console.print(f"[bold cyan]Living Trie detected:[/bold cyan] existing N3 has {existing_count} patterns ({existing_obs} observations) vs {new_count} new")
-            console.print(f"[cyan]Merging new build into existing Living Trie (preserving {existing_obs} trading observations)...[/cyan]")
-
-            merge_stats = existing_n3.merge(engine.trie_n3)
-
-            console.print(f"[green]Merge complete:[/green] "
-                          f"{merge_stats['new_patterns']} new patterns added, "
-                          f"{merge_stats['merged_patterns']} patterns merged, "
-                          f"{merge_stats['total_observations_added']} observations added")
-            console.print(f"[green]N3 Trie: {existing_count} -> {existing_n3.pattern_count} patterns[/green]")
-
-            n3_to_save = existing_n3
-        else:
-            # No trading observations — safe to replace
-            console.print(f"[yellow]Existing N3 ({existing_count} patterns) has no trading observations — using new build[/yellow]")
-            n3_to_save = engine.trie_n3
 
     # Save Tries
     for level, trie in [
         ("n1", engine.trie_n1),
         ("n2", engine.trie_n2),
-        ("n3", n3_to_save),
+        ("n3", engine.trie_n3),
         ("n4", engine.trie_n4),
     ]:
         storage.save_trie(symbol, level, trie)
@@ -288,16 +180,6 @@ def build(symbol: str, timeframe: str, pattern_length: int, force: bool, bootstr
     # Show stats
     stats = engine.get_stats()
     console.print(f"  Weights: {engine.weights}")
-
-    # Show bootstrap results summary
-    if bootstrap_stats and bootstrap_stats["trades"] > 0:
-        passes_text = f" ({bootstrap_passes} passes)" if bootstrap_passes > 1 else ""
-        console.print(
-            f"  [bold cyan]Bootstrap result:{passes_text}[/bold cyan] "
-            f"N3 trie now has {engine.trie_n3.trading_observations} trading observations "
-            f"({bootstrap_stats['trades']} trades, "
-            f"WR {bootstrap_stats['win_rate']:.1%})"
-        )
 
     storage.close()
 
@@ -395,24 +277,21 @@ def predict(symbol: str, timeframe: str, depth: int, price: float):
         console.print(f"[red]No Trie built for {symbol}. Run 'ppmt build' first.[/red]")
         return
 
-    # Propagate metadata so intermediate nodes have statistics
-    # (old stored Tries may not have propagated metadata)
-    trie.propagate_metadata()
-
-    # Encode the FULL DataFrame to SAX symbols (same context as build)
+    # Encode recent data to SAX symbols
     sax_config = config.get("sax", {})
     from ppmt.core.sax import SAXEncoder
     encoder = SAXEncoder(
-        alphabet_size=sax_config.get("alphabet_size", 10),
-        window_size=sax_config.get("window_size", 5),
+        alphabet_size=sax_config.get("alphabet_size", 8),
+        window_size=sax_config.get("window_size", 10),
         strategy=sax_config.get("strategy", "ohlcv"),
     )
 
-    # Must encode full DataFrame to get same z-score context as during build
-    symbols = encoder.encode(df)
+    # Use last N candles to get recent SAX symbols
+    recent_df = df.tail(100)
+    symbols = encoder.encode(recent_df)
 
     if not symbols:
-        console.print("[red]Could not encode data.[/red]")
+        console.print("[red]Could not encode recent data.[/red]")
         return
 
     # Use last 5 SAX blocks as current pattern
@@ -469,13 +348,13 @@ def predict(symbol: str, timeframe: str, depth: int, price: float):
 
         # Sizing interpretation
         if mock_signal.metadata_sizing_signal >= 1.5:
-            console.print(f"  -> [bold green]2.0x base position (HIGH CONVICTION)[/bold green]")
+            console.print(f"  → [bold green]2.0x base position (HIGH CONVICTION)[/bold green]")
         elif mock_signal.metadata_sizing_signal >= 1.0:
-            console.print(f"  -> [green]1.0x base position (NORMAL)[/green]")
+            console.print(f"  → [green]1.0x base position (NORMAL)[/green]")
         elif mock_signal.metadata_sizing_signal >= 0.5:
-            console.print(f"  -> [yellow]0.5x base position (LOW CONVICTION)[/yellow]")
+            console.print(f"  → [yellow]0.5x base position (LOW CONVICTION)[/yellow]")
         else:
-            console.print(f"  -> [red]0.25x base position or REJECT[/red]")
+            console.print(f"  → [red]0.25x base position or REJECT[/red]")
 
         # Forward prediction chain
         if prediction.predicted_path:
@@ -484,7 +363,7 @@ def predict(symbol: str, timeframe: str, depth: int, price: float):
             for step in prediction.predicted_path:
                 step_hours = step.estimated_candles * tf_hours
                 total_hours += step_hours
-                marker = "[green]ok[/green]" if step.is_continuation else "[red]X[/red]"
+                marker = "[green]✓[/green]" if step.is_continuation else "[red]✗[/red]"
                 console.print(
                     f"  {marker} Block [{step.symbol}] "
                     f"prob={step.probability:.0%} "
@@ -501,241 +380,20 @@ def predict(symbol: str, timeframe: str, depth: int, price: float):
 @cli.command()
 @click.option("--symbol", "-s", required=True, help="Trading pair")
 @click.option("--timeframe", "-t", default="1h", help="Candle timeframe")
-@click.option("--paper", is_flag=True, default=False, help="Run in paper trading mode (simulated)")
-@click.option("--capital", "-c", default=10000.0, type=float, help="Initial capital for paper trading")
-@click.option("--min-confidence", default=0.10, type=float, help="Minimum signal confidence to enter (default: 0.10)")
-def run(symbol: str, timeframe: str, paper: bool, capital: float, min_confidence: float):
-    """Run real-time pattern matching (requires exchange connection).
-
-    Use --paper to run a paper trading simulation on historical data
-    without real money. This validates PPMT predictions before going live.
-    """
-    if paper:
-        # Paper trading mode
-        from ppmt.engine.paper_trader import PaperTrader, PaperTraderConfig
-
-        config = load_config()
-        sax_config = config.get("sax", {})
-
-        pt_config = PaperTraderConfig(
-            symbol=symbol,
-            timeframe=timeframe,
-            initial_capital=capital,
-            sax_alphabet_size=sax_config.get("alphabet_size", 10),
-            sax_window_size=sax_config.get("window_size", 5),
-            sax_strategy=sax_config.get("strategy", "ohlcv"),
-            min_confidence=min_confidence,
-        )
-
-        trader = PaperTrader(config=pt_config)
-        result = trader.run()
-
-        # Display results
-        console.print()
-        console.print(Panel(result.format_summary(), title="Paper Trading Results", border_style="cyan"))
-
-        if result.trades:
-            console.print()
-            console.print(result.format_trades_table())
-
-            # Offer Monte Carlo on paper trading results
-            trades_pnl = [t.pnl_pct / 100.0 for t in result.trades]
-            if len(trades_pnl) >= 5:
-                console.print(f"\n[dim]Tip: Run 'ppmt monte-carlo --symbol {symbol}' for risk analysis[/dim]")
-        else:
-            console.print("\n[yellow]No trades generated. Try adjusting --min-confidence or ensure data is available.[/yellow]")
-
-        return
-
-    # Real-time mode (requires exchange connection)
+def run(symbol: str, timeframe: str):
+    """Run real-time pattern matching (requires exchange connection)."""
     console.print(f"[cyan]Starting PPMT real-time matching for {symbol}...[/cyan]")
     console.print("[yellow]Real-time mode requires exchange API connection.[/yellow]")
-    console.print("[yellow]Use --paper to run a paper trading simulation instead.[/yellow]")
+    console.print("[yellow]This is a placeholder for the real-time loop.[/yellow]")
 
     # TODO: Implement real-time loop with WebSocket
     # 1. Load engine state and Tries from storage
     # 2. Connect to exchange WebSocket
-    # 3. Process each new candle through SAX -> match -> signal
+    # 3. Process each new candle through SAX → match → signal
     # 4. Pass signals to RiskManager
     # 5. Execute trades if risk allows
 
     console.print("Real-time engine will be implemented in the next phase.")
-
-
-@cli.command("monte-carlo")
-@click.option("--symbol", "-s", required=True, help="Trading pair")
-@click.option("--timeframe", "-t", default="1h", help="Candle timeframe")
-@click.option("--simulations", "-n", default=1000, type=int, help="Number of Monte Carlo simulations")
-@click.option("--capital", "-c", default=10000.0, type=float, help="Initial capital")
-@click.option("--seed", default=42, type=int, help="Random seed for reproducibility")
-@click.option("--ruin-threshold", default=0.5, type=float, help="Ruin threshold (fraction of capital)")
-@click.option("--paper-first", is_flag=True, default=False, help="Run paper trading first, then Monte Carlo on results")
-@click.option("--min-confidence", default=0.10, type=float, help="Min confidence for paper trading (with --paper-first)")
-def monte_carlo(
-    symbol: str,
-    timeframe: str,
-    simulations: int,
-    capital: float,
-    seed: int,
-    ruin_threshold: float,
-    paper_first: bool,
-    min_confidence: float,
-):
-    """Run Monte Carlo simulation to assess trading system robustness.
-
-    Reshuffles trade order many times to estimate the distribution of
-    possible outcomes and derive confidence intervals for key risk metrics
-    including Risk of Ruin, P95 Max Drawdown, and Probability of Profit.
-
-    Two modes:
-      1. With --paper-first: Runs paper trading first, then Monte Carlo on results
-      2. Without --paper-first: Runs Monte Carlo on stored trade history (if any)
-    """
-    from ppmt.risk.monte_carlo import MonteCarloSimulator, MonteCarloConfig
-
-    config = load_config()
-    storage = PPMTStorage()
-
-    trades_pnl_pct = []
-
-    if paper_first:
-        # Run paper trading first to generate trade history
-        from ppmt.engine.paper_trader import PaperTrader, PaperTraderConfig
-
-        sax_config = config.get("sax", {})
-
-        console.print(f"[cyan]Step 1: Running paper trading for {symbol}...[/cyan]\n")
-        pt_config = PaperTraderConfig(
-            symbol=symbol,
-            timeframe=timeframe,
-            initial_capital=capital,
-            sax_alphabet_size=sax_config.get("alphabet_size", 10),
-            sax_window_size=sax_config.get("window_size", 5),
-            sax_strategy=sax_config.get("strategy", "ohlcv"),
-            min_confidence=min_confidence,
-        )
-
-        trader = PaperTrader(config=pt_config)
-        pt_result = trader.run()
-
-        # Show paper trading summary
-        console.print(Panel(pt_result.format_summary(), title="Paper Trading Results", border_style="cyan"))
-
-        if not pt_result.trades:
-            console.print("[red]No trades generated. Cannot run Monte Carlo.[/red]")
-            console.print("[yellow]Try adjusting --min-confidence or ensure data is available.[/yellow]")
-            storage.close()
-            return
-
-        trades_pnl_pct = [t.pnl_pct / 100.0 for t in pt_result.trades]
-        console.print(f"\n[cyan]Step 2: Running Monte Carlo on {len(trades_pnl_pct)} trades...[/cyan]\n")
-
-    else:
-        # Try to load trade history from storage
-        # For now, we need paper trading results
-        console.print(f"[cyan]Loading trade history for {symbol}...[/cyan]")
-
-        # Try paper trading as source
-        df = storage.load_ohlcv(symbol, timeframe)
-        if df.empty:
-            console.print(f"[red]No data found for {symbol}. Run 'ppmt ingest' first.[/red]")
-            storage.close()
-            return
-
-        # Run paper trading to generate trades
-        console.print(f"[yellow]No stored trade history found. Running paper trading first...[/yellow]")
-        console.print(f"[dim](Use --paper-first explicitly to control paper trading parameters)[/dim]\n")
-
-        from ppmt.engine.paper_trader import PaperTrader, PaperTraderConfig
-
-        sax_config = config.get("sax", {})
-        pt_config = PaperTraderConfig(
-            symbol=symbol,
-            timeframe=timeframe,
-            initial_capital=capital,
-            sax_alphabet_size=sax_config.get("alphabet_size", 10),
-            sax_window_size=sax_config.get("window_size", 5),
-            sax_strategy=sax_config.get("strategy", "ohlcv"),
-            min_confidence=min_confidence,
-        )
-
-        trader = PaperTrader(config=pt_config)
-        pt_result = trader.run()
-
-        if not pt_result.trades:
-            console.print("[red]No trades generated. Cannot run Monte Carlo.[/red]")
-            storage.close()
-            return
-
-        trades_pnl_pct = [t.pnl_pct / 100.0 for t in pt_result.trades]
-        console.print(f"\n[cyan]Running Monte Carlo on {len(trades_pnl_pct)} trades...[/cyan]\n")
-
-    # Run Monte Carlo simulation
-    mc_config = MonteCarloConfig(
-        simulations=simulations,
-        seed=seed,
-        initial_capital=capital,
-        ruin_threshold=ruin_threshold,
-    )
-
-    simulator = MonteCarloSimulator()
-
-    with console.status(f"[bold green]Running {simulations} Monte Carlo simulations...") as status:
-        result = simulator.simulate(trades_pnl_pct, config=mc_config)
-
-    # Display results
-    summary = simulator.generate_summary(result)
-    console.print(summary)
-
-    # Show interpretation
-    console.print()
-    if result.risk_of_ruin < 0.01:
-        console.print("[bold green]VERDICT: Excellent - Very low risk of ruin[/bold green]")
-    elif result.risk_of_ruin < 0.05:
-        console.print("[green]VERDICT: Good - Acceptable risk for most traders[/green]")
-    elif result.risk_of_ruin < 0.10:
-        console.print("[yellow]VERDICT: Marginal - Consider reducing position sizes[/yellow]")
-    else:
-        console.print("[bold red]VERDICT: Dangerous - High risk of blow-up, reduce exposure[/bold red]")
-
-    # Show equity curve percentiles in a table
-    table = Table(title="Equity Curve Percentiles")
-    table.add_column("Percentile", style="cyan")
-    table.add_column("Final Equity", justify="right")
-    table.add_column("vs Initial", justify="right")
-
-    for ci in result.equity_percentiles:
-        pct_change = (ci.value - capital) / capital * 100
-        style = "green" if pct_change >= 0 else "red"
-        table.add_row(
-            f"P{ci.level}",
-            f"${ci.value:,.2f}",
-            f"[{style}]{pct_change:+.1f}%[/{style}]",
-        )
-
-    console.print(table)
-
-    # Drawdown percentiles
-    dd_table = Table(title="Max Drawdown Percentiles")
-    dd_table.add_column("Percentile", style="cyan")
-    dd_table.add_column("Max Drawdown", justify="right")
-    dd_table.add_column("Risk Level", justify="right")
-
-    for ci in result.drawdown_percentiles:
-        dd_pct = ci.value * 100
-        if dd_pct < 10:
-            risk = "[green]Low[/green]"
-        elif dd_pct < 25:
-            risk = "[yellow]Moderate[/yellow]"
-        elif dd_pct < 40:
-            risk = "[red]High[/red]"
-        else:
-            risk = "[bold red]Extreme[/bold red]"
-        dd_table.add_row(f"P{ci.level}", f"{dd_pct:.1f}%", risk)
-
-    console.print(dd_table)
-
-    storage.close()
 
 
 if __name__ == "__main__":

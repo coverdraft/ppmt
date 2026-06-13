@@ -46,8 +46,8 @@ SAX_ALPHABET = "abcdefghijklmnopqrstuvwxyz"
 @dataclass
 class SAXConfig:
     """Configuration for SAX encoding."""
-    alphabet_size: int = 10
-    window_size: int = 5  # PAA window: candles per SAX block (v0.5.1: 10→5, more symbols = more trades)
+    alphabet_size: int = 8
+    window_size: int = 10  # PAA window: candles per SAX block
     strategy: Literal["ohlcv", "close", "typical_price"] = "ohlcv"
 
 
@@ -59,15 +59,15 @@ class SAXEncoder:
     for Trie storage and O(k) pattern matching.
 
     Usage:
-        encoder = SAXEncoder(alphabet_size=10, window_size=5)
+        encoder = SAXEncoder(alphabet_size=8, window_size=10)
         symbols = encoder.encode(df)  # df has OHLCV columns
         # symbols = ['a', 'd', 'b', 'h', 'e', ...]
     """
 
     def __init__(
         self,
-        alphabet_size: int = 10,
-        window_size: int = 5,
+        alphabet_size: int = 8,
+        window_size: int = 10,
         strategy: str = "ohlcv",
     ):
         if alphabet_size not in SAX_BREAKPOINTS:
@@ -146,7 +146,7 @@ class SAXEncoder:
         Piecewise Aggregate Approximation.
 
         Reduces the series dimensionality by averaging over windows.
-        E.g., 100 candles with window_size=5 → 20 PAA values.
+        E.g., 100 candles with window_size=10 → 10 PAA values.
         """
         n = len(series)
         window = self.window_size

@@ -134,8 +134,18 @@ class SAXEncoder:
             else:
                 vol_ratio = np.ones_like(v)
 
-            # Composite: body_center * direction * vol_ratio
-            composite = body_center * direction * (0.5 + 0.5 * vol_ratio)
+            # V0.6.2 CRITICAL FIX: Additive composite (was degenerate multiplicative)
+            # Old formula: body_center * direction * (0.5 + 0.5 * vol_ratio)
+            #   → collapses to ~0 when direction≈0 (doji candle)
+            # New formula: additive — preserves all features independently
+            #   body_position: where the body sits relative to the range [0, 1]
+            #   direction: sign and magnitude of body [-1, +1]
+            #   vol_signal: volume relative to rolling mean, centered [0, 1]
+            body_position = body_center  # already in [0, 1]
+            vol_signal = (vol_ratio - 0.5) / 1.5  # center vol_ratio [0.5,2.0] → [0, 1]
+            vol_signal = np.clip(vol_signal, 0.0, 1.0)
+
+            composite = body_position * 0.4 + direction * 0.35 + vol_signal * 0.25
             return composite
 
         else:

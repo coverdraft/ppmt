@@ -58,9 +58,8 @@ class RiskConfig:
     min_position_size_pct: float = 0.005  # 0.5% min (base × 0.25x)
     max_daily_loss_pct: float = 0.05      # 5% max daily loss
     max_drawdown_pct: float = 0.15        # 15% max portfolio drawdown
-    min_risk_reward: float = 0.5          # Minimum R:R to accept signal
-    min_quality_score: float = 0.0        # Minimum quality to accept
-    min_confidence: float = 0.0           # Minimum confidence to accept signal
+    min_risk_reward: float = 1.5          # Minimum R:R to accept signal
+    min_quality_score: float = 0.3        # Minimum quality to accept
     max_open_positions: int = 5           # Max simultaneous positions
     max_correlated_positions: int = 2     # Max positions in same asset class
 
@@ -122,9 +121,8 @@ class RiskManager:
         """
         Check if a new position can be opened based on risk constraints.
 
-        V3: Also checks quality_score and confidence from PPMT metadata.
-        All thresholds are configurable via RiskConfig so that paper trading
-        can use more permissive settings than live trading.
+        V3: Also checks quality_score from PPMT metadata.
+        Low quality patterns are rejected outright.
         """
         # Must be an entry signal
         if not signal.is_entry:
@@ -134,8 +132,8 @@ class RiskManager:
         if signal.quality_score < self.config.min_quality_score:
             return False, f"Quality too low: {signal.quality_score:.2f}"
 
-        # Check minimum confidence (configurable, was hardcoded at 0.5)
-        if signal.confidence < self.config.min_confidence:
+        # Check minimum confidence
+        if signal.confidence < 0.5:
             return False, f"Confidence too low: {signal.confidence:.2f}"
 
         # Check minimum risk:reward
@@ -150,8 +148,8 @@ class RiskManager:
         if signal.symbol in self._positions:
             return False, f"Already in position: {signal.symbol}"
 
-        # Check daily loss limit (only count losses, not gains)
-        if self._daily_pnl < 0 and abs(self._daily_pnl) / self.initial_capital >= self.config.max_daily_loss_pct:
+        # Check daily loss limit
+        if abs(self._daily_pnl) / self.initial_capital >= self.config.max_daily_loss_pct:
             return False, "Daily loss limit reached"
 
         # Check max drawdown
@@ -262,10 +260,7 @@ class RiskManager:
             pnl = (position.entry_price - exit_price) * position.size
 
         self.capital += pnl
-        # Only count losses toward daily P&L limit
-        # Gains should NOT prevent further trading
-        if pnl < 0:
-            self._daily_pnl += pnl
+        self._daily_pnl += pnl
 
         # Update peak capital
         if self.capital > self._peak_capital:

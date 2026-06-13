@@ -157,10 +157,6 @@ class PPMTTrie:
         self.root = TrieNode(symbol="", depth=0)
         self._pattern_count = 0
         self._max_depth = 0
-        self.trading_observations: int = 0
-        """Count of observations recorded from actual trading (Living Trie).
-        This distinguishes build-time observations from post-build trading
-        observations, enabling confidence scaling for fresh tries."""
 
     @property
     def pattern_count(self) -> int:
@@ -388,115 +384,7 @@ class PPMTTrie:
             self._collect_patterns(child, current_path, results, min_count)
             current_path.pop()
 
-    def propagate_metadata(self) -> None:
-        """
-        Propagate metadata from leaf nodes up to the root.
-
-        After building the Trie, intermediate nodes (including the root)
-        may have zero historical_count because only terminal nodes received
-        observations during insertion. This method aggregates child metadata
-        into each parent node so that every node has meaningful statistics.
-
-        The aggregation computes:
-        - historical_count: sum of all children's counts
-        - win_rate: weighted average of children's win_rates
-        - expected_move_pct: weighted average of children's moves
-        - max_drawdown_pct: minimum (worst) across children
-        - max_favorable_pct: maximum (best) across children
-        - avg_duration: weighted average of children's durations
-        - continuation_nodes: union of all children's continuation symbols
-
-        This is called once after Trie construction and periodically during
-        Living Trie operation (every 200 symbol steps in paper_trader.py).
-        """
-        self._propagate_node(self.root)
-
-    def _propagate_node(self, node: TrieNode) -> BlockLifecycleMetadata:
-        """
-        Recursively propagate metadata from children to this node.
-
-        For leaf nodes (no children), returns the node's own metadata.
-        For internal nodes, aggregates children's metadata with the node's
-        own observations (if any).
-
-        The node's OWN observations take precedence — children's data
-        augments but doesn't replace the node's direct observations.
-        """
-        if not node.children:
-            # Leaf node: return its own metadata
-            return node.metadata
-
-        # First, recursively propagate all children
-        child_metas = []
-        for child in node.children.values():
-            child_meta = self._propagate_node(child)
-            child_metas.append(child_meta)
-
-        # Aggregate children's metadata
-        total_count = sum(m.historical_count for m in child_metas)
-
-        if total_count == 0:
-            return node.metadata
-
-        # Weighted averages
-        weighted_win_rate = sum(
-            m.win_rate * m.historical_count for m in child_metas
-        ) / total_count
-
-        weighted_move = sum(
-            m.expected_move_pct * m.historical_count for m in child_metas
-        ) / total_count
-
-        weighted_duration = sum(
-            m.avg_duration * m.historical_count for m in child_metas
-        ) / total_count
-
-        # Min/max across children
-        worst_drawdown = min(m.max_drawdown_pct for m in child_metas)
-        best_favorable = max(m.max_favorable_pct for m in child_metas)
-
-        # Union of continuation symbols
-        all_continuations = set()
-        for m in child_metas:
-            all_continuations.update(m.continuation_nodes)
-
-        # Merge with node's own observations (if any)
-        own_count = node.metadata.historical_count
-        if own_count > 0:
-            combined_count = own_count + total_count
-            node.metadata.win_rate = (
-                node.metadata.win_rate * own_count + weighted_win_rate * total_count
-            ) / combined_count
-            node.metadata.expected_move_pct = (
-                node.metadata.expected_move_pct * own_count + weighted_move * total_count
-            ) / combined_count
-            node.metadata.avg_duration = int(
-                (node.metadata.avg_duration * own_count + weighted_duration * total_count)
-                / combined_count
-            )
-            node.metadata.historical_count = combined_count
-        else:
-            # Node has no own observations: use aggregated children data
-            node.metadata.historical_count = total_count
-            node.metadata.win_rate = weighted_win_rate
-            node.metadata.expected_move_pct = weighted_move
-            node.metadata.avg_duration = int(weighted_duration)
-
-        node.metadata.max_drawdown_pct = min(
-            node.metadata.max_drawdown_pct, worst_drawdown
-        )
-        node.metadata.max_favorable_pct = max(
-            node.metadata.max_favorable_pct, best_favorable
-        )
-        node.metadata.remaining_candles = node.metadata.avg_duration
-
-        for sym in all_continuations:
-            if sym not in node.metadata.continuation_nodes:
-                node.metadata.continuation_nodes.append(sym)
-
-        return node.metadata
-
-    # === Serialization (PPMTTrie) ===
+    # === Serialization ===
 
     def to_dict(self) -> dict:
         """Serialize the entire Trie to a dictionary."""
@@ -504,7 +392,6 @@ class PPMTTrie:
             "name": self.name,
             "pattern_count": self._pattern_count,
             "max_depth": self._max_depth,
-            "trading_observations": self.trading_observations,
             "root": self.root.to_dict(),
         }
 
@@ -514,7 +401,6 @@ class PPMTTrie:
         trie = cls(name=data.get("name", "root"))
         trie._pattern_count = data.get("pattern_count", 0)
         trie._max_depth = data.get("max_depth", 0)
-        trie.trading_observations = data.get("trading_observations", 0)
 
         # Reconstruct children from root
         root_data = data.get("root", {})
