@@ -172,6 +172,48 @@ class PPMT:
         }
         return profile_map.get(asset_class, "default")
 
+    @staticmethod
+    def _detect_simple_regime(window_df: pd.DataFrame) -> str:
+        """
+        Detect simple market regime from a window of OHLCV data.
+
+        Uses price direction and volatility to classify the window:
+        - trending_up: Strong upward move with low relative volatility
+        - trending_down: Strong downward move with low relative volatility
+        - volatile: High volatility regardless of direction
+        - ranging: Low volatility, no clear direction
+
+        This is intentionally simple — the full RegimeDetector is available
+        for production use. This gives the trie enough regime info to
+        make V4 regime-aware features work.
+        """
+        if len(window_df) < 2:
+            return "ranging"
+
+        entry = window_df["close"].iloc[0]
+        exit_price = window_df["close"].iloc[-1]
+        high = window_df["high"].max()
+        low = window_df["low"].min()
+
+        # Direction
+        move_pct = (exit_price - entry) / entry if entry > 0 else 0.0
+
+        # Volatility: range as % of entry
+        if entry > 0:
+            volatility = (high - low) / entry
+        else:
+            volatility = 0.0
+
+        # Classify
+        if volatility > 0.08:  # 8%+ range = volatile
+            return "volatile"
+        elif move_pct > 0.02:  # 2%+ up = trending up
+            return "trending_up"
+        elif move_pct < -0.02:  # 2%+ down = trending down
+            return "trending_down"
+        else:
+            return "ranging"
+
     def set_tries(
         self,
         trie_n1: PPMTTrie,
@@ -250,6 +292,10 @@ class PPMT:
             duration = len(window_df)
             won = move_pct > 0  # Simple: positive move = win
 
+            # V4 FIX: Detect simple regime from price action for this window
+            # This pipes regime into insert_with_observations (was dead code before)
+            regime = self._detect_simple_regime(window_df)
+
             # Insert into all 4 levels
             for trie in [self.trie_n1, self.trie_n2, self.trie_n3, self.trie_n4]:
                 trie.insert_with_observations(
@@ -260,6 +306,7 @@ class PPMT:
                     duration=duration,
                     won=won,
                     next_symbol=next_sym,
+                    regime=regime,
                 )
 
             count += 1

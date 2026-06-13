@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
-from ppmt.core.metadata import BlockLifecycleMetadata
+from ppmt.core.metadata import BlockLifecycleMetadata, RegimeStats
 
 
 @dataclass
@@ -238,6 +238,8 @@ class PPMTTrie:
         duration: int = 0,
         won: bool = False,
         next_symbol: Optional[str] = None,
+        regime: Optional[str] = None,
+        regime_confidence: Optional[float] = None,
     ) -> TrieNode:
         """
         Insert a pattern and update metadata from a single observation.
@@ -253,6 +255,8 @@ class PPMTTrie:
             duration: Duration in candles
             won: Whether the pattern completed successfully
             next_symbol: What followed this pattern (for continuation tracking)
+            regime: Market regime at time of observation (V4 fix: was not piped)
+            regime_confidence: Confidence of regime detection [0, 1]
         """
         node = self.insert(symbols)
 
@@ -268,6 +272,8 @@ class PPMTTrie:
             duration=duration,
             won=won,
             next_symbol=next_symbol,
+            regime=regime,
+            regime_confidence=regime_confidence,
         )
 
         return node
@@ -493,6 +499,47 @@ class PPMTTrie:
         for sym in all_continuations:
             if sym not in node.metadata.continuation_nodes:
                 node.metadata.continuation_nodes.append(sym)
+
+        # V4 FIX: Propagate regime_stats and move_variance from children
+        # These were being dropped during bottom-up aggregation, losing
+        # critical V4.1 data at intermediate nodes.
+        all_regime_stats: dict[str, RegimeStats] = {}
+        for m in child_metas:
+            for rname, rstat in m.regime_stats.items():
+                if rname not in all_regime_stats:
+                    all_regime_stats[rname] = RegimeStats()
+                all_regime_stats[rname].count += rstat.count
+                all_regime_stats[rname].wins += rstat.wins
+                all_regime_stats[rname].total_move_pct += rstat.total_move_pct
+
+        if all_regime_stats:
+            node.metadata.regime_stats = all_regime_stats
+            # Rebuild regime_distribution from aggregated stats
+            node.metadata.regime_distribution = {
+                rname: rstat.count for rname, rstat in all_regime_stats.items()
+            }
+            # Update dominant_regime
+            if all_regime_stats:
+                node.metadata.dominant_regime = max(
+                    all_regime_stats, key=lambda r: all_regime_stats[r].count
+                )
+
+        # V4.1 FIX: Propagate move_variance (pooled variance from children)
+        # Uses parallel algorithm: M2_total = sum(M2_i) + sum((mean_i - grand_mean)^2 * n_i)
+        if total_count > 0:
+            child_m2_total = sum(m.move_variance for m in child_metas)
+            child_means = [(m.expected_move_pct, m.historical_count) for m in child_metas if m.historical_count > 0]
+            if len(child_means) > 0:
+                grand_mean = sum(mean * n for mean, n in child_means) / total_count
+                between_variance = sum(n * (mean - grand_mean) ** 2 for mean, n in child_means)
+                node.metadata.move_variance = child_m2_total + between_variance
+                node.metadata.move_mean_for_variance = grand_mean
+
+        # V4 FIX: Update node_type for intermediate nodes
+        if node.metadata.historical_count >= node.metadata.min_independent_count:
+            node.metadata.node_type = "independent"
+        else:
+            node.metadata.node_type = "dependent"
 
         return node.metadata
 
