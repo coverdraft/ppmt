@@ -2115,3 +2115,8 @@ Each strategy has: PnL, WinRate, Sharpe, Drawdown, Status, Capital Allocated, an
 | `execSync` for Python bridge | Simple, synchronous — PaperTrader runs complete in <5 min |
 | Recharts for equity curve | Lightweight, React-native charting with gradient fills |
 | SQLite via Prisma | Zero-config DB, matches PPMT Python SQLite approach |
+
+### GitHub Repository
+
+**Dashboard**: https://github.com/coverdraft/ppmt-dashboard
+**PPMT Engine**: https://github.com/coverdraft/ppmt
