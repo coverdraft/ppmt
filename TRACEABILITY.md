@@ -1,4 +1,4 @@
-# PPMT v0.6.8 — TRACEABILITY DOCUMENT
+# PPMT v0.11.0 — TRACEABILITY DOCUMENT
 
 > Last updated: 2026-06-14
 > Data source: Bybit 12 tokens (BTC, ETH, SOL, BNB, XRP, ADA, LINK, UNI, ATOM, DOGE, SHIB, PEPE) 1h (14,400 real candles each) + 5m (57,600 candles) + 1m (288,000 candles)
@@ -1694,3 +1694,123 @@ well-maintained without excessive overhead.
 - [ ] CSV import for historical 1m data
 - [ ] Add `pruning_interval` config option to PaperTraderConfig
 - [ ] Test pruning impact on trading performance (before/after comparison)
+
+---
+
+## 22. Live Recalibration: TokenProfile α/W Updates During Trading (v0.11.0)
+
+### Problem: recalibration_interval Was Dead Code
+
+`PaperTraderConfig.recalibration_interval` was defined in v0.6.8 but **never implemented**
+in the trading loop. Parameters α/W were calibrated once at startup and never updated,
+even when market regime changed significantly.
+
+Evidence:
+- `recalibration_interval` field existed in config (line 360) but was never referenced
+  in the `for sym_idx in range(...)` trading loop
+- `token_profile.last_recalibration` was initialized to 0 but never updated
+- `TokenProfile.update_from_calibration()` didn't track which candle triggered the update
+
+### Solution: Full Live Recalibration Pipeline
+
+When `recalibration_interval > 0` and the candle counter reaches the threshold:
+
+1. **Safety gate**: Only recalibrates when NO position is open
+2. **No lookahead**: Uses data up to current candle (`df.iloc[:last_candle_idx + 1]`)
+3. **Re-run TradingCalibrationEngine**: Grid search on available data
+4. **If α/W changed**: Complete engine rebuild:
+   - Rebuild SAX encoder with new α/W
+   - Re-encode full DataFrame
+   - Rebuild all 4 trie levels (N1/N2/N3/N4)
+   - Rebuild PredictionEngine, PPMT engine, FuzzyMatcher
+   - Update `token_profile` with `recalibration_candle`
+   - Save rebuilt tries to storage
+   - Reset Living Trie counters (fresh trie)
+5. **If α/W unchanged**: Confirm and update `last_recalibration` only
+6. **Exception handling**: Reset counter even on failure to avoid re-triggering
+
+```python
+# v0.11.0: Live Recalibration checkpoint in trading loop
+if (cfg.recalibration_interval > 0
+    and cfg.auto_calibrate
+    and cfg.use_token_profile
+    and token_profile is not None
+    and candles_since_calibration >= cfg.recalibration_interval
+    and current_position is None):
+
+    recal_df = df.iloc[:last_candle_idx + 1]  # No lookahead
+    recalibrator = TradingCalibrationEngine(...)
+    recal_profile, recal_results = recalibrator.calibrate(recal_df, ...)
+
+    if alpha_changed or window_changed:
+        # Full rebuild: SAX → tries → engines
+        sax_encoder = SAXEncoder(alphabet_size=recal_alpha, ...)
+        all_sax_symbols = sax_encoder.encode(df)
+        rebuild_engine = PPMT(...)
+        rebuild_engine.build(recal_df, ...)
+        pred_engine = PredictionEngine(trie, ...)
+        # Save to storage for persistence
+```
+
+### TokenProfile Updates (profiles.py)
+
+```python
+def update_from_calibration(
+    self, best_alpha, best_window, metric, grid, n_samples,
+    recalibration_candle: int = 0,  # NEW in v0.11.0
+) -> None:
+    self.sax_alphabet_size = best_alpha
+    self.sax_window_size = best_window
+    ...
+    self.profile_changes += 1
+    if recalibration_candle > 0:
+        self.last_recalibration = recalibration_candle
+```
+
+### PaperTraderResult Reporting
+
+New fields for end-of-run diagnostics:
+
+```python
+@dataclass
+class PaperTraderResult:
+    ...
+    recalibrations: int = 0                    # Count of recalibrations performed
+    recalibration_details: list[dict] = ...     # Per-event: candle_idx, α/W before/after, metric
+```
+
+### Files Modified (v0.11.0 Live Recalibration)
+
+| File | Change |
+|------|--------|
+| `src/ppmt/core/profiles.py` | Added `recalibration_candle` param to `update_from_calibration()`, added `last_recalibration` to `to_dict()` |
+| `src/ppmt/engine/paper_trader.py` | Implemented full live recalibration in trading loop: counter, checkpoint, rebuild pipeline, reporting, `PaperTraderResult.recalibrations` + `recalibration_details`, `format_summary()` updates |
+
+### Design Decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| Only recalibrate when no position open | Safety — don't interrupt active trades |
+| Data up to current candle only | No lookahead — simulates live trading |
+| Rebuild ALL dependent engines | Consistency — SAX/tries/prediction must use same α/W |
+| Reset Living Trie counters on rebuild | Fresh trie has no prior observations |
+| Reset counter even on failure | Prevents infinite re-trigger loop |
+| `recalibration_candle` defaults to 0 | Backward compatible with existing callers |
+
+### Usage Example
+
+```python
+from ppmt.engine.paper_trader import PaperTrader, PaperTraderConfig
+
+config = PaperTraderConfig(
+    symbol="BTC/USDT",
+    timeframe="1h",
+    auto_calibrate=True,         # Calibrate on startup (v0.6.8)
+    recalibration_interval=2000,  # Re-calibrate every 2000 candles (v0.11.0)
+)
+trader = PaperTrader(config=config)
+result = trader.run()
+print(f"Recalibrations: {result.recalibrations}")
+for detail in result.recalibration_details:
+    print(f"  @ candle {detail['candle_idx']}: α={detail['alpha_before']}→{detail['alpha_after']}")
+```

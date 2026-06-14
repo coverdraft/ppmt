@@ -365,7 +365,10 @@ class PaperTraderConfig:
     new parameters. This adapts to regime changes where different
     granularity is optimal.
     WARNING: Recalibration is expensive (re-encodes all data). Use
-    conservatively (every 2000+ candles for 1h, 10000+ for 5m)."""
+    conservatively (every 2000+ candles for 1h, 10000+ for 5m).
+    v0.11.0: NOW FULLY IMPLEMENTED — previously defined but never used
+    in the trading loop. Now triggers live recalibration that updates
+    SAX encoder, rebuilds tries, and adjusts all dependent engines."""
 
     min_confidence: float = 0.20
     """Minimum confidence to generate entry signal.
@@ -526,6 +529,10 @@ class PaperTraderResult:
     trades: list[PaperTrade] = field(default_factory=list)
     equity_curve: list[float] = field(default_factory=list)
     capital_history: list[float] = field(default_factory=list)
+    recalibrations: int = 0
+    """v0.11.0: Number of live recalibrations performed during trading."""
+    recalibration_details: list[dict] = field(default_factory=list)
+    """v0.11.0: Details of each recalibration event (alpha_before/after, etc)."""
 
     def format_summary(self) -> str:
         """Format as a Rich panel summary."""
@@ -549,6 +556,17 @@ class PaperTraderResult:
         lines.append(f"  Worst Trade: {self.worst_trade_pnl_pct:+.2f}%")
         lines.append(f"  Avg Confidence: {self.avg_confidence:.1%}")
         lines.append(f"  Avg Quality:    {self.avg_quality_score:.2f}")
+
+        # v0.11.0: Recalibration info
+        if self.recalibrations > 0:
+            param_changes = sum(1 for d in self.recalibration_details if d.get("params_changed", False))
+            lines.append("")
+            lines.append(f"  Recalibrations: {self.recalibrations} ({param_changes} parameter changes)")
+            for detail in self.recalibration_details:
+                if detail.get("params_changed", False):
+                    lines.append(f"    @ candle {detail['candle_idx']}: "
+                                 f"α={detail['alpha_before']}→{detail['alpha_after']}, "
+                                 f"W={detail['window_before']}→{detail['window_after']}")
 
         return "\n".join(lines)
 
@@ -992,6 +1010,11 @@ class PaperTrader:
         # Track current date for daily P&L reset
         current_date = None
 
+        # v0.11.0: Track candles since last calibration for live recalibration
+        candles_since_calibration = 0
+        current_alpha = cfg.sax_alphabet_size
+        current_window = cfg.sax_window_size
+
         # Pre-extract arrays for fast intra-symbol access
         df_high = df['high'].values.astype(float)
         df_low = df['low'].values.astype(float)
@@ -1002,6 +1025,10 @@ class PaperTrader:
             candle_start = sym_idx * cfg.sax_window_size
             candle_end = min((sym_idx + 1) * cfg.sax_window_size, len(df))
             last_candle_idx = candle_end - 1
+
+            # v0.11.0: Track candles for recalibration
+            candles_in_window = candle_end - candle_start
+            candles_since_calibration += candles_in_window
 
             # Date check for daily P&L reset (use last candle of window)
             current_time = str(df.index[last_candle_idx]) if hasattr(df.index, 'strftime') else str(last_candle_idx)
@@ -1677,6 +1704,220 @@ class PaperTrader:
                                   f"({prune_stats['observations_lost']} obs lost, "
                                   f"{trie.pattern_count} patterns remain)[/dim]")
 
+            # ================================================================
+            # v0.11.0: Live Recalibration
+            # Re-run TradingCalibrationEngine every recalibration_interval
+            # candles. If α/W change, rebuild SAX encoder, re-encode all
+            # data, and rebuild tries with new parameters. This adapts to
+            # regime changes where different granularity is optimal.
+            #
+            # Design decisions:
+            # - Recalibration only fires when NO position is open (safety)
+            # - Uses data up to current candle (not full dataset)
+            # - Rebuilds all 4 trie levels + PPMT engine
+            # - Updates TokenProfile with new α/W and metadata
+            # - Resets candle counter after each recalibration
+            # ================================================================
+            if (cfg.recalibration_interval > 0
+                and cfg.auto_calibrate
+                and cfg.use_token_profile
+                and token_profile is not None
+                and candles_since_calibration >= cfg.recalibration_interval
+                and current_position is None):
+
+                console.print(f"\n[bold cyan]LIVE RECALIBRATION[/bold cyan] "
+                              f"at candle {last_candle_idx} "
+                              f"({candles_since_calibration} candles since last calibration)")
+
+                try:
+                    # Use data up to current candle for recalibration
+                    # (simulates live trading where future data is unknown)
+                    recal_df = df.iloc[:last_candle_idx + 1]
+
+                    if len(recal_df) < 1000:
+                        console.print(f"  [yellow]Insufficient data for recalibration "
+                                      f"({len(recal_df)} < 1000 candles) — skipping[/yellow]")
+                        candles_since_calibration = 0  # Reset anyway to avoid re-triggering
+                    else:
+                        recalibrator = TradingCalibrationEngine(
+                            train_ratio=0.70,
+                            pattern_length=cfg.pattern_length,
+                            timeframe=cfg.timeframe,
+                        )
+                        recal_profile, recal_results = recalibrator.calibrate(
+                            recal_df, symbol=cfg.symbol, verbose=False
+                        )
+
+                        recal_alpha = recal_profile.sax_alphabet_size
+                        recal_window = recal_profile.sax_window_size
+
+                        # Find the best result for display
+                        recal_best = [r for r in recal_results
+                                      if r.alphabet_size == recal_alpha
+                                      and r.window_size == recal_window]
+                        recal_best_result = recal_best[0] if recal_best else None
+
+                        alpha_changed = recal_alpha != current_alpha
+                        window_changed = recal_window != current_window
+
+                        recal_detail = {
+                            "candle_idx": last_candle_idx,
+                            "alpha_before": current_alpha,
+                            "window_before": current_window,
+                            "alpha_after": recal_alpha,
+                            "window_after": recal_window,
+                            "params_changed": alpha_changed or window_changed,
+                            "trading_metric": recal_best_result.trading_metric if recal_best_result else 0.0,
+                            "total_pnl_pct": recal_best_result.total_pnl_pct if recal_best_result else 0.0,
+                            "win_rate": recal_best_result.win_rate if recal_best_result else 0.0,
+                            "total_trades": recal_best_result.total_trades if recal_best_result else 0,
+                        }
+
+                        if alpha_changed or window_changed:
+                            console.print(f"  [bold yellow]Parameters changed:[/bold yellow] "
+                                          f"α={current_alpha}→{recal_alpha}, "
+                                          f"W={current_window}→{recal_window} "
+                                          f"(metric={recal_best_result.trading_metric:.4f}, "
+                                          f"PnL={recal_best_result.total_pnl_pct:+.1f}%, "
+                                          f"WR={recal_best_result.win_rate:.1%}, "
+                                          f"Trades={recal_best_result.total_trades})")
+
+                            # Update config with new parameters
+                            old_alpha, old_window = current_alpha, current_window
+                            cfg.sax_alphabet_size = recal_alpha
+                            cfg.sax_window_size = recal_window
+                            current_alpha = recal_alpha
+                            current_window = recal_window
+
+                            # Update token profile with calibrated values
+                            grid = {
+                                f"a{r.alphabet_size}_w{r.window_size}": {
+                                    "trading_metric": round(r.trading_metric, 4),
+                                    "total_pnl_pct": round(r.total_pnl_pct, 2),
+                                    "win_rate": round(r.win_rate, 4),
+                                    "total_trades": r.total_trades,
+                                }
+                                for r in recal_results
+                            }
+                            token_profile.update_from_calibration(
+                                best_alpha=recal_alpha,
+                                best_window=recal_window,
+                                metric=recal_best_result.trading_metric if recal_best_result else 0.0,
+                                grid=grid,
+                                n_samples=len(recal_df),
+                                recalibration_candle=last_candle_idx,
+                            )
+
+                            # Rebuild SAX encoder with new parameters
+                            sax_encoder = SAXEncoder(
+                                alphabet_size=recal_alpha,
+                                window_size=recal_window,
+                                strategy=cfg.sax_strategy,
+                            )
+
+                            # Re-encode the full DataFrame
+                            if cfg.paa_mean is not None and cfg.paa_std is not None:
+                                all_sax_symbols, _, _ = sax_encoder.encode_with_normalization(
+                                    df, paa_mean=cfg.paa_mean, paa_std=cfg.paa_std
+                                )
+                            else:
+                                all_sax_symbols = sax_encoder.encode(df)
+
+                            console.print(f"  [green]SAX re-encoded: {len(all_sax_symbols)} symbols "
+                                          f"(α={recal_alpha}, W={recal_window})[/green]")
+
+                            # Rebuild fuzzy matcher with new encoder
+                            fuzzy_threshold = token_profile.fuzzy_threshold
+                            fuzzy_matcher = FuzzyMatcher(
+                                sax_encoder=sax_encoder,
+                                threshold=fuzzy_threshold,
+                                max_edit_distance=2,
+                            )
+
+                            # Rebuild tries with new SAX parameters
+                            rebuild_engine = PPMT(
+                                symbol=cfg.symbol,
+                                asset_class=info.asset_class,
+                                sax_alphabet_size=recal_alpha,
+                                sax_window_size=recal_window,
+                                sax_strategy=cfg.sax_strategy,
+                                fuzzy_threshold=fuzzy_threshold,
+                                weight_profile=info.weight_profile,
+                            )
+                            # Build trie on data up to current point
+                            rebuild_engine.build(recal_df, pattern_length=cfg.pattern_length)
+
+                            trie_n1 = rebuild_engine.trie_n1
+                            trie_n2 = rebuild_engine.trie_n2
+                            trie_n3 = rebuild_engine.trie_n3
+                            trie_n4 = rebuild_engine.trie_n4
+                            trie = trie_n3
+
+                            # Propagate metadata on new tries
+                            trie.propagate_metadata()
+                            for t in [trie_n1, trie_n2, trie_n4]:
+                                t.propagate_metadata()
+
+                            console.print(f"  [green]Tries rebuilt: "
+                                          f"N1={trie_n1.pattern_count}, N2={trie_n2.pattern_count}, "
+                                          f"N3={trie_n3.pattern_count}, N4={trie_n4.pattern_count}[/green]")
+
+                            # Rebuild PredictionEngine with new trie
+                            pred_engine = PredictionEngine(trie, prediction_depth=cfg.pattern_length)
+
+                            # Rebuild PPMT engine with new tries
+                            if has_multi_level:
+                                ppmt_engine = PPMT(
+                                    symbol=cfg.symbol,
+                                    asset_class=info.asset_class,
+                                    sax_alphabet_size=recal_alpha,
+                                    sax_window_size=recal_window,
+                                    sax_strategy=cfg.sax_strategy,
+                                    fuzzy_threshold=fuzzy_threshold,
+                                    weight_profile=info.weight_profile,
+                                )
+                                ppmt_engine.set_tries(trie_n1, trie_n2, trie_n3, trie_n4)
+                                ppmt_engine.adapt_weights()
+                                console.print(f"  [green]4-level matching rebuilt: "
+                                              f"weights={ppmt_engine.weights}[/green]")
+
+                            # Recalculate ATR (unchanged data, but good practice)
+                            atr_pct = compute_atr_pct(df, period=14)
+
+                            # Reset Living Trie counters since we have a fresh trie
+                            initial_pattern_count = trie.pattern_count
+                            trie_observations_recorded = 0
+                            trie_new_nodes_created = 0
+                            trie_metadata_propagations = 0
+
+                            console.print(f"  [bold green]Recalibration complete:[/bold green] "
+                                          f"α={old_alpha}→{recal_alpha}, W={old_window}→{recal_window}")
+
+                            # Save rebuilt tries to storage
+                            for level, t in [("n1", trie_n1), ("n2", trie_n2),
+                                             ("n3", trie_n3), ("n4", trie_n4)]:
+                                storage.save_trie(cfg.symbol, level, t)
+                            console.print(f"  [green]Rebuilt tries saved to storage[/green]")
+
+                        else:
+                            console.print(f"  [green]Recalibration confirms: "
+                                          f"α={recal_alpha}/W={recal_window} unchanged "
+                                          f"(metric={recal_best_result.trading_metric:.4f}, "
+                                          f"PnL={recal_best_result.total_pnl_pct:+.1f}%, "
+                                          f"WR={recal_best_result.win_rate:.1%})[/green]")
+
+                            # Still update profile metadata even if params didn't change
+                            token_profile.last_recalibration = last_candle_idx
+
+                        result.recalibrations += 1
+                        result.recalibration_details.append(recal_detail)
+                        candles_since_calibration = 0
+
+                except Exception as e:
+                    console.print(f"  [red]Recalibration failed: {e} — "
+                                  f"continuing with current parameters[/red]")
+                    candles_since_calibration = 0  # Reset to avoid re-triggering immediately
+
         # Close any open position at end of data
         if current_position is not None:
             last_price = float(df["close"].iloc[-1])
@@ -1717,6 +1958,23 @@ class PaperTrader:
                           f"down={regime_stats.get('trending_down', 0)} ({regime_stats.get('trending_down', 0)/max(total_regime_steps,1):.0%}) "
                           f"range={regime_stats.get('ranging', 0)} ({regime_stats.get('ranging', 0)/max(total_regime_steps,1):.0%}) "
                           f"volatile={regime_stats.get('volatile', 0)} ({regime_stats.get('volatile', 0)/max(total_regime_steps,1):.0%})[/dim]")
+
+        # v0.11.0: Recalibration statistics
+        if result.recalibrations > 0:
+            param_changes = sum(1 for d in result.recalibration_details if d.get("params_changed", False))
+            console.print(f"[bold cyan]Live Recalibration:[/bold cyan] "
+                          f"{result.recalibrations} recalibrations, "
+                          f"{param_changes} parameter changes")
+            for i, detail in enumerate(result.recalibration_details):
+                if detail.get("params_changed", False):
+                    console.print(f"  [yellow]  #{i+1} @ candle {detail['candle_idx']}: "
+                                  f"α={detail['alpha_before']}→{detail['alpha_after']}, "
+                                  f"W={detail['window_before']}→{detail['window_after']} "
+                                  f"(metric={detail.get('trading_metric', 0):.4f}, "
+                                  f"PnL={detail.get('total_pnl_pct', 0):+.1f}%)[/yellow]")
+                else:
+                    console.print(f"  [dim]  #{i+1} @ candle {detail['candle_idx']}: "
+                                  f"confirmed α={detail['alpha_after']}/W={detail['window_after']}[/dim]")
 
         # Living Trie statistics and save
         if cfg.living_trie and trie_observations_recorded > 0:

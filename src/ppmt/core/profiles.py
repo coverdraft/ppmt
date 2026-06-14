@@ -218,8 +218,14 @@ class TokenProfile:
         metric: float,
         grid: dict,
         n_samples: int,
+        recalibration_candle: int = 0,
     ) -> None:
-        """Update profile with calibration results."""
+        """Update profile with calibration results.
+
+        v0.11.0: Added recalibration_candle parameter to track which
+        candle index the calibration was performed at. This enables
+        live recalibration to know when the last update occurred.
+        """
         self.sax_alphabet_size = best_alpha
         self.sax_window_size = best_window
         self.calibration_date = time.strftime("%Y-%m-%d %H:%M")
@@ -227,6 +233,8 @@ class TokenProfile:
         self.calibration_grid = grid
         self.calibration_samples = n_samples
         self.profile_changes += 1
+        if recalibration_candle > 0:
+            self.last_recalibration = recalibration_candle
 
     def to_dict(self) -> dict:
         """Serialize profile to dictionary."""
@@ -247,6 +255,7 @@ class TokenProfile:
             "calibration_metric": round(self.calibration_metric, 4),
             "calibration_samples": self.calibration_samples,
             "calibration_grid": self.calibration_grid,
+            "last_recalibration": self.last_recalibration,
             "profile_changes": self.profile_changes,
         }
 
