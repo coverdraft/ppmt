@@ -1,4 +1,4 @@
-# PPMT v0.11.0 — TRACEABILITY DOCUMENT
+# PPMT v0.12.0 — TRACEABILITY DOCUMENT
 
 > Last updated: 2026-06-14
 > Data source: Bybit 12 tokens (BTC, ETH, SOL, BNB, XRP, ADA, LINK, UNI, ATOM, DOGE, SHIB, PEPE) 1h (14,400 real candles each) + 5m (57,600 candles) + 1m (288,000 candles)
@@ -1690,10 +1690,10 @@ well-maintained without excessive overhead.
 
 ### Action Items (Post Node Pruning)
 
-- [ ] Re-enable catastrophic_loss_pct risk management
-- [ ] BlockLifecycleMetadata regime field for market regime tracking
-- [ ] CSV import for historical 1m data
-- [ ] Add `pruning_interval` config option to PaperTraderConfig
+- [x] Re-enable catastrophic_loss_pct risk management — DONE (v0.6.4: connected from TokenProfile, see Section 20)
+- [x] BlockLifecycleMetadata regime field for market regime tracking — DONE (v0.8.0/v4.1: `regime`, `regime_distribution`, `regime_stats`, `dominant_regime`, `regime_match_score()`)
+- [x] CSV import for historical 1m data — DONE (v0.12.0: `scripts/import_csv_1m.py`, see Section 24)
+- [x] Add `pruning_interval` config option to PaperTraderConfig — DONE (v0.12.0: see Section 24)
 - [ ] Test pruning impact on trading performance (before/after comparison)
 
 ---
@@ -1873,3 +1873,151 @@ storage.save_token_profile(cfg.symbol, cfg.timeframe, token_profile.to_dict())
 | `src/ppmt/core/profiles.py` | Added `TokenProfile.from_dict()` classmethod for deserialization |
 | `src/ppmt/data/storage.py` | Added `save_token_profile()`, `load_token_profile()` methods |
 | `src/ppmt/engine/paper_trader.py` | Load saved profile on startup; skip calibration if already calibrated; save profile after calibration and recalibration |
+
+---
+
+## 24. Configurable Pruning Interval + CSV 1m Import (v0.12.0)
+
+### Problem 1: Hardcoded Pruning Interval
+
+The Living Trie pruning interval was hardcoded to 1000 symbol steps in the trading
+loop (line 1768 of paper_trader.py). This meant:
+
+1. **No per-timeframe tuning**: 1h data (fewer symbols) and 1m data (many more symbols)
+   used the same interval, which is suboptimal. For 1h data, 1000 steps ≈ 1000 hours
+   (41 days) between prunes — too infrequent for active Living Trie sessions. For 1m data,
+   1000 steps ≈ 1000 minutes (16 hours) — potentially too aggressive.
+2. **No way to disable pruning**: Even if a user wanted to keep all nodes (e.g., for
+   analysis), the hardcoded interval forced pruning every 1000 steps.
+3. **No statistics tracking**: Pruning events weren't counted or reported in
+   `PaperTraderResult`, making it impossible to assess pruning impact.
+
+### Solution 1: Configurable `pruning_interval` + Statistics
+
+Added `pruning_interval` to `PaperTraderConfig` and pruning statistics to
+`PaperTraderResult`:
+
+```python
+@dataclass
+class PaperTraderConfig:
+    ...
+    pruning_interval: int = 1000
+    """v0.12.0: Prune trie every N SAX symbol steps during trading. 0 = no pruning.
+    When set to a positive value (default 1000), the paper trader will
+    prune stale/low-quality leaf nodes from the Living Trie every N
+    symbol steps. Pruning removes:
+    - Leaf nodes with < min_observations (default 2) — statistical noise
+    - Leaf nodes with near-zero confidence — unreliable patterns
+    - Stale branches not observed recently (if max_staleness_hours set)
+    Established patterns (>= 10 observations) and traded nodes are
+    ALWAYS preserved for safety.
+    This prevents unbounded trie growth during long trading sessions,
+    keeping the trie focused on patterns that produce reliable signals.
+    Previously hardcoded to 1000; now configurable for different
+    timeframes (e.g. 5000 for 1m, 500 for 1h)."""
+
+@dataclass
+class PaperTraderResult:
+    ...
+    pruning_runs: int = 0          # Number of pruning cycles executed
+    pruning_total_nodes: int = 0   # Total nodes pruned across all cycles
+    pruning_total_obs_lost: int = 0  # Total observations lost from pruned nodes
+```
+
+The trading loop now uses `cfg.pruning_interval` instead of the hardcoded 1000:
+
+```python
+# v0.12.0: Prune stale branches every pruning_interval symbol steps
+if (cfg.pruning_interval > 0
+    and cfg.living_trie
+    and trie_observations_recorded > 0
+    and sym_idx % cfg.pruning_interval == 0):
+    from ppmt.core.trie import PruningConfig
+    prune_config = PruningConfig(min_observations=2, preserve_traded=True)
+    prune_stats = trie.prune(**prune_config.to_prune_kwargs())
+    if prune_stats["nodes_pruned"] > 0:
+        console.print(f"  Pruned {prune_stats['nodes_pruned']} stale nodes "
+                      f"({prune_stats['observations_lost']} obs lost, "
+                      f"{trie.pattern_count} patterns remain)")
+        result.pruning_runs += 1
+        result.pruning_total_nodes += prune_stats["nodes_pruned"]
+        result.pruning_total_obs_lost += prune_stats["observations_lost"]
+```
+
+### Problem 2: No Dedicated CSV Import for 1m Data
+
+While `DataCollector.import_csv()` existed for generic CSV import, there was no
+dedicated script for importing 1-minute historical data from CSV files. Users
+with pre-downloaded 1m data (e.g., from Binance Data Vision exports, third-party
+data providers, or personal archives) had to manually call the collector's import
+method or write custom scripts.
+
+### Solution 2: `import_csv_1m.py` Script
+
+Created a comprehensive CSV import script with:
+
+1. **Multi-format auto-detection**: Automatically detects CSV format from column names:
+   - Generic: `timestamp`, `open`, `high`, `low`, `close`, `volume`
+   - Binance: `open_time`, `open`, ..., `close_time`, `quote_volume`, ...
+   - CryptoDataDownload: `Unix`, `Date`, `Symbol`, `Open`, `High`, `Low`, ...
+
+2. **Flexible timestamp parsing**: Handles unix milliseconds, unix seconds, and
+   ISO 8601 date strings automatically.
+
+3. **Symbol auto-detection from filename**: Extracts trading pair from filenames
+   like `BTCUSDT_1m.csv`, `Binance_BTCUSDT_1m.csv`, `BTC-USDT-1m.csv`, etc.
+
+4. **Data quality validation**: Optional `--validate` flag checks for:
+   - Duplicate timestamps
+   - Time gaps (missing minutes)
+   - Price consistency (high >= low, open/close within range)
+   - Zero/negative prices
+   - Volume anomalies
+
+5. **Detailed statistics**: Optional `--stats` flag prints coverage %, volatility,
+   date range, and price statistics.
+
+6. **Directory batch import**: `--dir` mode imports all CSVs in a directory
+   with auto-symbol detection.
+
+7. **Safe operations**: `--dry-run` for testing, `--merge` for combining with
+   existing data.
+
+```bash
+# Single CSV file
+python -m ppmt.scripts.import_csv_1m --csv BTCUSDT_1m.csv --symbol BTC/USDT
+
+# Directory of CSVs with validation
+python -m ppmt.scripts.import_csv_1m --dir ./data/1m_csvs/ --validate --stats
+
+# Dry run
+python -m ppmt.scripts.import_csv_1m --csv data.csv --symbol BTC/USDT --dry-run
+```
+
+### Verified: Already-Completed Tasks
+
+During this work, we verified that several previously-pending tasks are already complete:
+
+| Task | Status | Evidence |
+|------|--------|----------|
+| `catastrophic_loss_pct` from TokenProfile | ✅ Done (v0.6.4) | `paper_trader.py` line 717-718: `cfg.catastrophic_loss_pct = token_profile.catastrophic_loss_pct * 100.0` |
+| `BlockLifecycleMetadata.regime` | ✅ Done (v0.8.0/v4.1) | `metadata.py`: `regime`, `regime_confidence`, `dominant_regime`, `regime_distribution`, `regime_stats` (with `RegimeStats` class), `regime_match_score()` method |
+| Trie pruning infrastructure | ✅ Done (v0.6.8) | `trie.py`: `prune()`, `_collect_prunable()`, `_is_node_prunable()`, `PruningConfig` dataclass |
+
+### Files Modified (v0.12.0)
+
+| File | Change |
+|------|--------|
+| `src/ppmt/engine/paper_trader.py` | Added `pruning_interval: int = 1000` to `PaperTraderConfig`; Added `pruning_runs`, `pruning_total_nodes`, `pruning_total_obs_lost` to `PaperTraderResult`; Replaced hardcoded `sym_idx % 1000` with `sym_idx % cfg.pruning_interval`; Added pruning statistics tracking and reporting; Updated `format_summary()` with pruning info; Added pruning status to startup display |
+| `src/ppmt/scripts/import_csv_1m.py` | **NEW FILE**: Comprehensive CSV import script for 1-minute data with multi-format detection, validation, statistics, directory batch import, and CLI interface |
+
+### Design Decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| `pruning_interval` default = 1000 | Backward compatible with previous hardcoded value |
+| `pruning_interval = 0` disables pruning | Consistent with `recalibration_interval = 0` pattern |
+| Separate script instead of extending `bulk_data_loader.py` | Single responsibility — CSV import is different from API download |
+| Auto-detect CSV format | Most users don't know their CSV format; auto-detection removes friction |
+| `--validate` is opt-in | Validation adds processing time; not needed for trusted data sources |
+| `--merge` preserves existing data | Safe default — don't overwrite data that may be from a different source |

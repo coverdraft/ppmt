@@ -370,6 +370,21 @@ class PaperTraderConfig:
     in the trading loop. Now triggers live recalibration that updates
     SAX encoder, rebuilds tries, and adjusts all dependent engines."""
 
+    pruning_interval: int = 1000
+    """v0.12.0: Prune trie every N SAX symbol steps during trading. 0 = no pruning.
+    When set to a positive value (default 1000), the paper trader will
+    prune stale/low-quality leaf nodes from the Living Trie every N
+    symbol steps. Pruning removes:
+    - Leaf nodes with < min_observations (default 2) — statistical noise
+    - Leaf nodes with near-zero confidence — unreliable patterns
+    - Stale branches not observed recently (if max_staleness_hours set)
+    Established patterns (>= 10 observations) and traded nodes are
+    ALWAYS preserved for safety.
+    This prevents unbounded trie growth during long trading sessions,
+    keeping the trie focused on patterns that produce reliable signals.
+    Previously hardcoded to 1000; now configurable for different
+    timeframes (e.g. 5000 for 1m, 500 for 1h)."""
+
     min_confidence: float = 0.20
     """Minimum confidence to generate entry signal.
     v0.6.2: Raised from 0.15 to 0.20 based on Cycle 5 regression analysis.
@@ -533,6 +548,12 @@ class PaperTraderResult:
     """v0.11.0: Number of live recalibrations performed during trading."""
     recalibration_details: list[dict] = field(default_factory=list)
     """v0.11.0: Details of each recalibration event (alpha_before/after, etc)."""
+    pruning_runs: int = 0
+    """v0.12.0: Number of pruning cycles executed during trading."""
+    pruning_total_nodes: int = 0
+    """v0.12.0: Total nodes pruned across all pruning cycles."""
+    pruning_total_obs_lost: int = 0
+    """v0.12.0: Total observations lost from pruned nodes."""
 
     def format_summary(self) -> str:
         """Format as a Rich panel summary."""
@@ -567,6 +588,13 @@ class PaperTraderResult:
                     lines.append(f"    @ candle {detail['candle_idx']}: "
                                  f"α={detail['alpha_before']}→{detail['alpha_after']}, "
                                  f"W={detail['window_before']}→{detail['window_after']}")
+
+        # v0.12.0: Pruning info
+        if self.pruning_runs > 0:
+            lines.append("")
+            lines.append(f"  Pruning: {self.pruning_runs} cycles, "
+                         f"{self.pruning_total_nodes} nodes removed, "
+                         f"{self.pruning_total_obs_lost} observations lost")
 
         return "\n".join(lines)
 
@@ -1019,7 +1047,9 @@ class PaperTrader:
         console.print(f"  Re-entry cooldown: {cfg.reentry_cooldown} symbols after loss")
         console.print(f"  Living Trie: [bold]{living_trie_status}[/bold]")
         console.print(f"  Regime-aware sizing: [bold]{'ON' if cfg.regime_aware else 'OFF'}[/bold]")
-        console.print(f"  4-level matching: [bold]{'ON' if has_multi_level else 'OFF'}[/bold]\n")
+        console.print(f"  4-level matching: [bold]{'ON' if has_multi_level else 'OFF'}[/bold]")
+        pruning_status = f"every {cfg.pruning_interval} steps" if cfg.pruning_interval > 0 else "OFF"
+        console.print(f"  Trie pruning: [bold]{pruning_status}[/bold]\n")
 
         # v0.8.0: Regime detection
         regime_detector = None
@@ -1733,11 +1763,15 @@ class PaperTrader:
                 trie.propagate_metadata()
                 trie_metadata_propagations += 1
 
-            # v0.6.8: Prune stale branches every 1000 symbol steps
+            # v0.12.0: Prune stale branches every pruning_interval symbol steps
             # The Living Trie grows from observations, but not all branches
             # are useful. Pruning removes single-observation nodes (noise)
             # while preserving established patterns and traded nodes.
-            if cfg.living_trie and trie_observations_recorded > 0 and sym_idx % 1000 == 0:
+            # Interval is configurable via cfg.pruning_interval (default 1000).
+            if (cfg.pruning_interval > 0
+                and cfg.living_trie
+                and trie_observations_recorded > 0
+                and sym_idx % cfg.pruning_interval == 0):
                 from ppmt.core.trie import PruningConfig
                 prune_config = PruningConfig(min_observations=2, preserve_traded=True)
                 prune_stats = trie.prune(**prune_config.to_prune_kwargs())
@@ -1745,6 +1779,9 @@ class PaperTrader:
                     console.print(f"  [dim]Pruned {prune_stats['nodes_pruned']} stale nodes "
                                   f"({prune_stats['observations_lost']} obs lost, "
                                   f"{trie.pattern_count} patterns remain)[/dim]")
+                    result.pruning_runs += 1
+                    result.pruning_total_nodes += prune_stats["nodes_pruned"]
+                    result.pruning_total_obs_lost += prune_stats["observations_lost"]
 
             # ================================================================
             # v0.11.0: Live Recalibration
@@ -2023,6 +2060,13 @@ class PaperTrader:
                 else:
                     console.print(f"  [dim]  #{i+1} @ candle {detail['candle_idx']}: "
                                   f"confirmed α={detail['alpha_after']}/W={detail['window_after']}[/dim]")
+
+        # v0.12.0: Pruning statistics
+        if result.pruning_runs > 0:
+            console.print(f"[bold cyan]Trie Pruning:[/bold cyan] "
+                          f"{result.pruning_runs} cycles, "
+                          f"{result.pruning_total_nodes} nodes removed, "
+                          f"{result.pruning_total_obs_lost} observations lost")
 
         # Living Trie statistics and save
         if cfg.living_trie and trie_observations_recorded > 0:
