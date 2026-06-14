@@ -836,7 +836,74 @@ The SHORT confidence gate now uses the TokenProfile's `short_confidence_multipli
 8. ~~**Timeframe-adaptive calibration**~~ — ✅ DONE (Section 14). TIMEFRAME_ALPHA_DEFAULTS + from_timeframe().
 9. ~~**Re-enable catastrophic_loss_pct**~~ — ✅ DONE (Section 14). Asset-class-specific from TokenProfile.
 10. ~~**1m WF validation for DOGE/LINK**~~ — ✅ DONE (Section 13). 4/4 consistent, WF/OOS 2.64x-4.56x.
-11. **Fuzzy pattern break** — replace exact matching with FuzzyMatcher.check_continuation()
+11. ~~**Fuzzy pattern break**~~ — ✅ DONE (Section 16). FuzzyMatcher.check_continuation() for graduated exits.
 12. **Living recalibration** — auto-re-calibrate every N new candles
 13. **Paper trading in live** — run PaperTrader on real-time data with TokenProfile
 14. **Multi-token paper trading** — run PaperTrader on multiple tokens simultaneously
+
+---
+
+## 16. Read/Write Path Alignment: Fuzzy Living Trie (v0.6.6)
+
+### Problem: Node Proliferation in Living Trie
+
+The Living Trie's `_record_observation()` function had a critical read/write path mismatch:
+
+- **READ path**: `FuzzyMatcher.best_match()` allowed 1-edit and 2-edit matches, finding the closest existing node when an exact match didn't exist.
+- **WRITE path**: `trie.search()` required exact match only. When a trade was entered via fuzzy match but the exact pattern couldn't be found, `_record_observation()` created a **new branch** in the trie.
+
+This caused:
+
+1. **Node proliferation**: Fuzzy-matched patterns created duplicate branches instead of writing to the matched node.
+2. **Data fragmentation**: Observations split across near-identical nodes (e.g., `['a','d','b']` vs `['a','c','b']`).
+3. **Confidence dilution**: Each node received fewer observations, lowering confidence scores.
+4. **Unbounded growth**: No pruning mechanism — the trie only grew, never shrank.
+
+### Path B: Pattern Breaks Creating Unnecessary Children
+
+When `next_symbol` wasn't already a child of the matched node, `_record_observation()` always created a new child node. With alpha=3-5, there are up to 5 possible continuation symbols. If a similar symbol already existed as a child (e.g., 'b' when we see 'c'), the observation should go to the existing fuzzy-close child.
+
+### Fix: Align Write Path with Read Path
+
+**`_record_observation()` now accepts `fuzzy_matcher` parameter**:
+
+1. **Path A** (pattern not found): Use `FuzzyMatcher.best_match()` to find the closest existing node. Write observations there instead of creating a new branch. Only create new branches for genuinely novel patterns (no fuzzy match at all).
+
+2. **Path B** (next_symbol not a child): Use `FuzzyMatcher.check_continuation()` to check if a fuzzy-close child already exists. If found, write to that child. Only create new children when no fuzzy continuation exists.
+
+3. **Backward compatibility**: When `fuzzy_matcher` is not provided, the old exact-match behavior is preserved.
+
+### Test Results: Node Reduction by Alpha
+
+| Alpha | Theoretical Patterns | Old New Nodes | New New Nodes | Reduction |
+|-------|---------------------|---------------|---------------|-----------|
+| 3 | 243 | 90 | 90 | 0.0% |
+| 4 | 1,024 | 68 | 55 | 19.1% |
+| 5 | 3,125 | 71 | 38 | **46.5%** |
+
+Key observations:
+- **alpha=3**: Full coverage (212/243 patterns exist), so fuzzy matches are rare. No proliferation to reduce.
+- **alpha=4**: 19.1% reduction — the larger pattern space creates more fuzzy-only opportunities.
+- **alpha=5**: 46.5% reduction — with 3,125 theoretical patterns and only ~500 observed, fuzzy alignment prevents nearly half the new node creation.
+
+All observations are preserved (no data loss). The fix is fully backward compatible.
+
+### Diagnostic Data: Trie Proliferation Analysis
+
+Static trie analysis (before Living Trie):
+
+| Symbol | Timeframe | Alpha | Terminal Nodes | Theoretical | Coverage | Single-Obs | Near-Dup Pairs |
+|--------|-----------|-------|---------------|-------------|----------|------------|----------------|
+| BTC/USDT | 1h | 3 | 239 | 243 | 98.4% | 11 (4.6%) | 238 |
+| DOGE/USDT | 1h | 3 | 239 | 243 | 98.4% | 10 (4.2%) | 237 |
+| BTC/USDT | 5m | 4 | 983 | 1,024 | 96.0% | 109 (11.1%) | 964 |
+
+**Near-duplicate pairs**: Every parent node in the alpha=3 trie has near-duplicate children (100%). This means fuzzy matching is almost always possible, validating the fix approach.
+
+### Files Modified
+
+| File | Change |
+|------|--------|
+| `src/ppmt/engine/paper_trader.py` | `_record_observation()` now accepts `fuzzy_matcher` parameter; uses `best_match()` for Path A, `check_continuation()` for Path B |
+| `src/ppmt/scripts/diagnose_trie_proliferation.py` | New diagnostic script for trie node analysis |
+| `src/ppmt/scripts/test_fuzzy_alignment.py` | New test script validating the fix |

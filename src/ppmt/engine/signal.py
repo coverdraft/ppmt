@@ -523,13 +523,39 @@ class SignalGenerator:
         """
         Generate a continuation signal based on pattern state.
 
-        V3: Continuation signals also carry prediction data,
-        so the Risk Manager can adjust position size mid-trade.
+        v0.6.5: Fuzzy Pattern Break — graduated decisions based on
+        pattern_break_score instead of binary HOLD/EXIT:
+          - break_score >= 0.7: HOLD (pattern continues confidently)
+          - break_score 0.4-0.7: TRAILING (pattern weakening)
+          - break_score < 0.4: EXIT (pattern broken)
+
+        This prevents premature exits on noisy continuation symbols
+        while still exiting when the pattern truly breaks down.
         """
-        # Unknown block → predictive exit
-        if continuation_result.unknown_block and self.unknown_block_exit:
+        break_score = continuation_result.pattern_break_score
+
+        # Unknown block → check break score for graduated exit
+        if continuation_result.unknown_block or not continuation_result.matched:
             meta = continuation_result.node.metadata if continuation_result.node else None
 
+            # Graduated decision based on pattern break score
+            if break_score >= 0.4:
+                # Pattern weakening but not broken → TRAILING stop
+                # Protect profits while giving the pattern a chance
+                trailing_sl = current_price * (1 - self.trailing_distance_pct / 100.0)
+                return Signal(
+                    signal_type=SignalType.TRAILING,
+                    confidence=0.7 + 0.2 * break_score,  # 0.7-0.9 based on break score
+                    symbol=symbol,
+                    sl_price=trailing_sl,
+                    tp_price=meta.tp_price if meta else None,
+                    unknown_block_exit=False,  # Not a full exit — trailing
+                    is_fuzzy=True,
+                    quality_score=break_score,
+                    sizing_multiplier=0.5 if break_score < 0.6 else 1.0,
+                )
+
+            # Pattern truly broken → EXIT
             if current_pnl_pct >= self.trailing_activation_pct:
                 trailing_sl = current_price * (1 - self.trailing_distance_pct / 100.0)
                 return Signal(
@@ -541,7 +567,7 @@ class SignalGenerator:
                     unknown_block_exit=True,
                     is_fuzzy=continuation_result.is_exact is False,
                     quality_score=0.9,
-                    sizing_multiplier=0.0,  # Exit → no new size
+                    sizing_multiplier=0.0,
                 )
 
             sl = meta.sl_price if meta else entry_price * 0.97
@@ -551,22 +577,29 @@ class SignalGenerator:
                 symbol=symbol,
                 sl_price=sl,
                 unknown_block_exit=True,
-                quality_score=0.9,
-                sizing_multiplier=0.0,  # Exit
+                quality_score=break_score,
+                sizing_multiplier=0.0,
             )
 
-        # Pattern continues → HOLD
+        # Pattern continues → check if fuzzy or exact, adjust confidence
         if continuation_result.matched and continuation_result.node:
             meta = continuation_result.node.metadata
 
             # Generate prediction path for hold signal
             predicted_path = self.generate_prediction_path(continuation_result.node)
 
+            # Fuzzy continuation → lower confidence, may trigger trailing
+            is_fuzzy_cont = not continuation_result.is_exact
+            effective_confidence = meta.confidence
+            if is_fuzzy_cont:
+                # Reduce confidence for fuzzy matches
+                effective_confidence *= continuation_result.similarity
+
             if current_pnl_pct >= self.trailing_activation_pct:
                 trailing_sl = current_price * (1 - self.trailing_distance_pct / 100.0)
                 signal = Signal(
                     signal_type=SignalType.TRAILING,
-                    confidence=meta.confidence,
+                    confidence=effective_confidence,
                     symbol=symbol,
                     sl_price=trailing_sl,
                     tp_price=meta.tp_price,
@@ -577,13 +610,14 @@ class SignalGenerator:
                     historical_count=meta.historical_count,
                     risk_reward_ratio=meta.risk_reward_ratio,
                     predicted_path=predicted_path,
+                    is_fuzzy=is_fuzzy_cont,
                 )
                 signal.quality_score = signal.compute_quality_score()
                 return signal
 
             signal = Signal(
                 signal_type=SignalType.HOLD,
-                confidence=meta.confidence,
+                confidence=effective_confidence,
                 symbol=symbol,
                 sl_price=meta.sl_price,
                 tp_price=meta.tp_price,
@@ -596,6 +630,7 @@ class SignalGenerator:
                 max_drawdown_pct=meta.max_drawdown_pct,
                 max_favorable_pct=meta.max_favorable_pct,
                 predicted_path=predicted_path,
+                is_fuzzy=is_fuzzy_cont,
             )
             signal.quality_score = signal.compute_quality_score()
             signal.sizing_multiplier = signal.compute_sizing_multiplier()

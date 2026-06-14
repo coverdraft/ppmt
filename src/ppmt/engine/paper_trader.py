@@ -40,6 +40,7 @@ from ppmt.data.classifier import AssetClassifier
 from ppmt.core.sax import SAXEncoder
 from ppmt.core.regime import RegimeDetector, RegimeInfo
 from ppmt.core.profiles import TokenProfile, TIMEFRAME_ALPHA_DEFAULTS
+from ppmt.core.matcher import FuzzyMatcher
 from ppmt.engine.ppmt import PPMT
 from ppmt.engine.prediction import PredictionEngine
 from ppmt.engine.signal import SignalType, Signal
@@ -95,6 +96,7 @@ def _record_observation(
     trade: PaperTrade,
     exit_sym_idx: int,
     next_symbol: Optional[str] = None,
+    fuzzy_matcher: Optional["FuzzyMatcher"] = None,
 ) -> dict:
     """
     Living Trie: Record a trade's outcome back into the Trie.
@@ -104,6 +106,18 @@ def _record_observation(
     that updates the node's metadata, creating a feedback loop:
 
       Trie predicts → Trade executes → Outcome observed → Trie updated
+
+    v0.6.6 FIX: Read/Write Path Alignment
+    Previously, the READ path used FuzzyMatcher (allowing 1-edit matches)
+    but the WRITE path used trie.search() (exact match only). When a trade
+    was entered via fuzzy match, _record_observation couldn't find the exact
+    pattern and created a NEW branch — causing node proliferation.
+
+    Now, if fuzzy_matcher is provided:
+    - Path A: Use best_match() to find the closest existing node instead
+      of creating a new branch for patterns that are 1-edit away.
+    - Path B: Use check_continuation() to find fuzzy-close children
+      instead of always creating new children for unseen continuations.
 
     Two things happen:
     1. The entry node's metadata is updated with the actual outcome
@@ -117,6 +131,9 @@ def _record_observation(
         exit_sym_idx: SAX symbol index at trade exit
         next_symbol: The SAX symbol that followed (especially important
                      for pattern breaks — this is the NEW symbol)
+        fuzzy_matcher: Optional FuzzyMatcher for read/write alignment.
+            When provided, uses fuzzy matching to find the closest
+            existing node instead of creating new branches.
 
     Returns:
         Dict with 'observations' and 'new_nodes' counts
@@ -130,13 +147,31 @@ def _record_observation(
         return {"observations": 0, "new_nodes": 0}
 
     # 1. Find the Trie node for the matched entry pattern
-    #    Try exact match first, then progressively shorter prefixes
+    #    v0.6.6: Try exact match first, then fuzzy, then prefix fallback.
+    #    This aligns the WRITE path with the READ path — if a trade was
+    #    entered via fuzzy match, we find the same node to write back to.
     node = trie.search(trade.matched_pattern)
+    matched_via_fuzzy = False
+    matched_pattern = trade.matched_pattern  # Track which pattern we matched
+
+    if node is None and fuzzy_matcher is not None:
+        # v0.6.6 FIX: Use FuzzyMatcher to find closest existing node.
+        # This prevents creating duplicate branches for patterns that
+        # are 1-edit away from existing patterns. The trade was likely
+        # entered via a fuzzy match, so we should write back to the
+        # same node that generated the entry signal.
+        fuzzy_result = fuzzy_matcher.best_match(trie, trade.matched_pattern)
+        if fuzzy_result.matched and fuzzy_result.node is not None:
+            node = fuzzy_result.node
+            matched_via_fuzzy = True
+            matched_pattern = fuzzy_result.symbols
+
     if node is None:
         # Try shorter prefixes (the prediction may have used a prefix match)
         for prefix_len in range(len(trade.matched_pattern) - 1, 0, -1):
             node = trie.search(trade.matched_pattern[:prefix_len])
             if node is not None:
+                matched_pattern = trade.matched_pattern[:prefix_len]
                 break
 
     if node is None:
@@ -144,6 +179,9 @@ def _record_observation(
         # V4.4: Pass regime/regime_confidence so new nodes inherit regime context.
         # Previously these were missing, causing newly-created Living Trie nodes
         # to have empty regime info, which broke regime-aware confidence scoring.
+        #
+        # v0.6.6 NOTE: This should be RARE with fuzzy_matcher enabled.
+        # Only truly novel patterns (no fuzzy match) create new branches.
         trie.insert_with_observations(
             symbols=trade.matched_pattern,
             move_pct=trade.actual_move_pct,
@@ -198,20 +236,72 @@ def _record_observation(
     trie.trading_observations += 1
 
     # 3. If next_symbol is NOT already a child, add it — the Trie GROWS
-    if next_symbol and not node.has_child(next_symbol):
-        extended_pattern = trade.matched_pattern + [next_symbol]
-        child_node = trie.insert(extended_pattern)
-        child_node.metadata.update_from_observation(
-            move_pct=trade.actual_move_pct * 0.5,
-            drawdown_pct=max_dd_pct,
-            favorable_pct=max_fav_pct,
-            duration=duration,
-            won=won,
-            next_symbol=None,
-            regime=trade.regime if trade.regime else None,
-            regime_confidence=trade.regime_confidence if trade.regime_confidence > 0 else None,
-        )
-        new_nodes += 1
+    #    v0.6.6 FIX: Check fuzzy continuation before creating new child.
+    #    If a fuzzy-close symbol already exists as a child, write the
+    #    observation to THAT child instead of creating a new branch.
+    if next_symbol:
+        if node.has_child(next_symbol):
+            # Exact child exists — update it
+            child_node = node.get_child(next_symbol)
+            child_node.metadata.update_from_observation(
+                move_pct=trade.actual_move_pct * 0.5,
+                drawdown_pct=max_dd_pct,
+                favorable_pct=max_fav_pct,
+                duration=duration,
+                won=won,
+                next_symbol=None,
+                regime=trade.regime if trade.regime else None,
+                regime_confidence=trade.regime_confidence if trade.regime_confidence > 0 else None,
+            )
+        elif fuzzy_matcher is not None:
+            # v0.6.6: Check if a fuzzy-close continuation exists.
+            # If the next symbol is similar to an existing child,
+            # write to that child instead of creating a new one.
+            cont_result = fuzzy_matcher.check_continuation(
+                trie, matched_pattern, next_symbol
+            )
+            if cont_result.matched and cont_result.node is not None:
+                # Fuzzy continuation found — write to existing child
+                cont_result.node.metadata.update_from_observation(
+                    move_pct=trade.actual_move_pct * 0.5,
+                    drawdown_pct=max_dd_pct,
+                    favorable_pct=max_fav_pct,
+                    duration=duration,
+                    won=won,
+                    next_symbol=None,
+                    regime=trade.regime if trade.regime else None,
+                    regime_confidence=trade.regime_confidence if trade.regime_confidence > 0 else None,
+                )
+            else:
+                # No fuzzy continuation — create new child (genuinely novel)
+                extended_pattern = matched_pattern + [next_symbol]
+                child_node = trie.insert(extended_pattern)
+                child_node.metadata.update_from_observation(
+                    move_pct=trade.actual_move_pct * 0.5,
+                    drawdown_pct=max_dd_pct,
+                    favorable_pct=max_fav_pct,
+                    duration=duration,
+                    won=won,
+                    next_symbol=None,
+                    regime=trade.regime if trade.regime else None,
+                    regime_confidence=trade.regime_confidence if trade.regime_confidence > 0 else None,
+                )
+                new_nodes += 1
+        else:
+            # No fuzzy matcher — original behavior (always create new child)
+            extended_pattern = matched_pattern + [next_symbol]
+            child_node = trie.insert(extended_pattern)
+            child_node.metadata.update_from_observation(
+                move_pct=trade.actual_move_pct * 0.5,
+                drawdown_pct=max_dd_pct,
+                favorable_pct=max_fav_pct,
+                duration=duration,
+                won=won,
+                next_symbol=None,
+                regime=trade.regime if trade.regime else None,
+                regime_confidence=trade.regime_confidence if trade.regime_confidence > 0 else None,
+            )
+            new_nodes += 1
 
     trade.trie_updated = True
     return {"observations": observations, "new_nodes": new_nodes}
@@ -660,6 +750,15 @@ class PaperTrader:
             strategy=cfg.sax_strategy,
         )
 
+        # v0.6.5: Create FuzzyMatcher for pattern break checks
+        # This replaces direct trie.check_continuation() with fuzzy-aware
+        # continuation that computes pattern_break_score for graduated exits
+        fuzzy_matcher = FuzzyMatcher(
+            sax_encoder=sax_encoder,
+            threshold=fuzzy_threshold,
+            max_edit_distance=2,
+        )
+
         # Encode the FULL DataFrame
         # v0.6.3: Use encode_with_normalization() when training stats are provided.
         # This ensures consistent symbol mapping between train and test periods.
@@ -901,7 +1000,8 @@ class PaperTrader:
                             if cfg.living_trie and current_position.matched_pattern:
                                 next_sym = all_sax_symbols[sym_idx] if sym_idx < len(all_sax_symbols) else None
                                 obs_result = _record_observation(
-                                    trie, current_position, sym_idx, next_sym
+                                    trie, current_position, sym_idx, next_sym,
+                                    fuzzy_matcher=fuzzy_matcher,
                                 )
                                 trie_observations_recorded += obs_result["observations"]
                                 trie_new_nodes_created += obs_result["new_nodes"]
@@ -978,7 +1078,8 @@ class PaperTrader:
                     if cfg.living_trie and current_position.matched_pattern:
                         next_sym = all_sax_symbols[sym_idx] if sym_idx < len(all_sax_symbols) else None
                         obs_result = _record_observation(
-                            trie, current_position, sym_idx, next_sym
+                            trie, current_position, sym_idx, next_sym,
+                            fuzzy_matcher=fuzzy_matcher,
                         )
                         trie_observations_recorded += obs_result["observations"]
                         trie_new_nodes_created += obs_result["new_nodes"]
@@ -1014,7 +1115,8 @@ class PaperTrader:
                     if cfg.living_trie and current_position.matched_pattern:
                         next_sym = all_sax_symbols[sym_idx] if sym_idx < len(all_sax_symbols) else None
                         obs_result = _record_observation(
-                            trie, current_position, sym_idx, next_sym
+                            trie, current_position, sym_idx, next_sym,
+                            fuzzy_matcher=fuzzy_matcher,
                         )
                         trie_observations_recorded += obs_result["observations"]
                         trie_new_nodes_created += obs_result["new_nodes"]
@@ -1034,20 +1136,48 @@ class PaperTrader:
                 risk_mgr.update_position(cfg.symbol, current_price)
 
             # ================================================================
-            # PHASE 2: Pattern break check with grace period
-            # v0.2.9: Instead of closing on the FIRST pattern break, we
-            # wait for N consecutive breaks (default 2). A single break
-            # may be noise; two consecutive breaks confirm the pattern
+            # PHASE 2: Pattern break check with fuzzy matcher + grace period
+            # v0.6.5: Uses FuzzyMatcher.check_continuation() instead of
+            # trie.check_continuation() directly. This provides:
+            #   - Fuzzy symbol matching (not just exact)
+            #   - pattern_break_score for graduated exit decisions
+            #   - All 4 trie levels checked (not just trie_n3)
+            #
+            # v0.2.9: Grace period — instead of closing on the FIRST pattern
+            # break, we wait for N consecutive breaks (default 2). A single
+            # break may be noise; two consecutive breaks confirm the pattern
             # has actually changed.
             # ================================================================
             if current_position is not None and len(current_symbols) >= 2:
                 pattern_to_check = current_symbols[:-1]
                 latest_symbol = current_symbols[-1]
-                continues, _ = trie.check_continuation(pattern_to_check, latest_symbol)
+
+                # v0.6.5: Check all 4 trie levels, pick best break score
+                cont_results = []
+                for cont_trie in [trie_n1, trie_n2, trie_n3, trie_n4]:
+                    if cont_trie is not None:
+                        cr = fuzzy_matcher.check_continuation(cont_trie, pattern_to_check, latest_symbol)
+                        cont_results.append(cr)
+
+                if cont_results:
+                    best_cont = max(cont_results, key=lambda c: c.pattern_break_score)
+                    continues = best_cont.matched
+                    break_score = best_cont.pattern_break_score
+                else:
+                    # Fallback to exact match on main trie
+                    continues, _ = trie.check_continuation(pattern_to_check, latest_symbol)
+                    break_score = 0.0 if not continues else 1.0
 
                 if not continues and current_position.confidence > 0:
                     consecutive_breaks += 1
-                    if consecutive_breaks >= cfg.pattern_break_grace:
+                    # v0.6.5: Use break_score to modulate grace period
+                    # If break_score is high (close match), give more grace
+                    effective_grace = cfg.pattern_break_grace
+                    if break_score >= 0.4:
+                        # Pattern is weakening but not broken — add extra grace
+                        effective_grace = cfg.pattern_break_grace + 1
+
+                    if consecutive_breaks >= effective_grace:
                         # N consecutive breaks → close position
                         current_price = df_close[last_candle_idx]
                         _, pnl = risk_mgr.close_position(cfg.symbol, current_price)
@@ -1066,6 +1196,7 @@ class PaperTrader:
                             obs_result = _record_observation(
                                 trie, current_position, sym_idx,
                                 latest_symbol,  # The symbol that broke the pattern
+                                fuzzy_matcher=fuzzy_matcher,
                             )
                             trie_observations_recorded += obs_result["observations"]
                             trie_new_nodes_created += obs_result["new_nodes"]
@@ -1459,7 +1590,8 @@ class PaperTrader:
             # Living Trie: record the final trade outcome
             if cfg.living_trie and current_position.matched_pattern:
                 obs_result = _record_observation(
-                    trie, current_position, len(all_sax_symbols) - 1, None
+                    trie, current_position, len(all_sax_symbols) - 1, None,
+                    fuzzy_matcher=fuzzy_matcher,
                 )
                 trie_observations_recorded += obs_result["observations"]
                 trie_new_nodes_created += obs_result["new_nodes"]

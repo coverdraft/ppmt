@@ -440,17 +440,25 @@ class PPMT:
         signal: Signal
 
         if is_in_position and entry_price is not None:
-            # Check continuation
+            # Check continuation using ALL trie levels (not just n3)
+            # v0.6.5: Fuzzy Pattern Break — graduated continuation across levels
             pnl_pct = ((current_price - entry_price) / entry_price) * 100.0
 
-            # Get continuation from best matching level
             last_sym = current_symbols[-1] if current_symbols else ""
-            cont_result = self.matcher.check_continuation(
-                self.trie_n3, current_symbols[:-1], last_sym
-            )
+
+            # Check continuation at all 4 levels, pick best break score
+            cont_results = []
+            for trie in [self.trie_n1, self.trie_n2, self.trie_n3, self.trie_n4]:
+                cont = self.matcher.check_continuation(
+                    trie, current_symbols[:-1], last_sym
+                )
+                cont_results.append(cont)
+
+            # Select the continuation result with the highest pattern_break_score
+            best_cont = max(cont_results, key=lambda c: c.pattern_break_score)
 
             signal = self.signal_generator.generate_continuation_signal(
-                continuation_result=cont_result,
+                continuation_result=best_cont,
                 current_price=current_price,
                 entry_price=entry_price,
                 current_pnl_pct=pnl_pct,
