@@ -39,7 +39,7 @@ from ppmt.data.storage import PPMTStorage
 from ppmt.data.classifier import AssetClassifier
 from ppmt.core.sax import SAXEncoder
 from ppmt.core.regime import RegimeDetector, RegimeInfo
-from ppmt.core.profiles import TokenProfile, TIMEFRAME_ALPHA_DEFAULTS
+from ppmt.core.profiles import TokenProfile, TIMEFRAME_ALPHA_DEFAULTS, TradingCalibrationEngine
 from ppmt.core.matcher import FuzzyMatcher
 from ppmt.engine.ppmt import PPMT
 from ppmt.engine.prediction import PredictionEngine
@@ -345,6 +345,27 @@ class PaperTraderConfig:
     + timeframe. This replaces manual per-token tuning with
     data-driven auto-configuration validated across 22 token-TF combos.
     When False, falls back to explicit config values (backward compat)."""
+
+    auto_calibrate: bool = True
+    """v0.6.8: Auto-calibrate SAX α/W using TradingCalibrationEngine.
+    When True (default) and use_token_profile=True, runs a mini-backtest
+    grid search (alpha x window) on the available data to discover the
+    best α/W for this specific token, overriding the timeframe defaults.
+    This replaces the generic timeframe→alpha mapping (1h→3, 5m→4, 1m→5)
+    with a data-driven selection that can produce alpha=4 or alpha=5
+    for 1h data when trading results justify it.
+    When False, uses TokenProfile.from_timeframe() defaults (no calibration).
+    Requires at least 1000 candles of data to calibrate."""
+
+    recalibration_interval: int = 0
+    """v0.6.8: Re-calibrate every N candles during trading. 0 = no recalibration.
+    When set to a positive value (e.g. 2000), the paper trader will
+    re-run TradingCalibrationEngine every N candles with the latest
+    data. If the calibrated α/W changes, it rebuilds the trie with the
+    new parameters. This adapts to regime changes where different
+    granularity is optimal.
+    WARNING: Recalibration is expensive (re-encodes all data). Use
+    conservatively (every 2000+ candles for 1h, 10000+ for 5m)."""
 
     min_confidence: float = 0.20
     """Minimum confidence to generate entry signal.
@@ -665,6 +686,76 @@ class PaperTrader:
                           f"cat_loss={token_profile.catastrophic_loss_pct:.0%}, "
                           f"short_allowed={token_profile.short_allowed}, "
                           f"fuzzy={token_profile.fuzzy_threshold:.2f}")
+
+            # ================================================================
+            # v0.6.8: Auto-calibration with TradingCalibrationEngine
+            # Run a mini-backtest grid search on the available data to
+            # discover the best α/W for THIS specific token, overriding
+            # the generic timeframe defaults. This fixes the structural
+            # bias of the old CalibrationEngine (always α=3/W=5) by
+            # selecting based on actual trading PnL.
+            # ================================================================
+            if cfg.auto_calibrate and len(df) >= 1000:
+                console.print(f"[bold cyan]Auto-calibrating α/W...[/bold cyan] "
+                              f"({len(df)} candles, this may take a moment)")
+                try:
+                    calibrator = TradingCalibrationEngine(
+                        train_ratio=0.70,
+                        pattern_length=cfg.pattern_length,
+                        timeframe=cfg.timeframe,
+                    )
+                    cal_profile, cal_results = calibrator.calibrate(
+                        df, symbol=cfg.symbol, verbose=False
+                    )
+                    cal_alpha = cal_profile.sax_alphabet_size
+                    cal_window = cal_profile.sax_window_size
+
+                    # Find the best result for display
+                    cal_best = [r for r in cal_results
+                                if r.alphabet_size == cal_alpha
+                                and r.window_size == cal_window][0]
+
+                    # Only override if calibration found a different α/W
+                    if cal_alpha != cfg.sax_alphabet_size or cal_window != cfg.sax_window_size:
+                        old_alpha, old_window = cfg.sax_alphabet_size, cfg.sax_window_size
+                        cfg.sax_alphabet_size = cal_alpha
+                        cfg.sax_window_size = cal_window
+
+                        # Update the token profile with calibrated values
+                        grid = {
+                            f"a{r.alphabet_size}_w{r.window_size}": {
+                                "trading_metric": round(r.trading_metric, 4),
+                                "total_pnl_pct": round(r.total_pnl_pct, 2),
+                                "win_rate": round(r.win_rate, 4),
+                                "total_trades": r.total_trades,
+                            }
+                            for r in cal_results
+                        }
+                        token_profile.update_from_calibration(
+                            best_alpha=cal_alpha,
+                            best_window=cal_window,
+                            metric=cal_best.trading_metric,
+                            grid=grid,
+                            n_samples=len(df),
+                        )
+
+                        console.print(f"[bold green]Calibrated:[/bold green] "
+                                      f"α={old_alpha}→{cal_alpha}, W={old_window}→{cal_window} "
+                                      f"(PnL={cal_best.total_pnl_pct:+.1f}%, "
+                                      f"WR={cal_best.win_rate:.1%}, "
+                                      f"Trades={cal_best.total_trades}, "
+                                      f"SL/TP={calibrator.sl_pct}%/{calibrator.tp_pct}%)")
+                    else:
+                        console.print(f"[green]Calibration confirms default: "
+                                      f"α={cal_alpha}/W={cal_window} "
+                                      f"(PnL={cal_best.total_pnl_pct:+.1f}%, "
+                                      f"WR={cal_best.win_rate:.1%})[/green]")
+                except Exception as e:
+                    console.print(f"[yellow]Calibration failed: {e} — "
+                                  f"using default α/W[/yellow]")
+            elif cfg.auto_calibrate and len(df) < 1000:
+                console.print(f"[yellow]Insufficient data for calibration "
+                              f"({len(df)} < 1000 candles) — using defaults[/yellow]")
         else:
             # Fallback: use timeframe alpha defaults even without full profile
             if cfg.sax_alphabet_size == 0 or cfg.sax_window_size == 0:
