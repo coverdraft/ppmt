@@ -1,7 +1,7 @@
-# PPMT v0.6.6 — TRACEABILITY DOCUMENT
+# PPMT v0.6.8 — TRACEABILITY DOCUMENT
 
 > Last updated: 2026-06-14
-> Data source: Binance 12 tokens (BTC, ETH, SOL, BNB, XRP, ADA, LINK, UNI, ATOM, DOGE, SHIB, PEPE) 1h (14,400 real candles each) + 5m (57,600 candles) + 1m (288,000 candles)
+> Data source: Bybit 12 tokens (BTC, ETH, SOL, BNB, XRP, ADA, LINK, UNI, ATOM, DOGE, SHIB, PEPE) 1h (14,400 real candles each) + 5m (57,600 candles) + 1m (288,000 candles)
 
 ---
 
@@ -1352,3 +1352,134 @@ ETH/USDT at 1h with α=5/W=10 shows only +34.6% PnL (lowest). This may indicate:
 - [ ] Consider dynamic SL/TP per asset class in TradingCalibrationEngine
 - [ ] Integrate TradingCalibrationEngine into paper_trader.py for live recalibration
 - [ ] Investigate ETH low performance at α=5/W=10
+
+---
+
+## 19. CalibrationEngine Structural Bias Fix (v0.6.8)
+
+### Problem: CalibrationEngine Always Selects alpha=3/window=5
+
+The original `CalibrationEngine` uses a pattern-matching metric:
+
+```
+calibration_metric = information × (0.4 × oos_match_rate + 0.35 × overlap_ratio + 0.25 × repetition)
+```
+
+This metric has a **structural bias** toward low alpha values because:
+1. Lower alpha → fewer unique SAX symbols → higher match rate (100% at alpha=3)
+2. Lower alpha → more pattern overlap → higher overlap ratio (8.29x at alpha=3/w=5)
+3. These dominate the metric, making alpha=3/window=5 ALWAYS win
+4. But alpha=3 may produce POOR trading signals (too coarse encoding)
+
+### Diagnostic Evidence
+
+Ran both engines on 6 tokens × 1h × 600 days (Bybit real data):
+
+```
+Token        Old α/W    Old metric   New α/W    New metric   New PnL%
+BTC/USDT     α=3/w=5     0.5905       α=5/w=5     4.0078       +49.68
+ETH/USDT     α=3/w=5     0.5549       α=5/w=10    4.1112       +55.00
+SOL/USDT     α=3/w=5     0.5444       α=3/w=7     3.7704       +39.00
+DOGE/USDT    α=3/w=5     0.5569       α=4/w=10    4.0619       +52.39
+BNB/USDT     α=3/w=5     0.5461       α=4/w=7     2.9442       +16.63
+LINK/USDT    α=3/w=5     0.5448       α=4/w=10    3.7664       +38.87
+```
+
+**Old engine: alpha=3 in 6/6 (100%) | New engine: alpha=3 in 1/6 (17%)**
+
+### Why alpha=3 Always Wins in Old Engine (BTC Example)
+
+```
+OLD ENGINE (pattern-matching metric):
+  a3_w5:  metric=0.5905  info=0.658  oos_match=100.0%  overlap=8.29x  <<< BEST
+  a4_w5:  metric=0.3975  info=0.736  oos_match=100.0%  overlap=2.33x
+  a5_w5:  metric=0.3689  info=0.789  oos_match=96.5%   overlap=1.38x
+
+NEW ENGINE (trading metric):
+  a3_w5:  tmetric=2.7355  PnL=+13.3%  WR=40.4%  Trades=47
+  a4_w5:  tmetric=2.6171  PnL=+11.7%  WR=41.3%  Trades=46
+  a5_w5:  tmetric=4.0078  PnL=+49.7%  WR=52.5%  Trades=40  <<< BEST
+```
+
+alpha=3/w=5 has the HIGHEST pattern metric (0.5905) but the LOWEST PnL (+13.3%).
+alpha=5/w=5 has the LOWEST pattern metric (0.3689) but the HIGHEST PnL (+49.7%).
+The pattern-matching metric is **inversely correlated** with trading performance.
+
+### Fixes Applied in v0.6.8
+
+| # | Fix | Impact |
+|---|-----|--------|
+| 1 | **Deprecation warning** on `CalibrationEngine.__init__()` | Prevents accidental use of biased engine |
+| 2 | **Asset-class-adaptive SL/TP** in `TradingCalibrationEngine` | blue_chip: 2.5%/4.0%, large_cap: 3.0%/5.0%, defi: 3.5%/6.0%, meme: 5.0%/8.0% |
+| 3 | **Timeframe-aware Sharpe** annualization | Replaced hardcoded `sqrt(365*24)` with `sqrt(candles_per_year)` derived from timeframe parameter |
+| 4 | **Volatility penalty** in trading metric | `max(0, std(pnls) - 5) / 10` penalizes unstable PnL distributions |
+| 5 | **DeFi token classification** | LINK, UNI, ATOM, AAVE, MKR, COMP, CRV, SNX now classified as "defi" instead of defaulting to "large_cap" |
+| 6 | **Updated `oos_validation.py`** | Switched from `CalibrationEngine` to `TradingCalibrationEngine` with timeframe parameter |
+| 7 | **Updated `massive_validation.py`** | Added `timeframe=TIMEFRAME` parameter to `TradingCalibrationEngine` |
+
+### Asset-Class-Adaptive SL/TP Rationale
+
+| Asset Class | SL/TP | Rationale |
+|-------------|-------|-----------|
+| blue_chip | 2.5% / 4.0% | BTC/ETH have lower daily volatility; tighter stops capture smaller moves |
+| large_cap | 3.0% / 5.0% | SOL/BNB have moderate volatility; default balanced approach |
+| defi | 3.5% / 6.0% | LINK/UNI have higher volatility from DeFi-specific events |
+| meme | 5.0% / 8.0% | DOGE/SHIB/PEPE have extreme volatility; wider stops avoid premature exits |
+| new_launch | 5.0% / 8.0% | Unknown tokens assumed volatile; wide stops as safety measure |
+
+### Timeframe-Aware Sharpe Annualization
+
+```python
+# BEFORE (hardcoded for 1h):
+sharpe = mean(pnls) / std(pnls) * sqrt(365 * 24)  # Always assumes 1h
+
+# AFTER (derives from timeframe):
+TIMEFRAME_CANDLES_PER_YEAR = {
+    "1m": 525600,  # 365 * 24 * 60
+    "5m": 105120,  # 365 * 24 * 12
+    "15m": 35040,  # 365 * 24 * 4
+    "30m": 17520,  # 365 * 24 * 2
+    "1h":  8760,   # 365 * 24
+    "4h":  2190,   # 365 * 6
+    "1d":  365,
+}
+sharpe = mean(pnls) / std(pnls) * sqrt(candles_per_year)
+```
+
+This ensures the Sharpe ratio is correctly annualized regardless of timeframe.
+Previously, 5m results showed Sharpe=200+ because the annualization factor was
+too high (sqrt(8760) vs correct sqrt(105120)).
+
+### Calibration Results with v0.6.8 Fixes (3 tokens, Bybit 1h)
+
+```
+Token      α/W        SL/TP        Cal. PnL   Cal. WR   Full OOS PnL
+BTC/USDT   α=4/w=5    2.5%/4.0%    +50.8%     53.7%     +41.17%
+ETH/USDT   α=3/w=7    2.5%/4.0%    +40.6%     46.1%     -37.85%
+SOL/USDT   α=3/w=5    3.0%/5.0%    +42.5%     43.2%     +51.62%
+```
+
+**Note**: ETH shows a significant gap between calibration PnL (+40.6%) and full
+OOS PnL (-37.85%). This indicates the calibration mini-backtest's simplified
+trading logic (basic SL/TP, no trie hierarchy weighting) diverges from the
+full PPMT engine's behavior. This is a known limitation to address in future
+versions — the calibration is a rough proxy, not a perfect predictor.
+
+### Files Modified (v0.6.8)
+
+| File | Change |
+|------|--------|
+| `src/ppmt/core/profiles.py` | Deprecation warning on `CalibrationEngine`; asset-class SL/TP; timeframe-aware Sharpe; volatility penalty; DeFi classification; `_get_sl_tp_for_symbol()` method |
+| `src/ppmt/scripts/oos_validation.py` | Switched to `TradingCalibrationEngine`; updated version to v0.6.8; asset-class SL/TP display |
+| `src/ppmt/scripts/massive_validation.py` | Added `timeframe=TIMEFRAME` parameter; updated version to v0.6.8 |
+| `src/ppmt/scripts/calibration_bias_diagnostic.py` | NEW — diagnostic comparing old vs new engine (proof of bias) |
+
+### Action Items (Post v0.6.8)
+
+- [ ] Improve calibration-to-OOS correlation (ETH gap = 78 percentage points)
+- [ ] Consider walk-forward within calibration (currently single 70/30 split)
+- [ ] TokenProfile integration: pass calibrated α/W into paper_trader.py for live recalibration
+- [ ] Node pruning/cleanup mechanism for stale trie branches
+- [ ] Re-enable catastrophic_loss_pct risk management
+- [ ] BlockLifecycleMetadata regime field for market regime tracking
+- [ ] CSV import for historical 1m data (SOL/DOGE/LINK from CryptoDataDownload)

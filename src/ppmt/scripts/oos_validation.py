@@ -30,7 +30,7 @@ import numpy as np
 import pandas as pd
 
 from ppmt.data.collector import DataCollector
-from ppmt.core.profiles import CalibrationEngine, TokenProfile, CalibrationResult
+from ppmt.core.profiles import CalibrationEngine, TradingCalibrationEngine, TokenProfile, CalibrationResult
 from ppmt.core.sax import SAXEncoder
 from ppmt.core.trie import PPMTTrie
 from ppmt.core.matcher import FuzzyMatcher
@@ -317,8 +317,8 @@ def monte_carlo_simulation(
 
 def main():
     print("=" * 70)
-    print("  PPMT v0.6.2 — Cross-Token OOS Validation")
-    print("  Additive OHLCV Composite + Auto-Calibration")
+    print("  PPMT v0.6.8 — Cross-Token OOS Validation")
+    print("  Trading Calibration (bias-fixed) + Additive OHLCV Composite")
     print(f"  Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print("=" * 70)
 
@@ -344,20 +344,19 @@ def main():
     print("  STEP 2: Auto-Calibration (alpha x window grid search)")
     print("=" * 70)
 
-    calibrator = CalibrationEngine(train_ratio=TRAIN_RATIO, pattern_length=PATTERN_LENGTH)
+    calibrator = TradingCalibrationEngine(train_ratio=TRAIN_RATIO, pattern_length=PATTERN_LENGTH, timeframe=TIMEFRAME)
     profiles = {}
 
     for symbol, df in data.items():
         profile, results = calibrator.calibrate(df, symbol=symbol, verbose=True)
         profiles[symbol] = profile
 
-        # Print symbol distribution for best config
+        # Print trading metrics for best config
         best_r = [r for r in results if r.alphabet_size == profile.sax_alphabet_size
                   and r.window_size == profile.sax_window_size][0]
-        print(f"\n  Symbol distribution (alpha={best_r.alphabet_size}):")
-        for sym, pct in sorted(best_r.symbol_distribution.items()):
-            bar = "█" * int(pct * 100)
-            print(f"    {sym}: {pct:.1%} {bar}")
+        print(f"\n  Best: alpha={best_r.alphabet_size} window={best_r.window_size}")
+        print(f"    PnL={best_r.total_pnl_pct:+.1f}% WR={best_r.win_rate:.1%} Trades={best_r.total_trades}")
+        print(f"    SL/TP={calibrator.sl_pct}%/{calibrator.tp_pct}% (asset-class-adaptive)")
 
     # Step 3: Full OOS Trading Simulation
     print("\n" + "=" * 70)

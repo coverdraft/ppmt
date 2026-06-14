@@ -264,7 +264,7 @@ def compute_stats(trades):
 
 def main():
     print("=" * 90)
-    print("  PPMT v0.6.7 — MASSIVE Multi-Token Validation (Trading Calibration)")
+    print("  PPMT v0.6.8 — MASSIVE Multi-Token Validation (Trading Calibration)")
     print(f"  Tokens: {len(TOKEN_CONFIG)} | Classes: blue_chip, large_cap, defi, meme")
     print(f"  Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print("=" * 90)
@@ -289,7 +289,7 @@ def main():
     print("\n  STEP 2: Auto-Calibration")
     print("-" * 90)
 
-    calibrator = TradingCalibrationEngine(train_ratio=TRAIN_RATIO, pattern_length=PATTERN_LENGTH)
+    calibrator = TradingCalibrationEngine(train_ratio=TRAIN_RATIO, pattern_length=PATTERN_LENGTH, timeframe=TIMEFRAME)
     profiles = {}
 
     for symbol, info in token_data.items():

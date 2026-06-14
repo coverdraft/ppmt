@@ -290,6 +290,16 @@ class CalibrationEngine:
     This ensures the SAX encoding is neither too granular (each pattern
     is unique → no repetition) nor too coarse (all patterns are the
     same → no information).
+
+    .. deprecated:: v0.6.7
+        This engine has a **structural bias toward alpha=3/window=5**
+        because lower alpha always produces higher match rates, which
+        dominate the pattern-matching metric. Diagnostic data shows
+        it selects alpha=3/w=5 in 100% of cases across 6 tokens.
+
+        Use :class:`TradingCalibrationEngine` instead, which selects
+        parameters based on actual trading PnL and produces diverse,
+        data-driven alpha/window selections.
     """
 
     # Grid search space
@@ -297,6 +307,16 @@ class CalibrationEngine:
     WINDOW_GRID = [5, 7, 10]
 
     def __init__(self, train_ratio: float = 0.70, pattern_length: int = 5):
+        import warnings
+        warnings.warn(
+            "CalibrationEngine has a structural bias toward alpha=3/window=5. "
+            "Use TradingCalibrationEngine instead, which selects parameters "
+            "based on actual trading performance and produces diverse, "
+            "data-driven alpha/window selections. "
+            "(Deprecated since v0.6.7)",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.train_ratio = train_ratio
         self.pattern_length = pattern_length
 
@@ -550,14 +570,22 @@ class CalibrationEngine:
         symbol_upper = symbol.upper()
         blue_chips = {"BTC/USDT", "BTCUSDT", "ETH/USDT", "ETHUSDT"}
         large_caps = {"SOL/USDT", "SOLUSDT", "AVAX/USDT", "AVAXUSDT",
-                      "BNB/USDT", "BNBUSDT", "XRP/USDT", "XRPUSDT"}
+                      "BNB/USDT", "BNBUSDT", "XRP/USDT", "XRPUSDT",
+                      "ADA/USDT", "ADAUSDT"}
+        defi_tokens = {"LINK/USDT", "LINKUSDT", "UNI/USDT", "UNIUSDT",
+                       "ATOM/USDT", "ATOMUSDT", "AAVE/USDT", "AAVEUSDT",
+                       "MKR/USDT", "MKRUSDT", "COMP/USDT", "COMPUSDT",
+                       "CRV/USDT", "CRVUSDT", "SNX/USDT", "SNXUSDT"}
         memes = {"DOGE/USDT", "DOGEUSDT", "SHIB/USDT", "SHIBUSDT",
-                 "PEPE/USDT", "PEPEUSDT", "FLOKI/USDT", "FLOKIUSDT"}
+                 "PEPE/USDT", "PEPEUSDT", "FLOKI/USDT", "FLOKIUSDT",
+                 "WIF/USDT", "WIFUSDT", "BONK/USDT", "BONKUSDT"}
 
         if symbol_upper in blue_chips:
             return "blue_chip"
         elif symbol_upper in large_caps:
             return "large_cap"
+        elif symbol_upper in defi_tokens:
+            return "defi"
         elif symbol_upper in memes:
             return "meme"
         else:
@@ -615,20 +643,38 @@ class TradingCalibrationEngine:
     (always converging to alpha=3/window=5), this engine runs mini-backtests
     for each α/W combination and selects the one with the best TRADING PnL.
 
-    The metric combines trading performance with a minimum pattern quality gate:
+    Diagnostic data (6 tokens, 1h, 600 days each):
+      - CalibrationEngine selects alpha=3/w=5 in 100% of cases
+      - TradingCalibrationEngine selects: alpha=3 (17%), alpha=4 (50%), alpha=5 (33%)
 
-        trading_metric = pnl_score + 0.1 × pattern_quality_bonus
+    The metric combines trading performance with pattern quality and robustness:
+
+        trading_metric = pnl_score + 0.1 × pattern_quality + 0.05 × count_bonus
+                         - 0.1 × volatility_penalty
 
     Where:
         - pnl_score = sign(PnL) × log(1 + |PnL|) — logarithmic scaling
-        - pattern_quality_bonus = min(oos_match_rate, 0.8) × min(win_rate, 0.9)
+        - pattern_quality = min(oos_match_rate, 0.8) × min(win_rate, 0.9)
+        - count_bonus = log(1 + trades) / log(1 + 100) — statistical significance
+        - volatility_penalty = max(0, std(pnls) - 5) / 10 — penalize unstable results
         - A combo must produce at least MIN_TRADES trades to be eligible
-        - Negative PnL combos get penalized further
+        - Negative PnL combos get 1.5× penalty
 
     This ensures the selected parameters produce:
     1. Profitable trades (not just pattern matches)
     2. Sufficient trade frequency (at least some signals)
     3. Reasonable pattern quality (not degenerate matches)
+    4. Stable results (not wildly variable PnL)
+
+    SL/TP are configurable and adapt to asset class volatility:
+        - blue_chip: SL=2.5% / TP=4.0%  (lower volatility, tighter stops)
+        - large_cap: SL=3.0% / TP=5.0%  (moderate volatility)
+        - defi:     SL=3.5% / TP=6.0%  (higher volatility)
+        - meme:     SL=5.0% / TP=8.0%  (very high volatility, wider stops)
+        - default:  SL=3.0% / TP=5.0%
+
+    Sharpe ratio is timeframe-aware (derives annualization factor from
+    candle interval rather than hardcoding sqrt(365*24)).
 
     Usage:
         engine = TradingCalibrationEngine(train_ratio=0.70, pattern_length=5)
@@ -642,21 +688,57 @@ class TradingCalibrationEngine:
     # Minimum trades required for a combo to be considered
     MIN_TRADES = 5
 
-    # SL/TP defaults for mini-backtest
+    # SL/TP defaults for mini-backtest (overridden by asset class)
     DEFAULT_SL_PCT = 3.0
     DEFAULT_TP_PCT = 5.0
+
+    # Asset-class-adaptive SL/TP for mini-backtest
+    ASSET_CLASS_SL_TP = {
+        "blue_chip":  {"sl_pct": 2.5, "tp_pct": 4.0},
+        "large_cap":  {"sl_pct": 3.0, "tp_pct": 5.0},
+        "defi":       {"sl_pct": 3.5, "tp_pct": 6.0},
+        "meme":       {"sl_pct": 5.0, "tp_pct": 8.0},
+        "new_launch": {"sl_pct": 5.0, "tp_pct": 8.0},
+    }
+
+    # Timeframe → candles-per-year mapping (for Sharpe annualization)
+    TIMEFRAME_CANDLES_PER_YEAR = {
+        "1m":  365 * 24 * 60,
+        "5m":  365 * 24 * 12,
+        "15m": 365 * 24 * 4,
+        "30m": 365 * 24 * 2,
+        "1h":  365 * 24,
+        "4h":  365 * 6,
+        "1d":  365,
+    }
 
     def __init__(
         self,
         train_ratio: float = 0.70,
         pattern_length: int = 5,
-        sl_pct: float = 3.0,
-        tp_pct: float = 5.0,
+        sl_pct: float | None = None,
+        tp_pct: float | None = None,
+        timeframe: str = "1h",
     ):
         self.train_ratio = train_ratio
         self.pattern_length = pattern_length
-        self.sl_pct = sl_pct
-        self.tp_pct = tp_pct
+        self.timeframe = timeframe
+        # SL/TP: use explicit values if provided, otherwise asset-class-adaptive
+        self._explicit_sl = sl_pct
+        self._explicit_tp = tp_pct
+        self.sl_pct = sl_pct if sl_pct is not None else self.DEFAULT_SL_PCT
+        self.tp_pct = tp_pct if tp_pct is not None else self.DEFAULT_TP_PCT
+        # Sharpe annualization factor from timeframe
+        cpy = self.TIMEFRAME_CANDLES_PER_YEAR.get(timeframe, 365 * 24)
+        self._sharpe_annual_factor = np.sqrt(cpy)
+
+    def _get_sl_tp_for_symbol(self, symbol: str) -> tuple[float, float]:
+        """Get SL/TP percentages adapted to the token's asset class."""
+        if self._explicit_sl is not None and self._explicit_tp is not None:
+            return self._explicit_sl, self._explicit_tp
+        asset_class = CalibrationEngine._infer_asset_class(symbol)
+        sl_tp = self.ASSET_CLASS_SL_TP.get(asset_class, {"sl_pct": self.DEFAULT_SL_PCT, "tp_pct": self.DEFAULT_TP_PCT})
+        return sl_tp["sl_pct"], sl_tp["tp_pct"]
 
     def calibrate(
         self,
@@ -678,6 +760,9 @@ class TradingCalibrationEngine:
         Returns:
             Tuple of (best TokenProfile, list of TradingCalibrationResults)
         """
+        # Resolve SL/TP for this symbol's asset class
+        self.sl_pct, self.tp_pct = self._get_sl_tp_for_symbol(symbol)
+
         n = len(df)
         split = int(n * self.train_ratio)
         train_df = df.iloc[:split]
@@ -688,7 +773,8 @@ class TradingCalibrationEngine:
             print(f"  TRADING CALIBRATION: {symbol}")
             print(f"  Data: {n} candles | Train: {split} | OOS: {n - split}")
             print(f"  Grid: alpha={self.ALPHABET_GRID} x window={self.WINDOW_GRID}")
-            print(f"  SL={self.sl_pct}% / TP={self.tp_pct}%")
+            print(f"  SL={self.sl_pct}% / TP={self.tp_pct}% (asset-class-adaptive)")
+            print(f"  Timeframe: {self.timeframe} (Sharpe ann. factor: {self._sharpe_annual_factor:.1f})")
             print(f"{'='*70}")
 
         results = []
@@ -884,9 +970,9 @@ class TradingCalibrationEngine:
         drawdowns = cumulative - peak
         max_dd = abs(min(drawdowns)) if len(drawdowns) > 0 else 0.0
 
-        # Sharpe approximation (annualized)
+        # Sharpe approximation (annualized, timeframe-aware)
         if len(pnls) > 1 and np.std(pnls) > 0:
-            sharpe = np.mean(pnls) / np.std(pnls) * np.sqrt(365 * 24)  # 1h candles
+            sharpe = np.mean(pnls) / np.std(pnls) * self._sharpe_annual_factor
         else:
             sharpe = 0.0
 
@@ -908,8 +994,15 @@ class TradingCalibrationEngine:
         # But with diminishing returns (log scale)
         count_bonus = np.log1p(len(trades)) / np.log1p(100)  # Normalized to ~1 at 100 trades
 
-        # Combined metric: PnL is king, quality and count provide small bonuses
-        trading_metric = pnl_score + 0.1 * pattern_quality + 0.05 * count_bonus
+        # Volatility penalty: penalize unstable PnL distributions
+        # High std means results could be unreliable
+        pnl_std = float(np.std(pnls)) if len(pnls) > 1 else 0.0
+        volatility_penalty = max(0.0, pnl_std - 5.0) / 10.0
+
+        # Combined metric: PnL is king, quality and count provide small bonuses,
+        # volatility provides a penalty
+        trading_metric = pnl_score + 0.1 * pattern_quality + 0.05 * count_bonus \
+                        - 0.1 * volatility_penalty
 
         # Update result
         result.pattern_metric = round(pattern_metric, 4)
