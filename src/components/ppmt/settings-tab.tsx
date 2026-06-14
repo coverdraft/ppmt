@@ -80,9 +80,9 @@ export function SettingsTab() {
           PPMT engine. Otherwise, runs will fail with an engine-unavailable error.
         </p>
         <div className="bg-zinc-800/50 rounded-lg p-3 text-xs font-mono text-zinc-400">
-          <div>Package: /home/z/my-project/ppmt/</div>
+          <div>Package: pip3 install -e . (from ppmt repo)</div>
           <div>DB: ~/.ppmt/ppmt.db</div>
-          <div>Run: PYTHONPATH=src python3 -m ppmt.engine.paper_trader</div>
+          <div>Import: python3 -m ppmt.scripts.bulk_data_loader</div>
         </div>
       </div>
 

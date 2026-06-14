@@ -1,8 +1,35 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { execSync } from 'child_process';
+import path from 'path';
 
 export const dynamic = 'force-dynamic';
+
+// Resolve PPMT project root: walk up from this file to find pyproject.toml
+function resolvePPMTPath(): string | null {
+  try {
+    // Strategy 1: PPMT_PATH env variable (explicit override)
+    if (process.env.PPMT_PATH) return process.env.PPMT_PATH;
+
+    // Strategy 2: Walk up from cwd to find pyproject.toml with ppmt
+    let dir = process.cwd();
+    for (let i = 0; i < 10; i++) {
+      try {
+        const fs = require('fs');
+        const pyproject = fs.readFileSync(path.join(dir, 'pyproject.toml'), 'utf-8');
+        if (pyproject.includes('name = "ppmt"')) return dir;
+      } catch { /* not found, go up */ }
+      const parent = path.dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+
+    // Strategy 3: Use pip-installed ppmt (just run python3 -c "import ppmt")
+    return null; // will use system python with ppmt installed
+  } catch {
+    return null;
+  }
+}
 
 // POST /api/strategies/[id]/run - Execute a backtest/paper trading run
 export async function POST(
@@ -49,10 +76,13 @@ export async function POST(
       const minConf = strategy.minConfidence;
       const pruning = strategy.pruningInterval;
 
-      // Use PaperTrader (not Backtester) - it's the real PPMT engine
-      const cmd = `cd /home/z/my-project/ppmt && PYTHONPATH=src python3 -c "
+      // Build command — use local ppmt repo if found, otherwise use pip-installed
+      const ppmtPath = resolvePPMTPath();
+      const cdCmd = ppmtPath ? `cd ${ppmtPath} && ` : '';
+      const pythonCmd = ppmtPath ? 'PYTHONPATH=src python3' : 'python3';
+
+      const cmd = `${cdCmd}${pythonCmd} -c "
 import sys, json
-sys.path.insert(0, 'src')
 try:
     from ppmt.engine.paper_trader import PaperTrader, PaperTraderConfig
     config = PaperTraderConfig(
@@ -95,7 +125,6 @@ try:
         'totalTrades': result.total_trades,
         'winningTrades': result.winning_trades,
         'losingTrades': result.losing_trades,
-        'patternCount': result.trades[0].matched_pattern.__len__() if result.trades else 0,
         'recalibrations': result.recalibrations,
         'pruningRuns': result.pruning_runs,
         'equityCurve': equity[:200],
@@ -152,7 +181,6 @@ except Exception as e:
             maxDrawdown: result.maxDrawdown || 0,
             profitFactor: result.profitFactor || 0,
             totalTrades: result.totalTrades || 0,
-            patternCount: result.patternCount || strategy.patternCount,
             lastRunAt: new Date(),
           },
         });
