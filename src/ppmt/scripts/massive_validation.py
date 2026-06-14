@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-PPMT v0.6.6 — Massive Multi-Token Validation
+PPMT v0.6.7 — Massive Multi-Token Validation
 
 Tests 12+ tokens across ALL asset classes with:
-  1. Auto-Calibration per token
+  1. Trading-Calibration per token (mini-backtest selects best α/W)
   2. OOS Trading simulation (single split)
   3. Walk-Forward validation (expanding window)
   4. Monte Carlo resampling (500 sims)
@@ -14,8 +14,8 @@ Optimized for speed:
   - Walk-forward folds reduced by larger step
   - Runs in <8 min for 12 tokens
 
-All data: REAL (Binance via CDD/BV/Bybit). No synthetic data.
-v0.6.6: Read/Write Path Alignment fix validated here.
+All data: REAL (Bybit). No synthetic data.
+v0.6.7: TradingCalibrationEngine replaces CalibrationEngine to fix alpha=3 bias.
 """
 
 import sys
@@ -31,7 +31,7 @@ import pandas as pd
 
 from ppmt.data.collector import DataCollector
 from ppmt.data.storage import PPMTStorage
-from ppmt.core.profiles import CalibrationEngine, TokenProfile, ASSET_CLASS_DEFAULTS
+from ppmt.core.profiles import CalibrationEngine, TradingCalibrationEngine, TokenProfile, ASSET_CLASS_DEFAULTS
 from ppmt.core.sax import SAXEncoder
 from ppmt.core.trie import PPMTTrie
 from ppmt.engine.ppmt import PPMT
@@ -264,7 +264,7 @@ def compute_stats(trades):
 
 def main():
     print("=" * 90)
-    print("  PPMT v0.6.6 — MASSIVE Multi-Token Validation (Read/Write Path Alignment)")
+    print("  PPMT v0.6.7 — MASSIVE Multi-Token Validation (Trading Calibration)")
     print(f"  Tokens: {len(TOKEN_CONFIG)} | Classes: blue_chip, large_cap, defi, meme")
     print(f"  Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print("=" * 90)
@@ -289,7 +289,7 @@ def main():
     print("\n  STEP 2: Auto-Calibration")
     print("-" * 90)
 
-    calibrator = CalibrationEngine(train_ratio=TRAIN_RATIO, pattern_length=PATTERN_LENGTH)
+    calibrator = TradingCalibrationEngine(train_ratio=TRAIN_RATIO, pattern_length=PATTERN_LENGTH)
     profiles = {}
 
     for symbol, info in token_data.items():
