@@ -1582,7 +1582,115 @@ engine = PPMT(sax_alphabet_size=cal_alpha, sax_window_size=cal_window, ...)
 - [ ] Implement `recalibration_interval` logic (periodic re-calibration during trading)
 - [ ] Add calibrated profile persistence (save to storage for next run)
 - [ ] Test recalibration with regime changes (does α/W actually change?)
-- [ ] Node pruning/cleanup mechanism for stale trie branches
+- [x] Node pruning/cleanup mechanism for stale trie branches
 - [ ] Re-enable catastrophic_loss_pct risk management
 - [ ] BlockLifecycleMetadata regime field for market regime tracking
 - [ ] CSV import for historical 1m data
+
+---
+
+## 21. Living Trie Node Pruning (v0.6.8)
+
+### Problem: Living Trie Grows Indefinitely
+
+The Living Trie grows from trading observations — every closed trade updates
+or creates nodes. Over time, it accumulates branches that are:
+1. **Rarely observed**: seen only once, never repeated (likely noise)
+2. **Low confidence**: no predictive value
+3. **Stale**: not observed recently in changing market conditions
+
+Analysis of BTC/USDT N3 Trie (970 patterns):
+```
+count=0:   1 node
+count=1: 202 nodes  (21% — seen only once!)
+count=2: 241 nodes
+count=3: 207 nodes
+...
+count>=10: ~30 nodes (established patterns)
+```
+
+202 nodes have only 1 observation — these are noise from the v0.6.6
+fuzzy match misalignment (fixed) and from genuinely rare patterns.
+
+### Solution: `PPMTTrie.prune()` with Safety Guarantees
+
+Added `prune()` method to `PPMTTrie` that removes stale/low-quality branches:
+
+```python
+stats = trie.prune(
+    min_observations=2,      # Remove nodes seen < 2 times
+    min_confidence=0.01,     # Remove zero-confidence nodes
+    max_staleness_hours=0,   # Optional: remove stale nodes
+    preserve_traded=True,    # Never prune validated trading nodes
+    dry_run=False,           # True = report only, don't remove
+)
+```
+
+**Safety guarantees** (these are hard-coded, not configurable):
+1. NEVER prunes the root node
+2. NEVER prunes nodes with `historical_count >= 10` (established patterns)
+3. NEVER prunes intermediate nodes with surviving children (would lose subtree)
+4. Only prunes LEAF nodes or entire subtrees where ALL leaves qualify
+5. After pruning, calls `propagate_metadata()` to update all statistics
+6. `preserve_traded=True` protects nodes with count >= 3 in traded tries
+
+### Pruning Results (BTC/USDT, dry run)
+
+```
+Before: 970 patterns
+Would prune: 202 nodes (21%), 202 observations lost (each had count=1)
+Depth distribution: depth 5 (186 nodes), depth 6 (16 nodes)
+
+After (projected): 768 patterns
+All established patterns (count >= 10) survive
+All traded patterns (count >= 3) survive
+```
+
+### PruningConfig Dataclass
+
+```python
+@dataclass
+class PruningConfig:
+    min_observations: int = 2       # Remove nodes seen < N times
+    min_confidence: float = 0.01    # Remove nodes below confidence
+    max_staleness_hours: float = 0  # Remove nodes not seen in N hours
+    preserve_traded: bool = True    # Protect validated trading nodes
+    dry_run: bool = False           # Report-only mode
+
+    def to_prune_kwargs(self) -> dict:
+        """Convert to keyword arguments for PPMTTrie.prune()."""
+```
+
+### Integration with PaperTrader
+
+Pruning runs automatically every 1000 SAX symbol steps during paper trading
+(alongside the existing metadata propagation every 200 steps):
+
+```python
+# Living Trie: re-propagate metadata every 200 symbol steps
+if cfg.living_trie and sym_idx % 200 == 0:
+    trie.propagate_metadata()
+
+# v0.6.8: Prune stale branches every 1000 symbol steps
+if cfg.living_trie and sym_idx % 1000 == 0:
+    prune_config = PruningConfig(min_observations=2, preserve_traded=True)
+    prune_stats = trie.prune(**prune_config.to_prune_kwargs())
+```
+
+The pruning interval is 5× the propagation interval, ensuring the trie is
+well-maintained without excessive overhead.
+
+### Files Modified (v0.6.8 Node Pruning)
+
+| File | Change |
+|------|--------|
+| `src/ppmt/core/trie.py` | Added `PPMTTrie.prune()`, `_collect_prunable()`, `_is_node_prunable()`, `_recount_patterns()`, `PruningConfig` dataclass |
+| `src/ppmt/engine/paper_trader.py` | Added periodic pruning every 1000 symbol steps in trading loop |
+
+### Action Items (Post Node Pruning)
+
+- [ ] Re-enable catastrophic_loss_pct risk management
+- [ ] BlockLifecycleMetadata regime field for market regime tracking
+- [ ] CSV import for historical 1m data
+- [ ] Add `pruning_interval` config option to PaperTraderConfig
+- [ ] Test pruning impact on trading performance (before/after comparison)

@@ -1664,6 +1664,19 @@ class PaperTrader:
                 trie.propagate_metadata()
                 trie_metadata_propagations += 1
 
+            # v0.6.8: Prune stale branches every 1000 symbol steps
+            # The Living Trie grows from observations, but not all branches
+            # are useful. Pruning removes single-observation nodes (noise)
+            # while preserving established patterns and traded nodes.
+            if cfg.living_trie and trie_observations_recorded > 0 and sym_idx % 1000 == 0:
+                from ppmt.core.trie import PruningConfig
+                prune_config = PruningConfig(min_observations=2, preserve_traded=True)
+                prune_stats = trie.prune(**prune_config.to_prune_kwargs())
+                if prune_stats["nodes_pruned"] > 0:
+                    console.print(f"  [dim]Pruned {prune_stats['nodes_pruned']} stale nodes "
+                                  f"({prune_stats['observations_lost']} obs lost, "
+                                  f"{trie.pattern_count} patterns remain)[/dim]")
+
         # Close any open position at end of data
         if current_position is not None:
             last_price = float(df["close"].iloc[-1])

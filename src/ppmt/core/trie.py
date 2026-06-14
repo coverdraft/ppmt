@@ -579,3 +579,319 @@ class PPMTTrie:
             f"PPMTTrie(name='{self.name}', patterns={self._pattern_count}, "
             f"max_depth={self._max_depth})"
         )
+
+    # === Pruning (v0.6.8) ===
+
+    def prune(
+        self,
+        min_observations: int = 2,
+        min_confidence: float = 0.01,
+        max_staleness_hours: float = 0.0,
+        current_time: float = 0.0,
+        preserve_traded: bool = True,
+        dry_run: bool = False,
+    ) -> dict:
+        """
+        Remove stale/low-quality branches from the Living Trie.
+
+        As the Living Trie grows from trading observations, it accumulates
+        branches that are:
+        1. Rarely observed (1 observation, never repeated)
+        2. Low confidence (no predictive value)
+        3. Stale (not observed recently in changing market conditions)
+        4. Consistently losing (win_rate well below 50%)
+
+        These branches dilute the trie's predictive quality and waste memory.
+        Pruning removes them while preserving branches that:
+        - Have sufficient observations (>= min_observations)
+        - Have meaningful confidence (>= min_confidence)
+        - Have been observed recently (if staleness checking enabled)
+        - Have been used for actual trades (if preserve_traded=True)
+
+        Safety guarantees:
+        - NEVER prunes the root node
+        - NEVER prunes nodes with historical_count >= 10 (established patterns)
+        - NEVER prunes intermediate nodes with children (would lose subtree)
+        - Only prunes LEAF nodes or entire subtrees where ALL leaves qualify
+        - After pruning, calls propagate_metadata() to update statistics
+
+        Args:
+            min_observations: Remove nodes with fewer observations.
+                Default 2: removes nodes seen only once.
+            min_confidence: Remove nodes with confidence below this.
+                Default 0.01: removes nodes with essentially zero confidence.
+            max_staleness_hours: Remove nodes not observed in this many hours.
+                0.0 = no staleness check (default). Set to e.g. 720 (30 days)
+                to remove patterns not seen in a month.
+            current_time: Current epoch time for staleness comparison.
+                Required if max_staleness_hours > 0.
+            preserve_traded: If True, never prune nodes that have been
+                used for actual trading (trading_observations > 0 on the
+                trie). This protects patterns that have been validated
+                through live/paper trading.
+            dry_run: If True, only report what would be pruned without
+                actually removing anything.
+
+        Returns:
+            Dict with pruning statistics:
+            - nodes_pruned: number of leaf nodes removed
+            - patterns_removed: number of complete patterns removed
+            - observations_lost: total historical_count of removed nodes
+            - depth_distribution: depth of pruned nodes
+            - dry_run: whether this was a dry run
+        """
+        import time as _time
+
+        stats = {
+            "nodes_pruned": 0,
+            "patterns_removed": 0,
+            "observations_lost": 0,
+            "depth_distribution": {},
+            "dry_run": dry_run,
+        }
+
+        if current_time == 0.0:
+            current_time = _time.time()
+
+        # Collect prunable nodes (bottom-up)
+        to_prune = []
+        self._collect_prunable(
+            node=self.root,
+            path=[],
+            min_observations=min_observations,
+            min_confidence=min_confidence,
+            max_staleness_hours=max_staleness_hours,
+            current_time=current_time,
+            preserve_traded=preserve_traded,
+            candidates=to_prune,
+            stats=stats,
+        )
+
+        if not to_prune:
+            return stats
+
+        # Sort by depth (deepest first) to avoid orphaning nodes
+        to_prune.sort(key=lambda x: x[1], reverse=True)
+
+        if dry_run:
+            # Just count, don't actually prune
+            for parent, depth, symbol, node in to_prune:
+                stats["nodes_pruned"] += 1
+                stats["observations_lost"] += node.metadata.historical_count
+                stats["depth_distribution"][depth] = stats["depth_distribution"].get(depth, 0) + 1
+            return stats
+
+        # Actually prune
+        for parent, depth, symbol, node in to_prune:
+            if symbol in parent.children:
+                del parent.children[symbol]
+                self._pattern_count -= 1
+                stats["nodes_pruned"] += 1
+                stats["patterns_removed"] += 1
+                stats["observations_lost"] += node.metadata.historical_count
+                stats["depth_distribution"][depth] = stats["depth_distribution"].get(depth, 0) + 1
+
+                # Update parent's continuation_nodes
+                if symbol in parent.metadata.continuation_nodes:
+                    parent.metadata.continuation_nodes.remove(symbol)
+
+        # Recount pattern_count (could be off if we pruned intermediate paths)
+        self._recount_patterns()
+
+        # Propagate metadata to update statistics after removal
+        self.propagate_metadata()
+
+        return stats
+
+    def _collect_prunable(
+        self,
+        node: TrieNode,
+        path: list[str],
+        min_observations: int,
+        min_confidence: float,
+        max_staleness_hours: float,
+        current_time: float,
+        preserve_traded: bool,
+        candidates: list[tuple[TrieNode, int, str, TrieNode]],
+        stats: dict,
+    ) -> bool:
+        """
+        Recursively collect nodes eligible for pruning.
+
+        Returns True if this entire subtree was marked for pruning
+        (parent can safely remove this child).
+
+        A node is prunable if:
+        1. It's a leaf node (no children)
+        2. historical_count < 10 (not an established pattern)
+        3. It fails at least one quality criterion:
+           - historical_count < min_observations
+           - confidence < min_confidence
+           - staleness exceeds threshold (if enabled)
+        4. It's not preserved by trading activity
+        """
+        if node is self.root:
+            # Never prune root; recurse into children
+            prunable_children = []
+            for sym, child in list(node.children.items()):
+                child_path = path + [sym]
+                is_prunable = self._collect_prunable(
+                    node=child,
+                    path=child_path,
+                    min_observations=min_observations,
+                    min_confidence=min_confidence,
+                    max_staleness_hours=max_staleness_hours,
+                    current_time=current_time,
+                    preserve_traded=preserve_traded,
+                    candidates=candidates,
+                    stats=stats,
+                )
+                if is_prunable:
+                    prunable_children.append((sym, child))
+
+            # Mark prunable children for removal
+            for sym, child in prunable_children:
+                candidates.append((node, child.depth, sym, child))
+            return False
+
+        # If node has children, check if ALL descendants are prunable
+        if node.children:
+            prunable_children = []
+            all_children_prunable = True
+
+            for sym, child in list(node.children.items()):
+                child_path = path + [sym]
+                is_prunable = self._collect_prunable(
+                    node=child,
+                    path=child_path,
+                    min_observations=min_observations,
+                    min_confidence=min_confidence,
+                    max_staleness_hours=max_staleness_hours,
+                    current_time=current_time,
+                    preserve_traded=preserve_traded,
+                    candidates=candidates,
+                    stats=stats,
+                )
+                if is_prunable:
+                    prunable_children.append((sym, child))
+                else:
+                    all_children_prunable = False
+
+            if all_children_prunable and self._is_node_prunable(
+                node, min_observations, min_confidence, max_staleness_hours,
+                current_time, preserve_traded
+            ):
+                # Entire subtree is prunable — mark children and self
+                for sym, child in prunable_children:
+                    candidates.append((node, child.depth, sym, child))
+                return True
+            else:
+                # Some children are not prunable — just prune the prunable ones
+                for sym, child in prunable_children:
+                    candidates.append((node, child.depth, sym, child))
+                return False
+
+        # Leaf node — check if prunable
+        if self._is_node_prunable(
+            node, min_observations, min_confidence, max_staleness_hours,
+            current_time, preserve_traded
+        ):
+            return True
+
+        return False
+
+    def _is_node_prunable(
+        self,
+        node: TrieNode,
+        min_observations: int,
+        min_confidence: float,
+        max_staleness_hours: float,
+        current_time: float,
+        preserve_traded: bool,
+    ) -> bool:
+        """Check if a single node meets the pruning criteria."""
+        meta = node.metadata
+
+        # SAFETY: Never prune established patterns (>= 10 observations)
+        if meta.historical_count >= 10:
+            return False
+
+        # SAFETY: Never prune if trading observations exist and preserve_traded
+        if preserve_traded and self.trading_observations > 0 and meta.historical_count >= 3:
+            return False
+
+        # Check observation count
+        if meta.historical_count < min_observations:
+            return True
+
+        # Check confidence
+        if meta.confidence < min_confidence:
+            return True
+
+        # Check staleness (if enabled)
+        if max_staleness_hours > 0 and meta.last_observation_time > 0:
+            hours_since = (current_time - meta.last_observation_time) / 3600.0
+            if hours_since > max_staleness_hours:
+                return True
+
+        return False
+
+    def _recount_patterns(self) -> None:
+        """Recount patterns after pruning to ensure consistency."""
+        count = 0
+
+        def _count_leaves(node: TrieNode) -> None:
+            nonlocal count
+            if not node.children and node.depth > 0:
+                count += 1
+            for child in node.children.values():
+                _count_leaves(child)
+
+        _count_leaves(self.root)
+        self._pattern_count = count
+
+
+@dataclass
+class PruningConfig:
+    """
+    Configuration for Living Trie pruning.
+
+    Pruning removes stale/low-quality branches from the trie,
+    keeping it lean and focused on patterns that produce reliable
+    trading signals.
+
+    Usage:
+        config = PruningConfig(min_observations=2)
+        stats = trie.prune(**config.to_prune_kwargs())
+    """
+    min_observations: int = 2
+    """Remove leaf nodes with fewer than this many observations.
+    Default 2: removes nodes seen only once (likely noise)."""
+
+    min_confidence: float = 0.01
+    """Remove leaf nodes with confidence below this threshold.
+    Default 0.01: removes nodes with essentially zero confidence."""
+
+    max_staleness_hours: float = 0.0
+    """Remove leaf nodes not observed in this many hours.
+    0.0 = no staleness check. Set to e.g. 720 (30 days) to
+    remove patterns not seen recently."""
+
+    preserve_traded: bool = True
+    """If True, never prune patterns that have been validated
+    through actual trading (>= 3 observations in a traded trie)."""
+
+    dry_run: bool = False
+    """If True, report what would be pruned without removing anything."""
+
+    def to_prune_kwargs(self) -> dict:
+        """Convert to keyword arguments for PPMTTrie.prune()."""
+        import time
+        return {
+            "min_observations": self.min_observations,
+            "min_confidence": self.min_confidence,
+            "max_staleness_hours": self.max_staleness_hours,
+            "current_time": time.time(),
+            "preserve_traded": self.preserve_traded,
+            "dry_run": self.dry_run,
+        }
