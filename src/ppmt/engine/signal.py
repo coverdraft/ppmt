@@ -358,6 +358,31 @@ class SignalGenerator:
         self.trailing_distance_pct = trailing_distance_pct
         self.prediction_depth = prediction_depth
 
+        # Regime-adaptive thresholds
+        # In trending markets, we lower min_confidence to generate more signals
+        # In ranging/volatile, we keep it high to avoid false signals
+        self.regime_thresholds = {
+            'TRENDING_UP': {'min_confidence': 0.45, 'min_risk_reward': 1.2},
+            'TRENDING_DOWN': {'min_confidence': 0.45, 'min_risk_reward': 1.2},
+            'RANGING': {'min_confidence': 0.60, 'min_risk_reward': 1.5},
+            'VOLATILE': {'min_confidence': 0.55, 'min_risk_reward': 1.8},
+            'UNKNOWN': {'min_confidence': 0.60, 'min_risk_reward': 1.5},
+        }
+
+    def get_adaptive_thresholds(self, regime_name: str = 'UNKNOWN') -> tuple[float, float]:
+        """
+        Get min_confidence and min_risk_reward adjusted for the current regime.
+
+        Regime-adaptive signal thresholds:
+        - TRENDING: Lower confidence (0.45) + lower R:R (1.2) → more signals
+        - RANGING: Standard confidence (0.60) + standard R:R (1.5)
+        - VOLATILE: Higher R:R (1.8) required → fewer but better signals
+
+        This directly addresses the problem of too few signals in trending markets.
+        """
+        thresholds = self.regime_thresholds.get(regime_name, self.regime_thresholds['UNKNOWN'])
+        return thresholds['min_confidence'], thresholds['min_risk_reward']
+
     def generate_prediction_path(
         self,
         node: "TrieNode",
@@ -434,25 +459,30 @@ class SignalGenerator:
         current_price: float,
         confidence: float,
         trie_level: str = "",
+        regime_name: str = "UNKNOWN",
     ) -> Optional[Signal]:
         """
         Generate an entry signal from a pattern match.
 
         Entry conditions:
-        1. Match confidence >= min_confidence
+        1. Match confidence >= min_confidence (regime-adaptive)
         2. Expected move is significant enough
-        3. Risk:reward ratio meets minimum threshold
+        3. Risk:reward ratio meets minimum threshold (regime-adaptive)
         4. Sufficient historical observations
 
         V3: Also generates prediction path and quality score.
+        V4: Regime-adaptive thresholds — trending markets need lower confidence.
         """
         if not match_result.matched or match_result.node is None:
             return None
 
         meta = match_result.node.metadata
 
-        # Check minimum confidence
-        if confidence < self.min_confidence:
+        # Get regime-adaptive thresholds
+        adaptive_min_conf, adaptive_min_rr = self.get_adaptive_thresholds(regime_name)
+
+        # Check minimum confidence (regime-adaptive)
+        if confidence < adaptive_min_conf:
             return None
 
         # Check sufficient observations
@@ -471,8 +501,8 @@ class SignalGenerator:
         # Compute SL/TP from metadata
         meta.compute_sl_tp(current_price)
 
-        # Check risk:reward
-        if meta.risk_reward_ratio < self.min_risk_reward:
+        # Check risk:reward (regime-adaptive)
+        if meta.risk_reward_ratio < adaptive_min_rr:
             return None
 
         # Generate prediction path
