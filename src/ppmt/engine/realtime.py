@@ -54,6 +54,8 @@ from ppmt.data.storage import PPMTStorage
 from ppmt.data.classifier import AssetClassifier
 from ppmt.core.sax import SAXEncoder
 from ppmt.core.regime import RegimeDetector, RegimeInfo
+from ppmt.core.profiles import TokenProfile, TIMEFRAME_ALPHA_DEFAULTS, TradingCalibrationEngine
+from ppmt.core.matcher import FuzzyMatcher
 from ppmt.engine.prediction import PredictionEngine
 from ppmt.engine.signal import SignalType, Signal
 from ppmt.core.metadata import BlockLifecycleMetadata
@@ -87,17 +89,27 @@ class ReplayConfig:
     """Playback speed multiplier. 1.0 = real-time, 10.0 = 10x speed,
     0.0 = maximum speed (no delays)."""
     pattern_length: int = 5
-    sax_alphabet_size: int = 8
-    sax_window_size: int = 10
+    sax_alphabet_size: int = 0
+    """SAX alphabet size. 0 = auto from TokenProfile (timeframe-adaptive)."""
+    sax_window_size: int = 0
+    """SAX window size. 0 = auto from TokenProfile (timeframe-adaptive)."""
     sax_strategy: str = "ohlcv"
     min_confidence: float = 0.20
     start_offset: int = 200
     """Number of initial candles to skip (warm-up)."""
-    catastrophic_loss_pct: float = 8.0
+    catastrophic_loss_pct: float = 0.0
+    """Catastrophic loss threshold. 0.0 = use TokenProfile value."""
     regime_aware: bool = True
-    living_trie: bool = False
-    """Whether to update the Trie with observations during replay.
-    Default False for OOS integrity."""
+    living_trie: bool = True
+    """Whether to update the Trie with observations during replay."""
+    use_token_profile: bool = True
+    """v0.11.0: Use TokenProfile for automatic parameter selection."""
+    auto_calibrate: bool = True
+    """v0.11.0: Auto-calibrate SAX α/W using TradingCalibrationEngine."""
+    recalibration_interval: int = 0
+    """v0.11.0: Re-calibrate every N candles. 0 = no recalibration."""
+    use_multi_level: bool = True
+    """v0.11.0: Enable 4-level matching (N1+N2+N3+N4)."""
     verbose: bool = True
     on_signal: Optional[Callable] = None
     """Callback fired when a signal is generated. Receives (signal, prediction)."""
@@ -117,12 +129,25 @@ class LiveConfig:
     api_key: str = ""
     api_secret: str = ""
     pattern_length: int = 5
-    sax_alphabet_size: int = 8
-    sax_window_size: int = 10
+    sax_alphabet_size: int = 0
+    """SAX alphabet size. 0 = auto from TokenProfile."""
+    sax_window_size: int = 0
+    """SAX window size. 0 = auto from TokenProfile."""
     sax_strategy: str = "ohlcv"
     min_confidence: float = 0.20
-    catastrophic_loss_pct: float = 8.0
+    catastrophic_loss_pct: float = 0.0
+    """Catastrophic loss threshold. 0.0 = use TokenProfile value."""
     regime_aware: bool = True
+    use_token_profile: bool = True
+    """v0.11.0: Use TokenProfile for automatic parameter selection."""
+    auto_calibrate: bool = True
+    """v0.11.0: Auto-calibrate SAX α/W using TradingCalibrationEngine."""
+    recalibration_interval: int = 2000
+    """v0.11.0: Re-calibrate every N candles in live mode. Default 2000."""
+    use_multi_level: bool = True
+    """v0.11.0: Enable 4-level matching."""
+    living_trie: bool = True
+    """v0.11.0: Enable Living Trie updates in live mode."""
     testnet: bool = True
     """Use exchange testnet (paper trading on exchange)."""
     dry_run: bool = True
@@ -182,6 +207,9 @@ class RealtimeTrader:
     when new SAX symbols are produced (every window_size candles).
 
     This mirrors production behavior where future data is unavailable.
+
+    v0.11.0: Now fully integrated with TokenProfile, TradingCalibrationEngine,
+    FuzzyMatcher, 4-level matching, Living Trie, and prediction-aware SL/TP.
     """
 
     def __init__(self, config=None):
@@ -194,6 +222,131 @@ class RealtimeTrader:
             max_daily_loss_pct=0.10,
             max_drawdown_pct=0.80,
         )
+
+    def _setup_token_profile(self, cfg, info, storage, df=None):
+        """
+        v0.11.0: Initialize TokenProfile with auto-calibration and persistence.
+
+        Shared between run_replay() and run_live(). Returns:
+            (token_profile, cfg_with_updated_params)
+        """
+        token_profile = None
+
+        if getattr(cfg, 'use_token_profile', False):
+            # Try to load previously saved profile
+            saved_profile_dict = storage.load_token_profile(cfg.symbol, cfg.timeframe)
+            if saved_profile_dict is not None:
+                try:
+                    token_profile = TokenProfile.from_dict(saved_profile_dict)
+                    console.print(f"[bold green]TokenProfile restored from storage:[/bold green] "
+                                  f"alpha={token_profile.sax_alphabet_size}, "
+                                  f"window={token_profile.sax_window_size}, "
+                                  f"calibrated={token_profile.calibration_date}")
+                except Exception:
+                    token_profile = None
+
+            if token_profile is None:
+                token_profile = TokenProfile.from_timeframe(
+                    symbol=cfg.symbol,
+                    asset_class=info.asset_class,
+                    timeframe=cfg.timeframe,
+                )
+
+            # Override SAX params from profile (unless explicitly set)
+            if cfg.sax_alphabet_size == 0:
+                cfg.sax_alphabet_size = token_profile.sax_alphabet_size
+            if cfg.sax_window_size == 0:
+                cfg.sax_window_size = token_profile.sax_window_size
+            if cfg.catastrophic_loss_pct == 0.0:
+                cfg.catastrophic_loss_pct = token_profile.catastrophic_loss_pct * 100.0
+
+            console.print(f"[bold green]TokenProfile loaded:[/bold green] "
+                          f"alpha={token_profile.sax_alphabet_size}, "
+                          f"window={token_profile.sax_window_size}, "
+                          f"cat_loss={token_profile.catastrophic_loss_pct:.0%}, "
+                          f"short_allowed={token_profile.short_allowed}")
+
+            # Auto-calibrate if not already calibrated
+            profile_already_calibrated = (
+                token_profile.calibration_date != ""
+                and token_profile.calibration_metric > 0
+            )
+            if profile_already_calibrated:
+                console.print(f"[green]Profile already calibrated on "
+                              f"{token_profile.calibration_date} — "
+                              f"skipping calibration[/green]")
+            elif getattr(cfg, 'auto_calibrate', False) and df is not None and len(df) >= 1000:
+                console.print(f"[bold cyan]Auto-calibrating α/W...[/bold cyan] "
+                              f"({len(df)} candles)")
+                try:
+                    calibrator = TradingCalibrationEngine(
+                        train_ratio=0.70,
+                        pattern_length=cfg.pattern_length,
+                        timeframe=cfg.timeframe,
+                    )
+                    cal_profile, cal_results = calibrator.calibrate(
+                        df, symbol=cfg.symbol, verbose=False
+                    )
+                    cal_alpha = cal_profile.sax_alphabet_size
+                    cal_window = cal_profile.sax_window_size
+
+                    cal_best = [r for r in cal_results
+                                if r.alphabet_size == cal_alpha
+                                and r.window_size == cal_window]
+                    cal_best_result = cal_best[0] if cal_best else None
+
+                    if cal_alpha != cfg.sax_alphabet_size or cal_window != cfg.sax_window_size:
+                        old_alpha, old_window = cfg.sax_alphabet_size, cfg.sax_window_size
+                        cfg.sax_alphabet_size = cal_alpha
+                        cfg.sax_window_size = cal_window
+
+                        grid = {
+                            f"a{r.alphabet_size}_w{r.window_size}": {
+                                "trading_metric": round(r.trading_metric, 4),
+                                "total_pnl_pct": round(r.total_pnl_pct, 2),
+                                "win_rate": round(r.win_rate, 4),
+                                "total_trades": r.total_trades,
+                            }
+                            for r in cal_results
+                        }
+                        token_profile.update_from_calibration(
+                            best_alpha=cal_alpha,
+                            best_window=cal_window,
+                            metric=cal_best_result.trading_metric if cal_best_result else 0.0,
+                            grid=grid,
+                            n_samples=len(df),
+                        )
+                        console.print(f"[bold green]Calibrated:[/bold green] "
+                                      f"α={old_alpha}→{cal_alpha}, W={old_window}→{cal_window} "
+                                      f"(PnL={cal_best_result.total_pnl_pct:+.1f}%, "
+                                      f"WR={cal_best_result.win_rate:.1%})")
+                    else:
+                        console.print(f"[green]Calibration confirms: "
+                                      f"α={cal_alpha}/W={cal_window}[/green]")
+                except Exception as e:
+                    console.print(f"[yellow]Calibration failed: {e} — "
+                                  f"using defaults[/yellow]")
+
+            # Save calibrated profile
+            if token_profile is not None and token_profile.calibration_date:
+                try:
+                    storage.save_token_profile(cfg.symbol, cfg.timeframe, token_profile.to_dict())
+                except Exception:
+                    pass
+        else:
+            # Fallback: use timeframe defaults
+            if cfg.sax_alphabet_size == 0 or cfg.sax_window_size == 0:
+                tf_defaults = TIMEFRAME_ALPHA_DEFAULTS.get(
+                    cfg.timeframe, TIMEFRAME_ALPHA_DEFAULTS["1h"]
+                )
+                if cfg.sax_alphabet_size == 0:
+                    cfg.sax_alphabet_size = tf_defaults["sax_alphabet_size"]
+                if cfg.sax_window_size == 0:
+                    cfg.sax_window_size = tf_defaults["sax_window_size"]
+            if cfg.catastrophic_loss_pct == 0.0:
+                cfg.catastrophic_loss_pct = 8.0
+
+        return token_profile, cfg
 
     def _compute_atr_pct(self, prices: np.ndarray, highs: np.ndarray,
                          lows: np.ndarray, period: int = 14) -> float:
@@ -231,6 +384,9 @@ class RealtimeTrader:
         When a new SAX symbol is produced (every window_size candles),
         the pattern buffer is updated and a prediction is generated.
 
+        v0.11.0: Now uses TokenProfile, auto-calibration, FuzzyMatcher,
+        4-level matching, Living Trie, and prediction-aware SL/TP.
+
         Returns:
             RealtimeResult with trading statistics
         """
@@ -251,10 +407,25 @@ class RealtimeTrader:
         classifier = AssetClassifier()
         info = classifier.classify(cfg.symbol)
 
-        # Load or build trie
+        # v0.11.0: TokenProfile + auto-calibration + persistence
+        token_profile, cfg = self._setup_token_profile(cfg, info, storage, df)
+
+        # Load or build tries (v0.11.0: all 4 levels)
         from ppmt.engine.ppmt import PPMT
-        trie = storage.load_trie(cfg.symbol, "n3")
-        if trie is None:
+        all_tries = storage.load_all_tries(cfg.symbol)
+        trie_n1 = all_tries["n1"]
+        trie_n2 = all_tries["n2"]
+        trie_n3 = all_tries["n3"]
+        trie_n4 = all_tries["n4"]
+
+        has_multi_level = (
+            getattr(cfg, 'use_multi_level', False)
+            and trie_n1 is not None
+            and trie_n2 is not None
+            and trie_n4 is not None
+        )
+
+        if trie_n3 is None:
             console.print(f"[yellow]No Trie for {cfg.symbol}. Building from data...[/yellow]")
             engine = PPMT(
                 symbol=cfg.symbol,
@@ -262,14 +433,28 @@ class RealtimeTrader:
                 sax_alphabet_size=cfg.sax_alphabet_size,
                 sax_window_size=cfg.sax_window_size,
                 sax_strategy=cfg.sax_strategy,
+                fuzzy_threshold=token_profile.fuzzy_threshold if token_profile else 0.80,
                 weight_profile=info.weight_profile,
             )
             engine.build(df, pattern_length=cfg.pattern_length)
-            trie = engine.trie_n3
+            trie_n1 = engine.trie_n1
+            trie_n2 = engine.trie_n2
+            trie_n3 = engine.trie_n3
+            trie_n4 = engine.trie_n4
+            has_multi_level = True
         else:
-            console.print(f"[green]Loaded N3 Trie for {cfg.symbol} ({trie.pattern_count} patterns)[/green]")
+            console.print(f"[green]Loaded N3 Trie for {cfg.symbol} ({trie_n3.pattern_count} patterns)[/green]")
+            if has_multi_level:
+                console.print(f"[green]All 4 levels loaded[/green]")
 
+        trie = trie_n3
         trie.propagate_metadata()
+        if has_multi_level:
+            for t in [trie_n1, trie_n2, trie_n4]:
+                t.propagate_metadata()
+
+        # v0.11.0: FuzzyMatcher
+        fuzzy_threshold = token_profile.fuzzy_threshold if token_profile else 0.80
 
         # Create SAX encoder
         sax_encoder = SAXEncoder(
@@ -278,9 +463,32 @@ class RealtimeTrader:
             strategy=cfg.sax_strategy,
         )
 
+        # v0.11.0: FuzzyMatcher for pattern breaks
+        fuzzy_matcher = FuzzyMatcher(
+            sax_encoder=sax_encoder,
+            threshold=fuzzy_threshold,
+            max_edit_distance=2,
+        )
+
         # Create engines
         pred_engine = PredictionEngine(trie, prediction_depth=cfg.pattern_length)
         risk_mgr = RiskManager(capital=cfg.initial_capital, config=self.risk_config)
+
+        # v0.11.0: PPMT engine for 4-level matching
+        ppmt_engine = None
+        if has_multi_level:
+            ppmt_engine = PPMT(
+                symbol=cfg.symbol,
+                asset_class=info.asset_class,
+                sax_alphabet_size=cfg.sax_alphabet_size,
+                sax_window_size=cfg.sax_window_size,
+                sax_strategy=cfg.sax_strategy,
+                fuzzy_threshold=fuzzy_threshold,
+                weight_profile=info.weight_profile,
+            )
+            ppmt_engine.set_tries(trie_n1, trie_n2, trie_n3, trie_n4)
+            ppmt_engine.adapt_weights()
+            console.print(f"  [bold cyan]4-level matching enabled[/bold cyan]: weights={ppmt_engine.weights}")
 
         # Regime detector
         regime_detector = None
@@ -475,29 +683,90 @@ class RealtimeTrader:
                                 last_losing_trade_idx >= 0):
                             continue
 
-                        # Entry signal generation (same logic as paper_trader)
-                        effective_min_conf = cfg.min_confidence
-                        if prediction.direction == "SHORT":
-                            effective_min_conf = max(effective_min_conf * 1.2, 0.20)
+                        if prediction.direction == "FLAT" or prediction.confidence <= 0:
+                            continue
 
+                        # v0.11.0: 4-level matching (same as PaperTrader)
+                        weighted_confidence = prediction.confidence
+                        best_trie_level = "n3"
+                        match_result = None
+
+                        if ppmt_engine is not None:
+                            ppmt_result = ppmt_engine.match_raw(
+                                current_symbols=current_symbols,
+                                current_price=current_price,
+                            )
+                            weighted_confidence = ppmt_result.weighted_confidence
+                            match_result = ppmt_result
+
+                            level_confs = {
+                                "n1": ppmt_result.n1_confidence,
+                                "n2": ppmt_result.n2_confidence,
+                                "n3": ppmt_result.n3_confidence,
+                                "n4": ppmt_result.n4_confidence,
+                            }
+                            best_trie_level = max(level_confs, key=level_confs.get)
+
+                            if weighted_confidence <= 0 and prediction.confidence > 0:
+                                weighted_confidence = prediction.confidence
+                                best_trie_level = "n3"
+
+                        # Entry signal generation
+                        effective_min_conf = cfg.min_confidence
+
+                        # v0.11.0: TokenProfile SHORT gating
+                        if prediction.direction == "SHORT":
+                            if token_profile is not None and not token_profile.short_allowed:
+                                continue
+
+                            # v0.11.0: Regime-aware SHORT gating
+                            short_regime_mult = {
+                                "trending_down": 0.85,
+                                "ranging": 1.1,
+                                "trending_up": 1.5,
+                                "volatile": 1.8,
+                            }.get(current_regime, 1.2)
+                            effective_min_conf = max(effective_min_conf * short_regime_mult, 0.20)
+
+                            if token_profile is not None:
+                                effective_min_conf = max(
+                                    effective_min_conf * token_profile.short_confidence_multiplier,
+                                    effective_min_conf,
+                                )
+
+                        # v0.11.0: Regime-aware confidence adjustment
+                        if cfg.regime_aware and current_regime and prediction.confidence > 0:
+                            try:
+                                matched_node = trie.search(current_symbols)
+                                if matched_node and matched_node.metadata.regime_distribution:
+                                    regime_adjustment = matched_node.metadata.regime_match_score(current_regime)
+                                    if regime_adjustment > 0:
+                                        effective_min_conf = effective_min_conf / regime_adjustment
+                            except Exception:
+                                pass
+
+                        # v0.11.0: Lower move threshold for alpha=3 (same as PaperTrader)
                         if (position_state == PositionState.FLAT
                                 and prediction.direction != "FLAT"
-                                and prediction.confidence >= effective_min_conf
-                                and abs(prediction.expected_total_move_pct) > 1.0
+                                and weighted_confidence >= effective_min_conf
+                                and abs(prediction.expected_total_move_pct) > 0.3
                                 and prediction.overall_probability > 0.20):
 
                             result.signals_generated += 1
 
-                            # Compute SL/TP
-                            current_atr = self._compute_atr_pct(
-                                np.array(atr_prices), np.array(atr_highs), np.array(atr_lows))
+                            # v0.11.0: Prediction-aware SL/TP (same as PaperTrader)
+                            expected_move_abs = abs(prediction.expected_total_move_pct)
 
                             if prediction.direction == "LONG":
-                                sl_distance_pct = min(max(current_atr * 1.5, 1.5), 5.0)
-                                tp_distance_pct = sl_distance_pct * 2.0
-                            else:
-                                sl_distance_pct = min(max(current_atr * 2.0, 2.0), 7.0)
-                                tp_distance_pct = sl_distance_pct * 1.5
+                                sl_distance_pct = max(min(expected_move_abs * 1.5, 5.0), 0.5)
+                                tp_distance_pct = expected_move_abs * 2.5
+                                if tp_distance_pct < sl_distance_pct * 1.5:
+                                    tp_distance_pct = sl_distance_pct * 1.5
+                            else:  # SHORT
+                                sl_distance_pct = max(min(expected_move_abs * 1.5, 5.0), 0.5)
+                                tp_distance_pct = expected_move_abs * 2.5
+                                if tp_distance_pct < sl_distance_pct * 1.5:
+                                    tp_distance_pct = sl_distance_pct * 1.5
 
                             if prediction.direction == "LONG":
                                 sl_price = current_price * (1 - sl_distance_pct / 100)
@@ -508,6 +777,16 @@ class RealtimeTrader:
 
                             risk_reward = tp_distance_pct / sl_distance_pct if sl_distance_pct > 0 else 0
 
+                            # v0.11.0: Get actual historical_count from matched node
+                            actual_historical_count = 10
+                            matched_node_for_sizing = None
+                            try:
+                                matched_node_for_sizing = trie.search(current_symbols)
+                                if matched_node_for_sizing and matched_node_for_sizing.metadata.historical_count > 0:
+                                    actual_historical_count = matched_node_for_sizing.metadata.historical_count
+                            except Exception:
+                                pass
+
                             # Create signal
                             signal_type = (
                                 SignalType.ENTRY_LONG if prediction.direction == "LONG"
@@ -516,7 +795,7 @@ class RealtimeTrader:
 
                             signal = Signal(
                                 signal_type=signal_type,
-                                confidence=prediction.confidence,
+                                confidence=weighted_confidence,
                                 symbol=cfg.symbol,
                                 entry_price=current_price,
                                 sl_price=sl_price,
@@ -524,8 +803,9 @@ class RealtimeTrader:
                                 expected_move_pct=prediction.expected_total_move_pct,
                                 risk_reward_ratio=risk_reward,
                                 win_rate=prediction.overall_probability,
-                                historical_count=100,
+                                historical_count=actual_historical_count,
                                 matched_pattern=current_symbols,
+                                trie_level=best_trie_level,
                             )
                             signal.quality_score = signal.compute_quality_score()
                             signal.sizing_multiplier = signal.compute_sizing_multiplier()
@@ -535,7 +815,7 @@ class RealtimeTrader:
                                 win_rate=signal.win_rate,
                                 expected_move_pct=signal.expected_move_pct,
                                 max_drawdown_pct=-sl_distance_pct,
-                                historical_count=100,
+                                historical_count=actual_historical_count,
                             )
                             signal.probability_of_success = mock_meta.probability_of_success
                             signal.expected_profit_ahead = mock_meta.expected_profit_ahead
@@ -729,16 +1009,32 @@ class RealtimeTrader:
         classifier = AssetClassifier()
         info = classifier.classify(cfg.symbol)
 
-        # Load trie
+        # v0.11.0: TokenProfile + auto-calibration + persistence
+        token_profile, cfg = self._setup_token_profile(cfg, info, storage)
+
+        # Load tries (v0.11.0: all 4 levels)
         from ppmt.engine.ppmt import PPMT
-        trie = storage.load_trie(cfg.symbol, "n3")
-        if trie is None:
+        all_tries = storage.load_all_tries(cfg.symbol)
+        trie_n1 = all_tries["n1"]
+        trie_n2 = all_tries["n2"]
+        trie_n3 = all_tries["n3"]
+        trie_n4 = all_tries["n4"]
+
+        if trie_n3 is None:
             console.print(f"[red]No Trie for {cfg.symbol}. Run 'ppmt build' first.[/red]")
             storage.close()
             return RealtimeResult(mode="live", symbol=cfg.symbol, timeframe=cfg.timeframe)
 
+        trie = trie_n3
         trie.propagate_metadata()
         console.print(f"[green]Loaded N3 Trie ({trie.pattern_count} patterns)[/green]")
+
+        has_multi_level = (
+            getattr(cfg, 'use_multi_level', False)
+            and trie_n1 is not None
+            and trie_n2 is not None
+            and trie_n4 is not None
+        )
 
         # Create SAX encoder and engines
         sax_encoder = SAXEncoder(
@@ -748,6 +1044,30 @@ class RealtimeTrader:
         )
         pred_engine = PredictionEngine(trie, prediction_depth=cfg.pattern_length)
         risk_mgr = RiskManager(capital=cfg.initial_capital, config=self.risk_config)
+
+        # v0.11.0: FuzzyMatcher
+        fuzzy_threshold = token_profile.fuzzy_threshold if token_profile else 0.80
+        fuzzy_matcher = FuzzyMatcher(
+            sax_encoder=sax_encoder,
+            threshold=fuzzy_threshold,
+            max_edit_distance=2,
+        )
+
+        # v0.11.0: PPMT engine for 4-level matching
+        ppmt_engine = None
+        if has_multi_level:
+            ppmt_engine = PPMT(
+                symbol=cfg.symbol,
+                asset_class=info.asset_class,
+                sax_alphabet_size=cfg.sax_alphabet_size,
+                sax_window_size=cfg.sax_window_size,
+                sax_strategy=cfg.sax_strategy,
+                fuzzy_threshold=fuzzy_threshold,
+                weight_profile=info.weight_profile,
+            )
+            ppmt_engine.set_tries(trie_n1, trie_n2, trie_n3, trie_n4)
+            ppmt_engine.adapt_weights()
+            console.print(f"  [bold cyan]4-level matching enabled[/bold cyan]: weights={ppmt_engine.weights}")
 
         # Connect to exchange
         exchange_class = getattr(ccxt_async, cfg.exchange, None)
@@ -886,7 +1206,7 @@ class RealtimeTrader:
                                                 position_state = PositionState.FLAT
                                                 current_position = None
 
-                                    # Signal generation
+                                    # v0.11.0: Signal generation with TokenProfile + 4-level matching
                                     if (len(pattern_buffer) >= cfg.pattern_length
                                             and position_state == PositionState.FLAT):
                                         current_symbols = pattern_buffer[-cfg.pattern_length:]
@@ -897,95 +1217,127 @@ class RealtimeTrader:
                                             symbol=cfg.symbol,
                                         )
 
-                                        effective_min_conf = cfg.min_confidence
-                                        if prediction.direction == "SHORT":
-                                            effective_min_conf = max(effective_min_conf * 1.2, 0.20)
+                                        if prediction.direction == "FLAT" or prediction.confidence <= 0:
+                                            pass  # Skip, no signal
+                                        else:
+                                            # v0.11.0: 4-level matching
+                                            weighted_confidence = prediction.confidence
+                                            if ppmt_engine is not None:
+                                                ppmt_result = ppmt_engine.match_raw(
+                                                    current_symbols=current_symbols,
+                                                    current_price=current_price,
+                                                )
+                                                weighted_confidence = ppmt_result.weighted_confidence
+                                                if weighted_confidence <= 0 and prediction.confidence > 0:
+                                                    weighted_confidence = prediction.confidence
 
-                                        if (prediction.direction != "FLAT"
-                                                and prediction.confidence >= effective_min_conf
-                                                and abs(prediction.expected_total_move_pct) > 1.0
-                                                and prediction.overall_probability > 0.20):
+                                            effective_min_conf = cfg.min_confidence
 
-                                            result.signals_generated += 1
-
-                                            current_atr = self._compute_atr_pct(
-                                                np.array(recent_prices),
-                                                np.array(recent_highs),
-                                                np.array(recent_lows))
-
-                                            if prediction.direction == "LONG":
-                                                sl_pct = min(max(current_atr * 1.5, 1.5), 5.0)
-                                                tp_pct = sl_pct * 2.0
-                                            else:
-                                                sl_pct = min(max(current_atr * 2.0, 2.0), 7.0)
-                                                tp_pct = sl_pct * 1.5
-
-                                            sl_price = current_price * (1 - sl_pct / 100) if prediction.direction == "LONG" else current_price * (1 + sl_pct / 100)
-                                            tp_price = current_price * (1 + tp_pct / 100) if prediction.direction == "LONG" else current_price * (1 - tp_pct / 100)
-
-                                            signal_type = (SignalType.ENTRY_LONG
-                                                           if prediction.direction == "LONG"
-                                                           else SignalType.ENTRY_SHORT)
-
-                                            signal = Signal(
-                                                signal_type=signal_type,
-                                                confidence=prediction.confidence,
-                                                symbol=cfg.symbol,
-                                                entry_price=current_price,
-                                                sl_price=sl_price,
-                                                tp_price=tp_price,
-                                                expected_move_pct=prediction.expected_total_move_pct,
-                                                risk_reward_ratio=tp_pct / sl_pct if sl_pct > 0 else 0,
-                                                win_rate=prediction.overall_probability,
-                                                historical_count=100,
-                                                matched_pattern=current_symbols,
-                                            )
-                                            signal.quality_score = signal.compute_quality_score()
-                                            signal.sizing_multiplier = signal.compute_sizing_multiplier()
-
-                                            mock_meta = BlockLifecycleMetadata(
-                                                win_rate=signal.win_rate,
-                                                expected_move_pct=signal.expected_move_pct,
-                                                max_drawdown_pct=-sl_pct,
-                                                historical_count=100,
-                                            )
-                                            signal.probability_of_success = mock_meta.probability_of_success
-                                            signal.expected_profit_ahead = mock_meta.expected_profit_ahead
-                                            signal.metadata_sizing_signal = mock_meta.sizing_signal
-
-                                            if cfg.regime_aware and current_regime:
-                                                regime_mults = {"trending_up": 1.2, "ranging": 1.0,
-                                                                "trending_down": 0.6, "volatile": 0.4}
-                                                rm = regime_mults.get(current_regime, 1.0)
-                                                signal.metadata_sizing_signal *= rm
-                                                signal.sizing_multiplier *= rm
-
-                                            can_open, reason = risk_mgr.can_open(signal, info.asset_class)
-                                            if can_open:
-                                                size = risk_mgr.calculate_position_size(signal)
-
-                                                if not cfg.dry_run:
-                                                    # Execute real order on exchange
-                                                    try:
-                                                        side = 'buy' if prediction.direction == "LONG" else 'sell'
-                                                        order = await exchange.create_order(
-                                                            cfg.symbol, 'market', side, size
+                                            # v0.11.0: TokenProfile SHORT gating
+                                            if prediction.direction == "SHORT":
+                                                if token_profile is not None and not token_profile.short_allowed:
+                                                    pass  # Skip SHORT
+                                                else:
+                                                    short_regime_mult = {
+                                                        "trending_down": 0.85, "ranging": 1.1,
+                                                        "trending_up": 1.5, "volatile": 1.8,
+                                                    }.get(current_regime, 1.2)
+                                                    effective_min_conf = max(effective_min_conf * short_regime_mult, 0.20)
+                                                    if token_profile is not None:
+                                                        effective_min_conf = max(
+                                                            effective_min_conf * token_profile.short_confidence_multiplier,
+                                                            effective_min_conf,
                                                         )
-                                                        console.print(f"[green]Order executed: {side} {size} {cfg.symbol}[/green]")
-                                                    except Exception as e:
-                                                        console.print(f"[red]Order failed: {e}[/red]")
-                                                        continue
 
-                                                risk_mgr.open_position(signal, size)
-                                                current_position = RealtimeTrade(
-                                                    trade_id=trade_counter + 1,
+                                            if (prediction.direction != "FLAT"
+                                                    and weighted_confidence >= effective_min_conf
+                                                    and abs(prediction.expected_total_move_pct) > 0.3
+                                                    and prediction.overall_probability > 0.20):
+
+                                                result.signals_generated += 1
+
+                                                # v0.11.0: Prediction-aware SL/TP
+                                                expected_move_abs = abs(prediction.expected_total_move_pct)
+                                                sl_distance_pct = max(min(expected_move_abs * 1.5, 5.0), 0.5)
+                                                tp_distance_pct = expected_move_abs * 2.5
+                                                if tp_distance_pct < sl_distance_pct * 1.5:
+                                                    tp_distance_pct = sl_distance_pct * 1.5
+
+                                                sl_price = current_price * (1 - sl_distance_pct / 100) if prediction.direction == "LONG" else current_price * (1 + sl_distance_pct / 100)
+                                                tp_price = current_price * (1 + tp_distance_pct / 100) if prediction.direction == "LONG" else current_price * (1 - tp_distance_pct / 100)
+
+                                                # v0.11.0: Get actual historical_count
+                                                actual_historical_count = 10
+                                                try:
+                                                    matched_node = trie.search(current_symbols)
+                                                    if matched_node and matched_node.metadata.historical_count > 0:
+                                                        actual_historical_count = matched_node.metadata.historical_count
+                                                except Exception:
+                                                    pass
+
+                                                signal_type = (SignalType.ENTRY_LONG
+                                                               if prediction.direction == "LONG"
+                                                               else SignalType.ENTRY_SHORT)
+
+                                                signal = Signal(
+                                                    signal_type=signal_type,
+                                                    confidence=weighted_confidence,
                                                     symbol=cfg.symbol,
-                                                    direction=signal.direction or "LONG",
                                                     entry_price=current_price,
-                                                    entry_time=str(candle_ts),
-                                                    size=size,
-                                                    confidence=signal.confidence,
-                                                    regime=current_regime,
+                                                    sl_price=sl_price,
+                                                    tp_price=tp_price,
+                                                    expected_move_pct=prediction.expected_total_move_pct,
+                                                    risk_reward_ratio=tp_distance_pct / sl_distance_pct if sl_distance_pct > 0 else 0,
+                                                    win_rate=prediction.overall_probability,
+                                                    historical_count=actual_historical_count,
+                                                    matched_pattern=current_symbols,
+                                                )
+                                                signal.quality_score = signal.compute_quality_score()
+                                                signal.sizing_multiplier = signal.compute_sizing_multiplier()
+
+                                                mock_meta = BlockLifecycleMetadata(
+                                                    win_rate=signal.win_rate,
+                                                    expected_move_pct=signal.expected_move_pct,
+                                                    max_drawdown_pct=-sl_distance_pct,
+                                                    historical_count=actual_historical_count,
+                                                )
+                                                signal.probability_of_success = mock_meta.probability_of_success
+                                                signal.expected_profit_ahead = mock_meta.expected_profit_ahead
+                                                signal.metadata_sizing_signal = mock_meta.sizing_signal
+
+                                                if cfg.regime_aware and current_regime:
+                                                    regime_mults = {"trending_up": 1.2, "ranging": 1.0,
+                                                                    "trending_down": 0.6, "volatile": 0.4}
+                                                    rm = regime_mults.get(current_regime, 1.0)
+                                                    signal.metadata_sizing_signal *= rm
+                                                    signal.sizing_multiplier *= rm
+
+                                                can_open, reason = risk_mgr.can_open(signal, info.asset_class)
+                                                if can_open:
+                                                    size = risk_mgr.calculate_position_size(signal)
+
+                                                    if not cfg.dry_run:
+                                                        # Execute real order on exchange
+                                                        try:
+                                                            side = 'buy' if prediction.direction == "LONG" else 'sell'
+                                                            order = await exchange.create_order(
+                                                                cfg.symbol, 'market', side, size
+                                                            )
+                                                            console.print(f"[green]Order executed: {side} {size} {cfg.symbol}[/green]")
+                                                        except Exception as e:
+                                                            console.print(f"[red]Order failed: {e}[/red]")
+                                                            continue
+
+                                                    risk_mgr.open_position(signal, size)
+                                                    current_position = RealtimeTrade(
+                                                        trade_id=trade_counter + 1,
+                                                        symbol=cfg.symbol,
+                                                        direction=signal.direction or "LONG",
+                                                        entry_price=current_price,
+                                                        entry_time=str(candle_ts),
+                                                        size=size,
+                                                        confidence=signal.confidence,
+                                                        regime=current_regime,
                                                     matched_pattern=current_symbols,
                                                 )
                                                 current_position.sl_price = sl_price  # type: ignore
