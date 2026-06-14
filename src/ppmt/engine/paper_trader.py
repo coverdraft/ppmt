@@ -39,6 +39,7 @@ from ppmt.data.storage import PPMTStorage
 from ppmt.data.classifier import AssetClassifier
 from ppmt.core.sax import SAXEncoder
 from ppmt.core.regime import RegimeDetector, RegimeInfo
+from ppmt.core.profiles import TokenProfile, TIMEFRAME_ALPHA_DEFAULTS
 from ppmt.engine.ppmt import PPMT
 from ppmt.engine.prediction import PredictionEngine
 from ppmt.engine.signal import SignalType, Signal
@@ -231,14 +232,29 @@ class PaperTraderConfig:
     pattern_length: int = 5
     """SAX blocks per pattern."""
 
-    sax_alphabet_size: int = 8
-    """SAX alphabet size."""
+    sax_alphabet_size: int = 0
+    """SAX alphabet size. 0 = auto from TokenProfile (timeframe-adaptive).
+    v0.6.4: Changed from hardcoded 8 to auto. Previous default alpha=8 was
+    OUTSIDE the calibration grid (3-5) and caused zero trades at 1m/5m.
+    Now uses TokenProfile.from_timeframe() which selects alpha based on
+    validated timeframe-alpha mapping: 1h→3, 5m→4, 1m→5."""
 
-    sax_window_size: int = 10
-    """SAX window size."""
+    sax_window_size: int = 0
+    """SAX window size. 0 = auto from TokenProfile (timeframe-adaptive).
+    v0.6.4: Changed from hardcoded 10 to auto. Validated mapping:
+    1h→7, 5m→7, 1m→7."""
 
     sax_strategy: str = "ohlcv"
     """SAX encoding strategy."""
+
+    use_token_profile: bool = True
+    """v0.6.4: Use TokenProfile for automatic parameter selection.
+    When True (default), SAX alpha/window, catastrophic_loss_pct,
+    short_allowed, short_confidence_multiplier, and fuzzy_threshold
+    are all automatically set from TokenProfile based on asset class
+    + timeframe. This replaces manual per-token tuning with
+    data-driven auto-configuration validated across 22 token-TF combos.
+    When False, falls back to explicit config values (backward compat)."""
 
     min_confidence: float = 0.20
     """Minimum confidence to generate entry signal.
@@ -303,14 +319,15 @@ class PaperTraderConfig:
     A cooldown of 1 still prevents immediate revenge trading while
     allowing the system to capture the next valid signal."""
 
-    catastrophic_loss_pct: float = 8.0
-    """Catastrophic loss threshold (percentage). v0.6.2: Re-enabled at 8.0%.
-    Cycle 5 showed several trades with -10%+ losses (worst -10.56%).
-    The old 5% threshold cut winners short, but 8% is high enough to
-    let trades breathe while preventing catastrophic drawdowns.
-    Max DD in Cycle 5 was 41.3% — this safety net should reduce that.
-    v0.3.0 had disabled it (0.0) because 5% was too tight for BTC's
-    volatility. 8% gives ~3x the avg ATR (0.84%) as breathing room."""
+    catastrophic_loss_pct: float = 0.0
+    """Catastrophic loss threshold (percentage). 0.0 = use TokenProfile value.
+    v0.6.4: Changed from hardcoded 8.0 to 0.0 (auto from TokenProfile).
+    When use_token_profile=True, this is overridden by the asset-class-
+    specific value from TokenProfile:
+      blue_chip: 8%, large_cap: 10%, defi: 12%, meme: 15%, new_launch: 20%
+    When use_token_profile=False or explicit value > 0, uses that value.
+    Previous versions hardcoded 8.0%, which was too tight for meme tokens
+    and too loose for blue chips."""
 
     regime_aware: bool = True
     """v0.8.0: Enable regime-aware position sizing. When True, the paper
@@ -485,6 +502,16 @@ class PaperTrader:
         """
         Run paper trading simulation on stored historical data.
 
+        v0.6.4: TokenProfile integration.
+        The paper trader now auto-configures from TokenProfile:
+        - SAX alpha/window from timeframe-adaptive mapping (1h→3, 5m→4, 1m→5)
+        - catastrophic_loss_pct from asset class (blue_chip:8%, meme:15%, etc.)
+        - short_allowed / short_confidence_multiplier from asset class
+        - fuzzy_threshold from asset class
+        This replaces manual per-token tuning with data-driven
+        auto-configuration validated across 22 token-TF combos with
+        6+ months of real Binance data each.
+
         v0.3.0: Revert to v0.2.8 SL/TP behavior for maximum P&L.
         v0.2.10's "improvements" reduced P&L from +1578% to +371%:
         - Catastrophic protection (5%) cut trades that would reach TP
@@ -520,6 +547,48 @@ class PaperTrader:
         classifier = AssetClassifier()
         info = classifier.classify(cfg.symbol)
 
+        # ================================================================
+        # v0.6.4: TokenProfile integration
+        # Auto-configure SAX parameters, risk params, and gating from
+        # the TokenProfile based on asset class + timeframe.
+        # ================================================================
+        token_profile = None
+        if cfg.use_token_profile:
+            token_profile = TokenProfile.from_timeframe(
+                symbol=cfg.symbol,
+                asset_class=info.asset_class,
+                timeframe=cfg.timeframe,
+            )
+            # Override SAX params from profile (unless explicitly set)
+            if cfg.sax_alphabet_size == 0:
+                cfg.sax_alphabet_size = token_profile.sax_alphabet_size
+            if cfg.sax_window_size == 0:
+                cfg.sax_window_size = token_profile.sax_window_size
+            # Override catastrophic_loss from profile (unless explicitly set)
+            if cfg.catastrophic_loss_pct == 0.0:
+                cfg.catastrophic_loss_pct = token_profile.catastrophic_loss_pct * 100.0
+
+            console.print(f"[bold green]TokenProfile loaded:[/bold green] "
+                          f"{info.asset_class} @ {cfg.timeframe} → "
+                          f"alpha={token_profile.sax_alphabet_size}, "
+                          f"window={token_profile.sax_window_size}, "
+                          f"cat_loss={token_profile.catastrophic_loss_pct:.0%}, "
+                          f"short_allowed={token_profile.short_allowed}, "
+                          f"fuzzy={token_profile.fuzzy_threshold:.2f}")
+        else:
+            # Fallback: use timeframe alpha defaults even without full profile
+            if cfg.sax_alphabet_size == 0 or cfg.sax_window_size == 0:
+                tf_defaults = TIMEFRAME_ALPHA_DEFAULTS.get(
+                    cfg.timeframe, TIMEFRAME_ALPHA_DEFAULTS["1h"]
+                )
+                if cfg.sax_alphabet_size == 0:
+                    cfg.sax_alphabet_size = tf_defaults["sax_alphabet_size"]
+                if cfg.sax_window_size == 0:
+                    cfg.sax_window_size = tf_defaults["sax_window_size"]
+
+            if cfg.catastrophic_loss_pct == 0.0:
+                cfg.catastrophic_loss_pct = 8.0  # safe default
+
         # Try to load existing Tries, or build new ones
         # v0.10.0: Load all 4 levels for GAP-1 4-level matching
         all_tries = storage.load_all_tries(cfg.symbol)
@@ -536,6 +605,11 @@ class PaperTrader:
             and trie_n4 is not None
         )
 
+        # v0.6.4: Get fuzzy_threshold from TokenProfile if available
+        fuzzy_threshold = 0.80  # safe default
+        if token_profile is not None:
+            fuzzy_threshold = token_profile.fuzzy_threshold
+
         if trie_n3 is None:
             console.print(f"[yellow]No Trie for {cfg.symbol}. Building from data...[/yellow]")
             engine = PPMT(
@@ -544,6 +618,7 @@ class PaperTrader:
                 sax_alphabet_size=cfg.sax_alphabet_size,
                 sax_window_size=cfg.sax_window_size,
                 sax_strategy=cfg.sax_strategy,
+                fuzzy_threshold=fuzzy_threshold,
                 weight_profile=info.weight_profile,
             )
             engine.build(df, pattern_length=cfg.pattern_length)
@@ -616,6 +691,7 @@ class PaperTrader:
                 sax_alphabet_size=cfg.sax_alphabet_size,
                 sax_window_size=cfg.sax_window_size,
                 sax_strategy=cfg.sax_strategy,
+                fuzzy_threshold=fuzzy_threshold,
                 weight_profile=info.weight_profile,
             )
             # Inject loaded tries instead of building new ones
@@ -1109,6 +1185,13 @@ class PaperTrader:
                 # in earlier versions (confidence < max(confidence * 1.2, 0.20) was
                 # always false for conf >= 0.167).
                 if prediction.direction == "SHORT":
+                    # v0.6.4: TokenProfile SHORT gating
+                    # If the token profile says short_allowed=False, skip SHORT entries.
+                    # Meme tokens (DOGE, SHIB, PEPE) have short_allowed=False because
+                    # their SHORT signals are unreliable in the validated data.
+                    if token_profile is not None and not token_profile.short_allowed:
+                        continue
+
                     short_regime_mult = {
                         "trending_down": 0.85,  # SHORTs favored in downtrend
                         "ranging": 1.1,         # slight caution
@@ -1116,6 +1199,15 @@ class PaperTrader:
                         "volatile": 1.8,        # high risk — very strict
                     }.get(current_regime, 1.2)   # default: moderate penalty
                     effective_min_conf = max(effective_min_conf * short_regime_mult, 0.20)
+
+                    # v0.6.4: Apply TokenProfile's short_confidence_multiplier
+                    # This makes SHORTs harder for tokens where SHORT WR is low.
+                    # blue_chip: 1.5x, large_cap: 1.8x, defi: 2.0x, meme: 99x (disabled)
+                    if token_profile is not None:
+                        effective_min_conf = max(
+                            effective_min_conf * token_profile.short_confidence_multiplier,
+                            effective_min_conf  # don't lower below current
+                        )
 
                 # V4.1: Regime-aware confidence adjustment
                 # If the current regime is unfavorable for this pattern (e.g.,

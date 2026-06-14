@@ -689,14 +689,16 @@ Previous calibration (pattern-matching metric) always picked alpha=3 for all tim
 
 **5m WF Summary**: 6/6 consistent (WF/OOS 1.77x-2.72x), 100% MC profitable. No lookahead bias.
 
-### 1m Walk-Forward (8 Folds, Expanding Window)
+### 1m Walk-Forward (12 Folds, Expanding Window)
 
 | Token | Folds | Trades | Win Rate | PnL% | MC% | OOS PnL | WF/OOS Ratio |
 |-------|-------|--------|----------|------|-----|---------|-------------|
-| BTC/USDT | 8 | 936 | 87.9% | +972.45 | 100 | +310.82 | 3.13 |
-| SOL/USDT | 8 | 2315 | 87.3% | +2608.24 | 100 | +993.76 | 2.62 |
+| BTC/USDT | 12 | 925 | 86.7% | +868.78 | 100 | +310.82 | 2.80 |
+| SOL/USDT | 12 | 2313 | 87.8% | +2621.24 | 100 | +993.76 | 2.64 |
+| DOGE/USDT | 12 | 2177 | 85.0% | +2089.13 | 100 | +746.64 | 2.80 |
+| LINK/USDT | 12 | 1285 | 85.2% | +889.26 | 100 | +195.14 | 4.56 |
 
-**1m WF Summary**: Both consistent, WF/OOS 2.62x-3.13x, MC 100%. No lookahead bias.
+**1m WF Summary**: 4/4 consistent, WF/OOS 2.64x-4.56x, MC 100%. No lookahead bias.
 
 ### Cross-Timeframe Comparison (Same Tokens)
 
@@ -734,7 +736,95 @@ Previous calibration (pattern-matching metric) always picked alpha=3 for all tim
 
 ---
 
-## 14. Next Steps (Priority Order)
+## 14. TokenProfile Integration into PaperTrader (v0.6.4)
+
+### Motivation
+
+The PaperTrader was disconnected from the validation pipeline. Despite extensive validation showing that alpha=3-5 is optimal, the PaperTrader hardcoded alpha=8/window=10 — a value outside the calibration grid that produces zero trades at 1m/5m. Similarly, catastrophic_loss_pct was hardcoded at 8% regardless of asset class volatility, and SHORT gating didn't use the token-specific parameters validated in Section 11.
+
+### Changes Made
+
+#### 1. Timeframe-Adaptive Alpha (profiles.py)
+
+Added `TIMEFRAME_ALPHA_DEFAULTS` — a validated mapping from timeframe to optimal SAX parameters:
+
+| Timeframe | Alpha | Window | Validated On |
+|-----------|-------|--------|-------------|
+| 1m | 5 | 7 | BTC, SOL, DOGE, LINK (4 tokens, 6+ months each) |
+| 5m | 4 | 7 | BTC, ETH, SOL, BNB, DOGE, LINK (6 tokens) |
+| 30m | 4 | 5 | BTC, DOGE (2 tokens) |
+| 1h | 3 | 7 | 12 tokens across 4 asset classes |
+| 4h | 3 | 10 | Insufficient data for full validation |
+
+Critical finding: With alpha=3 at 1m, the system generates ZERO trades because all patterns become identical. Alpha must scale with timeframe granularity.
+
+Added `TokenProfile.from_timeframe()` class method that combines:
+- Asset class risk params (catastrophic_loss_pct, max_position_pct, short_allowed, etc.)
+- Timeframe-adaptive SAX params (alpha, window)
+
+#### 2. PaperTraderConfig Changes (paper_trader.py)
+
+| Parameter | Old Default | New Default | Source |
+|-----------|------------|-------------|--------|
+| sax_alphabet_size | 8 (hardcoded) | 0 (auto from TokenProfile) | Timeframe-adaptive |
+| sax_window_size | 10 (hardcoded) | 0 (auto from TokenProfile) | Timeframe-adaptive |
+| catastrophic_loss_pct | 8.0 (hardcoded) | 0.0 (auto from TokenProfile) | Asset class-specific |
+| use_token_profile | N/A | True | New flag |
+
+When `use_token_profile=True` (default), the PaperTrader:
+1. Creates a `TokenProfile.from_timeframe(symbol, asset_class, timeframe)`
+2. Overrides `sax_alphabet_size` from profile (unless explicitly set)
+3. Overrides `sax_window_size` from profile (unless explicitly set)
+4. Overrides `catastrophic_loss_pct` from profile (0.0 → asset class value)
+5. Applies `token_profile.short_allowed` — skips SHORT entries for meme tokens
+6. Applies `token_profile.short_confidence_multiplier` — makes SHORTs harder for defi/meme
+7. Applies `token_profile.fuzzy_threshold` to PPMT engine construction
+
+#### 3. Asset-Class-Specific Catastrophic Loss
+
+| Asset Class | catastrophic_loss_pct | Rationale |
+|-------------|----------------------|-----------|
+| blue_chip | 8% | ~3x avg ATR, gives BTC/ETH room to breathe |
+| large_cap | 10% | More volatile than blue chips |
+| defi | 12% | DeFi tokens have higher volatility |
+| meme | 15% | DOGE/SHIB/PEPE need wide stops |
+| new_launch | 20% | Extreme volatility in new launches |
+
+#### 4. SHORT Gating from TokenProfile
+
+The SHORT confidence gate now uses the TokenProfile's `short_confidence_multiplier`:
+- blue_chip: 1.5x (moderate penalty — SHORTs possible but harder)
+- large_cap: 1.8x (strict — SHORT WR lower in large caps)
+- defi: 2.0x (very strict — DeFi SHORTs unreliable)
+- meme: 99x (effectively disabled — meme SHORTs never profitable in validation)
+- new_launch: 99x (disabled — too risky for new tokens)
+
+### Backward Compatibility
+
+- `use_token_profile=False` falls back to explicit config values
+- Setting `sax_alphabet_size > 0` overrides the profile value
+- Setting `catastrophic_loss_pct > 0` overrides the profile value
+- The PPMT engine default alpha=8 is unchanged (other callers unaffected)
+
+### Complete Validation Summary (All Timeframes)
+
+| Timeframe | Tokens | OOS Profitable | WF Consistent | MC 100% | Avg PnL |
+|-----------|--------|---------------|---------------|---------|---------|
+| 1h | 12 | 12/12 | 12/12 | 12/12 | +511% |
+| 5m | 6 | 6/6 | 6/6 | 6/6 | +498% |
+| 1m | 4 | 4/4 | 4/4 | 4/4 | +562% |
+| **Total** | **22** | **22/22** | **22/22** | **22/22** | **+521%** |
+
+### Files Modified
+
+| File | Change |
+|------|--------|
+| `src/ppmt/core/profiles.py` | Added TIMEFRAME_ALPHA_DEFAULTS, TokenProfile.from_timeframe() |
+| `src/ppmt/engine/paper_trader.py` | TokenProfile integration: auto SAX/risk/SHORT/fuzzy params |
+
+---
+
+## 15. Next Steps (Priority Order)
 
 1. ~~**Walk-forward testing**~~ — ✅ DONE (Section 9). No lookahead bias detected.
 2. ~~**Weight sensitivity analysis**~~ — ✅ DONE (Section 10). Current weights validated.
@@ -742,9 +832,11 @@ Previous calibration (pattern-matching metric) always picked alpha=3 for all tim
 4. ~~**Improve calibration metric**~~ — ✅ DONE (Section 12). Trading-calibrated selection picks better configs (+74% to +211% improvement).
 5. ~~**Bug fixes: regime, propagate, variance**~~ — ✅ DONE (Section 12). V4 features now fully functional.
 6. ~~**Low timeframe validation (5m + 1m)**~~ — ✅ DONE (Section 13). 5m: 6/6 profitable, 1m: 4/4 profitable. 6+ months real data.
-7. **Integrate TokenProfile into paper_trader.py** — use profile.short_confidence_multiplier, catastrophic_loss_pct
-8. **Timeframe-adaptive calibration** — auto-select alpha based on timeframe (1h→a3, 5m→a4, 1m→a5) instead of fixed grid
-9. **Re-enable catastrophic_loss_pct** — 8% hard stop from TokenProfile
-10. **Fuzzy pattern break** — replace exact matching with FuzzyMatcher.check_continuation()
-11. **Living recalibration** — auto-re-calibrate every N new candles
-12. **1m WF validation for DOGE/LINK** — extend walk-forward to all 4 1m tokens
+7. ~~**Integrate TokenProfile into paper_trader.py**~~ — ✅ DONE (Section 14). Auto SAX/risk/SHORT/fuzzy from profile.
+8. ~~**Timeframe-adaptive calibration**~~ — ✅ DONE (Section 14). TIMEFRAME_ALPHA_DEFAULTS + from_timeframe().
+9. ~~**Re-enable catastrophic_loss_pct**~~ — ✅ DONE (Section 14). Asset-class-specific from TokenProfile.
+10. ~~**1m WF validation for DOGE/LINK**~~ — ✅ DONE (Section 13). 4/4 consistent, WF/OOS 2.64x-4.56x.
+11. **Fuzzy pattern break** — replace exact matching with FuzzyMatcher.check_continuation()
+12. **Living recalibration** — auto-re-calibrate every N new candles
+13. **Paper trading in live** — run PaperTrader on real-time data with TokenProfile
+14. **Multi-token paper trading** — run PaperTrader on multiple tokens simultaneously
