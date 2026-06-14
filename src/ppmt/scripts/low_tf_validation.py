@@ -80,8 +80,8 @@ def get_data(symbol, timeframe, days_needed):
             print(f"cached {len(cached)} candles ({days_span} days)", end=" ", flush=True)
             return cached
 
-    # Download
-    collector = DataCollector(exchange="binance")
+    # Download (Bybit primary, auto-fallback to OKX/Kraken)
+    collector = DataCollector(exchange="bybit")
     df = collector.fetch_and_save(symbol, timeframe, days=days_needed)
     collector.close()
     storage.close()
@@ -249,7 +249,7 @@ def build_engine_and_test(train_df, oos_df, symbol, asset_class, alpha, window, 
 
 def main():
     print("=" * 100)
-    print("  PPMT v0.6.2 — LOW TIMEFRAME VALIDATION (5m + 1m)")
+    print("  PPMT v0.6.6 — LOW TIMEFRAME VALIDATION (5m + 1m)")
     print(f"  MINIMUM 6 MONTHS REAL DATA — NO SYNTHETIC DATA")
     print(f"  Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print("=" * 100)
@@ -472,7 +472,7 @@ def main():
         },
     }
 
-    output_path = "/home/z/my-project/download/low_tf_validation_results.json"
+    output_path = "/home/z/my-project/download/v066_low_tf_validation_results.json"
     with open(output_path, "w") as f:
         json.dump(output, f, indent=2, default=str)
     print(f"\n  Results saved to: {output_path}")

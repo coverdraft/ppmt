@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PPMT v0.6.2 — Massive Multi-Token Validation
+PPMT v0.6.6 — Massive Multi-Token Validation
 
 Tests 12+ tokens across ALL asset classes with:
   1. Auto-Calibration per token
@@ -14,7 +14,8 @@ Optimized for speed:
   - Walk-forward folds reduced by larger step
   - Runs in <8 min for 12 tokens
 
-All data: REAL Binance. No synthetic data.
+All data: REAL (Binance via CDD/BV/Bybit). No synthetic data.
+v0.6.6: Read/Write Path Alignment fix validated here.
 """
 
 import sys
@@ -29,6 +30,7 @@ import numpy as np
 import pandas as pd
 
 from ppmt.data.collector import DataCollector
+from ppmt.data.storage import PPMTStorage
 from ppmt.core.profiles import CalibrationEngine, TokenProfile, ASSET_CLASS_DEFAULTS
 from ppmt.core.sax import SAXEncoder
 from ppmt.core.trie import PPMTTrie
@@ -79,15 +81,28 @@ WF_MIN_TEST = 500
 # ============================================================
 
 def download_all_tokens() -> dict:
-    """Download data for all configured tokens."""
+    """Download data for all configured tokens (with SQLite cache)."""
     data = {}
     failed = []
+
+    storage = PPMTStorage()
 
     for symbol, config in TOKEN_CONFIG.items():
         try:
             print(f"  {symbol} ({config['asset_class']})...", end=" ", flush=True)
-            collector = DataCollector(exchange="binance")
+
+            # Check SQLite cache first (from bulk data loader)
+            cached = storage.load_ohlcv(symbol, TIMEFRAME)
+            if not cached.empty and len(cached) >= 3000:
+                days_span = (cached.index[-1] - cached.index[0]).days
+                print(f"CACHED ({len(cached)} candles, {days_span} days)")
+                data[symbol] = {"df": cached, "asset_class": config["asset_class"]}
+                continue
+
+            # Fallback to API (Bybit primary, auto-fallback to OKX/Kraken)
+            collector = DataCollector(exchange="bybit")
             df = collector.fetch_and_save(symbol, TIMEFRAME, days=DAYS_OF_DATA)
+            collector.close()
 
             if df.empty:
                 print("NO DATA")
@@ -106,6 +121,7 @@ def download_all_tokens() -> dict:
             print(f"ERROR: {e}")
             failed.append(symbol)
 
+    storage.close()
     print(f"\n  Downloaded: {len(data)} | Failed: {len(failed)} {failed}")
     return data
 
@@ -248,7 +264,7 @@ def compute_stats(trades):
 
 def main():
     print("=" * 90)
-    print("  PPMT v0.6.2 — MASSIVE Multi-Token Validation")
+    print("  PPMT v0.6.6 — MASSIVE Multi-Token Validation (Read/Write Path Alignment)")
     print(f"  Tokens: {len(TOKEN_CONFIG)} | Classes: blue_chip, large_cap, defi, meme")
     print(f"  Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print("=" * 90)
@@ -258,7 +274,7 @@ def main():
     # ================================================================
     # STEP 1: Download all data
     # ================================================================
-    print("\n  STEP 1: Download Real Data from Binance")
+    print("\n  STEP 1: Load Real Data (CDD/BV/Bybit → SQLite cache)")
     print("-" * 90)
 
     token_data = download_all_tokens()
@@ -546,7 +562,7 @@ def main():
         },
     }
 
-    output_path = "/home/z/my-project/download/massive_validation_results.json"
+    output_path = "/home/z/my-project/download/v066_massive_validation_results.json"
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "w") as f:
         json.dump(output, f, indent=2, default=str)

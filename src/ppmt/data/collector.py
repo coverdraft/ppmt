@@ -2,22 +2,28 @@
 PPMT Data Collector - Market Data Fetching
 
 Supports:
-  1. Binance API (free, no account needed for historical klines)
-  2. CSV import (offline, works without any exchange connection)
-  3. ccxt library (optional, for multi-exchange support)
+  1. Bybit API (free, no account needed — PRIMARY since Binance geo-blocked)
+  2. Binance API (free, no account needed — may be geo-blocked 418)
+  3. OKX API (free, no account needed — backup)
+  4. Kraken API (free, no account needed — backup)
+  5. ccxt library (optional, for any other exchange)
+  6. CSV import (offline, works without any exchange connection)
 
-Binance API is used directly (free, public endpoints) to avoid
-requiring ccxt or any account. The ccxt dependency is optional
-and only needed for non-Binance exchanges.
+Automatic fallback chain: primary → OKX → Kraken → Binance → ccxt
+If the primary exchange fails (geo-block, rate-limit, etc.), the system
+automatically tries the next available source.
+
+All exchanges are free public APIs — no account or API key needed.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Dict, List, Optional, Tuple
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
 
@@ -25,33 +31,83 @@ import pandas as pd
 
 from ppmt.data.storage import PPMTStorage
 
+logger = logging.getLogger(__name__)
 
-# Binance API endpoints (free, public, no account needed)
+# ============================================================
+# API Endpoints (all free, public, no account needed)
+# ============================================================
 BINANCE_API_BASE = "https://api.binance.com"
 BINANCE_KLINES_URL = f"{BINANCE_API_BASE}/api/v3/klines"
+
+BYBIT_API_BASE = "https://api.bybit.com"
+BYBIT_KLINES_URL = f"{BYBIT_API_BASE}/v5/market/kline"
+
+OKX_API_BASE = "https://www.okx.com"
+OKX_CANDLES_URL = f"{OKX_API_BASE}/api/v5/market/candles"
+
+KRAKEN_API_BASE = "https://api.kraken.com"
+KRAKEN_OHLC_URL = f"{KRAKEN_API_BASE}/0/public/OHLC"
+
+# Fallback chain: try these exchanges in order if primary fails
+DEFAULT_FALLBACK_CHAIN = ["bybit", "okx", "kraken", "binance"]
+
+# Rate limits (seconds between requests)
+EXCHANGE_RATE_LIMITS = {
+    "bybit": 0.15,
+    "okx": 0.20,
+    "kraken": 1.0,  # Kraken is stricter
+    "binance": 0.20,
+}
+
+# ============================================================
+# Timeframe mapping per exchange
+# ============================================================
+BYBIT_INTERVALS = {
+    "1m": "1", "3m": "3", "5m": "5", "15m": "15", "30m": "30",
+    "1h": "60", "2h": "120", "4h": "240", "6h": "360", "12h": "720",
+    "1d": "D", "1w": "W", "1M": "M",
+}
+
+OKX_INTERVALS = {
+    "1m": "1m", "3m": "3m", "5m": "5m", "15m": "15m", "30m": "30m",
+    "1h": "1H", "2h": "2H", "4h": "4H", "6h": "6H", "12h": "12H",
+    "1d": "1D", "1w": "1W", "1M": "1M",
+}
+
+KRAKEN_INTERVALS = {
+    "1m": 1, "5m": 5, "15m": 15, "30m": 30,
+    "1h": 60, "4h": 240, "1d": 1440, "1w": 10080,
+}
 
 
 class DataCollector:
     """
-    OHLCV data collector for PPMT.
+    OHLCV data collector for PPMT with multi-exchange support.
 
-    Fetches candle data from Binance (free API) or imports from CSV.
-    All data is stored locally via PPMTStorage (SQLite).
+    Supports Bybit (primary), Binance, OKX, Kraken as direct API sources,
+    plus ccxt for any other exchange, and CSV import.
+
+    Features:
+      - Automatic fallback chain if primary exchange fails
+      - Paginated historical data fetching
+      - Local caching via PPMTStorage (SQLite)
 
     Usage:
-        collector = DataCollector(exchange="binance", storage=storage)
+        collector = DataCollector(exchange="bybit", storage=storage)
         df = collector.fetch_and_save("BTC/USDT", "1h", days=365)
         collector.close()
     """
 
     def __init__(
         self,
-        exchange: str = "binance",
+        exchange: str = "bybit",
         storage: Optional[PPMTStorage] = None,
+        fallback_chain: Optional[List[str]] = None,
     ):
         self.exchange = exchange
         self.storage = storage or PPMTStorage()
         self._ccxt_exchange = None
+        self.fallback_chain = fallback_chain or DEFAULT_FALLBACK_CHAIN
 
     def _init_ccxt(self):
         """Initialize ccxt exchange if available (optional)."""
@@ -77,8 +133,8 @@ class DataCollector:
         """
         Fetch OHLCV data from exchange and save to storage.
 
-        Tries Binance API first (free, no account needed).
-        Falls back to ccxt if available for other exchanges.
+        Tries the configured exchange first, then falls back through
+        the fallback chain (Bybit → OKX → Kraken → Binance → ccxt).
 
         Args:
             symbol: Trading pair (e.g., 'BTC/USDT')
@@ -88,23 +144,360 @@ class DataCollector:
         Returns:
             DataFrame with OHLCV data
         """
-        if self.exchange == "binance":
-            df = self._fetch_binance(symbol, timeframe, days)
-        else:
-            # Try ccxt for non-Binance exchanges
-            if self._init_ccxt():
-                df = self._fetch_ccxt(symbol, timeframe, days)
-            else:
-                raise RuntimeError(
-                    f"Cannot fetch from {self.exchange}: ccxt not installed. "
-                    f"Install with: pip install 'ppmt[exchange]'"
-                )
+        # Build the list of exchanges to try
+        exchanges_to_try = [self.exchange]
+        for ex in self.fallback_chain:
+            if ex != self.exchange:
+                exchanges_to_try.append(ex)
 
-        if not df.empty and self.storage:
-            self.storage.save_ohlcv(symbol, timeframe, df)
+        last_error = None
+        for exchange in exchanges_to_try:
+            try:
+                df = self._fetch_from_exchange(exchange, symbol, timeframe, days)
+                if not df.empty:
+                    if self.storage:
+                        self.storage.save_ohlcv(symbol, timeframe, df)
+                    return df
+            except Exception as e:
+                last_error = e
+                logger.warning(f"  {exchange} failed for {symbol}: {e}")
+                continue
+
+        # Last resort: try ccxt with the original exchange
+        if self._init_ccxt():
+            try:
+                df = self._fetch_ccxt(symbol, timeframe, days)
+                if not df.empty:
+                    if self.storage:
+                        self.storage.save_ohlcv(symbol, timeframe, df)
+                    return df
+            except Exception as e:
+                last_error = e
+                logger.warning(f"  ccxt/{self.exchange} failed for {symbol}: {e}")
+
+        if last_error:
+            raise RuntimeError(
+                f"All exchanges failed for {symbol}/{timeframe}. "
+                f"Last error: {last_error}"
+            ) from last_error
+
+        return pd.DataFrame()
+
+    def _fetch_from_exchange(
+        self,
+        exchange: str,
+        symbol: str,
+        timeframe: str,
+        days: int,
+    ) -> pd.DataFrame:
+        """Route to the appropriate fetch method based on exchange."""
+        if exchange == "bybit":
+            return self._fetch_bybit(symbol, timeframe, days)
+        elif exchange == "okx":
+            return self._fetch_okx(symbol, timeframe, days)
+        elif exchange == "kraken":
+            return self._fetch_kraken(symbol, timeframe, days)
+        elif exchange == "binance":
+            return self._fetch_binance(symbol, timeframe, days)
+        else:
+            raise ValueError(f"Unknown exchange: {exchange}")
+
+    # ================================================================
+    # BYBIT V5 API (Primary — free, public, no account needed)
+    # ================================================================
+    def _fetch_bybit(
+        self,
+        symbol: str,
+        timeframe: str = "1h",
+        days: int = 365,
+    ) -> pd.DataFrame:
+        """
+        Fetch historical klines from Bybit V5 API (free, public).
+
+        Bybit V5 kline format: [startTime, open, high, low, close, volume, turnover]
+        Returns candles in REVERSE chronological order (newest first).
+        Max 200 candles per request.
+        """
+        bybit_symbol = symbol.replace("/", "")
+        interval = BYBIT_INTERVALS.get(timeframe)
+        if interval is None:
+            raise ValueError(f"Bybit: unsupported timeframe '{timeframe}'")
+
+        tf_ms = self._timeframe_to_ms(timeframe)
+        end_ts = int(time.time() * 1000)
+        start_ts = end_ts - (days * 24 * 60 * 60 * 1000)
+
+        all_klines = []
+        current_end = end_ts
+        rate_limit = EXCHANGE_RATE_LIMITS["bybit"]
+
+        while current_end > start_ts:
+            url = (
+                f"{BYBIT_KLINES_URL}?"
+                f"category=spot&"
+                f"symbol={bybit_symbol}&"
+                f"interval={interval}&"
+                f"start={start_ts}&"
+                f"end={current_end}&"
+                f"limit=200"
+            )
+
+            try:
+                req = Request(url)
+                req.add_header("User-Agent", "PPMT/0.6.6")
+                with urlopen(req, timeout=30) as response:
+                    data = json.loads(response.read().decode())
+            except (HTTPError, URLError) as e:
+                if "400" in str(e) or "404" in str(e):
+                    return pd.DataFrame()
+                raise RuntimeError(f"Bybit API error: {e}") from e
+
+            ret_code = data.get("retCode", -1)
+            if ret_code != 0:
+                ret_msg = data.get("retMsg", "unknown")
+                if ret_code == 10001 or "invalid symbol" in ret_msg.lower():
+                    return pd.DataFrame()
+                raise RuntimeError(f"Bybit API error: {ret_msg} (code={ret_code})")
+
+            candles = data.get("result", {}).get("list", [])
+            if not candles:
+                break
+
+            all_klines.extend(candles)
+
+            # Bybit returns newest first; oldest candle is last in list
+            oldest_ts = int(candles[-1][0])
+            current_end = oldest_ts - 1  # Move end before oldest candle
+
+            time.sleep(rate_limit)
+
+            # If we got less than 200, we've reached the beginning
+            if len(candles) < 200:
+                break
+
+        if not all_klines:
+            return pd.DataFrame()
+
+        # Parse: [startTime, open, high, low, close, volume, turnover]
+        df = pd.DataFrame(all_klines, columns=[
+            "open_time", "open", "high", "low", "close", "volume", "turnover"
+        ])
+
+        # Keep needed columns only
+        df = df[["open_time", "open", "high", "low", "close", "volume"]]
+
+        # Convert types
+        for col in ["open", "high", "low", "close", "volume"]:
+            df[col] = df[col].astype(float)
+
+        # Set datetime index
+        df = df.set_index(pd.to_datetime(df["open_time"].astype(int), unit="ms"))
+        df = df.drop(columns=["open_time"])
+
+        # Dedup and sort (Bybit returns newest first, we need chronological)
+        df = df[~df.index.duplicated(keep="first")]
+        df = df.sort_index()
 
         return df
 
+    # ================================================================
+    # OKX V5 API (Backup — free, public, no account needed)
+    # ================================================================
+    def _fetch_okx(
+        self,
+        symbol: str,
+        timeframe: str = "1h",
+        days: int = 365,
+    ) -> pd.DataFrame:
+        """
+        Fetch historical candles from OKX V5 API (free, public).
+
+        OKX candle format: [ts, o, h, l, c, vol, volCcy, volCcyQuote, confirm]
+        Returns candles in REVERSE chronological order (newest first).
+        Max 100 candles per request.
+        """
+        # OKX instrument format: BTC-USDT (dash instead of slash)
+        okx_inst = symbol.replace("/", "-")
+        bar = OKX_INTERVALS.get(timeframe)
+        if bar is None:
+            raise ValueError(f"OKX: unsupported timeframe '{timeframe}'")
+
+        tf_ms = self._timeframe_to_ms(timeframe)
+        end_ts = int(time.time() * 1000)
+        start_ts = end_ts - (days * 24 * 60 * 60 * 1000)
+
+        all_klines = []
+        current_end = end_ts
+        rate_limit = EXCHANGE_RATE_LIMITS["okx"]
+
+        while current_end > start_ts:
+            url = (
+                f"{OKX_CANDLES_URL}?"
+                f"instId={okx_inst}&"
+                f"bar={bar}&"
+                f"after={current_end}&"
+                f"limit=100"
+            )
+
+            try:
+                req = Request(url)
+                req.add_header("User-Agent", "PPMT/0.6.6")
+                with urlopen(req, timeout=30) as response:
+                    data = json.loads(response.read().decode())
+            except (HTTPError, URLError) as e:
+                if "400" in str(e) or "404" in str(e):
+                    return pd.DataFrame()
+                raise RuntimeError(f"OKX API error: {e}") from e
+
+            code = data.get("code", "-1")
+            if code != "0":
+                msg = data.get("msg", "unknown")
+                if "Invalid" in msg or "instrument" in msg.lower():
+                    return pd.DataFrame()
+                raise RuntimeError(f"OKX API error: {msg} (code={code})")
+
+            candles = data.get("data", [])
+            if not candles:
+                break
+
+            all_klines.extend(candles)
+
+            # OKX returns newest first; oldest is last
+            oldest_ts = int(candles[-1][0])
+            current_end = oldest_ts - 1
+
+            time.sleep(rate_limit)
+
+            if len(candles) < 100:
+                break
+
+        if not all_klines:
+            return pd.DataFrame()
+
+        # Parse: [ts, o, h, l, c, vol, volCcy, volCcyQuote, confirm]
+        df = pd.DataFrame(all_klines, columns=[
+            "open_time", "open", "high", "low", "close",
+            "volume", "vol_ccy", "vol_ccy_quote", "confirm"
+        ])
+
+        df = df[["open_time", "open", "high", "low", "close", "volume"]]
+
+        for col in ["open", "high", "low", "close", "volume"]:
+            df[col] = df[col].astype(float)
+
+        df = df.set_index(pd.to_datetime(df["open_time"].astype(int), unit="ms"))
+        df = df.drop(columns=["open_time"])
+
+        df = df[~df.index.duplicated(keep="first")]
+        df = df.sort_index()
+
+        return df
+
+    # ================================================================
+    # KRAKEN API (Backup — free, public, no account needed)
+    # ================================================================
+    def _fetch_kraken(
+        self,
+        symbol: str,
+        timeframe: str = "1h",
+        days: int = 365,
+    ) -> pd.DataFrame:
+        """
+        Fetch historical OHLC from Kraken API (free, public).
+
+        Kraken returns: {pair_name: [[ts, o, h, l, c, vwap, volume, count], ...], last: ts}
+        Candles are in chronological order.
+        Max 720 candles per request for most pairs.
+        Note: Kraken uses XBT instead of BTC.
+        """
+        # Kraken symbol format: XBTUSDT (XBT not BTC), no slash
+        kraken_symbol = symbol.replace("/", "").replace("BTC", "XBT")
+        interval = KRAKEN_INTERVALS.get(timeframe)
+        if interval is None:
+            raise ValueError(f"Kraken: unsupported timeframe '{timeframe}'")
+
+        tf_ms = self._timeframe_to_ms(timeframe)
+        now = int(time.time())
+        since = now - (days * 24 * 60 * 60)
+
+        all_klines = []
+        current_since = since
+        rate_limit = EXCHANGE_RATE_LIMITS["kraken"]
+
+        while current_since < now:
+            url = (
+                f"{KRAKEN_OHLC_URL}?"
+                f"pair={kraken_symbol}&"
+                f"interval={interval}&"
+                f"since={current_since}"
+            )
+
+            try:
+                req = Request(url)
+                req.add_header("User-Agent", "PPMT/0.6.6")
+                with urlopen(req, timeout=30) as response:
+                    data = json.loads(response.read().decode())
+            except (HTTPError, URLError) as e:
+                if "400" in str(e) or "404" in str(e):
+                    return pd.DataFrame()
+                raise RuntimeError(f"Kraken API error: {e}") from e
+
+            errors = data.get("error", [])
+            if errors:
+                if any("EQuery:Unknown asset pair" in e for e in errors):
+                    return pd.DataFrame()
+                raise RuntimeError(f"Kraken API error: {errors}")
+
+            result = data.get("result", {})
+            last_ts = result.get("last", 0)
+            pair_key = [k for k in result.keys() if k != "last"]
+            if not pair_key:
+                break
+
+            candles = result[pair_key[0]]
+            if not candles:
+                break
+
+            all_klines.extend(candles)
+
+            # Move forward using the 'last' cursor
+            if last_ts <= current_since:
+                break
+            current_since = last_ts
+
+            time.sleep(rate_limit)
+
+            # If fewer than expected candles, we've reached current time
+            if len(candles) < 720:
+                break
+
+        if not all_klines:
+            return pd.DataFrame()
+
+        # Kraken format: [ts, o, h, l, c, vwap, volume, count]
+        df = pd.DataFrame(all_klines, columns=[
+            "open_time", "open", "high", "low", "close",
+            "vwap", "volume", "count"
+        ])
+
+        df = df[["open_time", "open", "high", "low", "close", "volume"]]
+
+        for col in ["open", "high", "low", "close", "volume"]:
+            df[col] = df[col].astype(float)
+
+        # Kraken open_time is in seconds, convert to ms for consistency
+        df["open_time_ms"] = df["open_time"].astype(int) * 1000
+        df = df.set_index(pd.to_datetime(df["open_time_ms"], unit="ms"))
+        df = df.drop(columns=["open_time", "open_time_ms"])
+
+        df = df[~df.index.duplicated(keep="first")]
+        df = df.sort_index()
+
+        return df
+
+    # ================================================================
+    # BINANCE API (Original — may be geo-blocked 418)
+    # ================================================================
     def _fetch_binance(
         self,
         symbol: str,
@@ -118,17 +511,12 @@ class DataCollector:
         [open_time, open, high, low, close, volume, close_time,
          quote_volume, trades, taker_buy_base, taker_buy_quote, ignore]
         """
-        # Convert symbol format: BTC/USDT → BTCUSDT
         binance_symbol = symbol.replace("/", "")
 
-        # Time parameters
         end_time = int(time.time() * 1000)
         start_time = end_time - (days * 24 * 60 * 60 * 1000)
-
-        # Binance timeframe to milliseconds
         tf_ms = self._timeframe_to_ms(timeframe)
 
-        # Fetch in batches (Binance returns max 1000 candles per request)
         all_klines = []
         current_start = start_time
 
@@ -144,12 +532,11 @@ class DataCollector:
 
             try:
                 req = Request(url)
-                req.add_header("User-Agent", "PPMT/0.1.0")
+                req.add_header("User-Agent", "PPMT/0.6.6")
                 with urlopen(req, timeout=30) as response:
                     data = json.loads(response.read().decode())
             except (HTTPError, URLError) as e:
-                if "400" in str(e) or "404" in str(e):
-                    # Symbol might not exist on Binance
+                if "400" in str(e) or "404" in str(e) or "418" in str(e):
                     return pd.DataFrame()
                 raise RuntimeError(f"Binance API error: {e}") from e
 
@@ -157,22 +544,17 @@ class DataCollector:
                 break
 
             all_klines.extend(data)
-
-            # Move start time to after the last candle
             last_open_time = data[-1][0]
             current_start = last_open_time + tf_ms
 
-            # Rate limit: be nice to the API
-            time.sleep(0.2)
+            time.sleep(EXCHANGE_RATE_LIMITS["binance"])
 
-            # If we got less than 1000, we've reached the end
             if len(data) < 1000:
                 break
 
         if not all_klines:
             return pd.DataFrame()
 
-        # Parse klines into DataFrame
         df = pd.DataFrame(
             all_klines,
             columns=[
@@ -182,34 +564,30 @@ class DataCollector:
             ],
         )
 
-        # Keep only needed columns
         df = df[["open_time", "open", "high", "low", "close", "volume"]]
 
-        # Convert types
-        df["open"] = df["open"].astype(float)
-        df["high"] = df["high"].astype(float)
-        df["low"] = df["low"].astype(float)
-        df["close"] = df["close"].astype(float)
-        df["volume"] = df["volume"].astype(float)
+        for col in ["open", "high", "low", "close", "volume"]:
+            df[col] = df[col].astype(float)
 
-        # Convert timestamp to DatetimeIndex
         df["timestamp"] = df["open_time"]
         df = df.set_index(pd.to_datetime(df["open_time"], unit="ms"))
         df = df.drop(columns=["open_time"])
 
-        # Remove duplicates
         df = df[~df.index.duplicated(keep="first")]
         df = df.sort_index()
 
         return df
 
+    # ================================================================
+    # CCXT (Universal fallback — requires ccxt package)
+    # ================================================================
     def _fetch_ccxt(
         self,
         symbol: str,
         timeframe: str = "1h",
         days: int = 365,
     ) -> pd.DataFrame:
-        """Fetch data using ccxt library (optional, for non-Binance exchanges)."""
+        """Fetch data using ccxt library (optional, for any exchange)."""
         if self._ccxt_exchange is None:
             raise RuntimeError("ccxt exchange not initialized")
 
@@ -235,6 +613,9 @@ class DataCollector:
         df = df[~df.index.duplicated(keep="first")]
         return df.sort_index()
 
+    # ================================================================
+    # CSV Import (offline)
+    # ================================================================
     def import_csv(
         self,
         symbol: str,
@@ -246,23 +627,14 @@ class DataCollector:
 
         The CSV must have columns: timestamp (or date), open, high, low, close, volume.
         Timestamp can be unix milliseconds or ISO 8601 format.
-
-        Args:
-            symbol: Trading pair to assign this data to
-            timeframe: Candle timeframe
-            csv_path: Path to the CSV file
         """
         if not os.path.exists(csv_path):
             raise FileNotFoundError(f"CSV not found: {csv_path}")
 
         df = pd.read_csv(csv_path)
-
-        # Standardize column names (case-insensitive)
         df.columns = [c.strip().lower() for c in df.columns]
 
-        # Handle timestamp column
         if "timestamp" in df.columns:
-            # Try unix ms first
             try:
                 df["ts"] = pd.to_datetime(df["timestamp"], unit="ms")
             except (ValueError, OverflowError):
@@ -272,12 +644,10 @@ class DataCollector:
         elif "datetime" in df.columns:
             df["ts"] = pd.to_datetime(df["datetime"])
         else:
-            # Use first column as timestamp
             df["ts"] = pd.to_datetime(df.iloc[:, 0])
 
         df = df.set_index("ts")
 
-        # Ensure required columns exist
         required = ["open", "high", "low", "close", "volume"]
         for col in required:
             if col not in df.columns:
@@ -290,15 +660,17 @@ class DataCollector:
         df = df[~df.index.duplicated(keep="first")]
         df = df.sort_index()
 
-        # Save to storage
         if self.storage:
             self.storage.save_ohlcv(symbol, timeframe, df)
 
         return df
 
+    # ================================================================
+    # Utilities
+    # ================================================================
     @staticmethod
     def _timeframe_to_ms(timeframe: str) -> int:
-        """Convert Binance timeframe string to milliseconds."""
+        """Convert timeframe string to milliseconds."""
         units = {"m": 60_000, "h": 3_600_000, "d": 86_400_000, "w": 604_800_000}
         for suffix, ms in units.items():
             if timeframe.endswith(suffix):
