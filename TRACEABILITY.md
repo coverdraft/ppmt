@@ -1,4 +1,4 @@
-# PPMT v0.12.0 — TRACEABILITY DOCUMENT
+# PPMT v0.13.0 — TRACEABILITY DOCUMENT
 
 > Last updated: 2026-06-14
 > Data source: Bybit 12 tokens (BTC, ETH, SOL, BNB, XRP, ADA, LINK, UNI, ATOM, DOGE, SHIB, PEPE) 1h (14,400 real candles each) + 5m (57,600 candles) + 1m (288,000 candles)
@@ -2021,3 +2021,97 @@ During this work, we verified that several previously-pending tasks are already 
 | Auto-detect CSV format | Most users don't know their CSV format; auto-detection removes friction |
 | `--validate` is opt-in | Validation adds processing time; not needed for trusted data sources |
 | `--merge` preserves existing data | Safe default — don't overwrite data that may be from a different source |
+
+---
+
+## 25. PPMT Strategy Terminal Dashboard (v0.13.0)
+
+### Feature: Web Dashboard for Strategy Lifecycle Management
+
+A full-featured web dashboard built with **Next.js 16 + TypeScript + Tailwind CSS 4 + shadcn/ui + Recharts + Zustand + Framer Motion** running on `localhost:3000`.
+
+The dashboard implements the **Strategy Lifecycle Pipeline** concept:
+
+```
+Create Strategy → Backtest → Paper Trading → Forward Test → Live Trading
+    (draft)     (backtesting) (paper_trading) (forward_testing)   (live)
+```
+
+Each strategy has: PnL, WinRate, Sharpe, Drawdown, Status, Capital Allocated, and a **[Deploy]** button that promotes it to the next lifecycle stage.
+
+### Architecture
+
+| Layer | Technology | Description |
+|-------|-----------|-------------|
+| Frontend | Next.js 16 App Router + React 19 | Server-side rendering, API routes |
+| State | Zustand (`ppmt-strategy-store`) | Global state for strategies, UI, actions |
+| Charts | Recharts | Equity curve area charts |
+| Animation | Framer Motion | Sidebar collapse, card transitions |
+| UI Kit | shadcn/ui + Radix | Dialog, Button, Badge, etc. |
+| Database | Prisma ORM + SQLite | `ppmt_strategies` + `ppmt_strategy_runs` tables |
+| Backend | Next.js API Routes | CRUD, Deploy, Run (Python bridge) |
+| Python Bridge | `child_process.execSync` | Executes PPMT `PaperTrader` via Python |
+
+### Dashboard Tabs
+
+| Tab | Component | Description |
+|-----|-----------|-------------|
+| Overview | `overview-tab.tsx` | Portfolio stats, lifecycle pipeline, best performer equity curve |
+| Strategies | `strategies-tab.tsx` | Strategy cards with filter/search, Create dialog, detail view |
+| Trie Explorer | `trie-explorer-tab.tsx` | Per-symbol trie statistics from PPMT DB |
+| Token Profiles | `profiles-tab.tsx` | Asset class risk profiles, timeframe defaults, active profiles |
+| Data Import | `data-import-tab.tsx` | CSV import (Binance/CDD/Generic), bulk ingest |
+| Settings | `settings-tab.tsx` | PPMT engine status, Python/DB connection info |
+
+### API Routes
+
+| Route | Method | Description |
+|-------|--------|-------------|
+| `/api/strategies` | GET | List all strategies with runs |
+| `/api/strategies` | POST | Create new strategy |
+| `/api/strategies/[id]` | DELETE | Delete strategy |
+| `/api/strategies/[id]/deploy` | POST | Promote to next lifecycle stage |
+| `/api/strategies/[id]/run` | POST | Execute PaperTrader via Python |
+
+### Database Schema
+
+**PPMTStrategy**: id, symbol, timeframe, assetClass, status, saxAlpha, saxWindow, catastrophicLossPct, fuzzyThreshold, totalPnl, totalPnlPct, winRate, sharpeRatio, maxDrawdown, profitFactor, totalTrades, capitalAllocated, patternCount, trieLevel, initialCapital, patternLength, minConfidence, livingTrie, regimeAware, pruningInterval, recalibrationInterval
+
+**PPMTStrategyRun**: id, strategyId, runType, status, totalPnl, totalPnlPct, winRate, sharpeRatio, maxDrawdown, profitFactor, totalTrades, winningTrades, losingTrades, candlesProcessed, recalibrations, pruningRuns, equityCurve (JSON), tradesJson (JSON)
+
+### Files Created/Modified (v0.13.0)
+
+| File | Description |
+|------|-------------|
+| `src/app/page.tsx` | PPMT Dashboard main page (replaced crypto dashboard) |
+| `src/store/ppmt-strategy-store.ts` | Zustand store: strategies CRUD, deploy, run, UI state |
+| `src/components/ppmt/sidebar.tsx` | Animated sidebar with nav items and status |
+| `src/components/ppmt/overview-tab.tsx` | Portfolio overview with stats, pipeline, equity |
+| `src/components/ppmt/strategies-tab.tsx` | Strategy list with filter/search/detail |
+| `src/components/ppmt/strategy-card.tsx` | Strategy card with metrics, Deploy button |
+| `src/components/ppmt/strategy-detail.tsx` | Full strategy detail: metrics, config, runs, trades |
+| `src/components/ppmt/create-strategy-dialog.tsx` | Create strategy dialog with advanced settings |
+| `src/components/ppmt/lifecycle-pipeline.tsx` | Visual pipeline: Draft → Backtest → Paper → Forward → Live |
+| `src/components/ppmt/equity-curve-chart.tsx` | Recharts area chart for equity curves |
+| `src/components/ppmt/trie-explorer-tab.tsx` | Trie statistics per symbol from PPMT DB |
+| `src/components/ppmt/profiles-tab.tsx` | Token profile management and reference |
+| `src/components/ppmt/data-import-tab.tsx` | CSV import with multi-format support |
+| `src/components/ppmt/settings-tab.tsx` | PPMT engine status and configuration |
+| `src/app/api/strategies/route.ts` | GET/POST strategies with demo seeding |
+| `src/app/api/strategies/[id]/route.ts` | DELETE strategy |
+| `src/app/api/strategies/[id]/deploy/route.ts` | Promote lifecycle stage |
+| `src/app/api/strategies/[id]/run/route.ts` | Execute Python PaperTrader |
+| `src/app/api/strategies/[id]/runs/route.ts` | List strategy runs |
+| `prisma/schema.prisma` | Added PPMTStrategy + PPMTStrategyRun models |
+
+### Design Decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| Dark terminal theme (zinc-950 base) | Bloomberg/TradingView aesthetic for trading |
+| No fake data on runs | If Python unavailable, run fails honestly — no simulation |
+| Deploy = promote status | Clean lifecycle progression with audit trail |
+| Demo strategies on empty DB | Shows the UI with realistic examples immediately |
+| `execSync` for Python bridge | Simple, synchronous — PaperTrader runs complete in <5 min |
+| Recharts for equity curve | Lightweight, React-native charting with gradient fills |
+| SQLite via Prisma | Zero-config DB, matches PPMT Python SQLite approach |
