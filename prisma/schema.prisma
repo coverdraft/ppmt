@@ -1512,3 +1512,90 @@ model RiskBudget {
 
   @@map("risk_budgets")
 }
+
+// ============================================================
+// PPMT STRATEGY LIFECYCLE
+// ============================================================
+
+model PPMTStrategy {
+  id            String   @id @default(cuid())
+  symbol        String   // e.g., "BTC/USDT"
+  timeframe     String   // e.g., "1h", "5m", "1m"
+  assetClass    String   @map("asset_class") // blue_chip, large_cap, defi, meme, new_launch
+  status        String   @default("draft") // draft, backtesting, paper_trading, forward_testing, live
+
+  // TokenProfile params
+  saxAlpha      Int      @default(3) @map("sax_alpha")
+  saxWindow     Int      @default(7) @map("sax_window")
+  catastrophicLossPct Float @default(8.0) @map("catastrophic_loss_pct")
+  fuzzyThreshold Float  @default(0.80) @map("fuzzy_threshold")
+
+  // Performance metrics
+  totalPnl      Float    @default(0) @map("total_pnl")
+  totalPnlPct   Float    @default(0) @map("total_pnl_pct")
+  winRate       Float    @default(0) @map("win_rate")
+  sharpeRatio   Float    @default(0) @map("sharpe_ratio")
+  maxDrawdown   Float    @default(0) @map("max_drawdown")
+  profitFactor  Float    @default(0) @map("profit_factor")
+  totalTrades   Int      @default(0) @map("total_trades")
+
+  // Capital
+  capitalAllocated Float @default(0) @map("capital_allocated")
+
+  // Trie info
+  patternCount  Int      @default(0) @map("pattern_count")
+  trieLevel     String   @default("n3") @map("trie_level")
+
+  // Config
+  initialCapital Float  @default(10000) @map("initial_capital")
+  patternLength Int      @default(5) @map("pattern_length")
+  minConfidence Float    @default(0.20) @map("min_confidence")
+  livingTrie    Boolean  @default(true) @map("living_trie")
+  regimeAware   Boolean  @default(true) @map("regime_aware")
+  pruningInterval Int    @default(1000) @map("pruning_interval")
+  recalibrationInterval Int @default(0) @map("recalibration_interval")
+
+  // Metadata
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+  lastRunAt     DateTime? @map("last_run_at")
+
+  // Relations
+  runs          PPMTStrategyRun[]
+
+  @@map("ppmt_strategies")
+}
+
+model PPMTStrategyRun {
+  id            String   @id @default(cuid())
+  strategyId    String   @map("strategy_id")
+  runType       String   @map("run_type") // backtest, paper_trading, forward_test, live
+  status        String   @default("running") // running, completed, failed
+
+  // Results
+  totalPnl      Float    @default(0) @map("total_pnl")
+  totalPnlPct   Float    @default(0) @map("total_pnl_pct")
+  winRate       Float    @default(0) @map("win_rate")
+  sharpeRatio   Float    @default(0) @map("sharpe_ratio")
+  maxDrawdown   Float    @default(0) @map("max_drawdown")
+  profitFactor  Float    @default(0) @map("profit_factor")
+  totalTrades   Int      @default(0) @map("total_trades")
+  winningTrades Int      @default(0) @map("winning_trades")
+  losingTrades  Int      @default(0) @map("losing_trades")
+
+  // Run details
+  candlesProcessed Int   @default(0) @map("candles_processed")
+  recalibrations Int     @default(0)
+  pruningRuns   Int      @default(0) @map("pruning_runs")
+
+  // Data
+  equityCurve   String?  @map("equity_curve") // JSON array
+  tradesJson    String?  @map("trades_json") // JSON array
+
+  startedAt     DateTime @default(now()) @map("started_at")
+  completedAt   DateTime? @map("completed_at")
+
+  strategy      PPMTStrategy @relation(fields: [strategyId], references: [id])
+
+  @@map("ppmt_strategy_runs")
+}
