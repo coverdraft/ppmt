@@ -683,11 +683,31 @@ class PaperTrader:
         # ================================================================
         token_profile = None
         if cfg.use_token_profile:
-            token_profile = TokenProfile.from_timeframe(
-                symbol=cfg.symbol,
-                asset_class=info.asset_class,
-                timeframe=cfg.timeframe,
-            )
+            # v0.11.0: Try to load a previously saved calibrated profile
+            # This skips the expensive TradingCalibrationEngine grid search
+            # when a profile was already calibrated in a previous run.
+            saved_profile_dict = storage.load_token_profile(cfg.symbol, cfg.timeframe)
+
+            if saved_profile_dict is not None:
+                try:
+                    token_profile = TokenProfile.from_dict(saved_profile_dict)
+                    console.print(f"[bold green]TokenProfile restored from storage:[/bold green] "
+                                  f"{token_profile.asset_class} @ {cfg.timeframe} → "
+                                  f"alpha={token_profile.sax_alphabet_size}, "
+                                  f"window={token_profile.sax_window_size}, "
+                                  f"calibrated={token_profile.calibration_date}, "
+                                  f"changes={token_profile.profile_changes}")
+                except Exception as e:
+                    console.print(f"[yellow]Saved profile corrupt ({e}) — creating fresh[/yellow]")
+                    token_profile = None
+
+            if token_profile is None:
+                token_profile = TokenProfile.from_timeframe(
+                    symbol=cfg.symbol,
+                    asset_class=info.asset_class,
+                    timeframe=cfg.timeframe,
+                )
+
             # Override SAX params from profile (unless explicitly set)
             if cfg.sax_alphabet_size == 0:
                 cfg.sax_alphabet_size = token_profile.sax_alphabet_size
@@ -712,8 +732,23 @@ class PaperTrader:
             # the generic timeframe defaults. This fixes the structural
             # bias of the old CalibrationEngine (always α=3/W=5) by
             # selecting based on actual trading PnL.
+            #
+            # v0.11.0: Skip calibration if a profile was already restored
+            # from storage (calibration_date is set). This saves significant
+            # startup time on subsequent runs. The recalibration_interval
+            # mechanism handles periodic re-verification during trading.
             # ================================================================
-            if cfg.auto_calibrate and len(df) >= 1000:
+            profile_already_calibrated = (
+                token_profile.calibration_date != ""
+                and token_profile.calibration_metric > 0
+            )
+            if profile_already_calibrated:
+                console.print(f"[green]Profile already calibrated on "
+                              f"{token_profile.calibration_date} "
+                              f"(metric={token_profile.calibration_metric:.4f}, "
+                              f"changes={token_profile.profile_changes}) — "
+                              f"skipping calibration[/green]")
+            elif cfg.auto_calibrate and len(df) >= 1000:
                 console.print(f"[bold cyan]Auto-calibrating α/W...[/bold cyan] "
                               f"({len(df)} candles, this may take a moment)")
                 try:
@@ -771,9 +806,16 @@ class PaperTrader:
                 except Exception as e:
                     console.print(f"[yellow]Calibration failed: {e} — "
                                   f"using default α/W[/yellow]")
-            elif cfg.auto_calibrate and len(df) < 1000:
-                console.print(f"[yellow]Insufficient data for calibration "
-                              f"({len(df)} < 1000 candles) — using defaults[/yellow]")
+
+            # v0.11.0: Save calibrated profile to storage for next run
+            if token_profile is not None and token_profile.calibration_date:
+                try:
+                    storage.save_token_profile(cfg.symbol, cfg.timeframe, token_profile.to_dict())
+                    console.print(f"[dim]  TokenProfile saved to storage "
+                                  f"(α={token_profile.sax_alphabet_size}, "
+                                  f"W={token_profile.sax_window_size})[/dim]")
+                except Exception as e:
+                    console.print(f"[dim]  Failed to save profile: {e}[/dim]")
         else:
             # Fallback: use timeframe alpha defaults even without full profile
             if cfg.sax_alphabet_size == 0 or cfg.sax_window_size == 0:
@@ -1908,6 +1950,12 @@ class PaperTrader:
 
                             # Still update profile metadata even if params didn't change
                             token_profile.last_recalibration = last_candle_idx
+
+                        # v0.11.0: Save updated profile to storage after recalibration
+                        try:
+                            storage.save_token_profile(cfg.symbol, cfg.timeframe, token_profile.to_dict())
+                        except Exception:
+                            pass  # Non-critical — don't disrupt trading
 
                         result.recalibrations += 1
                         result.recalibration_details.append(recal_detail)

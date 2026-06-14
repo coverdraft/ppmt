@@ -837,9 +837,10 @@ The SHORT confidence gate now uses the TokenProfile's `short_confidence_multipli
 9. ~~**Re-enable catastrophic_loss_pct**~~ — ✅ DONE (Section 14). Asset-class-specific from TokenProfile.
 10. ~~**1m WF validation for DOGE/LINK**~~ — ✅ DONE (Section 13). 4/4 consistent, WF/OOS 2.64x-4.56x.
 11. ~~**Fuzzy pattern break**~~ — ✅ DONE (Section 16). FuzzyMatcher.check_continuation() for graduated exits.
-12. **Living recalibration** — auto-re-calibrate every N new candles
-13. **Paper trading in live** — run PaperTrader on real-time data with TokenProfile
-14. **Multi-token paper trading** — run PaperTrader on multiple tokens simultaneously
+12. ~~**Living recalibration**~~ — ✅ DONE (Section 22). recalibration_interval fully implemented, rebuilds SAX+tries on α/W change.
+13. **Calibrated profile persistence** — save/load TokenProfile to storage for next run
+14. **Paper trading in live** — run PaperTrader on real-time data with TokenProfile
+15. **Multi-token paper trading** — run PaperTrader on multiple tokens simultaneously
 
 ---
 
@@ -1217,8 +1218,8 @@ All 12 tokens maintain WF consistency. Average WF PnL decreased (pre: 1093.8% �
 
 - [ ] Re-run 1m validation for SOL/DOGE/LINK when 200-day data becomes available (alternative exchange or CSV import)
 - [ ] Consider implementing CSV import from CryptoDataDownload for historical 1m data
-- [ ] Investigate why calibration still converges to alpha=3/window=5 (structural bias)
-- [ ] TokenProfile integration into paper_trader.py (per-token α/W from trading calibration)
+- [x] ~~Investigate why calibration still converges to alpha=3/window=5 (structural bias)~~ — DONE (Section 19, TradingCalibrationEngine)
+- [x] ~~TokenProfile integration into paper_trader.py (per-token α/W from trading calibration)~~ — DONE (Section 20 + 22)
 
 ### Files Added (This Session)
 
@@ -1349,8 +1350,8 @@ ETH/USDT at 1h with α=5/W=10 shows only +34.6% PnL (lowest). This may indicate:
 ### Action Items
 
 - [ ] Run low TF validation (5m + 1m) with TradingCalibrationEngine
-- [ ] Consider dynamic SL/TP per asset class in TradingCalibrationEngine
-- [ ] Integrate TradingCalibrationEngine into paper_trader.py for live recalibration
+- [x] ~~Consider dynamic SL/TP per asset class in TradingCalibrationEngine~~ — DONE (Section 19, ASSET_CLASS_SL_TP)
+- [x] ~~Integrate TradingCalibrationEngine into paper_trader.py for live recalibration~~ — DONE (Section 20 + 22)
 - [ ] Investigate ETH low performance at α=5/W=10
 
 ---
@@ -1478,9 +1479,9 @@ versions — the calibration is a rough proxy, not a perfect predictor.
 
 - [ ] Improve calibration-to-OOS correlation (ETH gap = 78 percentage points)
 - [ ] Consider walk-forward within calibration (currently single 70/30 split)
-- [x] TokenProfile integration: pass calibrated α/W into paper_trader.py for live recalibration
-- [ ] Node pruning/cleanup mechanism for stale trie branches
-- [ ] Re-enable catastrophic_loss_pct risk management
+- [x] ~~TokenProfile integration: pass calibrated α/W into paper_trader.py for live recalibration~~ — DONE (Section 20 + 22)
+- [x] ~~Node pruning/cleanup mechanism for stale trie branches~~ — DONE (Section 21)
+- [x] ~~Re-enable catastrophic_loss_pct risk management~~ — DONE (Section 14, asset-class-specific from TokenProfile)
 - [ ] BlockLifecycleMetadata regime field for market regime tracking
 - [ ] CSV import for historical 1m data (SOL/DOGE/LINK from CryptoDataDownload)
 
@@ -1579,11 +1580,11 @@ engine = PPMT(sax_alphabet_size=cal_alpha, sax_window_size=cal_window, ...)
 
 ### Action Items (Post TokenProfile Integration)
 
-- [ ] Implement `recalibration_interval` logic (periodic re-calibration during trading)
-- [ ] Add calibrated profile persistence (save to storage for next run)
+- [x] ~~Implement `recalibration_interval` logic (periodic re-calibration during trading)~~ — DONE (Section 22, v0.11.0)
+- [x] ~~Add calibrated profile persistence (save to storage for next run)~~ — DONE (Section 23, v0.11.0)
 - [ ] Test recalibration with regime changes (does α/W actually change?)
-- [x] Node pruning/cleanup mechanism for stale trie branches
-- [ ] Re-enable catastrophic_loss_pct risk management
+- [x] ~~Node pruning/cleanup mechanism for stale trie branches~~ — DONE (Section 21)
+- [x] ~~Re-enable catastrophic_loss_pct risk management~~ — DONE (Section 14)
 - [ ] BlockLifecycleMetadata regime field for market regime tracking
 - [ ] CSV import for historical 1m data
 
@@ -1814,3 +1815,61 @@ print(f"Recalibrations: {result.recalibrations}")
 for detail in result.recalibration_details:
     print(f"  @ candle {detail['candle_idx']}: α={detail['alpha_before']}→{detail['alpha_after']}")
 ```
+
+---
+
+## 23. Calibrated Profile Persistence (v0.11.0)
+
+### Problem: Re-calibrating on Every Startup
+
+Every PaperTrader run re-executed `TradingCalibrationEngine` on startup, even when
+the same token was traded before with an already-calibrated profile. The grid search
+(9 α×W combos × mini-backtests) is expensive — on 14,400 candles it takes seconds,
+and on 288,000 1m candles it can take minutes. This was wasted work when the previous
+calibration was still valid.
+
+### Solution: Save/Load TokenProfile from Storage
+
+Three changes enable profile persistence:
+
+1. **`PPMTStorage.save_token_profile()` / `load_token_profile()`** — New methods that
+   store the serialized TokenProfile in the `engine_states` table using a compound
+   key `symbol:timeframe:profile`. This reuses existing infrastructure instead of
+   adding a new table.
+
+2. **`TokenProfile.from_dict()`** — New classmethod that reconstructs a TokenProfile
+   from a serialized dictionary. Validates fields against the dataclass definition
+   to avoid errors from unknown keys.
+
+3. **PaperTrader startup flow** — On startup, tries `storage.load_token_profile()` first.
+   If a calibrated profile exists (has `calibration_date` and `calibration_metric > 0`),
+   skips the expensive `TradingCalibrationEngine` grid search entirely. The
+   `recalibration_interval` mechanism handles periodic re-verification during trading.
+
+```python
+# v0.11.0: Startup flow
+saved_profile_dict = storage.load_token_profile(cfg.symbol, cfg.timeframe)
+if saved_profile_dict is not None:
+    token_profile = TokenProfile.from_dict(saved_profile_dict)  # Skip calibration
+else:
+    token_profile = TokenProfile.from_timeframe(...)  # Default → calibrate
+
+# After calibration (initial or recalibration):
+storage.save_token_profile(cfg.symbol, cfg.timeframe, token_profile.to_dict())
+```
+
+### Performance Impact
+
+| Scenario | Before v0.11.0 | After v0.11.0 |
+|----------|----------------|----------------|
+| First run (no saved profile) | Calibrate (seconds-minutes) | Calibrate (same) |
+| Second run (profile saved) | Re-calibrate (seconds-minutes) | Load from storage (<1ms) |
+| Run with recalibration_interval | N/A | Calibrate once, re-verify during trading |
+
+### Files Modified (v0.11.0 Profile Persistence)
+
+| File | Change |
+|------|--------|
+| `src/ppmt/core/profiles.py` | Added `TokenProfile.from_dict()` classmethod for deserialization |
+| `src/ppmt/data/storage.py` | Added `save_token_profile()`, `load_token_profile()` methods |
+| `src/ppmt/engine/paper_trader.py` | Load saved profile on startup; skip calibration if already calibrated; save profile after calibration and recalibration |

@@ -443,3 +443,62 @@ class PPMTStorage:
 
     def __del__(self):
         self.close()
+
+    # === TokenProfile Persistence ===
+
+    def save_token_profile(self, symbol: str, timeframe: str, profile_dict: dict) -> None:
+        """
+        Save a calibrated TokenProfile to the database.
+
+        v0.11.0: Persists calibrated α/W and all profile parameters so the next
+        run doesn't need to re-calibrate from scratch. The profile is stored
+        in the engine_states table with a compound key 'symbol:timeframe:profile'.
+
+        Args:
+            symbol: Trading pair (e.g., 'BTC/USDT')
+            timeframe: Candle timeframe (e.g., '1h')
+            profile_dict: Serialized TokenProfile (from TokenProfile.to_dict())
+        """
+        key = f"{symbol}:{timeframe}:profile"
+        data = json.dumps(profile_dict, default=str)
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """INSERT INTO engine_states (symbol, data, updated_at)
+               VALUES (?, ?, datetime('now'))
+               ON CONFLICT(symbol) DO UPDATE SET
+                   data=excluded.data,
+                   updated_at=datetime('now')""",
+            (key, data),
+        )
+        self.conn.commit()
+
+    def load_token_profile(self, symbol: str, timeframe: str) -> Optional[dict]:
+        """
+        Load a saved TokenProfile from the database.
+
+        v0.11.0: Returns the serialized profile dict if a calibrated profile
+        was previously saved, or None if no profile exists for this
+        symbol+timeframe combination. The caller can use this to skip
+        calibration and go straight to trading.
+
+        Args:
+            symbol: Trading pair (e.g., 'BTC/USDT')
+            timeframe: Candle timeframe (e.g., '1h')
+
+        Returns:
+            Dict with TokenProfile fields, or None if not found.
+        """
+        key = f"{symbol}:{timeframe}:profile"
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT data FROM engine_states WHERE symbol = ?",
+            (key,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+
+        try:
+            return json.loads(row[0])
+        except json.JSONDecodeError:
+            return None

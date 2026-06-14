@@ -259,6 +259,25 @@ class TokenProfile:
             "profile_changes": self.profile_changes,
         }
 
+    @classmethod
+    def from_dict(cls, data: dict) -> TokenProfile:
+        """Reconstruct a TokenProfile from a serialized dictionary.
+
+        v0.11.0: Enables loading a previously calibrated profile from storage,
+        skipping the expensive TradingCalibrationEngine grid search on startup.
+
+        Args:
+            data: Dict from TokenProfile.to_dict()
+
+        Returns:
+            TokenProfile with all fields restored from the dict.
+        """
+        # Only pass fields that are actual dataclass fields
+        from dataclasses import fields
+        valid_fields = {f.name for f in fields(cls)}
+        filtered = {k: v for k, v in data.items() if k in valid_fields}
+        return cls(**filtered)
+
 
 @dataclass
 class CalibrationResult:
