@@ -972,6 +972,30 @@ def terminal(host: str, port: int, open_browser: bool, lite: bool):
                         console.print(f"[yellow]Prisma setup skipped: {e}[/yellow]")
 
                 console.print(f"  [green]Found Next.js dashboard at {repo_root}[/green]")
+
+                # Check if port is already in use and kill it
+                import subprocess as _sp
+                try:
+                    check = _sp.run(
+                        ["lsof", "-ti", f":{port}"],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    if check.returncode == 0 and check.stdout.strip():
+                        pids = check.stdout.strip().split('\n')
+                        console.print(f"  [yellow]Port {port} in use by PID(s): {', '.join(pids)}. Killing...[/yellow]")
+                        for pid in pids:
+                            try:
+                                _sp.run(["kill", "-9", pid], capture_output=True, timeout=5)
+                            except Exception:
+                                pass
+                        import time as _time
+                        _time.sleep(1)
+                        console.print(f"  [green]Port {port} freed.[/green]")
+                except FileNotFoundError:
+                    pass  # lsof not available on this OS
+                except Exception:
+                    pass
+
                 console.print(f"  Starting on http://localhost:{port}")
 
                 if open_browser:
