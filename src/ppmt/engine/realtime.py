@@ -980,13 +980,397 @@ class RealtimeTrader:
             except Exception:
                 pass
 
+    async def process_new_candle(
+        self,
+        candle,
+        cfg,
+        sax_encoder,
+        pred_engine,
+        risk_mgr,
+        trie,
+        ppmt_engine,
+        fuzzy_matcher,
+        token_profile,
+        info,
+        result,
+        sax_buffer: list,
+        pattern_buffer: list,
+        position_state: PositionState,
+        current_position,
+        trade_counter: int,
+        regime_detector,
+        current_regime: str,
+        recent_prices: list,
+        recent_highs: list,
+        recent_lows: list,
+        peak_capital: float,
+        last_losing_trade_idx: int = -999,
+        exchange=None,
+    ) -> tuple:
+        """
+        Process a single closed candle through the full PPMT pipeline.
+
+        This is the core streaming pipeline:
+          Candle → SAX encode → Pattern buffer → Match → Signal → Risk → Position
+
+        Shared between run_replay(), run_live(), and external callers.
+        Returns updated state tuple for functional-style state management.
+
+        Args:
+            candle: Candle object from WebSocketFeed or replay
+            cfg: LiveConfig or ReplayConfig
+            sax_encoder: SAXEncoder instance
+            pred_engine: PredictionEngine instance
+            risk_mgr: RiskManager instance
+            trie: PPMTTrie (N3 level)
+            ppmt_engine: PPMT engine (4-level, or None)
+            fuzzy_matcher: FuzzyMatcher instance
+            token_profile: TokenProfile or None
+            info: AssetClassification
+            result: RealtimeResult to update
+            sax_buffer: Current SAX partial window buffer
+            pattern_buffer: Current SAX symbol pattern
+            position_state: Current PositionState
+            current_position: Current RealtimeTrade or None
+            trade_counter: Trade counter
+            regime_detector: RegimeDetector or None
+            current_regime: Current regime string
+            recent_prices: Rolling price list for ATR
+            recent_highs: Rolling high list
+            recent_lows: Rolling low list
+            peak_capital: Peak capital for drawdown
+            last_losing_trade_idx: Last losing trade symbol index
+            exchange: ccxt exchange for order execution (or None)
+
+        Returns:
+            (sax_buffer, pattern_buffer, position_state, current_position,
+             trade_counter, current_regime, peak_capital, last_losing_trade_idx)
+        """
+        current_price = candle.close
+        current_high = candle.high
+        current_low = candle.low
+        current_time = str(candle.timestamp)
+
+        # Update ATR tracking
+        recent_prices.append(current_price)
+        recent_highs.append(current_high)
+        recent_lows.append(current_low)
+        if len(recent_prices) > 50:
+            del recent_prices[:-50]
+            del recent_highs[:-50]
+            del recent_lows[:-50]
+
+        # Incremental SAX encoding: feed one candle at a time
+        single_df = candle.to_dataframe_row()
+        new_symbols, sax_buffer = sax_encoder.encode_incremental(single_df, sax_buffer)
+
+        if new_symbols:
+            for new_sym in new_symbols:
+                pattern_buffer.append(new_sym)
+                result.sax_symbols_produced += 1
+                if len(pattern_buffer) > cfg.pattern_length * 2:
+                    del pattern_buffer[:len(pattern_buffer) - cfg.pattern_length * 2]
+
+            # Regime detection
+            if regime_detector is not None and len(recent_prices) >= 50:
+                regime_info = regime_detector.detect_detailed(np.array(recent_prices))
+                current_regime = regime_info.regime
+
+            # === POSITION MANAGEMENT ===
+            if position_state != PositionState.FLAT and current_position is not None:
+                pos = risk_mgr._positions.get(cfg.symbol)
+                if pos is not None:
+                    # Catastrophic loss check
+                    if cfg.catastrophic_loss_pct > 0:
+                        if pos.direction == "LONG":
+                            unrealized_loss = (pos.entry_price - current_price) / pos.entry_price * 100
+                        else:
+                            unrealized_loss = (current_price - pos.entry_price) / pos.entry_price * 100
+                        if unrealized_loss >= cfg.catastrophic_loss_pct:
+                            self._close_trade(risk_mgr, current_position, current_price,
+                                              current_time, "catastrophic_stop", result)
+                            position_state = PositionState.FLAT
+                            current_position = None
+                            return (sax_buffer, pattern_buffer, position_state, current_position,
+                                    trade_counter, current_regime, peak_capital, last_losing_trade_idx)
+
+                    # Trailing stop update
+                    if pos.tp_price is not None:
+                        entry = pos.entry_price
+                        if pos.direction == "LONG":
+                            unrealized_pct = (current_price - entry) / entry * 100
+                            tp_distance_pct = (pos.tp_price - entry) / entry * 100
+                        else:
+                            unrealized_pct = (entry - current_price) / entry * 100
+                            tp_distance_pct = (entry - pos.tp_price) / entry * 100
+
+                        if (not getattr(current_position, 'trailing_activated', False)
+                                and tp_distance_pct > 0 and unrealized_pct >= tp_distance_pct * 0.75):
+                            current_position.trailing_activated = True  # type: ignore
+
+                        if getattr(current_position, 'trailing_activated', False):
+                            current_atr = self._compute_atr_pct(
+                                np.array(recent_prices), np.array(recent_highs), np.array(recent_lows))
+                            trailing_distance = current_atr * 1.5
+                            if pos.direction == "LONG":
+                                new_sl = max(pos.sl_price, current_price * (1 - trailing_distance / 100))
+                            else:
+                                new_sl = min(pos.sl_price, current_price * (1 + trailing_distance / 100))
+                            pos.sl_price = new_sl
+
+                    # SL/TP check
+                    sl_hit = risk_mgr.check_stop_loss(cfg.symbol, current_price)
+                    tp_hit = risk_mgr.check_take_profit(cfg.symbol, current_price)
+
+                    if sl_hit:
+                        exit_reason = ("trailing_stop"
+                                       if getattr(current_position, 'trailing_activated', False)
+                                       else "stop_loss")
+                        self._close_trade(risk_mgr, current_position, current_price,
+                                          current_time, exit_reason, result)
+                        position_state = PositionState.FLAT
+                        current_position = None
+                        return (sax_buffer, pattern_buffer, position_state, current_position,
+                                trade_counter, current_regime, peak_capital, last_losing_trade_idx)
+
+                    elif tp_hit:
+                        self._close_trade(risk_mgr, current_position, current_price,
+                                          current_time, "take_profit", result)
+                        position_state = PositionState.FLAT
+                        current_position = None
+                        return (sax_buffer, pattern_buffer, position_state, current_position,
+                                trade_counter, current_regime, peak_capital, last_losing_trade_idx)
+
+            # === PATTERN MATCHING & SIGNAL GENERATION ===
+            if len(pattern_buffer) >= cfg.pattern_length and position_state == PositionState.FLAT:
+                current_symbols = pattern_buffer[-cfg.pattern_length:]
+
+                # Cooldown check
+                sym_idx = result.sax_symbols_produced
+                if (sym_idx - last_losing_trade_idx < 1 and last_losing_trade_idx >= 0):
+                    result.candles_processed += 1
+                    return (sax_buffer, pattern_buffer, position_state, current_position,
+                            trade_counter, current_regime, peak_capital, last_losing_trade_idx)
+
+                # Generate prediction
+                tf_hours = {
+                    "1m": 1/60, "5m": 5/60, "15m": 15/60,
+                    "1h": 1, "4h": 4, "1d": 24,
+                }.get(cfg.timeframe, 1)
+
+                prediction = pred_engine.predict(
+                    current_symbols=current_symbols,
+                    entry_price=current_price,
+                    timeframe_hours=tf_hours,
+                    symbol=cfg.symbol,
+                )
+
+                if prediction.direction == "FLAT" or prediction.confidence <= 0:
+                    result.candles_processed += 1
+                    return (sax_buffer, pattern_buffer, position_state, current_position,
+                            trade_counter, current_regime, peak_capital, last_losing_trade_idx)
+
+                # v0.12.0: 4-level matching
+                weighted_confidence = prediction.confidence
+                best_trie_level = "n3"
+
+                if ppmt_engine is not None:
+                    ppmt_result = ppmt_engine.match_raw(
+                        current_symbols=current_symbols,
+                        current_price=current_price,
+                    )
+                    weighted_confidence = ppmt_result.weighted_confidence
+
+                    level_confs = {
+                        "n1": ppmt_result.n1_confidence,
+                        "n2": ppmt_result.n2_confidence,
+                        "n3": ppmt_result.n3_confidence,
+                        "n4": ppmt_result.n4_confidence,
+                    }
+                    best_trie_level = max(level_confs, key=level_confs.get)
+
+                    if weighted_confidence <= 0 and prediction.confidence > 0:
+                        weighted_confidence = prediction.confidence
+                        best_trie_level = "n3"
+
+                effective_min_conf = cfg.min_confidence
+
+                # v0.12.0: TokenProfile SHORT gating
+                if prediction.direction == "SHORT":
+                    if token_profile is not None and not token_profile.short_allowed:
+                        result.candles_processed += 1
+                        return (sax_buffer, pattern_buffer, position_state, current_position,
+                                trade_counter, current_regime, peak_capital, last_losing_trade_idx)
+
+                    short_regime_mult = {
+                        "trending_down": 0.85,
+                        "ranging": 1.1,
+                        "trending_up": 1.5,
+                        "volatile": 1.8,
+                    }.get(current_regime, 1.2)
+                    effective_min_conf = max(effective_min_conf * short_regime_mult, 0.20)
+
+                    if token_profile is not None:
+                        effective_min_conf = max(
+                            effective_min_conf * token_profile.short_confidence_multiplier,
+                            effective_min_conf,
+                        )
+
+                # v0.12.0: Regime-aware confidence adjustment
+                if cfg.regime_aware and current_regime and prediction.confidence > 0:
+                    try:
+                        matched_node = trie.search(current_symbols)
+                        if matched_node and matched_node.metadata.regime_distribution:
+                            regime_adjustment = matched_node.metadata.regime_match_score(current_regime)
+                            if regime_adjustment > 0:
+                                effective_min_conf = effective_min_conf / regime_adjustment
+                    except Exception:
+                        pass
+
+                # Entry signal check
+                if (prediction.direction != "FLAT"
+                        and weighted_confidence >= effective_min_conf
+                        and abs(prediction.expected_total_move_pct) > 0.3
+                        and prediction.overall_probability > 0.20):
+
+                    result.signals_generated += 1
+
+                    # v0.12.0: Prediction-aware SL/TP
+                    expected_move_abs = abs(prediction.expected_total_move_pct)
+                    sl_distance_pct = max(min(expected_move_abs * 1.5, 5.0), 0.5)
+                    tp_distance_pct = expected_move_abs * 2.5
+                    if tp_distance_pct < sl_distance_pct * 1.5:
+                        tp_distance_pct = sl_distance_pct * 1.5
+
+                    if prediction.direction == "LONG":
+                        sl_price = current_price * (1 - sl_distance_pct / 100)
+                        tp_price = current_price * (1 + tp_distance_pct / 100)
+                    else:
+                        sl_price = current_price * (1 + sl_distance_pct / 100)
+                        tp_price = current_price * (1 - tp_distance_pct / 100)
+
+                    risk_reward = tp_distance_pct / sl_distance_pct if sl_distance_pct > 0 else 0
+
+                    # Get actual historical_count from matched node
+                    actual_historical_count = 10
+                    try:
+                        matched_node_for_sizing = trie.search(current_symbols)
+                        if matched_node_for_sizing and matched_node_for_sizing.metadata.historical_count > 0:
+                            actual_historical_count = matched_node_for_sizing.metadata.historical_count
+                    except Exception:
+                        pass
+
+                    # Create signal
+                    signal_type = (
+                        SignalType.ENTRY_LONG if prediction.direction == "LONG"
+                        else SignalType.ENTRY_SHORT
+                    )
+
+                    signal = Signal(
+                        signal_type=signal_type,
+                        confidence=weighted_confidence,
+                        symbol=cfg.symbol,
+                        entry_price=current_price,
+                        sl_price=sl_price,
+                        tp_price=tp_price,
+                        expected_move_pct=prediction.expected_total_move_pct,
+                        risk_reward_ratio=risk_reward,
+                        win_rate=prediction.overall_probability,
+                        historical_count=actual_historical_count,
+                        matched_pattern=current_symbols,
+                        trie_level=best_trie_level,
+                    )
+                    signal.quality_score = signal.compute_quality_score()
+                    signal.sizing_multiplier = signal.compute_sizing_multiplier()
+
+                    # Metadata sizing
+                    mock_meta = BlockLifecycleMetadata(
+                        win_rate=signal.win_rate,
+                        expected_move_pct=signal.expected_move_pct,
+                        max_drawdown_pct=-sl_distance_pct,
+                        historical_count=actual_historical_count,
+                    )
+                    signal.probability_of_success = mock_meta.probability_of_success
+                    signal.expected_profit_ahead = mock_meta.expected_profit_ahead
+                    signal.metadata_sizing_signal = mock_meta.sizing_signal
+
+                    # Apply regime multiplier
+                    if cfg.regime_aware and current_regime:
+                        regime_mults = {
+                            "trending_up": 1.2,
+                            "ranging": 1.0,
+                            "trending_down": 0.6,
+                            "volatile": 0.4,
+                        }
+                        regime_mult = regime_mults.get(current_regime, 1.0)
+                        signal.metadata_sizing_signal *= regime_mult
+                        signal.sizing_multiplier *= regime_mult
+
+                    # Fire signal callback
+                    if hasattr(cfg, 'on_signal') and cfg.on_signal:
+                        try:
+                            cfg.on_signal(signal, prediction)
+                        except Exception:
+                            pass
+
+                    # Risk check
+                    can_open, reason = risk_mgr.can_open(signal, info.asset_class)
+                    if can_open:
+                        size = risk_mgr.calculate_position_size(signal)
+
+                        # Execute order (only in non-dry-run with exchange)
+                        if not getattr(cfg, 'dry_run', True) and exchange is not None:
+                            try:
+                                side = 'buy' if prediction.direction == "LONG" else 'sell'
+                                order = await exchange.create_order(
+                                    cfg.symbol, 'market', side, size
+                                )
+                                console.print(f"[green]Order executed: {side} {size} {cfg.symbol}[/green]")
+                            except Exception as e:
+                                console.print(f"[red]Order failed: {e}[/red]")
+                                result.candles_processed += 1
+                                return (sax_buffer, pattern_buffer, position_state, current_position,
+                                        trade_counter, current_regime, peak_capital, last_losing_trade_idx)
+
+                        position = risk_mgr.open_position(signal, size)
+
+                        current_position = RealtimeTrade(
+                            trade_id=trade_counter + 1,
+                            symbol=cfg.symbol,
+                            direction=signal.direction or "LONG",
+                            entry_price=current_price,
+                            entry_time=current_time,
+                            size=size,
+                            confidence=signal.confidence,
+                            regime=current_regime,
+                            matched_pattern=current_symbols,
+                        )
+                        current_position.sl_price = sl_price  # type: ignore
+                        current_position.tp_price = tp_price  # type: ignore
+                        current_position.trailing_activated = False  # type: ignore
+
+                        position_state = (PositionState.LONG
+                                          if prediction.direction == "LONG"
+                                          else PositionState.SHORT)
+                        trade_counter += 1
+
+        # Record equity
+        result.candles_processed += 1
+        if risk_mgr.capital > peak_capital:
+            peak_capital = risk_mgr.capital
+
+        return (sax_buffer, pattern_buffer, position_state, current_position,
+                trade_counter, current_regime, peak_capital, last_losing_trade_idx)
+
     async def run_live(self) -> RealtimeResult:
         """
-        Run live mode: connect to exchange and process candles in real-time.
+        Run live mode: connect to exchange WebSocket and process candles in real-time.
 
-        Requires ccxt (Python 3.10+). Uses the exchange's WebSocket or
-        REST polling to receive new candles and process them through
-        the PPMT pipeline.
+        v0.12.0: Now uses WebSocketFeed for true streaming instead of REST polling.
+        The pipeline is:
+          WebSocket → Candle → process_new_candle() → SAX → Match → Signal → Trade
+
+        Falls back to ccxt REST polling if websockets is not installed.
 
         Returns:
             RealtimeResult with trading statistics
@@ -995,24 +1379,17 @@ class RealtimeTrader:
             raise ValueError("run_live() requires LiveConfig")
 
         cfg = self.config
-
-        try:
-            import ccxt.async_support as ccxt_async
-        except ImportError:
-            console.print("[red]ccxt is required for live trading. Install with: pip install ccxt>=4.0.0[/red]")
-            console.print("[dim]Note: ccxt requires Python 3.10+[/dim]")
-            return RealtimeResult(mode="live", symbol=cfg.symbol, timeframe=cfg.timeframe)
-
+        start_time = time.time()
         storage = PPMTStorage()
 
         # Classify asset
         classifier = AssetClassifier()
         info = classifier.classify(cfg.symbol)
 
-        # v0.11.0: TokenProfile + auto-calibration + persistence
+        # v0.12.0: TokenProfile + auto-calibration + persistence
         token_profile, cfg = self._setup_token_profile(cfg, info, storage)
 
-        # Load tries (v0.11.0: all 4 levels)
+        # Load tries (v0.12.0: all 4 levels)
         from ppmt.engine.ppmt import PPMT
         all_tries = storage.load_all_tries(cfg.symbol)
         trie_n1 = all_tries["n1"]
@@ -1045,7 +1422,7 @@ class RealtimeTrader:
         pred_engine = PredictionEngine(trie, prediction_depth=cfg.pattern_length)
         risk_mgr = RiskManager(capital=cfg.initial_capital, config=self.risk_config)
 
-        # v0.11.0: FuzzyMatcher
+        # v0.12.0: FuzzyMatcher
         fuzzy_threshold = token_profile.fuzzy_threshold if token_profile else 0.80
         fuzzy_matcher = FuzzyMatcher(
             sax_encoder=sax_encoder,
@@ -1053,7 +1430,7 @@ class RealtimeTrader:
             max_edit_distance=2,
         )
 
-        # v0.11.0: PPMT engine for 4-level matching
+        # v0.12.0: PPMT engine for 4-level matching
         ppmt_engine = None
         if has_multi_level:
             ppmt_engine = PPMT(
@@ -1069,41 +1446,32 @@ class RealtimeTrader:
             ppmt_engine.adapt_weights()
             console.print(f"  [bold cyan]4-level matching enabled[/bold cyan]: weights={ppmt_engine.weights}")
 
-        # Connect to exchange
-        exchange_class = getattr(ccxt_async, cfg.exchange, None)
-        if exchange_class is None:
-            console.print(f"[red]Exchange '{cfg.exchange}' not found in ccxt[/red]")
-            storage.close()
-            return RealtimeResult(mode="live", symbol=cfg.symbol, timeframe=cfg.timeframe)
+        # Setup ccxt exchange for order execution (optional — only needed for real orders)
+        exchange = None
+        if not cfg.dry_run:
+            try:
+                import ccxt.async_support as ccxt_async
+                exchange_class = getattr(ccxt_async, cfg.exchange, None)
+                if exchange_class is not None:
+                    exchange_config = {}
+                    if cfg.api_key:
+                        exchange_config['apiKey'] = cfg.api_key
+                    if cfg.api_secret:
+                        exchange_config['secret'] = cfg.api_secret
+                    if cfg.testnet:
+                        exchange_config['options'] = {'defaultType': 'future'}
 
-        exchange_config = {}
-        if cfg.api_key:
-            exchange_config['apiKey'] = cfg.api_key
-        if cfg.api_secret:
-            exchange_config['secret'] = cfg.api_secret
-        if cfg.testnet:
-            exchange_config['options'] = {'defaultType': 'future'}
+                    exchange = exchange_class(exchange_config)
+                    if cfg.testnet:
+                        exchange.set_sandbox_mode(True)
+                        console.print(f"[yellow]Using {cfg.exchange} TESTNET for orders[/yellow]")
 
-        exchange = exchange_class(exchange_config)
-
-        if cfg.testnet:
-            exchange.set_sandbox_mode(True)
-            console.print(f"[yellow]Using {cfg.exchange} TESTNET[/yellow]")
-
-        try:
-            await exchange.load_markets()
-            console.print(f"[green]Connected to {cfg.exchange}[/green]")
-        except Exception as e:
-            console.print(f"[red]Failed to connect to {cfg.exchange}: {e}[/red]")
-            await exchange.close()
-            storage.close()
-            return RealtimeResult(mode="live", symbol=cfg.symbol, timeframe=cfg.timeframe)
-
-        # Timeframe to milliseconds
-        tf_ms = {
-            "1m": 60_000, "5m": 300_000, "15m": 900_000,
-            "1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000,
-        }.get(cfg.timeframe, 3_600_000)
+                    await exchange.load_markets()
+                    console.print(f"[green]Connected to {cfg.exchange} for order execution[/green]")
+            except ImportError:
+                console.print("[yellow]ccxt not installed — order execution disabled[/yellow]")
+            except Exception as e:
+                console.print(f"[yellow]Exchange connection failed: {e} — order execution disabled[/yellow]")
 
         # State
         result = RealtimeResult(
@@ -1113,289 +1481,314 @@ class RealtimeTrader:
             initial_capital=cfg.initial_capital,
             final_capital=cfg.initial_capital,
         )
+        result.equity_curve = [cfg.initial_capital]
+        result.capital_history = [cfg.initial_capital]
+
         sax_buffer = []
         pattern_buffer = []
         position_state = PositionState.FLAT
         current_position = None
         trade_counter = 0
         peak_capital = cfg.initial_capital
+        last_losing_trade_idx = -999
 
-        # Regime detection
         regime_detector = None
         current_regime = "ranging"
-        regime_info = None
         if cfg.regime_aware:
             regime_detector = RegimeDetector()
 
-        # ATR tracking
         recent_prices = []
         recent_highs = []
         recent_lows = []
 
-        # Track last candle timestamp to detect new candles
-        last_candle_ts = 0
+        # v0.12.0: Choose WebSocket or REST polling
+        use_websocket = True
+        try:
+            import websockets  # noqa: F401
+        except ImportError:
+            use_websocket = False
+            console.print("[yellow]websockets not installed — using REST polling (slower)[/yellow]")
+            console.print("[dim]Install with: pip install websockets>=12.0[/dim]")
+
+        # Warmup: how many candles to fetch before streaming?
+        # Need at least (sax_window_size + pattern_length) candles to produce first signal
+        warmup_candles = cfg.sax_window_size * 2 + cfg.pattern_length * cfg.sax_window_size
 
         console.print(f"\n[bold cyan]Starting Live Trading: {cfg.symbol} ({cfg.timeframe})[/bold cyan]")
         console.print(f"  Exchange: {cfg.exchange} ({'TESTNET' if cfg.testnet else 'MAINNET'})")
+        console.print(f"  Data Source: {'WebSocket' if use_websocket else 'REST polling'}")
         console.print(f"  Dry Run: {'YES' if cfg.dry_run else 'NO - REAL ORDERS'}")
         console.print(f"  Capital: ${cfg.initial_capital:,.2f}")
-        console.print(f"  Mode: {'PAPER (no execution)' if cfg.dry_run else 'LIVE (real execution)'}")
+        console.print(f"  Warmup: {warmup_candles} candles")
+        console.print(f"  SAX: window={cfg.sax_window_size}, alphabet={cfg.sax_alphabet_size}")
+        console.print(f"  Trie: {trie.pattern_count} patterns")
         console.print()
 
         try:
             with Live(console=console, refresh_per_second=2) as live_display:
-                while True:
+
+                if use_websocket:
+                    # === WEBSOCKET MODE (v0.12.0) ===
+                    from ppmt.data.websocket_feed import WebSocketFeed, Candle
+
+                    async def on_candle(candle: Candle):
+                        nonlocal sax_buffer, pattern_buffer, position_state
+                        nonlocal current_position, trade_counter, current_regime
+                        nonlocal peak_capital, last_losing_trade_idx
+
+                        (sax_buffer, pattern_buffer, position_state, current_position,
+                         trade_counter, current_regime, peak_capital,
+                         last_losing_trade_idx) = await self.process_new_candle(
+                            candle=candle,
+                            cfg=cfg,
+                            sax_encoder=sax_encoder,
+                            pred_engine=pred_engine,
+                            risk_mgr=risk_mgr,
+                            trie=trie,
+                            ppmt_engine=ppmt_engine,
+                            fuzzy_matcher=fuzzy_matcher,
+                            token_profile=token_profile,
+                            info=info,
+                            result=result,
+                            sax_buffer=sax_buffer,
+                            pattern_buffer=pattern_buffer,
+                            position_state=position_state,
+                            current_position=current_position,
+                            trade_counter=trade_counter,
+                            regime_detector=regime_detector,
+                            current_regime=current_regime,
+                            recent_prices=recent_prices,
+                            recent_highs=recent_highs,
+                            recent_lows=recent_lows,
+                            peak_capital=peak_capital,
+                            last_losing_trade_idx=last_losing_trade_idx,
+                            exchange=exchange,
+                        )
+
+                        # Update display
+                        _update_live_display(live_display, cfg, result, position_state,
+                                             current_position, current_regime, recent_prices,
+                                             risk_mgr)
+
+                    def on_status(status: str, msg: str):
+                        console.print(f"[dim][{status}] {msg}[/dim]")
+
+                    def on_error(error):
+                        console.print(f"[red]WebSocket error: {error}[/red]")
+
+                    feed = WebSocketFeed(
+                        symbol=cfg.symbol,
+                        timeframe=cfg.timeframe,
+                        exchange=cfg.exchange,
+                        on_candle=on_candle,
+                        on_status=on_status,
+                        on_error=on_error,
+                        testnet=cfg.testnet,
+                        warmup_candles=warmup_candles,
+                    )
+
+                    # Run until interrupted
+                    await feed.start()
+
+                else:
+                    # === REST POLLING FALLBACK (ccxt) ===
                     try:
-                        # Fetch latest OHLCV
-                        ohlcv = await exchange.fetch_ohlcv(cfg.symbol, cfg.timeframe, limit=1)
+                        import ccxt.async_support as ccxt_async
+                    except ImportError:
+                        console.print("[red]ccxt is required for REST polling. Install with: pip install ccxt>=4.0.0[/red]")
+                        storage.close()
+                        return result
 
-                        if ohlcv:
-                            candle = ohlcv[-1]
-                            candle_ts = candle[0]
-                            current_price = candle[4]  # Close price
-                            current_high = candle[2]
-                            current_low = candle[3]
+                    exchange_class = getattr(ccxt_async, cfg.exchange, None)
+                    if exchange_class is None:
+                        console.print(f"[red]Exchange '{cfg.exchange}' not found in ccxt[/red]")
+                        storage.close()
+                        return result
 
-                            # Only process if this is a new candle
-                            if candle_ts != last_candle_ts:
-                                last_candle_ts = candle_ts
+                    exchange_config = {}
+                    if cfg.api_key:
+                        exchange_config['apiKey'] = cfg.api_key
+                    if cfg.api_secret:
+                        exchange_config['secret'] = cfg.api_secret
 
-                                # Update ATR tracking
-                                recent_prices.append(current_price)
-                                recent_highs.append(current_high)
-                                recent_lows.append(current_low)
-                                if len(recent_prices) > 50:
-                                    recent_prices = recent_prices[-50:]
-                                    recent_highs = recent_highs[-50:]
-                                    recent_lows = recent_lows[-50:]
+                    poll_exchange = exchange_class(exchange_config)
+                    if cfg.testnet:
+                        poll_exchange.set_sandbox_mode(True)
 
-                                # Incremental SAX encoding
-                                # Create a single-row DataFrame for the encoder
-                                single_df = pd.DataFrame([{
-                                    'open': candle[1], 'high': candle[2],
-                                    'low': candle[3], 'close': candle[4],
-                                    'volume': candle[5]
-                                }])
-
-                                new_symbols, sax_buffer = sax_encoder.encode_incremental(single_df, sax_buffer)
-
-                                if new_symbols:
-                                    for sym in new_symbols:
-                                        pattern_buffer.append(sym)
-                                        result.sax_symbols_produced += 1
-                                        if len(pattern_buffer) > cfg.pattern_length * 2:
-                                            pattern_buffer = pattern_buffer[-(cfg.pattern_length * 2):]
-
-                                    # Regime detection
-                                    if regime_detector and len(recent_prices) >= 50:
-                                        regime_info = regime_detector.detect_detailed(np.array(recent_prices))
-                                        current_regime = regime_info.regime
-
-                                    # Position management (SL/TP checks)
-                                    if position_state != PositionState.FLAT and current_position:
-                                        pos = risk_mgr._positions.get(cfg.symbol)
-                                        if pos:
-                                            sl_hit = risk_mgr.check_stop_loss(cfg.symbol, current_price)
-                                            tp_hit = risk_mgr.check_take_profit(cfg.symbol, current_price)
-
-                                            if sl_hit or tp_hit:
-                                                reason = ("stop_loss" if sl_hit else "take_profit")
-                                                self._close_trade(risk_mgr, current_position,
-                                                                  current_price, str(candle_ts),
-                                                                  reason, result)
-                                                position_state = PositionState.FLAT
-                                                current_position = None
-
-                                    # v0.11.0: Signal generation with TokenProfile + 4-level matching
-                                    if (len(pattern_buffer) >= cfg.pattern_length
-                                            and position_state == PositionState.FLAT):
-                                        current_symbols = pattern_buffer[-cfg.pattern_length:]
-                                        prediction = pred_engine.predict(
-                                            current_symbols=current_symbols,
-                                            entry_price=current_price,
-                                            timeframe_hours=1.0,
-                                            symbol=cfg.symbol,
-                                        )
-
-                                        if prediction.direction == "FLAT" or prediction.confidence <= 0:
-                                            pass  # Skip, no signal
-                                        else:
-                                            # v0.11.0: 4-level matching
-                                            weighted_confidence = prediction.confidence
-                                            if ppmt_engine is not None:
-                                                ppmt_result = ppmt_engine.match_raw(
-                                                    current_symbols=current_symbols,
-                                                    current_price=current_price,
-                                                )
-                                                weighted_confidence = ppmt_result.weighted_confidence
-                                                if weighted_confidence <= 0 and prediction.confidence > 0:
-                                                    weighted_confidence = prediction.confidence
-
-                                            effective_min_conf = cfg.min_confidence
-
-                                            # v0.11.0: TokenProfile SHORT gating
-                                            if prediction.direction == "SHORT":
-                                                if token_profile is not None and not token_profile.short_allowed:
-                                                    pass  # Skip SHORT
-                                                else:
-                                                    short_regime_mult = {
-                                                        "trending_down": 0.85, "ranging": 1.1,
-                                                        "trending_up": 1.5, "volatile": 1.8,
-                                                    }.get(current_regime, 1.2)
-                                                    effective_min_conf = max(effective_min_conf * short_regime_mult, 0.20)
-                                                    if token_profile is not None:
-                                                        effective_min_conf = max(
-                                                            effective_min_conf * token_profile.short_confidence_multiplier,
-                                                            effective_min_conf,
-                                                        )
-
-                                            if (prediction.direction != "FLAT"
-                                                    and weighted_confidence >= effective_min_conf
-                                                    and abs(prediction.expected_total_move_pct) > 0.3
-                                                    and prediction.overall_probability > 0.20):
-
-                                                result.signals_generated += 1
-
-                                                # v0.11.0: Prediction-aware SL/TP
-                                                expected_move_abs = abs(prediction.expected_total_move_pct)
-                                                sl_distance_pct = max(min(expected_move_abs * 1.5, 5.0), 0.5)
-                                                tp_distance_pct = expected_move_abs * 2.5
-                                                if tp_distance_pct < sl_distance_pct * 1.5:
-                                                    tp_distance_pct = sl_distance_pct * 1.5
-
-                                                sl_price = current_price * (1 - sl_distance_pct / 100) if prediction.direction == "LONG" else current_price * (1 + sl_distance_pct / 100)
-                                                tp_price = current_price * (1 + tp_distance_pct / 100) if prediction.direction == "LONG" else current_price * (1 - tp_distance_pct / 100)
-
-                                                # v0.11.0: Get actual historical_count
-                                                actual_historical_count = 10
-                                                try:
-                                                    matched_node = trie.search(current_symbols)
-                                                    if matched_node and matched_node.metadata.historical_count > 0:
-                                                        actual_historical_count = matched_node.metadata.historical_count
-                                                except Exception:
-                                                    pass
-
-                                                signal_type = (SignalType.ENTRY_LONG
-                                                               if prediction.direction == "LONG"
-                                                               else SignalType.ENTRY_SHORT)
-
-                                                signal = Signal(
-                                                    signal_type=signal_type,
-                                                    confidence=weighted_confidence,
-                                                    symbol=cfg.symbol,
-                                                    entry_price=current_price,
-                                                    sl_price=sl_price,
-                                                    tp_price=tp_price,
-                                                    expected_move_pct=prediction.expected_total_move_pct,
-                                                    risk_reward_ratio=tp_distance_pct / sl_distance_pct if sl_distance_pct > 0 else 0,
-                                                    win_rate=prediction.overall_probability,
-                                                    historical_count=actual_historical_count,
-                                                    matched_pattern=current_symbols,
-                                                )
-                                                signal.quality_score = signal.compute_quality_score()
-                                                signal.sizing_multiplier = signal.compute_sizing_multiplier()
-
-                                                mock_meta = BlockLifecycleMetadata(
-                                                    win_rate=signal.win_rate,
-                                                    expected_move_pct=signal.expected_move_pct,
-                                                    max_drawdown_pct=-sl_distance_pct,
-                                                    historical_count=actual_historical_count,
-                                                )
-                                                signal.probability_of_success = mock_meta.probability_of_success
-                                                signal.expected_profit_ahead = mock_meta.expected_profit_ahead
-                                                signal.metadata_sizing_signal = mock_meta.sizing_signal
-
-                                                if cfg.regime_aware and current_regime:
-                                                    regime_mults = {"trending_up": 1.2, "ranging": 1.0,
-                                                                    "trending_down": 0.6, "volatile": 0.4}
-                                                    rm = regime_mults.get(current_regime, 1.0)
-                                                    signal.metadata_sizing_signal *= rm
-                                                    signal.sizing_multiplier *= rm
-
-                                                can_open, reason = risk_mgr.can_open(signal, info.asset_class)
-                                                if can_open:
-                                                    size = risk_mgr.calculate_position_size(signal)
-
-                                                    if not cfg.dry_run:
-                                                        # Execute real order on exchange
-                                                        try:
-                                                            side = 'buy' if prediction.direction == "LONG" else 'sell'
-                                                            order = await exchange.create_order(
-                                                                cfg.symbol, 'market', side, size
-                                                            )
-                                                            console.print(f"[green]Order executed: {side} {size} {cfg.symbol}[/green]")
-                                                        except Exception as e:
-                                                            console.print(f"[red]Order failed: {e}[/red]")
-                                                            continue
-
-                                                    risk_mgr.open_position(signal, size)
-                                                    current_position = RealtimeTrade(
-                                                        trade_id=trade_counter + 1,
-                                                        symbol=cfg.symbol,
-                                                        direction=signal.direction or "LONG",
-                                                        entry_price=current_price,
-                                                        entry_time=str(candle_ts),
-                                                        size=size,
-                                                        confidence=signal.confidence,
-                                                        regime=current_regime,
-                                                    matched_pattern=current_symbols,
-                                                )
-                                                current_position.sl_price = sl_price  # type: ignore
-                                                current_position.tp_price = tp_price  # type: ignore
-                                                current_position.trailing_activated = False  # type: ignore
-                                                position_state = (PositionState.LONG
-                                                                  if prediction.direction == "LONG"
-                                                                  else PositionState.SHORT)
-                                                trade_counter += 1
-
-                                result.candles_processed += 1
-
-                                # Update display
-                                pos_str = f"[green]{position_state.value}[/green]" if position_state != PositionState.FLAT else "FLAT"
-                                pnl_pct = (risk_mgr.capital - cfg.initial_capital) / cfg.initial_capital * 100
-                                pnl_color = "green" if pnl_pct >= 0 else "red"
-                                pnl_sign = "+" if pnl_pct >= 0 else ""
-
-                                live_display.update(Panel(
-                                    f"  Price: ${current_price:,.2f} | "
-                                    f"Position: {pos_str} | "
-                                    f"P&L: [{pnl_color}]{pnl_sign}{pnl_pct:.2f}%[/{pnl_color}] | "
-                                    f"Regime: {current_regime} | "
-                                    f"Trades: {result.total_trades}",
-                                    title=f"PPMT Live: {cfg.symbol} ({'DRY RUN' if cfg.dry_run else 'LIVE'})",
-                                    border_style="cyan",
-                                ))
-
-                        # Poll interval: check every 30 seconds
-                        await asyncio.sleep(30)
-
-                    except KeyboardInterrupt:
-                        console.print("\n[yellow]Interrupted by user. Shutting down...[/yellow]")
-                        break
+                    try:
+                        await poll_exchange.load_markets()
+                        console.print(f"[green]Connected to {cfg.exchange} (REST polling)[/green]")
                     except Exception as e:
-                        console.print(f"[red]Error in live loop: {e}[/red]")
-                        await asyncio.sleep(10)
+                        console.print(f"[red]Failed to connect: {e}[/red]")
+                        await poll_exchange.close()
+                        storage.close()
+                        return result
+
+                    last_candle_ts = 0
+
+                    # Warmup: fetch some historical candles first
+                    try:
+                        warmup_ohlcv = await poll_exchange.fetch_ohlcv(
+                            cfg.symbol, cfg.timeframe, limit=min(warmup_candles, 500)
+                        )
+                        from ppmt.data.websocket_feed import Candle
+                        for c in warmup_ohlcv:
+                            candle = Candle(
+                                timestamp=c[0], open=c[1], high=c[2],
+                                low=c[3], close=c[4], volume=c[5],
+                                closed=True, exchange=cfg.exchange,
+                                symbol=cfg.symbol, timeframe=cfg.timeframe,
+                            )
+                            (sax_buffer, pattern_buffer, position_state, current_position,
+                             trade_counter, current_regime, peak_capital,
+                             last_losing_trade_idx) = await self.process_new_candle(
+                                candle=candle, cfg=cfg, sax_encoder=sax_encoder,
+                                pred_engine=pred_engine, risk_mgr=risk_mgr,
+                                trie=trie, ppmt_engine=ppmt_engine,
+                                fuzzy_matcher=fuzzy_matcher, token_profile=token_profile,
+                                info=info, result=result, sax_buffer=sax_buffer,
+                                pattern_buffer=pattern_buffer, position_state=position_state,
+                                current_position=current_position, trade_counter=trade_counter,
+                                regime_detector=regime_detector, current_regime=current_regime,
+                                recent_prices=recent_prices, recent_highs=recent_highs,
+                                recent_lows=recent_lows, peak_capital=peak_capital,
+                                last_losing_trade_idx=last_losing_trade_idx,
+                            )
+                        console.print(f"[green]Warmup: processed {len(warmup_ohlcv)} historical candles[/green]")
+                    except Exception as e:
+                        console.print(f"[yellow]Warmup failed: {e}[/yellow]")
+
+                    while True:
+                        try:
+                            ohlcv = await poll_exchange.fetch_ohlcv(cfg.symbol, cfg.timeframe, limit=1)
+
+                            if ohlcv:
+                                candle_data = ohlcv[-1]
+                                candle_ts = candle_data[0]
+
+                                if candle_ts != last_candle_ts:
+                                    last_candle_ts = candle_ts
+
+                                    from ppmt.data.websocket_feed import Candle
+                                    candle = Candle(
+                                        timestamp=candle_data[0],
+                                        open=candle_data[1], high=candle_data[2],
+                                        low=candle_data[3], close=candle_data[4],
+                                        volume=candle_data[5], closed=True,
+                                        exchange=cfg.exchange, symbol=cfg.symbol,
+                                        timeframe=cfg.timeframe,
+                                    )
+
+                                    (sax_buffer, pattern_buffer, position_state, current_position,
+                                     trade_counter, current_regime, peak_capital,
+                                     last_losing_trade_idx) = await self.process_new_candle(
+                                        candle=candle, cfg=cfg, sax_encoder=sax_encoder,
+                                        pred_engine=pred_engine, risk_mgr=risk_mgr,
+                                        trie=trie, ppmt_engine=ppmt_engine,
+                                        fuzzy_matcher=fuzzy_matcher, token_profile=token_profile,
+                                        info=info, result=result, sax_buffer=sax_buffer,
+                                        pattern_buffer=pattern_buffer, position_state=position_state,
+                                        current_position=current_position, trade_counter=trade_counter,
+                                        regime_detector=regime_detector, current_regime=current_regime,
+                                        recent_prices=recent_prices, recent_highs=recent_highs,
+                                        recent_lows=recent_lows, peak_capital=peak_capital,
+                                        last_losing_trade_idx=last_losing_trade_idx,
+                                        exchange=exchange if not cfg.dry_run else poll_exchange,
+                                    )
+
+                                    _update_live_display(live_display, cfg, result, position_state,
+                                                         current_position, current_regime, recent_prices,
+                                                         risk_mgr)
+
+                            # Poll every 30 seconds
+                            await asyncio.sleep(30)
+
+                        except KeyboardInterrupt:
+                            console.print("\n[yellow]Interrupted by user. Shutting down...[/yellow]")
+                            break
+                        except Exception as e:
+                            console.print(f"[red]Polling error: {e}[/red]")
+                            await asyncio.sleep(10)
+
+                    await poll_exchange.close()
+
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Interrupted. Shutting down...[/yellow]")
 
         finally:
-            # Cleanup
-            await exchange.close()
+            # Cleanup exchange connection
+            if exchange is not None:
+                try:
+                    await exchange.close()
+                except Exception:
+                    pass
 
             # Close any open position
             if current_position is not None:
-                # In live mode, don't auto-close on shutdown (might be real money)
                 if cfg.dry_run:
+                    last_price = recent_prices[-1] if recent_prices else cfg.initial_capital
                     self._close_trade(risk_mgr, current_position,
-                                      risk_mgr.capital, "shutdown", "shutdown", result)
+                                      last_price, "shutdown", "shutdown", result)
                 else:
-                    console.print("[yellow]WARNING: Open position exists! Close manually on the exchange.[/yellow]")
+                    console.print("[bold yellow]WARNING: Open position exists! Close manually on the exchange.[/bold yellow]")
 
+            # Compute final statistics
+            duration = time.time() - start_time
+            result.duration_seconds = duration
             result.final_capital = risk_mgr.capital
             result.total_pnl = risk_mgr.capital - cfg.initial_capital
             result.total_pnl_pct = result.total_pnl / cfg.initial_capital * 100 if cfg.initial_capital > 0 else 0
 
+            if result.total_trades > 0:
+                result.win_rate = result.winning_trades / result.total_trades
+                if result.equity_curve:
+                    peak = result.equity_curve[0]
+                    max_dd = 0.0
+                    for eq in result.equity_curve:
+                        if eq > peak:
+                            peak = eq
+                        dd = (peak - eq) / peak
+                        if dd > max_dd:
+                            max_dd = dd
+                    result.max_drawdown = max_dd
+
             storage.close()
 
         return result
+
+
+def _update_live_display(
+    live_display,
+    cfg,
+    result: RealtimeResult,
+    position_state: PositionState,
+    current_position,
+    current_regime: str,
+    recent_prices: list,
+    risk_mgr: RiskManager,
+) -> None:
+    """Update the Rich Live display panel during live trading."""
+    current_price = recent_prices[-1] if recent_prices else 0
+    pos_str = f"[green]{position_state.value}[/green]" if position_state != PositionState.FLAT else "FLAT"
+    pnl_pct = (risk_mgr.capital - cfg.initial_capital) / cfg.initial_capital * 100 if cfg.initial_capital > 0 else 0
+    pnl_color = "green" if pnl_pct >= 0 else "red"
+    pnl_sign = "+" if pnl_pct >= 0 else ""
+
+    direction_str = ""
+    if current_position is not None:
+        direction_str = f" ({current_position.direction})"
+
+    live_display.update(Panel(
+        f"  Price: ${current_price:,.2f} | "
+        f"Position: {pos_str}{direction_str} | "
+        f"P&L: [{pnl_color}]{pnl_sign}{pnl_pct:.2f}%[/{pnl_color}] | "
+        f"Regime: {current_regime} | "
+        f"Candles: {result.candles_processed} | "
+        f"Signals: {result.signals_generated} | "
+        f"Trades: {result.total_trades}",
+        title=f"PPMT Live: {cfg.symbol} ({'DRY RUN' if getattr(cfg, 'dry_run', True) else 'LIVE'})",
+        border_style="cyan",
+    ))
 
 
 def format_realtime_result(result: RealtimeResult) -> str:

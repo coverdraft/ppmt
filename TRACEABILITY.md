@@ -1,6 +1,6 @@
-# PPMT v0.13.0 — TRACEABILITY DOCUMENT
+# PPMT v0.12.0 — TRACEABILITY DOCUMENT
 
-> Last updated: 2026-06-14
+> Last updated: 2026-06-15
 > Data source: Bybit 12 tokens (BTC, ETH, SOL, BNB, XRP, ADA, LINK, UNI, ATOM, DOGE, SHIB, PEPE) 1h (14,400 real candles each) + 5m (57,600 candles) + 1m (288,000 candles)
 
 ---
@@ -1690,10 +1690,10 @@ well-maintained without excessive overhead.
 
 ### Action Items (Post Node Pruning)
 
-- [x] Re-enable catastrophic_loss_pct risk management — DONE (v0.6.4: connected from TokenProfile, see Section 20)
-- [x] BlockLifecycleMetadata regime field for market regime tracking — DONE (v0.8.0/v4.1: `regime`, `regime_distribution`, `regime_stats`, `dominant_regime`, `regime_match_score()`)
-- [x] CSV import for historical 1m data — DONE (v0.12.0: `scripts/import_csv_1m.py`, see Section 24)
-- [x] Add `pruning_interval` config option to PaperTraderConfig — DONE (v0.12.0: see Section 24)
+- [ ] Re-enable catastrophic_loss_pct risk management
+- [ ] BlockLifecycleMetadata regime field for market regime tracking
+- [ ] CSV import for historical 1m data
+- [ ] Add `pruning_interval` config option to PaperTraderConfig
 - [ ] Test pruning impact on trading performance (before/after comparison)
 
 ---
@@ -1876,247 +1876,151 @@ storage.save_token_profile(cfg.symbol, cfg.timeframe, token_profile.to_dict())
 
 ---
 
-## 24. Configurable Pruning Interval + CSV 1m Import (v0.12.0)
+## 23. v0.12.0: Real-Time Pipeline — WebSocket Streaming + process_new_candle() + CLI `ppmt run`
 
-### Problem 1: Hardcoded Pruning Interval
+### Problem: PPMT Could Not Operate in Real-Time
 
-The Living Trie pruning interval was hardcoded to 1000 symbol steps in the trading
-loop (line 1768 of paper_trader.py). This meant:
+Until v0.11.0, PPMT could only operate in two modes:
+1. **Batch paper trading** (`PaperTrader`) — encode ALL data, then iterate
+2. **Replay mode** (`RealtimeTrader.run_replay()`) — step through historical data
+3. **Live mode** (`RealtimeTrader.run_live()`) — existed but used **REST polling every 30 seconds**, which meant:
+   - Candles could be missed during the 30s interval
+   - No real-time price updates within a candle
+   - High latency between candle close and PPMT processing
+   - The CLI `ppmt run` was a **placeholder** that just printed a message
 
-1. **No per-timeframe tuning**: 1h data (fewer symbols) and 1m data (many more symbols)
-   used the same interval, which is suboptimal. For 1h data, 1000 steps ≈ 1000 hours
-   (41 days) between prunes — too infrequent for active Living Trie sessions. For 1m data,
-   1000 steps ≈ 1000 minutes (16 hours) — potentially too aggressive.
-2. **No way to disable pruning**: Even if a user wanted to keep all nodes (e.g., for
-   analysis), the hardcoded interval forced pruning every 1000 steps.
-3. **No statistics tracking**: Pruning events weren't counted or reported in
-   `PaperTraderResult`, making it impossible to assess pruning impact.
+### Solution: WebSocket Streaming Pipeline
 
-### Solution 1: Configurable `pruning_interval` + Statistics
+v0.12.0 replaces REST polling with true WebSocket streaming, creating a production-grade real-time pipeline:
 
-Added `pruning_interval` to `PaperTraderConfig` and pruning statistics to
-`PaperTraderResult`:
-
-```python
-@dataclass
-class PaperTraderConfig:
-    ...
-    pruning_interval: int = 1000
-    """v0.12.0: Prune trie every N SAX symbol steps during trading. 0 = no pruning.
-    When set to a positive value (default 1000), the paper trader will
-    prune stale/low-quality leaf nodes from the Living Trie every N
-    symbol steps. Pruning removes:
-    - Leaf nodes with < min_observations (default 2) — statistical noise
-    - Leaf nodes with near-zero confidence — unreliable patterns
-    - Stale branches not observed recently (if max_staleness_hours set)
-    Established patterns (>= 10 observations) and traded nodes are
-    ALWAYS preserved for safety.
-    This prevents unbounded trie growth during long trading sessions,
-    keeping the trie focused on patterns that produce reliable signals.
-    Previously hardcoded to 1000; now configurable for different
-    timeframes (e.g. 5000 for 1m, 500 for 1h)."""
-
-@dataclass
-class PaperTraderResult:
-    ...
-    pruning_runs: int = 0          # Number of pruning cycles executed
-    pruning_total_nodes: int = 0   # Total nodes pruned across all cycles
-    pruning_total_obs_lost: int = 0  # Total observations lost from pruned nodes
+```
+Binance/Bybit WebSocket → Candle → process_new_candle() → SAX encode →
+Pattern buffer → Trie match → Signal → Risk check → Position management
 ```
 
-The trading loop now uses `cfg.pruning_interval` instead of the hardcoded 1000:
+### New Module: `src/ppmt/data/websocket_feed.py`
+
+| Component | Description |
+|-----------|-------------|
+| `WebSocketFeed` | Main class: connects to exchange WebSocket, fires `on_candle` callback on each closed candle |
+| `Candle` | Dataclass: OHLCV candle with `to_dataframe_row()` for SAX encoder compatibility |
+| `CandleStream` | Async iterator wrapper for consuming candles in a `async for` loop |
+| Binance WS parser | `wss://stream.binance.com:9443/ws/{stream}` kline parsing |
+| Bybit WS parser | `wss://stream.bybit.com/v5/public/spot` kline parsing with subscription |
+
+**Features:**
+- Automatic reconnection with exponential backoff (2s → 4s → 8s → ... → 60s max)
+- Ping/pong keepalive
+- Warm-up: fetch last N candles via REST before streaming (ensures SAX has initial data)
+- Only processes **closed candles** (`k.x == True`) for data integrity
+- `on_tick` callback for partial candle updates (live price display)
+- Graceful shutdown via `stop()`
+- Works **without ccxt** (uses raw websockets library)
+
+### Refactored: `process_new_candle()` Method
+
+Extracted the core streaming pipeline from `run_live()` into a clean, testable async method:
 
 ```python
-# v0.12.0: Prune stale branches every pruning_interval symbol steps
-if (cfg.pruning_interval > 0
-    and cfg.living_trie
-    and trie_observations_recorded > 0
-    and sym_idx % cfg.pruning_interval == 0):
-    from ppmt.core.trie import PruningConfig
-    prune_config = PruningConfig(min_observations=2, preserve_traded=True)
-    prune_stats = trie.prune(**prune_config.to_prune_kwargs())
-    if prune_stats["nodes_pruned"] > 0:
-        console.print(f"  Pruned {prune_stats['nodes_pruned']} stale nodes "
-                      f"({prune_stats['observations_lost']} obs lost, "
-                      f"{trie.pattern_count} patterns remain)")
-        result.pruning_runs += 1
-        result.pruning_total_nodes += prune_stats["nodes_pruned"]
-        result.pruning_total_obs_lost += prune_stats["observations_lost"]
+async def process_new_candle(self, candle, cfg, sax_encoder, ...) -> tuple:
+    """Candle → SAX → Pattern buffer → Match → Signal → Risk → Position"""
 ```
 
-### Problem 2: No Dedicated CSV Import for 1m Data
+**Why this matters:**
+- **Testable**: Can unit test the pipeline with synthetic candles without WebSocket
+- **Reusable**: Same method used by WebSocket mode, REST fallback, and external callers
+- **Stateless**: Returns updated state tuple, no hidden mutations
+- **Clean**: Separates data ingestion from data processing
 
-While `DataCollector.import_csv()` existed for generic CSV import, there was no
-dedicated script for importing 1-minute historical data from CSV files. Users
-with pre-downloaded 1m data (e.g., from Binance Data Vision exports, third-party
-data providers, or personal archives) had to manually call the collector's import
-method or write custom scripts.
+### Refactored: `run_live()` Method
 
-### Solution 2: `import_csv_1m.py` Script
+v0.12.0 `run_live()` architecture:
 
-Created a comprehensive CSV import script with:
+| Mode | When | How |
+|------|------|-----|
+| **WebSocket** (primary) | `websockets` installed | Binance/Bybit WebSocket → `on_candle` callback → `process_new_candle()` |
+| **REST polling** (fallback) | `websockets` NOT installed | ccxt REST every 30s → `process_new_candle()` |
 
-1. **Multi-format auto-detection**: Automatically detects CSV format from column names:
-   - Generic: `timestamp`, `open`, `high`, `low`, `close`, `volume`
-   - Binance: `open_time`, `open`, ..., `close_time`, `quote_volume`, ...
-   - CryptoDataDownload: `Unix`, `Date`, `Symbol`, `Open`, `High`, `Low`, ...
+**Key changes:**
+- ccxt exchange only needed for **order execution** (not data)
+- WebSocket handles data feed independently
+- Warmup: automatically fetches `sax_window_size * 2 + pattern_length * sax_window_size` candles before streaming
+- Better error handling and status reporting
 
-2. **Flexible timestamp parsing**: Handles unix milliseconds, unix seconds, and
-   ISO 8601 date strings automatically.
+### Implemented: CLI `ppmt run`
 
-3. **Symbol auto-detection from filename**: Extracts trading pair from filenames
-   like `BTCUSDT_1m.csv`, `Binance_BTCUSDT_1m.csv`, `BTC-USDT-1m.csv`, etc.
-
-4. **Data quality validation**: Optional `--validate` flag checks for:
-   - Duplicate timestamps
-   - Time gaps (missing minutes)
-   - Price consistency (high >= low, open/close within range)
-   - Zero/negative prices
-   - Volume anomalies
-
-5. **Detailed statistics**: Optional `--stats` flag prints coverage %, volatility,
-   date range, and price statistics.
-
-6. **Directory batch import**: `--dir` mode imports all CSVs in a directory
-   with auto-symbol detection.
-
-7. **Safe operations**: `--dry-run` for testing, `--merge` for combining with
-   existing data.
+The `ppmt run` command is now fully functional:
 
 ```bash
-# Single CSV file
-python -m ppmt.scripts.import_csv_1m --csv BTCUSDT_1m.csv --symbol BTC/USDT
+# Dry run (paper trading) with Binance WebSocket
+ppmt run -s BTC/USDT
 
-# Directory of CSVs with validation
-python -m ppmt.scripts.import_csv_1m --dir ./data/1m_csvs/ --validate --stats
+# Replay stored historical data
+ppmt run -s BTC/USDT --replay
 
-# Dry run
-python -m ppmt.scripts.import_csv_1m --csv data.csv --symbol BTC/USDT --dry-run
+# Use Bybit instead of Binance
+ppmt run -s ETH/USDT -e bybit
+
+# Replay at 10x speed
+ppmt run -s BTC/USDT --replay --speed 10
+
+# REAL trading on exchange (requires API keys)
+ppmt run -s BTC/USDT --live --mainnet --api-key KEY --api-secret SECRET
+
+# With custom parameters
+ppmt run -s BTC/USDT -t 4h --pattern-length 7 --min-confidence 0.30
 ```
 
-### Verified: Already-Completed Tasks
+**CLI Options:**
 
-During this work, we verified that several previously-pending tasks are already complete:
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-s, --symbol` | required | Trading pair (e.g., BTC/USDT) |
+| `-t, --timeframe` | 1h | Candle interval |
+| `-e, --exchange` | binance | Exchange (binance/bybit) |
+| `-c, --capital` | 10000 | Initial capital |
+| `--dry-run` | True | Paper trading (no real orders) |
+| `--live` | False | Execute REAL orders on exchange |
+| `--testnet` | True | Use exchange testnet |
+| `--mainnet` | False | Use MAINNET (real money) |
+| `--api-key` | env:PPMT_API_KEY | Exchange API key |
+| `--api-secret` | env:PPMT_API_SECRET | Exchange API secret |
+| `--replay` | False | Replay historical data |
+| `--speed` | 0.0 | Replay speed (0=max, 1=realtime) |
+| `-p, --pattern-length` | 5 | SAX blocks per pattern |
+| `--min-confidence` | 0.20 | Minimum signal confidence |
+| `--auto-calibrate` | True | Auto-calibrate SAX parameters |
+| `--no-calibrate` | False | Skip auto-calibration |
+| `--regime-aware` | True | Enable regime detection |
+| `--multi-level` | True | Enable 4-level matching |
 
-| Task | Status | Evidence |
-|------|--------|----------|
-| `catastrophic_loss_pct` from TokenProfile | ✅ Done (v0.6.4) | `paper_trader.py` line 717-718: `cfg.catastrophic_loss_pct = token_profile.catastrophic_loss_pct * 100.0` |
-| `BlockLifecycleMetadata.regime` | ✅ Done (v0.8.0/v4.1) | `metadata.py`: `regime`, `regime_confidence`, `dominant_regime`, `regime_distribution`, `regime_stats` (with `RegimeStats` class), `regime_match_score()` method |
-| Trie pruning infrastructure | ✅ Done (v0.6.8) | `trie.py`: `prune()`, `_collect_prunable()`, `_is_node_prunable()`, `PruningConfig` dataclass |
+### Updated: `pyproject.toml`
+
+| Change | Before | After |
+|--------|--------|-------|
+| Version | 0.1.0 | 0.12.0 |
+| `websockets` dependency | Not declared | `websockets>=12.0` (required) |
 
 ### Files Modified (v0.12.0)
 
 | File | Change |
 |------|--------|
-| `src/ppmt/engine/paper_trader.py` | Added `pruning_interval: int = 1000` to `PaperTraderConfig`; Added `pruning_runs`, `pruning_total_nodes`, `pruning_total_obs_lost` to `PaperTraderResult`; Replaced hardcoded `sym_idx % 1000` with `sym_idx % cfg.pruning_interval`; Added pruning statistics tracking and reporting; Updated `format_summary()` with pruning info; Added pruning status to startup display |
-| `src/ppmt/scripts/import_csv_1m.py` | **NEW FILE**: Comprehensive CSV import script for 1-minute data with multi-format detection, validation, statistics, directory batch import, and CLI interface |
+| `src/ppmt/data/websocket_feed.py` | **NEW** — Binance/Bybit WebSocket feed with Candle, WebSocketFeed, CandleStream |
+| `src/ppmt/engine/realtime.py` | Added `process_new_candle()` async method; rewrote `run_live()` with WebSocket; added `_update_live_display()` helper |
+| `src/ppmt/cli/main.py` | Replaced placeholder `ppmt run` with full implementation (replay + live modes, 16 options) |
+| `pyproject.toml` | Version 0.12.0; added `websockets>=12.0` dependency |
+| `TRACEABILITY.md` | Section 23 |
 
-### Design Decisions
+### Test Results
 
-| Decision | Rationale |
-|----------|-----------|
-| `pruning_interval` default = 1000 | Backward compatible with previous hardcoded value |
-| `pruning_interval = 0` disables pruning | Consistent with `recalibration_interval = 0` pattern |
-| Separate script instead of extending `bulk_data_loader.py` | Single responsibility — CSV import is different from API download |
-| Auto-detect CSV format | Most users don't know their CSV format; auto-detection removes friction |
-| `--validate` is opt-in | Validation adds processing time; not needed for trusted data sources |
-| `--merge` preserves existing data | Safe default — don't overwrite data that may be from a different source |
+- 183/195 tests pass (12 pre-existing failures in OOS and merge tests — unrelated to v0.12.0)
+- All new module imports verified: WebSocketFeed, Candle, CandleStream, RealtimeTrader, LiveConfig
+- Candle.to_dataframe_row() produces correct shape for SAX encoder
+- WebSocketFeed creates and configures correctly for both Binance and Bybit
 
----
+### Known Limitations (v0.12.0)
 
-## 25. PPMT Strategy Terminal Dashboard (v0.13.0)
-
-### Feature: Web Dashboard for Strategy Lifecycle Management
-
-A full-featured web dashboard built with **Next.js 16 + TypeScript + Tailwind CSS 4 + shadcn/ui + Recharts + Zustand + Framer Motion** running on `localhost:3000`.
-
-The dashboard implements the **Strategy Lifecycle Pipeline** concept:
-
-```
-Create Strategy → Backtest → Paper Trading → Forward Test → Live Trading
-    (draft)     (backtesting) (paper_trading) (forward_testing)   (live)
-```
-
-Each strategy has: PnL, WinRate, Sharpe, Drawdown, Status, Capital Allocated, and a **[Deploy]** button that promotes it to the next lifecycle stage.
-
-### Architecture
-
-| Layer | Technology | Description |
-|-------|-----------|-------------|
-| Frontend | Next.js 16 App Router + React 19 | Server-side rendering, API routes |
-| State | Zustand (`ppmt-strategy-store`) | Global state for strategies, UI, actions |
-| Charts | Recharts | Equity curve area charts |
-| Animation | Framer Motion | Sidebar collapse, card transitions |
-| UI Kit | shadcn/ui + Radix | Dialog, Button, Badge, etc. |
-| Database | Prisma ORM + SQLite | `ppmt_strategies` + `ppmt_strategy_runs` tables |
-| Backend | Next.js API Routes | CRUD, Deploy, Run (Python bridge) |
-| Python Bridge | `child_process.execSync` | Executes PPMT `PaperTrader` via Python |
-
-### Dashboard Tabs
-
-| Tab | Component | Description |
-|-----|-----------|-------------|
-| Overview | `overview-tab.tsx` | Portfolio stats, lifecycle pipeline, best performer equity curve |
-| Strategies | `strategies-tab.tsx` | Strategy cards with filter/search, Create dialog, detail view |
-| Trie Explorer | `trie-explorer-tab.tsx` | Per-symbol trie statistics from PPMT DB |
-| Token Profiles | `profiles-tab.tsx` | Asset class risk profiles, timeframe defaults, active profiles |
-| Data Import | `data-import-tab.tsx` | CSV import (Binance/CDD/Generic), bulk ingest |
-| Settings | `settings-tab.tsx` | PPMT engine status, Python/DB connection info |
-
-### API Routes
-
-| Route | Method | Description |
-|-------|--------|-------------|
-| `/api/strategies` | GET | List all strategies with runs |
-| `/api/strategies` | POST | Create new strategy |
-| `/api/strategies/[id]` | DELETE | Delete strategy |
-| `/api/strategies/[id]/deploy` | POST | Promote to next lifecycle stage |
-| `/api/strategies/[id]/run` | POST | Execute PaperTrader via Python |
-
-### Database Schema
-
-**PPMTStrategy**: id, symbol, timeframe, assetClass, status, saxAlpha, saxWindow, catastrophicLossPct, fuzzyThreshold, totalPnl, totalPnlPct, winRate, sharpeRatio, maxDrawdown, profitFactor, totalTrades, capitalAllocated, patternCount, trieLevel, initialCapital, patternLength, minConfidence, livingTrie, regimeAware, pruningInterval, recalibrationInterval
-
-**PPMTStrategyRun**: id, strategyId, runType, status, totalPnl, totalPnlPct, winRate, sharpeRatio, maxDrawdown, profitFactor, totalTrades, winningTrades, losingTrades, candlesProcessed, recalibrations, pruningRuns, equityCurve (JSON), tradesJson (JSON)
-
-### Files Created/Modified (v0.13.0)
-
-| File | Description |
-|------|-------------|
-| `src/app/page.tsx` | PPMT Dashboard main page (replaced crypto dashboard) |
-| `src/store/ppmt-strategy-store.ts` | Zustand store: strategies CRUD, deploy, run, UI state |
-| `src/components/ppmt/sidebar.tsx` | Animated sidebar with nav items and status |
-| `src/components/ppmt/overview-tab.tsx` | Portfolio overview with stats, pipeline, equity |
-| `src/components/ppmt/strategies-tab.tsx` | Strategy list with filter/search/detail |
-| `src/components/ppmt/strategy-card.tsx` | Strategy card with metrics, Deploy button |
-| `src/components/ppmt/strategy-detail.tsx` | Full strategy detail: metrics, config, runs, trades |
-| `src/components/ppmt/create-strategy-dialog.tsx` | Create strategy dialog with advanced settings |
-| `src/components/ppmt/lifecycle-pipeline.tsx` | Visual pipeline: Draft → Backtest → Paper → Forward → Live |
-| `src/components/ppmt/equity-curve-chart.tsx` | Recharts area chart for equity curves |
-| `src/components/ppmt/trie-explorer-tab.tsx` | Trie statistics per symbol from PPMT DB |
-| `src/components/ppmt/profiles-tab.tsx` | Token profile management and reference |
-| `src/components/ppmt/data-import-tab.tsx` | CSV import with multi-format support |
-| `src/components/ppmt/settings-tab.tsx` | PPMT engine status and configuration |
-| `src/app/api/strategies/route.ts` | GET/POST strategies with demo seeding |
-| `src/app/api/strategies/[id]/route.ts` | DELETE strategy |
-| `src/app/api/strategies/[id]/deploy/route.ts` | Promote lifecycle stage |
-| `src/app/api/strategies/[id]/run/route.ts` | Execute Python PaperTrader |
-| `src/app/api/strategies/[id]/runs/route.ts` | List strategy runs |
-| `prisma/schema.prisma` | Added PPMTStrategy + PPMTStrategyRun models |
-
-### Design Decisions
-
-| Decision | Rationale |
-|----------|-----------|
-| Dark terminal theme (zinc-950 base) | Bloomberg/TradingView aesthetic for trading |
-| No fake data on runs | If Python unavailable, run fails honestly — no simulation |
-| Deploy = promote status | Clean lifecycle progression with audit trail |
-| Demo strategies on empty DB | Shows the UI with realistic examples immediately |
-| `execSync` for Python bridge | Simple, synchronous — PaperTrader runs complete in <5 min |
-| Recharts for equity curve | Lightweight, React-native charting with gradient fills |
-| SQLite via Prisma | Zero-config DB, matches PPMT Python SQLite approach |
-
-### GitHub Repository
-
-**Dashboard**: https://github.com/coverdraft/ppmt-dashboard
-**PPMT Engine**: https://github.com/coverdraft/ppmt
+1. **No live testing yet** — WebSocket has been implemented but not tested against real Binance/Bybit WebSocket endpoints (requires network access)
+2. **Warmup via REST** — Initial candle fetch uses DataCollector (REST), which may be geo-blocked for Binance
+3. **Bybit WebSocket** — Only spot and linear endpoints implemented; no inverse futures
+4. **Order execution** — Still requires ccxt; no direct exchange API order placement

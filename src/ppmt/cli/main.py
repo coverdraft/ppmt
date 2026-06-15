@@ -27,6 +27,7 @@ from ppmt.data.collector import DataCollector
 from ppmt.data.classifier import AssetClassifier
 from ppmt.engine.ppmt import PPMT
 from ppmt.engine.prediction import PredictionEngine
+from ppmt.engine.realtime import format_realtime_result
 
 console = Console()
 
@@ -380,20 +381,111 @@ def predict(symbol: str, timeframe: str, depth: int, price: float):
 @cli.command()
 @click.option("--symbol", "-s", required=True, help="Trading pair")
 @click.option("--timeframe", "-t", default="1h", help="Candle timeframe")
-def run(symbol: str, timeframe: str):
-    """Run real-time pattern matching (requires exchange connection)."""
-    console.print(f"[cyan]Starting PPMT real-time matching for {symbol}...[/cyan]")
-    console.print("[yellow]Real-time mode requires exchange API connection.[/yellow]")
-    console.print("[yellow]This is a placeholder for the real-time loop.[/yellow]")
+@click.option("--exchange", "-e", default="binance", help="Exchange (binance/bybit)")
+@click.option("--capital", "-c", default=10000.0, type=float, help="Initial capital")
+@click.option("--dry-run", is_flag=True, default=True, help="Paper trading (no real orders)")
+@click.option("--live", "dry_run_false", is_flag=True, help="Execute REAL orders on exchange")
+@click.option("--testnet", is_flag=True, default=True, help="Use exchange testnet")
+@click.option("--mainnet", "testnet_false", is_flag=True, help="Use exchange MAINNET (real money)")
+@click.option("--api-key", envvar="PPMT_API_KEY", default="", help="Exchange API key")
+@click.option("--api-secret", envvar="PPMT_API_SECRET", default="", help="Exchange API secret")
+@click.option("--replay", is_flag=True, help="Replay historical data instead of live")
+@click.option("--speed", default=0.0, type=float, help="Replay speed (0=max, 1=realtime, 10=10x)")
+@click.option("--pattern-length", "-p", default=5, type=int, help="SAX blocks per pattern")
+@click.option("--min-confidence", default=0.20, type=float, help="Minimum signal confidence")
+@click.option("--auto-calibrate", is_flag=True, default=True, help="Auto-calibrate SAX parameters")
+@click.option("--no-calibrate", "no_calibrate", is_flag=True, help="Skip auto-calibration")
+@click.option("--regime-aware", is_flag=True, default=True, help="Enable regime detection")
+@click.option("--multi-level", is_flag=True, default=True, help="Enable 4-level matching")
+def run(
+    symbol: str, timeframe: str, exchange: str, capital: float,
+    dry_run: bool, dry_run_false: bool, testnet: bool, testnet_false: bool,
+    api_key: str, api_secret: str,
+    replay: bool, speed: float,
+    pattern_length: int, min_confidence: float,
+    auto_calibrate: bool, no_calibrate: bool,
+    regime_aware: bool, multi_level: bool,
+):
+    """Run real-time pattern matching and trading.
 
-    # TODO: Implement real-time loop with WebSocket
-    # 1. Load engine state and Tries from storage
-    # 2. Connect to exchange WebSocket
-    # 3. Process each new candle through SAX → match → signal
-    # 4. Pass signals to RiskManager
-    # 5. Execute trades if risk allows
+    v0.12.0: Now supports WebSocket streaming, REST polling, and replay modes.
 
-    console.print("Real-time engine will be implemented in the next phase.")
+    Modes:
+      --replay          Replay historical data (for testing)
+      (default)         Live WebSocket streaming from exchange
+
+    Examples:
+      ppmt run -s BTC/USDT                      # Dry run with Binance WebSocket
+      ppmt run -s BTC/USDT --replay             # Replay stored data
+      ppmt run -s ETH/USDT -e bybit             # Bybit WebSocket
+      ppmt run -s BTC/USDT --live --mainnet     # REAL trading on Binance
+    """
+    # Resolve flag conflicts
+    actual_dry_run = not dry_run_false  # --live flag disables dry-run
+    actual_testnet = not testnet_false  # --mainnet flag disables testnet
+
+    if no_calibrate:
+        auto_calibrate = False
+
+    if replay:
+        # === REPLAY MODE ===
+        from ppmt.engine.realtime import RealtimeTrader, ReplayConfig
+
+        config = ReplayConfig(
+            symbol=symbol,
+            timeframe=timeframe,
+            initial_capital=capital,
+            speed=speed,
+            pattern_length=pattern_length,
+            min_confidence=min_confidence,
+            auto_calibrate=auto_calibrate,
+            regime_aware=regime_aware,
+            use_multi_level=multi_level,
+            use_token_profile=True,
+        )
+
+        trader = RealtimeTrader(config=config)
+        result = trader.run_replay()
+
+        console.print(format_realtime_result(result))
+
+    else:
+        # === LIVE MODE (WebSocket or REST) ===
+        import asyncio
+        from ppmt.engine.realtime import RealtimeTrader, LiveConfig
+
+        if not actual_dry_run:
+            if not api_key or not api_secret:
+                console.print("[bold red]WARNING: Live trading requires API credentials![/bold red]")
+                console.print("[dim]Set PPMT_API_KEY and PPMT_API_SECRET environment variables[/dim]")
+                console.print("[dim]Or use --api-key and --api-secret options[/dim]")
+                if not click.confirm("Continue without credentials?"):
+                    return
+
+        config = LiveConfig(
+            symbol=symbol,
+            timeframe=timeframe,
+            initial_capital=capital,
+            exchange=exchange,
+            api_key=api_key,
+            api_secret=api_secret,
+            pattern_length=pattern_length,
+            min_confidence=min_confidence,
+            auto_calibrate=auto_calibrate,
+            regime_aware=regime_aware,
+            use_multi_level=multi_level,
+            use_token_profile=True,
+            testnet=actual_testnet,
+            dry_run=actual_dry_run,
+        )
+
+        trader = RealtimeTrader(config=config)
+
+        try:
+            result = asyncio.run(trader.run_live())
+            console.print(format_realtime_result(result))
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Stopped by user.[/yellow]")
 
 
 if __name__ == "__main__":
