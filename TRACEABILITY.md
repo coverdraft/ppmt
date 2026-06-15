@@ -2970,6 +2970,11 @@ PortfolioIntelligenceFusion (dashboard component)
 - [x] Auto-backfill OHLCV — backtest-data-bridge.ts now auto-fetches from CoinGecko/DexScreener when no candles exist
 - [x] Duplicate React keys — correlation-panel.tsx SOL/ETH/BNB duplicates fixed
 - [x] Rebalance button — no feedback → added loading state + success/error messages
+- [x] TypeScript compilation — 118 errors fixed → 0 errors in src/
+- [x] Next.js build — npm run build succeeds (was broken by .venv broken symlink)
+- [x] .gitmodules — removed broken self-ref cryptoquant-terminal + ppmt-repo submodules
+- [x] Docs consolidation — single TRACEABILITY.md, deleted RUTA-PROYECTO.txt + download/TRACEABILITY.md
+- [x] PPMT bridge verified — /api/ppmt/runner returns 200 with real Python API data
 
 ---
 
