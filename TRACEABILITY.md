@@ -2865,9 +2865,26 @@ PortfolioIntelligenceFusion (dashboard component)
 
 ---
 
-#### Phase 4: Live Portfolio Trading & Backtesting (PENDING)
+#### Phase 4: Live Portfolio Trading & Backtesting (IN PROGRESS)
 
 **Problem:** No end-to-end system exists that runs multiple PPMT engines simultaneously with shared capital, real rebalancing, and live dashboard updates.
+
+**DONE:**
+
+- [x] 4.3 — Rebalance automation with configurable triggers
+  - Time-based (every N minutes, configurable)
+  - Regime-change trigger (when dominant regime shifts)
+  - Drawdown-threshold trigger (when drawdown exceeds X%)
+  - Weight-drift trigger (when actual weights deviate >Y% from target)
+  - Cooldown protection (prevents rebalance thrashing)
+  - Full dashboard UI: start/stop, config controls, trigger log
+
+- [x] 4.5 — Monte Carlo portfolio simulation
+  - Cholesky decomposition for correlated returns
+  - Uses REAL portfolio data from Python API (positions, weights, volatility, correlation)
+  - Configurable: simulations count (500-10K), horizon days (30-365), confidence levels
+  - Equity distribution, drawdown percentiles, Sharpe ratio distribution
+  - Probability of profit, risk of ruin, P95 max drawdown
 
 **TODO:**
 
@@ -2883,24 +2900,11 @@ PortfolioIntelligenceFusion (dashboard component)
   - Portfolio-level signal approval before execution
   - Real-time dashboard updates
 
-- [ ] 4.3 — Rebalance automation with configurable triggers
-  - Time-based (every N candles)
-  - Regime-change trigger (when dominant regime shifts)
-  - Drawdown-threshold trigger (when drawdown exceeds X%)
-  - Performance-drift trigger (when actual weights deviate >Y% from target)
-  - Manual trigger via dashboard button
-
 - [ ] 4.4 — Multi-token portfolio backtest with real historical data
   - Load 12-token Bybit dataset (14,400 candles each at 1h)
   - Run PortfolioBacktester with each allocation method
   - Compare: EQUAL_WEIGHT vs RISK_PARITY vs REGIME_AWARE vs QUALITY_WEIGHTED
   - Generate portfolio-level metrics (Sharpe, Sortino, max DD, Calmar)
-
-- [ ] 4.5 — Monte Carlo portfolio simulation
-  - Bootstrap from historical returns
-  - Simulate 10,000 portfolio paths
-  - Compute confidence intervals for P&L, drawdown, recovery time
-  - Display fan chart in dashboard
 
 - [ ] 4.6 — End-to-end integration test
   - Start Portfolio API server
@@ -2910,7 +2914,23 @@ PortfolioIntelligenceFusion (dashboard component)
   - Verify allocation change in Python
   - Full circuit breaker test (kill switch from dashboard)
 
-**Estimated LOC:** ~2,500 (runner + live mode + backtest integration + dashboard)
+**New files created (Phase 4 partial):**
+
+| File | LOC | Purpose |
+|------|-----|---------|
+| `src/lib/services/portfolio/rebalance-automation.ts` | ~337 | Auto-rebalance service with 4 configurable triggers |
+| `src/app/api/portfolio/ppmt/monte-carlo/route.ts` | ~295 | Monte Carlo simulation API using real portfolio data |
+
+**Modified files:**
+
+| File | Change |
+|------|--------|
+| `src/components/dashboard/portfolio-intelligence-fusion.tsx` | Added Auto-Rebalance + Monte Carlo tabs (5 sub-tabs total) |
+
+**Intelligence Fusion sub-tabs (5):**
+  Optimizer | Compare | Stress | Auto-Rebalance | Monte Carlo
+
+**Estimated LOC:** ~1,040 new (4.3 + 4.5)
 
 ---
 
@@ -2921,7 +2941,7 @@ PortfolioIntelligenceFusion (dashboard component)
 | Phase 1 | Multi-Token Portfolio Core | COMPLETE | 4,799 | 38/38 |
 | Phase 2 | Bridge API Python ↔ TypeScript | COMPLETE | 1,665 (new) + 3,095 (pre-existing) | Type-check OK |
 | Phase 3 | Portfolio Intelligence Fusion | COMPLETE (v0.16.4 hotfix) | ~650 (new+mod) + ~80 (hotfix) | Type-check OK |
-| Phase 4 | Live Portfolio Trading & Backtesting | PENDING | ~2,500 | TBD |
+| Phase 4 | Live Portfolio Trading & Backtesting | IN PROGRESS (4.3 + 4.5 done) | ~1,040 new | Type-check OK |
 | **Total** | | | **~11,500** | |
 
 ### Critical Dependency Chain
