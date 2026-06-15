@@ -490,3 +490,392 @@ def run(
 
 if __name__ == "__main__":
     cli()
+
+
+# ============================================================
+# v0.13.0: BACKTEST & MONTE CARLO COMMANDS
+# ============================================================
+
+@cli.command()
+@click.option("--symbol", "-s", required=True, help="Trading pair")
+@click.option("--timeframe", "-t", default="1h", help="Candle timeframe")
+@click.option("--capital", "-c", default=10000.0, type=float, help="Initial capital")
+@click.option("--pattern-length", "-p", default=5, type=int, help="SAX blocks per pattern")
+@click.option("--min-confidence", default=0.20, type=float, help="Minimum signal confidence")
+@click.option("--start-offset", default=200, type=int, help="Candles to skip (warm-up)")
+@click.option("--auto-calibrate", is_flag=True, default=True, help="Auto-calibrate SAX parameters")
+@click.option("--no-calibrate", "no_calibrate", is_flag=True, help="Skip auto-calibration")
+@click.option("--regime-aware", is_flag=True, default=True, help="Enable regime detection")
+@click.option("--multi-level", is_flag=True, default=True, help="Enable 4-level matching")
+@click.option("--output", "-o", default=None, help="Save results to JSON file")
+def backtest(
+    symbol: str, timeframe: str, capital: float,
+    pattern_length: int, min_confidence: float, start_offset: int,
+    auto_calibrate: bool, no_calibrate: bool,
+    regime_aware: bool, multi_level: bool, output: str,
+):
+    """Run a full backtest on stored historical data.
+
+    Uses the RealtimeTrader in replay mode to simulate streaming through
+    historical candles, generating signals, and tracking P&L with
+    the full PPMT pipeline (SAX → Trie → Match → Signal → Risk → Trade).
+
+    This is the primary tool for validating the trading engine before
+    deploying to live markets.
+
+    Examples:
+      ppmt backtest -s BTC/USDT                    # Default backtest
+      ppmt backtest -s ETH/USDT -t 5m -c 50000     # 5-minute with 50k capital
+      ppmt backtest -s BTC/USDT -o results.json     # Save results
+    """
+    if no_calibrate:
+        auto_calibrate = False
+
+    from ppmt.engine.realtime import RealtimeTrader, ReplayConfig
+
+    config = ReplayConfig(
+        symbol=symbol,
+        timeframe=timeframe,
+        initial_capital=capital,
+        speed=0,  # Maximum speed for backtest
+        pattern_length=pattern_length,
+        min_confidence=min_confidence,
+        start_offset=start_offset,
+        auto_calibrate=auto_calibrate,
+        regime_aware=regime_aware,
+        use_multi_level=multi_level,
+        use_token_profile=True,
+        verbose=True,
+    )
+
+    console.print(f"[bold cyan]Running Backtest: {symbol} ({timeframe})[/bold cyan]")
+    console.print(f"  Capital: ${capital:,.2f}")
+    console.print(f"  Pattern Length: {pattern_length}")
+    console.print(f"  Min Confidence: {min_confidence:.0%}")
+    console.print(f"  Auto-calibrate: {'ON' if auto_calibrate else 'OFF'}")
+    console.print(f"  Regime-aware: {'ON' if regime_aware else 'OFF'}")
+    console.print(f"  Multi-level: {'ON' if multi_level else 'OFF'}")
+    console.print()
+
+    trader = RealtimeTrader(config=config)
+    result = trader.run_replay()
+
+    console.print(format_realtime_result(result))
+
+    # Show trade details if any
+    if result.trades:
+        console.print(f"\n[bold]Trade Details:[/bold]")
+        trade_table = Table(title="Backtest Trades")
+        trade_table.add_column("#", justify="right", style="cyan")
+        trade_table.add_column("Dir")
+        trade_table.add_column("Entry", justify="right")
+        trade_table.add_column("Exit", justify="right")
+        trade_table.add_column("P&L%", justify="right")
+        trade_table.add_column("Exit Reason")
+        trade_table.add_column("Regime")
+
+        for t in result.trades:
+            pnl_color = "green" if t.pnl_pct >= 0 else "red"
+            trade_table.add_row(
+                str(t.trade_id),
+                t.direction,
+                f"${t.entry_price:,.2f}",
+                f"${t.exit_price:,.2f}",
+                f"[{pnl_color}]{t.pnl_pct:+.2f}%[/{pnl_color}]",
+                t.exit_reason,
+                t.regime,
+            )
+
+        console.print(trade_table)
+
+    # Save to JSON if requested
+    if output:
+        import json
+        from pathlib import Path
+        output_path = Path(output)
+        if not output_path.is_absolute():
+            output_path = Path.cwd() / output_path
+
+        result_dict = {
+            "symbol": result.symbol,
+            "timeframe": result.timeframe,
+            "mode": result.mode,
+            "initial_capital": result.initial_capital,
+            "final_capital": result.final_capital,
+            "total_pnl": result.total_pnl,
+            "total_pnl_pct": result.total_pnl_pct,
+            "total_trades": result.total_trades,
+            "winning_trades": result.winning_trades,
+            "losing_trades": result.losing_trades,
+            "win_rate": result.win_rate,
+            "max_drawdown": result.max_drawdown,
+            "candles_processed": result.candles_processed,
+            "sax_symbols_produced": result.sax_symbols_produced,
+            "signals_generated": result.signals_generated,
+            "duration_seconds": result.duration_seconds,
+            "trades": [
+                {
+                    "trade_id": t.trade_id,
+                    "direction": t.direction,
+                    "entry_price": t.entry_price,
+                    "exit_price": t.exit_price,
+                    "pnl": t.pnl,
+                    "pnl_pct": t.pnl_pct,
+                    "exit_reason": t.exit_reason,
+                    "regime": t.regime,
+                    "confidence": t.confidence,
+                }
+                for t in result.trades
+            ],
+        }
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w") as f:
+            json.dump(result_dict, f, indent=2, default=str)
+        console.print(f"\n[green]Results saved to {output_path}[/green]")
+
+
+@cli.command("monte-carlo")
+@click.option("--symbol", "-s", required=True, help="Trading pair")
+@click.option("--timeframe", "-t", default="1h", help="Candle timeframe")
+@click.option("--capital", "-c", default=10000.0, type=float, help="Initial capital")
+@click.option("--simulations", "-n", default=1000, type=int, help="Number of simulations")
+@click.option("--pattern-length", "-p", default=5, type=int, help="SAX blocks per pattern")
+@click.option("--min-confidence", default=0.20, type=float, help="Minimum signal confidence")
+@click.option("--auto-calibrate", is_flag=True, default=True, help="Auto-calibrate SAX parameters")
+@click.option("--regime-aware", is_flag=True, default=True, help="Enable regime detection")
+@click.option("--confidence-level", default=0.95, type=float, help="Confidence level (0-1)")
+@click.option("--output", "-o", default=None, help="Save results to JSON file")
+def monte_carlo(
+    symbol: str, timeframe: str, capital: float,
+    simulations: int, pattern_length: int, min_confidence: float,
+    auto_calibrate: bool, regime_aware: bool,
+    confidence_level: float, output: str,
+):
+    """Run Monte Carlo simulation on backtest results.
+
+    First runs a backtest to collect trade P&Ls, then resamples
+    them thousands of times to build confidence intervals for:
+      - Risk of Ruin
+      - Probability of Profit
+      - Max Drawdown distribution
+      - Sharpe Ratio distribution
+
+    This provides statistical validation of the trading strategy.
+
+    Examples:
+      ppmt monte-carlo -s BTC/USDT                     # 1000 simulations
+      ppmt monte-carlo -s ETH/USDT -n 5000             # 5000 simulations
+      ppmt monte-carlo -s BTC/USDT -o mc_results.json   # Save results
+    """
+    from ppmt.engine.realtime import RealtimeTrader, ReplayConfig
+    from ppmt.risk.monte_carlo import MonteCarloSimulator
+
+    # Step 1: Run backtest to collect trades
+    console.print(f"[bold cyan]Step 1/2: Running Backtest for {symbol}...[/bold cyan]")
+    config = ReplayConfig(
+        symbol=symbol,
+        timeframe=timeframe,
+        initial_capital=capital,
+        speed=0,
+        pattern_length=pattern_length,
+        min_confidence=min_confidence,
+        auto_calibrate=auto_calibrate,
+        regime_aware=regime_aware,
+        use_multi_level=True,
+        use_token_profile=True,
+        verbose=False,  # Quiet mode for backtest
+    )
+
+    trader = RealtimeTrader(config=config)
+    result = trader.run_replay()
+
+    if result.total_trades == 0:
+        console.print("[yellow]No trades generated. Cannot run Monte Carlo.[/yellow]")
+        console.print("[dim]Try lowering --min-confidence or ingesting more data.[/dim]")
+        return
+
+    console.print(f"  Backtest: {result.total_trades} trades, "
+                  f"WR={result.win_rate:.1%}, "
+                  f"P&L={result.total_pnl_pct:+.2f}%")
+
+    # Step 2: Run Monte Carlo
+    console.print(f"\n[bold cyan]Step 2/2: Running {simulations} Monte Carlo simulations...[/bold cyan]")
+
+    trade_pnls = [t.pnl_pct for t in result.trades]
+    mc = MonteCarloSimulator(
+        trade_pnls=trade_pnls,
+        initial_capital=capital,
+        n_simulations=simulations,
+        confidence_level=confidence_level,
+    )
+    mc_results = mc.run()
+
+    # Display results
+    console.print(f"\n[bold]Monte Carlo Simulation Results: {symbol} ({timeframe})[/bold]")
+    console.print(f"  Base Trades:       {result.total_trades}")
+    console.print(f"  Simulations:       {simulations}")
+    console.print(f"  Confidence Level:  {confidence_level:.0%}")
+    console.print("")
+
+    # Risk metrics
+    risk_of_ruin = mc_results.get("risk_of_ruin", 0)
+    prob_profit = mc_results.get("probability_of_profit", 0)
+    mean_final = mc_results.get("mean_final_capital", capital)
+    median_final = mc_results.get("median_final_capital", capital)
+
+    console.print(f"  [bold]Risk of Ruin:[/bold]          {risk_of_ruin:.1%}")
+    console.print(f"  [bold]Probability of Profit:[/bold]  {prob_profit:.1%}")
+    console.print(f"  Mean Final Capital:    ${mean_final:,.2f}")
+    console.print(f"  Median Final Capital:  ${median_final:,.2f}")
+
+    # Confidence intervals
+    ci_lower = mc_results.get("ci_lower_capital", capital)
+    ci_upper = mc_results.get("ci_upper_capital", capital)
+    console.print(f"  {confidence_level:.0%} CI:             ${ci_lower:,.2f} — ${ci_upper:,.2f}")
+
+    # Max drawdown
+    mean_dd = mc_results.get("mean_max_drawdown", 0)
+    worst_dd = mc_results.get("worst_max_drawdown", 0)
+    console.print(f"  Mean Max DD:          {mean_dd:.1%}")
+    console.print(f"  Worst Max DD:         {worst_dd:.1%}")
+
+    # Sharpe
+    mean_sharpe = mc_results.get("mean_sharpe_ratio", 0)
+    console.print(f"  Mean Sharpe Ratio:    {mean_sharpe:.2f}")
+
+    # Verdict
+    if risk_of_ruin > 0.20:
+        console.print(f"\n  [bold red]VERDICT: HIGH RISK — Risk of ruin {risk_of_ruin:.0%} exceeds 20%[/bold red]")
+    elif risk_of_ruin > 0.05:
+        console.print(f"\n  [bold yellow]VERDICT: MODERATE RISK — Risk of ruin {risk_of_ruin:.0%}[/bold yellow]")
+    else:
+        console.print(f"\n  [bold green]VERDICT: LOW RISK — Risk of ruin only {risk_of_ruin:.0%}[/bold green]")
+
+    # Save to JSON
+    if output:
+        import json
+        from pathlib import Path
+        output_path = Path(output)
+        if not output_path.is_absolute():
+            output_path = Path.cwd() / output_path
+
+        mc_dict = {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "base_trades": result.total_trades,
+            "base_win_rate": result.win_rate,
+            "base_pnl_pct": result.total_pnl_pct,
+            "simulations": simulations,
+            "confidence_level": confidence_level,
+            "risk_of_ruin": risk_of_ruin,
+            "probability_of_profit": prob_profit,
+            "mean_final_capital": mean_final,
+            "median_final_capital": median_final,
+            "ci_lower_capital": ci_lower,
+            "ci_upper_capital": ci_upper,
+            "mean_max_drawdown": mean_dd,
+            "worst_max_drawdown": worst_dd,
+            "mean_sharpe_ratio": mean_sharpe,
+        }
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w") as f:
+            json.dump(mc_dict, f, indent=2, default=str)
+        console.print(f"\n[green]Results saved to {output_path}[/green]")
+
+
+@cli.command("validate")
+@click.option("--symbol", "-s", required=True, help="Trading pair")
+@click.option("--timeframe", "-t", default="1h", help="Candle timeframe")
+@click.option("--pattern-length", "-p", default=5, type=int, help="SAX blocks per pattern")
+@click.option("--output", "-o", default=None, help="Save validation report to JSON")
+def validate(symbol: str, timeframe: str, pattern_length: int, output: str):
+    """Run the full validation suite (OOS + Monte Carlo + Walk-Forward).
+
+    Performs three statistical tests to determine if the strategy
+    is robust, overfit, or marginal:
+
+      P0 — Out-of-Sample Test: Train on 70%, test on 30%
+      P1 — Monte Carlo Permutation: Randomize trade order 1000x
+      P2 — Walk-Forward Analysis: Rolling window validation
+
+    Composite verdict: ROBUST / MARGINAL / OVERFIT / INSUFFICIENT_DATA
+
+    Examples:
+      ppmt validate -s BTC/USDT
+      ppmt validate -s ETH/USDT -t 5m -o validation.json
+    """
+    from ppmt.engine.validator import ValidationSuite
+
+    console.print(f"[bold cyan]Running Validation Suite: {symbol} ({timeframe})[/bold cyan]")
+
+    storage = PPMTStorage()
+    df = storage.load_ohlcv(symbol, timeframe)
+    if df.empty:
+        console.print(f"[red]No data for {symbol}. Run 'ppmt ingest' first.[/red]")
+        storage.close()
+        return
+
+    config = load_config()
+    classifier = AssetClassifier()
+    info = classifier.classify(symbol)
+
+    sax_config = config.get("sax", {})
+
+    suite = ValidationSuite(
+        symbol=symbol,
+        timeframe=timeframe,
+        pattern_length=pattern_length,
+        sax_alphabet_size=sax_config.get("alphabet_size", 8),
+        sax_window_size=sax_config.get("window_size", 10),
+        asset_class=info.asset_class,
+    )
+
+    results = suite.run(df)
+
+    # Display results
+    console.print(f"\n[bold]Validation Results: {symbol} ({timeframe})[/bold]")
+    console.print(f"  Data: {len(df)} candles")
+
+    for test_name, test_result in results.items():
+        if isinstance(test_result, dict):
+            status = test_result.get("verdict", "N/A")
+            color = {"ROBUST": "green", "MARGINAL": "yellow", "OVERFIT": "red", "INSUFFICIENT_DATA": "dim"}.get(status, "white")
+            console.print(f"  {test_name}: [{color}]{status}[/{color}]")
+            for key, val in test_result.items():
+                if key != "verdict" and isinstance(val, (int, float, str)):
+                    console.print(f"    {key}: {val}")
+
+    composite = results.get("composite_verdict", "UNKNOWN")
+    composite_color = {"ROBUST": "bold green", "MARGINAL": "bold yellow", "OVERFIT": "bold red"}.get(composite, "white")
+    console.print(f"\n  [bold]Composite Verdict:[/bold] [{composite_color}]{composite}[/{composite_color}]")
+
+    # Save to JSON
+    if output:
+        import json
+        from pathlib import Path
+        output_path = Path(output)
+        if not output_path.is_absolute():
+            output_path = Path.cwd() / output_path
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Convert results for JSON serialization
+        json_results = {}
+        for key, val in results.items():
+            if isinstance(val, dict):
+                json_results[key] = {k: str(v) if not isinstance(v, (int, float, bool)) else v
+                                     for k, v in val.items()}
+            else:
+                json_results[key] = str(val)
+
+        json_results["symbol"] = symbol
+        json_results["timeframe"] = timeframe
+        json_results["data_candles"] = len(df)
+
+        with open(output_path, "w") as f:
+            json.dump(json_results, f, indent=2, default=str)
+        console.print(f"\n[green]Validation report saved to {output_path}[/green]")
+
+    storage.close()

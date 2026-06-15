@@ -60,6 +60,7 @@ from ppmt.engine.prediction import PredictionEngine
 from ppmt.engine.signal import SignalType, Signal
 from ppmt.core.metadata import BlockLifecycleMetadata
 from ppmt.risk.manager import RiskManager, RiskConfig
+from ppmt.engine.buffer import StreamingPatternBuffer
 
 
 console = Console()
@@ -1484,13 +1485,19 @@ class RealtimeTrader:
         result.equity_curve = [cfg.initial_capital]
         result.capital_history = [cfg.initial_capital]
 
+        # v0.13.0: Use StreamingPatternBuffer for structured state management
+        stream_buf = StreamingPatternBuffer(
+            pattern_length=cfg.pattern_length,
+            max_buffer_length=cfg.pattern_length * 3,
+            track_history=True,
+        )
         sax_buffer = []
-        pattern_buffer = []
         position_state = PositionState.FLAT
         current_position = None
         trade_counter = 0
         peak_capital = cfg.initial_capital
         last_losing_trade_idx = -999
+        candles_since_calibration = 0  # v0.13.0: Recalibration counter
 
         regime_detector = None
         current_regime = "ranging"
@@ -1528,15 +1535,19 @@ class RealtimeTrader:
             with Live(console=console, refresh_per_second=2) as live_display:
 
                 if use_websocket:
-                    # === WEBSOCKET MODE (v0.12.0) ===
+                    # === WEBSOCKET MODE (v0.12.0 → v0.13.0 with StreamingPatternBuffer) ===
                     from ppmt.data.websocket_feed import WebSocketFeed, Candle
 
                     async def on_candle(candle: Candle):
-                        nonlocal sax_buffer, pattern_buffer, position_state
+                        nonlocal sax_buffer, position_state
                         nonlocal current_position, trade_counter, current_regime
                         nonlocal peak_capital, last_losing_trade_idx
+                        nonlocal candles_since_calibration
 
-                        (sax_buffer, pattern_buffer, position_state, current_position,
+                        # Use StreamingPatternBuffer for SAX symbol management
+                        pattern_buffer = stream_buf.pattern_buffer
+
+                        (sax_buffer, _pattern_buffer, position_state, current_position,
                          trade_counter, current_regime, peak_capital,
                          last_losing_trade_idx) = await self.process_new_candle(
                             candle=candle,
@@ -1565,10 +1576,36 @@ class RealtimeTrader:
                             exchange=exchange,
                         )
 
+                        # v0.13.0: Sync buffer state back to StreamingPatternBuffer
+                        # (process_new_candle returns updated lists)
+                        # We track new symbols via the returned pattern_buffer
+                        new_symbols_in_buf = _pattern_buffer[len(pattern_buffer):]
+                        if new_symbols_in_buf:
+                            for sym in new_symbols_in_buf:
+                                stream_buf._pattern_buffer.append(sym)
+                                stream_buf._symbol_counts[sym] += 1
+                                stream_buf._total_symbols += 1
+                                stream_buf._symbols_produced += 1
+                            stream_buf._trim()
+
+                        # v0.13.0: Living Trie updates
+                        if getattr(cfg, 'living_trie', False) and stream_buf.has_pattern():
+                            _living_trie_update(
+                                stream_buf, trie, ppmt_engine, cfg, current_regime
+                            )
+
+                        # v0.13.0: Periodic recalibration
+                        candles_since_calibration += 1
+                        recalc_interval = getattr(cfg, 'recalibration_interval', 0)
+                        if (recalc_interval > 0
+                                and candles_since_calibration >= recalc_interval):
+                            _recalibrate(sax_encoder, cfg, storage, info)
+                            candles_since_calibration = 0
+
                         # Update display
                         _update_live_display(live_display, cfg, result, position_state,
                                              current_position, current_regime, recent_prices,
-                                             risk_mgr)
+                                             risk_mgr, stream_buf)
 
                     def on_status(status: str, msg: str):
                         console.print(f"[dim][{status}] {msg}[/dim]")
@@ -1766,26 +1803,44 @@ def _update_live_display(
     current_regime: str,
     recent_prices: list,
     risk_mgr: RiskManager,
+    stream_buf: Optional[StreamingPatternBuffer] = None,
 ) -> None:
-    """Update the Rich Live display panel during live trading."""
+    """Update the Rich Live display panel during live trading.
+
+    v0.13.0: Enhanced with StreamingPatternBuffer info, entropy, and SL/TP display.
+    """
     current_price = recent_prices[-1] if recent_prices else 0
     pos_str = f"[green]{position_state.value}[/green]" if position_state != PositionState.FLAT else "FLAT"
     pnl_pct = (risk_mgr.capital - cfg.initial_capital) / cfg.initial_capital * 100 if cfg.initial_capital > 0 else 0
     pnl_color = "green" if pnl_pct >= 0 else "red"
     pnl_sign = "+" if pnl_pct >= 0 else ""
 
+    # Position details
     direction_str = ""
+    sl_tp_str = ""
     if current_position is not None:
         direction_str = f" ({current_position.direction})"
+        sl_val = getattr(current_position, 'sl_price', None)
+        tp_val = getattr(current_position, 'tp_price', None)
+        if sl_val and tp_val and current_price > 0:
+            sl_dist = abs(current_price - sl_val) / current_price * 100
+            tp_dist = abs(tp_val - current_price) / current_price * 100
+            sl_tp_str = f" | SL: ${sl_val:,.0f} (-{sl_dist:.1f}%) TP: ${tp_val:,.0f} (+{tp_dist:.1f}%)"
+
+    # Buffer info
+    buf_str = ""
+    if stream_buf is not None:
+        pat = " -> ".join(stream_buf.get_pattern()) if stream_buf.has_pattern() else "..."
+        buf_str = f" | Pattern: [{pat}] | Entropy: {stream_buf.entropy:.1f}b"
 
     live_display.update(Panel(
         f"  Price: ${current_price:,.2f} | "
-        f"Position: {pos_str}{direction_str} | "
-        f"P&L: [{pnl_color}]{pnl_sign}{pnl_pct:.2f}%[/{pnl_color}] | "
+        f"Position: {pos_str}{direction_str}{sl_tp_str}\n"
+        f"  P&L: [{pnl_color}]{pnl_sign}{pnl_pct:.2f}%[/{pnl_color}] | "
         f"Regime: {current_regime} | "
         f"Candles: {result.candles_processed} | "
         f"Signals: {result.signals_generated} | "
-        f"Trades: {result.total_trades}",
+        f"Trades: {result.total_trades}{buf_str}",
         title=f"PPMT Live: {cfg.symbol} ({'DRY RUN' if getattr(cfg, 'dry_run', True) else 'LIVE'})",
         border_style="cyan",
     ))
@@ -1814,3 +1869,94 @@ def format_realtime_result(result: RealtimeResult) -> str:
     lines.append(f"  Duration:          {result.duration_seconds:.1f}s")
 
     return "\n".join(lines)
+
+
+# ============================================================
+# v0.13.0: LIVING TRIE & RECALIBRATION
+# ============================================================
+
+def _living_trie_update(
+    stream_buf: StreamingPatternBuffer,
+    trie,
+    ppmt_engine,
+    cfg,
+    current_regime: str,
+) -> None:
+    """
+    Update the Living Trie with recent pattern observations.
+
+    The Living Trie adapts to market changes by inserting new pattern
+    observations as they occur in real-time. This keeps the Trie
+    synchronized with current market dynamics without full rebuilds.
+
+    Only updates every N symbols to avoid excessive writes.
+    """
+    # Only update every pattern_length symbols (1 update per full pattern cycle)
+    if stream_buf.symbols_produced % cfg.pattern_length != 0:
+        return
+
+    observations = stream_buf.get_recent_observations(n=5)
+    if not observations:
+        return
+
+    for obs in observations[-1:]:  # Only insert the most recent
+        symbols = obs["symbols"]
+        if len(symbols) == cfg.pattern_length:
+            try:
+                trie.insert_with_observations(
+                    symbols=symbols,
+                    direction=None,  # Unknown at insertion time
+                    move_pct=0.0,    # Will be updated on exit
+                    regime=current_regime,
+                )
+            except Exception:
+                pass  # Non-critical — Living Trie is best-effort
+
+    # Periodically re-propagate metadata (every 50 updates)
+    if stream_buf.symbols_produced % (cfg.pattern_length * 50) == 0:
+        try:
+            trie.propagate_metadata()
+        except Exception:
+            pass
+
+
+def _recalibrate(sax_encoder, cfg, storage, info) -> None:
+    """
+    Periodically re-calibrate SAX parameters based on accumulated data.
+
+    Uses the TradingCalibrationEngine to find optimal α/W for the
+    current market regime. Only updates if new parameters are
+    significantly different from current ones.
+    """
+    try:
+        df = storage.load_ohlcv(cfg.symbol, cfg.timeframe)
+        if df.empty or len(df) < 500:
+            return
+
+        calibrator = TradingCalibrationEngine(
+            train_ratio=0.70,
+            pattern_length=cfg.pattern_length,
+            timeframe=cfg.timeframe,
+        )
+        cal_profile, cal_results = calibrator.calibrate(df, symbol=cfg.symbol, verbose=False)
+
+        new_alpha = cal_profile.sax_alphabet_size
+        new_window = cal_profile.sax_window_size
+
+        # Only update if parameters changed significantly
+        if new_alpha != cfg.sax_alphabet_size or new_window != cfg.sax_window_size:
+            old_alpha, old_window = cfg.sax_alphabet_size, cfg.sax_window_size
+            cfg.sax_alphabet_size = new_alpha
+            cfg.sax_window_size = new_window
+
+            # Update SAX encoder parameters
+            sax_encoder.alphabet_size = new_alpha
+            sax_encoder.window_size = new_window
+            # Reset normalization stats for new params
+            sax_encoder._zscore_stats = None
+
+            console.print(f"[bold yellow]Recalibrated:[/bold yellow] "
+                          f"alpha={old_alpha}->{new_alpha}, window={old_window}->{new_window}")
+    except Exception as e:
+        # Recalibration failure is non-critical
+        console.print(f"[dim]Recalibration skipped: {e}[/dim]")
