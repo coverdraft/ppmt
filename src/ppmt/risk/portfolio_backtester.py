@@ -51,6 +51,7 @@ Architecture:
 from __future__ import annotations
 
 import json
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -282,6 +283,138 @@ class PortfolioBacktester:
         self._rebalance_count: int = 0
         self._prev_regimes: dict[str, str] = {}
 
+        # Async execution state (v0.19.0)
+        self._is_running: bool = False
+        self._is_cancelled: bool = False
+        self._progress_pct: float = 0.0
+        self._total_candles: int = 0
+        self._result: Optional[PortfolioBacktestResult] = None
+        self._last_error: Optional[str] = None
+        self._thread: Optional[threading.Thread] = None
+        self._data: Optional[dict] = None
+        self._regime_data: Optional[dict] = None
+        self._signal_func: Optional[callable] = None
+
+    # -------------------------------------------------------------------
+    # Async Execution (v0.19.0)
+    # -------------------------------------------------------------------
+
+    @property
+    def is_running(self) -> bool:
+        """Whether the backtest is currently executing."""
+        return self._is_running
+
+    @property
+    def progress_pct(self) -> float:
+        """Progress as a float 0.0–1.0."""
+        return self._progress_pct
+
+    @property
+    def current_candle(self) -> int:
+        """Current candle index being processed."""
+        return self._candle_idx
+
+    @property
+    def last_result(self) -> Optional[PortfolioBacktestResult]:
+        """Result from the last completed backtest run."""
+        return self._result
+
+    @property
+    def last_error(self) -> Optional[str]:
+        """Error from the last failed backtest run."""
+        return self._last_error
+
+    def get_live_status(self) -> dict:
+        """Get current backtest status for API consumers.
+
+        Returns a dict with: running, progress_pct, candle, total_candles,
+        portfolio_value, open_positions, tokens, error.
+        """
+        return {
+            "running": self._is_running,
+            "progress_pct": round(self._progress_pct, 3),
+            "candle": self._candle_idx,
+            "total_candles": self._total_candles,
+            "portfolio_value": round(self.portfolio.total_value, 2) if self.portfolio else 0.0,
+            "open_positions": self.portfolio.total_open_positions if self.portfolio else 0,
+            "tokens": self.config.tokens,
+            "error": self._last_error,
+        }
+
+    def cancel(self) -> None:
+        """Request graceful cancellation of the running backtest.
+
+        The backtest will stop at the next candle boundary
+        and produce a partial result.
+        """
+        self._is_cancelled = True
+
+    def run_async(
+        self,
+        data: Optional[dict[str, list]] = None,
+        regime_data: Optional[dict[str, list[str]]] = None,
+        signal_generator_func: Optional[callable] = None,
+    ) -> None:
+        """Start the backtest in a background thread (non-blocking).
+
+        If data was previously set (via set_data), it will be used.
+        Otherwise, data must be provided here.
+
+        Check progress via is_running / progress_pct / get_live_status().
+        Get the result via last_result when is_running becomes False.
+        """
+        if data is not None:
+            self._data = data
+        if regime_data is not None:
+            self._regime_data = regime_data
+        if signal_generator_func is not None:
+            self._signal_func = signal_generator_func
+
+        if self._data is None:
+            raise ValueError("No data provided for backtest. Pass data to run_async() or call set_data() first.")
+
+        self._thread = threading.Thread(
+            target=self._run_in_thread,
+            daemon=True,
+            name="portfolio-backtest",
+        )
+        self._thread.start()
+
+    def set_data(
+        self,
+        data: dict[str, list],
+        regime_data: Optional[dict[str, list[str]]] = None,
+    ) -> None:
+        """Pre-load data for a subsequent run_async() call."""
+        self._data = data
+        self._regime_data = regime_data
+
+    def _run_in_thread(self) -> None:
+        """Execute backtest in background thread."""
+        try:
+            self._is_running = True
+            self._is_cancelled = False
+            self._progress_pct = 0.0
+            self._result = None
+            self._last_error = None
+
+            result = self.run(
+                data=self._data,
+                regime_data=self._regime_data,
+                signal_generator_func=self._signal_func,
+                progress=False,  # No CLI progress bar in API mode
+            )
+            self._result = result
+            self._progress_pct = 1.0
+        except Exception as e:
+            self._last_error = str(e)
+        finally:
+            self._is_running = False
+
+    # -------------------------------------------------------------------
+    # Synchronous Run
+    # -------------------------------------------------------------------
+
     def run(
         self,
         data: dict[str, list],
@@ -314,6 +447,7 @@ class PortfolioBacktester:
         max_candles = min(lengths.values())
         total_candles = max_candles
 
+        self._total_candles = max_candles
         self._reset()
 
         if progress:
@@ -375,7 +509,15 @@ class PortfolioBacktester:
     ) -> None:
         """Main backtest simulation loop."""
         for candle_idx in range(total_candles):
+            # Check cancellation (v0.19.0)
+            if self._is_cancelled:
+                break
+
             self._candle_idx = candle_idx
+
+            # Update progress for async consumers
+            if total_candles > 0:
+                self._progress_pct = candle_idx / total_candles
 
             # Process each token's candle
             for symbol, candles in data.items():

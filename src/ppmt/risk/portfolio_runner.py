@@ -1,10 +1,17 @@
 """
-Portfolio Runner - Multi-Engine Orchestrator for PPMT v0.17.0
+Portfolio Runner - Multi-Engine Orchestrator for PPMT v0.18.0
 
 The Portfolio Runner orchestrates MULTIPLE PPMT engines simultaneously,
 each processing its own token's data, while sharing capital allocation
 through a PortfolioManager. This is the bridge between single-token
 PaperTrader and true multi-token portfolio trading.
+
+v0.18.0 Changes:
+  - Added run_async() for background execution (threading)
+  - Added live progress tracking (is_running, progress_pct)
+  - Added cancel() for graceful shutdown
+  - Fixed status reporting (now reflects actual running state)
+  - Improved error resilience per-token
 
 Architecture:
   ┌──────────────────────────────────────────────────────────────────┐
@@ -56,8 +63,9 @@ Key Difference from PaperTrader:
 from __future__ import annotations
 
 import time
+import threading
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Callable
 from pathlib import Path
 
 import numpy as np
@@ -341,6 +349,16 @@ class PortfolioRunner:
         self._prev_regimes: dict[str, str] = {}
         self._signal_log: list[dict] = []
 
+        # Async execution state
+        self._is_running: bool = False
+        self._is_cancelled: bool = False
+        self._progress_pct: float = 0.0
+        self._total_candles: int = 0
+        self._result: Optional[PortfolioRunnerResult] = None
+        self._error: Optional[str] = None
+        self._thread: Optional[threading.Thread] = None
+        self._progress_callback: Optional[Callable[[dict], None]] = None
+
         # Risk config for per-token RiskManagers (inside PortfolioManager slots)
         self.risk_config = RiskConfig(
             base_position_size_pct=0.01,
@@ -566,6 +584,60 @@ class PortfolioRunner:
     # Main Run Loop
     # -------------------------------------------------------------------
 
+    # -------------------------------------------------------------------
+    # Live Status
+    # -------------------------------------------------------------------
+
+    @property
+    def is_running(self) -> bool:
+        """Whether the runner is currently executing."""
+        return self._is_running
+
+    @property
+    def progress_pct(self) -> float:
+        """Current progress percentage (0.0 - 1.0)."""
+        return self._progress_pct
+
+    @property
+    def current_candle(self) -> int:
+        """Current candle index being processed."""
+        return self._candle_idx
+
+    @property
+    def last_result(self) -> Optional[PortfolioRunnerResult]:
+        """Last completed result, if any."""
+        return self._result
+
+    @property
+    def last_error(self) -> Optional[str]:
+        """Last error message, if any."""
+        return self._error
+
+    def get_live_status(self) -> dict:
+        """Get current live status for API consumers.
+
+        Returns a dict with: running, progress_pct, candle, total_candles,
+        portfolio_value, open_positions, tokens, error.
+        """
+        return {
+            "running": self._is_running,
+            "progress_pct": round(self._progress_pct, 3),
+            "candle": self._candle_idx,
+            "total_candles": self._total_candles,
+            "portfolio_value": self.portfolio.total_value if self.portfolio else 0,
+            "open_positions": self.portfolio.total_open_positions if self.portfolio else 0,
+            "tokens": list(self.engines.keys()) if self.engines else [],
+            "error": self._error,
+        }
+
+    def cancel(self) -> None:
+        """Request graceful cancellation of a running session."""
+        self._is_cancelled = True
+
+    # -------------------------------------------------------------------
+    # Synchronous Run
+    # -------------------------------------------------------------------
+
     def run(self, progress: bool = True) -> PortfolioRunnerResult:
         """
         Run the portfolio trading session.
@@ -609,25 +681,123 @@ class PortfolioRunner:
 
         # Reset state
         self._reset()
+        self._total_candles = total_candles
+        self._is_running = True
+        self._is_cancelled = False
+        self._error = None
 
-        if progress:
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-                console=console,
-            ) as progress_bar:
-                task = progress_bar.add_task(
-                    f"[cyan]Running {len(self.engines)} tokens...",
-                    total=total_candles,
-                )
-                self._run_loop(total_candles, progress_bar, task)
-        else:
+        try:
+            if progress:
+                with Progress(
+                    SpinnerColumn(),
+                    TextColumn("[progress.description]{task.description}"),
+                    BarColumn(),
+                    TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                    console=console,
+                ) as progress_bar:
+                    task = progress_bar.add_task(
+                        f"[cyan]Running {len(self.engines)} tokens...",
+                        total=total_candles,
+                    )
+                    self._run_loop(total_candles, progress_bar, task)
+            else:
+                self._run_loop(total_candles, None, None)
+
+            # Build final result
+            result = self._build_result(total_candles)
+            self._result = result
+            return result
+        except Exception as e:
+            self._error = str(e)
+            raise
+        finally:
+            self._is_running = False
+            self._progress_pct = 1.0 if self._result else self._progress_pct
+
+    # -------------------------------------------------------------------
+    # Asynchronous Run (for API server)
+    # -------------------------------------------------------------------
+
+    def run_async(
+        self,
+        progress_callback: Optional[Callable[[dict], None]] = None,
+    ) -> None:
+        """Start the runner in a background thread.
+
+        The runner executes in a separate thread, allowing the API
+        server to remain responsive. Progress updates are sent via
+        the callback.
+
+        Args:
+            progress_callback: Called with a status dict every 100 candles.
+        """
+        self._progress_callback = progress_callback
+        self._thread = threading.Thread(
+            target=self._run_in_thread,
+            daemon=True,
+            name="portfolio-runner",
+        )
+        self._thread.start()
+
+    def _run_in_thread(self) -> None:
+        """Internal: run the portfolio session in a background thread."""
+        cfg = self.config
+
+        try:
+            # Initialize engines
+            for symbol in cfg.tokens:
+                engine = self._init_token_engine(symbol)
+                if engine is not None:
+                    self.engines[symbol] = engine
+
+            if not self.engines:
+                self._error = "No engines initialized"
+                self._is_running = False
+                return
+
+            min_candles = min(len(eng._df) for eng in self.engines.values())
+            total_candles = min_candles - cfg.start_offset
+            if total_candles <= 0:
+                self._error = "Not enough data for any token"
+                self._is_running = False
+                return
+
+            # Reset and run
+            self._reset()
+            self._total_candles = total_candles
+            self._is_running = True
+            self._is_cancelled = False
+            self._progress_pct = 0.0
+
             self._run_loop(total_candles, None, None)
 
-        # Build final result
-        return self._build_result(total_candles)
+            result = self._build_result(total_candles)
+            self._result = result
+
+            # Final callback
+            if self._progress_callback:
+                try:
+                    self._progress_callback({
+                        "event": "complete",
+                        "progress_pct": 1.0,
+                        "result": result.to_dict(),
+                    })
+                except Exception:
+                    pass
+
+        except Exception as e:
+            self._error = str(e)
+            if self._progress_callback:
+                try:
+                    self._progress_callback({
+                        "event": "error",
+                        "error": str(e),
+                    })
+                except Exception:
+                    pass
+        finally:
+            self._is_running = False
+            self._progress_pct = 1.0 if self._result else self._progress_pct
 
     def _reset(self) -> None:
         """Reset runner state for a fresh session."""
@@ -691,6 +861,34 @@ class PortfolioRunner:
 
         for candle_idx in range(start_candle, start_candle + total_candles):
             self._candle_idx = candle_idx
+
+            # Check cancellation
+            if self._is_cancelled:
+                console.print("[yellow]Runner cancelled by user.[/yellow]")
+                break
+
+            # Update progress
+            if total_candles > 0:
+                self._progress_pct = (candle_idx - start_candle) / total_candles
+
+            # Progress callback every 100 candles
+            if (self._progress_callback
+                    and (candle_idx - start_candle) % 100 == 0
+                    and candle_idx > start_candle):
+                try:
+                    self._progress_callback({
+                        "event": "progress",
+                        "candle": candle_idx,
+                        "total_candles": start_candle + total_candles,
+                        "progress_pct": round(self._progress_pct, 3),
+                        "portfolio_value": self.portfolio.total_value,
+                        "open_positions": self.portfolio.total_open_positions,
+                        "trades": sum(
+                            eng.trade_counter for eng in self.engines.values()
+                        ),
+                    })
+                except Exception:
+                    pass
 
             # ----------------------------------------------------------
             # PHASE 1: Per-token candle processing

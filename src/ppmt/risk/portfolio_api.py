@@ -23,6 +23,15 @@ v0.18.2 Changes:
   - Background runner progress broadcaster for WS clients
   - Auto ping/pong keepalive
 
+v0.19.0 Changes:
+  - Added PortfolioBacktester endpoints for multi-token backtesting
+  - POST /api/portfolio/backtest/run — start async backtest
+  - GET  /api/portfolio/backtest/status — live progress
+  - GET  /api/portfolio/backtest/result — completed result
+  - GET  /api/portfolio/backtest/stream — SSE progress streaming
+  - POST /api/portfolio/backtest/stop — cancel running backtest
+  - PortfolioBacktester now supports async execution + cancellation
+
 Endpoints:
   GET  /api/portfolio/state          - Full portfolio state
   GET  /api/portfolio/summary        - Portfolio summary
@@ -42,6 +51,12 @@ Endpoints:
   GET  /api/portfolio/runner/result  - Latest result
   GET  /api/portfolio/runner/stream  - SSE progress stream
   POST /api/portfolio/runner/stop    - Cancel runner
+  --- Backtester ---
+  POST /api/portfolio/backtest/run   - Start multi-token backtest (async)
+  GET  /api/portfolio/backtest/status - Backtest progress
+  GET  /api/portfolio/backtest/result - Completed backtest result
+  GET  /api/portfolio/backtest/stream - SSE backtest progress stream
+  POST /api/portfolio/backtest/stop  - Cancel running backtest
   --- WebSocket ---
   WS   /ws/trading                   - Live trading signals + portfolio updates
 """
@@ -70,6 +85,9 @@ from ppmt.risk.portfolio_manager import PortfolioManager, PortfolioConfig
 from ppmt.risk.correlation_engine import CrossTokenCorrelationEngine, CorrelationMethod
 from ppmt.risk.regime_allocator import RegimeAwareAllocator
 from ppmt.risk.portfolio_runner import PortfolioRunner, PortfolioRunnerConfig
+from ppmt.risk.portfolio_backtester import (
+    PortfolioBacktester, PortfolioBacktestConfig, PortfolioBacktestResult,
+)
 from ppmt.data.classifier import AssetClassifier
 
 
@@ -83,6 +101,10 @@ _allocator: Optional[RegimeAwareAllocator] = None
 _runner: Optional[PortfolioRunner] = None
 _runner_result: Optional[dict] = None
 _classifier = AssetClassifier()
+
+# Backtester state
+_backtester: Optional[PortfolioBacktester] = None
+_backtester_result: Optional[dict] = None
 
 # WebSocket clients for live trading signals
 _ws_clients: set = set()
@@ -127,6 +149,111 @@ def get_allocator() -> RegimeAwareAllocator:
     if _allocator is None:
         _allocator = RegimeAwareAllocator()
     return _allocator
+
+
+# ---------------------------------------------------------------------------
+# Backtest Data Loader
+# ---------------------------------------------------------------------------
+
+def _load_backtest_data(tokens: list[str], timeframe: str = "1h") -> dict[str, list]:
+    """Load OHLCV data from PPMT storage for backtesting.
+
+    Tries to load real historical data. Falls back to synthetic
+    data generation if storage is empty or unavailable.
+    """
+    data: dict[str, list] = {}
+    candle_count = 720  # Default: 720 candles (30 days at 1h)
+
+    try:
+        storage = PPMTStorage()
+        for symbol in tokens:
+            ohlcv = storage.load_ohlcv(symbol, timeframe)
+            if ohlcv and len(ohlcv) > 50:
+                data[symbol] = [
+                    {
+                        "timestamp": bar[0],
+                        "open": bar[1],
+                        "high": bar[2],
+                        "low": bar[3],
+                        "close": bar[4],
+                        "volume": bar[5],
+                    }
+                    for bar in ohlcv
+                ]
+    except Exception:
+        pass  # Fall through to synthetic data
+
+    # Generate synthetic data for tokens without stored data
+    import numpy as np
+    base_prices = {
+        "BTC/USDT": 65000, "ETH/USDT": 3500, "SOL/USDT": 170,
+        "DOGE/USDT": 0.12, "AVAX/USDT": 35, "ADA/USDT": 0.45,
+        "DOT/USDT": 7.5, "LINK/USDT": 15, "MATIC/USDT": 0.7,
+    }
+
+    for symbol in tokens:
+        if symbol in data:
+            continue
+
+        base_price = base_prices.get(symbol, 100.0)
+        candles = []
+        price = base_price
+        np.random.seed(hash(symbol) % 2**31)
+
+        for i in range(candle_count):
+            change = np.random.normal(0, 0.015)
+            price *= (1 + change)
+            price = max(price * 0.5, price)  # Floor at 50% of current
+            high = price * (1 + abs(np.random.normal(0, 0.005)))
+            low = price * (1 - abs(np.random.normal(0, 0.005)))
+            candles.append({
+                "timestamp": 1700000000 + i * 3600,
+                "open": round(price * (1 + np.random.normal(0, 0.002)), 6),
+                "high": round(high, 6),
+                "low": round(low, 6),
+                "close": round(price, 6),
+                "volume": round(abs(np.random.normal(1e6, 2e5)), 2),
+            })
+        data[symbol] = candles
+
+    return data
+
+
+# Try to import PPMTStorage (may not be available in all environments)
+try:
+    from ppmt.data.storage import PPMTStorage
+except ImportError:
+    PPMTStorage = None  # type: ignore
+    # Redefine _load_backtest_data without storage dependency
+    def _load_backtest_data(tokens: list[str], timeframe: str = "1h") -> dict[str, list]:  # type: ignore
+        """Load OHLCV data — synthetic only (PPMTStorage not available)."""
+        import numpy as np
+        data: dict[str, list] = {}
+        candle_count = 720
+        base_prices = {
+            "BTC/USDT": 65000, "ETH/USDT": 3500, "SOL/USDT": 170,
+            "DOGE/USDT": 0.12, "AVAX/USDT": 35, "ADA/USDT": 0.45,
+        }
+        for symbol in tokens:
+            base_price = base_prices.get(symbol, 100.0)
+            candles = []
+            price = base_price
+            np.random.seed(hash(symbol) % 2**31)
+            for i in range(candle_count):
+                change = np.random.normal(0, 0.015)
+                price *= (1 + change)
+                high = price * (1 + abs(np.random.normal(0, 0.005)))
+                low = price * (1 - abs(np.random.normal(0, 0.005)))
+                candles.append({
+                    "timestamp": 1700000000 + i * 3600,
+                    "open": round(price * (1 + np.random.normal(0, 0.002)), 6),
+                    "high": round(high, 6),
+                    "low": round(low, 6),
+                    "close": round(price, 6),
+                    "volume": round(abs(np.random.normal(1e6, 2e5)), 2),
+                })
+            data[symbol] = candles
+        return data
 
 
 # ---------------------------------------------------------------------------
@@ -419,7 +546,7 @@ def create_app() -> "FastAPI":
         """Health check endpoint."""
         return {
             "status": "ok",
-            "version": "0.16.0",
+            "version": "0.19.0",
             "tokens": len(get_portfolio()._slots),
             "positions": get_portfolio().total_open_positions,
         }
@@ -691,6 +818,222 @@ def create_app() -> "FastAPI":
         }
 
     # -------------------------------------------------------------------
+    # Portfolio Backtester — Multi-Token Backtest
+    # -------------------------------------------------------------------
+
+    @app.post("/api/portfolio/backtest/run")
+    async def start_backtest(
+        tokens: Optional[str] = Query(None),
+        initial_capital: float = Query(50_000),
+        allocation_method: str = Query("REGIME_AWARE"),
+        rebalance_interval: int = Query(24),
+        regime_shift_rebalance: bool = Query(True),
+        max_portfolio_exposure: float = Query(0.80),
+        correlation_lookback: int = Query(60),
+        timeframe: str = Query("1h"),
+    ):
+        """Start a multi-token portfolio backtest (async, non-blocking).
+
+        Runs the PortfolioBacktester in a background thread. Progress
+        is available via /backtest/status or /backtest/stream.
+
+        The backtest uses PPMT's built-in signal generation (simple
+        price-action signals) unless a custom signal generator is
+        configured at the Python level.
+
+        If OHLCV data is available in PPMT storage, it will be loaded
+        automatically. Otherwise, synthetic data will be generated for
+        the backtest.
+        """
+        global _backtester, _backtester_result
+
+        if _backtester is not None and _backtester.is_running:
+            return {
+                "success": False,
+                "error": "A backtest is already running. Stop it first.",
+                "status": _backtester.get_live_status(),
+            }
+
+        token_list = tokens.split(",") if tokens else ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+
+        config = PortfolioBacktestConfig(
+            initial_capital=initial_capital,
+            tokens=token_list,
+            allocation_method=allocation_method,
+            rebalance_interval=rebalance_interval,
+            regime_shift_rebalance=regime_shift_rebalance,
+            max_portfolio_exposure=max_portfolio_exposure,
+            correlation_lookback=correlation_lookback,
+        )
+
+        try:
+            _backtester = PortfolioBacktester(config=config)
+            _backtester_result = None
+
+            # Try to load OHLCV data from PPMT storage
+            data = _load_backtest_data(token_list, timeframe)
+
+            # Start async backtest
+            _backtester.run_async(data=data)
+
+            return {
+                "success": True,
+                "mode": "async",
+                "tokens": token_list,
+                "initial_capital": initial_capital,
+                "message": "Backtest started. Check /backtest/status for progress.",
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    @app.get("/api/portfolio/backtest/status")
+    async def get_backtest_status():
+        """Get current PortfolioBacktester status with live progress.
+
+        Returns real-time progress including:
+        - running: Whether the backtest is currently executing
+        - progress_pct: 0.0 to 1.0 completion
+        - candle: Current candle being processed
+        - total_candles: Total candles to process
+        - portfolio_value: Current portfolio value
+        - open_positions: Number of open positions
+        - tokens: List of tokens being backtested
+        - error: Error message if any
+        """
+        if _backtester is None:
+            return {
+                "running": False,
+                "progress_pct": 0.0,
+                "tokens": [],
+                "message": "No backtest session",
+            }
+        return _backtester.get_live_status()
+
+    @app.get("/api/portfolio/backtest/result")
+    async def get_backtest_result():
+        """Get the latest PortfolioBacktest result.
+
+        Returns the result from the last completed backtest session.
+        If the backtest is still running, returns partial info.
+        """
+        if _backtester is None:
+            return {"success": False, "error": "No backtest session yet"}
+
+        # If still running, return progress
+        if _backtester.is_running:
+            return {
+                "success": True,
+                "running": True,
+                "progress_pct": round(_backtester.progress_pct, 3),
+                "candle": _backtester.current_candle,
+                "message": "Backtest is still executing. Check /backtest/status for live progress.",
+            }
+
+        # Return completed result
+        if _backtester_result is not None:
+            return {"success": True, "result": _backtester_result}
+
+        # Backtester exists but no result yet
+        if _backtester.last_result is not None:
+            return {"success": True, "result": _backtester.last_result.to_dict()}
+
+        return {"success": False, "error": "No result available"}
+
+    @app.get("/api/portfolio/backtest/stream")
+    async def backtest_stream():
+        """SSE endpoint for live backtest progress streaming.
+
+        Connect to receive real-time progress updates every 2 seconds
+        while the backtest is active. Events:
+          - backtest_progress: Progress update with candle/value data
+          - backtest_complete: Final result when backtest finishes
+          - backtest_error: Error if backtest fails
+          - backtest_idle: No active backtest session
+        """
+        from starlette.responses import StreamingResponse
+
+        async def sse_generator():
+            last_pct = -1.0
+            while True:
+                try:
+                    if _backtester is None:
+                        yield f"event: backtest_idle\n"
+                        yield f"data: {{\"message\": \"No backtest session\"}}\n\n"
+                        break
+
+                    if _backtester.is_running:
+                        status = _backtester.get_live_status()
+                        # Only emit if progress changed
+                        if status["progress_pct"] != last_pct:
+                            last_pct = status["progress_pct"]
+                            yield f"event: backtest_progress\n"
+                            yield f"data: {json.dumps(status, default=float)}\n\n"
+                    else:
+                        # Backtest finished
+                        if _backtester.last_error:
+                            yield f"event: backtest_error\n"
+                            yield f"data: {{\"error\": \"{_backtester.last_error}\"}}\n\n"
+                        elif _backtester.last_result:
+                            result = _backtester.last_result.to_dict()
+                            _backtester_result = result  # Cache it
+                            yield f"event: backtest_complete\n"
+                            yield f"data: {json.dumps(result, default=float)}\n\n"
+                        elif _backtester_result:
+                            yield f"event: backtest_complete\n"
+                            yield f"data: {json.dumps(_backtester_result, default=float)}\n\n"
+                        break
+
+                except Exception as e:
+                    yield f"event: backtest_error\n"
+                    yield f"data: {{\"error\": \"{str(e)}\"}}\n\n"
+                    break
+
+                await asyncio.sleep(2)
+
+        return StreamingResponse(
+            sse_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    @app.post("/api/portfolio/backtest/stop")
+    async def stop_backtest():
+        """Cancel the PortfolioBacktester session gracefully.
+
+        Sets a cancellation flag. The backtest will stop at the next
+        candle boundary and produce a partial result.
+        """
+        global _backtester_result
+
+        if _backtester is None:
+            return {"success": True, "message": "No backtest session to stop"}
+
+        if not _backtester.is_running:
+            return {"success": True, "message": "Backtest is not running"}
+
+        _backtester.cancel()
+
+        # Wait a moment for graceful shutdown (up to 5s)
+        for _ in range(50):
+            if not _backtester.is_running:
+                break
+            await asyncio.sleep(0.1)
+
+        # Capture partial result if available
+        if _backtester.last_result is not None:
+            _backtester_result = _backtester.last_result.to_dict()
+
+        return {
+            "success": True,
+            "message": "Backtest cancelled",
+            "partial_result": _backtester_result,
+        }
+
+    # -------------------------------------------------------------------
     # Live Trading WebSocket
     # -------------------------------------------------------------------
 
@@ -864,7 +1207,7 @@ def serve(host: str = "0.0.0.0", port: int = 8430) -> None:
     import uvicorn
 
     app = create_app()
-    print(f"PPMT Portfolio API v0.18.2 starting on {host}:{port}")
+    print(f"PPMT Portfolio API v0.19.0 starting on {host}:{port}")
     print(f"Dashboard can connect at: http://{host}:{port}/api/portfolio/state")
     print(f"WebSocket endpoint: ws://{host}:{port}/ws/trading")
 
