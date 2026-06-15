@@ -1,7 +1,37 @@
-# PPMT v0.12.0 — TRACEABILITY DOCUMENT
+# PPMT Terminal v0.14.0 — TRACEABILITY DOCUMENT
 
 > Last updated: 2026-06-15
 > Data source: Bybit 12 tokens (BTC, ETH, SOL, BNB, XRP, ADA, LINK, UNI, ATOM, DOGE, SHIB, PEPE) 1h (14,400 real candles each) + 5m (57,600 candles) + 1m (288,000 candles)
+
+---
+
+## ⚠️ ARCHITECTURAL DECISION — DO NOT INTEGRATE WITH CryptoQuant Terminal
+
+**Date: 2026-06-15 | Status: PERMANENT — Do not reverse unless EXPLICITLY requested by user**
+
+### Decision
+
+PPMT Terminal is a **standalone, self-contained** trading terminal. It does NOT integrate with CryptoQuant Terminal (github.com/coverdraft/cryptoquant-terminal).
+
+### Rationale
+
+1. **Integration overhead**: Connecting two separate projects (Python engine + Next.js dashboard) creates complexity without proportional value
+2. **PPMT has everything it needs**: SAX encoding, Trie matching, risk management, and now its own built-in web dashboard — all in one project
+3. **Faster to deliver**: Building features directly in PPMT Terminal is faster than maintaining an integration layer
+4. **CryptoQuant Terminal is visualization-only**: It serves a different purpose and can continue as a separate repo
+
+### What This Means
+
+- CryptoQuant Terminal remains at `github.com/coverdraft/cryptoquant-terminal` as a separate project
+- PPMT Terminal has its OWN dashboard at `ppmt terminal` (FastAPI + WebSocket, port 8420)
+- No APIs, webhooks, or data bridges between the two projects
+- If the user ever wants integration, it must be **explicitly requested** — do not assume it
+
+### CryptoQuant Terminal Status
+
+- Code safe on GitHub (`github.com/coverdraft/cryptoquant-terminal`)
+- Local directory exists at `/home/z/my-project/cryptoquant-terminal/` but contains only `.git/`
+- Can be cloned again if needed, but NOT for PPMT integration
 
 ---
 
@@ -2152,3 +2182,142 @@ All Phase 1 deliverables are implemented:
 - ✅ `ppmt backtest` CLI command
 - ✅ `ppmt monte-carlo` CLI command
 - ✅ `ppmt validate` CLI command
+
+---
+
+## 11. v0.14.0 — PPMT TERMINAL: Standalone Trading Terminal
+
+> Date: 2026-06-15
+
+### Background & Decision
+
+During session continuation, the question arose: should PPMT integrate with CryptoQuant Terminal? After analysis, the decision was clear:
+
+**PPMT Terminal is now a standalone, all-in-one trading terminal.** No integration with CryptoQuant Terminal.
+
+The existing PPMT codebase was much more complete than documented in the previous session:
+- `process_new_candle()` was NOT a stub — it was a complete 350-line pipeline
+- `WebSocketFeed` was fully implemented (Binance + Bybit)
+- `StreamingPatternBuffer` existed with entropy, living trie support, serialization
+- `run_live()` had WebSocket + REST fallback + exchange order execution
+- CLI `ppmt run` was functional for both replay and live modes
+- CLI `ppmt backtest`, `ppmt monte-carlo`, `ppmt validate` already existed
+
+### What Was Missing
+
+The gap was not the core engine — it was the **terminal/operational layer**:
+
+1. **Money Manager**: Portfolio-level P&L, multi-position, exposure control, kill switch
+2. **Web Dashboard**: Real-time visualization of the trading engine
+3. **Asset Scanning**: Finding and analyzing assets to trade
+4. **Portfolio Command**: Portfolio management from CLI
+
+### New Modules
+
+#### 1. `src/ppmt/risk/money_manager.py` — MoneyManager (NEW, ~600 lines)
+
+Portfolio-level capital and risk management that wraps around the existing RiskManager:
+
+- **Portfolio State Tracking**: Total value (cash + unrealized), realized/unrealized P&L, equity curve, daily return, rolling Sharpe ratio
+- **Multi-Position Management**: Track multiple symbols, max positions (5), max correlated (2), per-symbol exposure, asset class grouping via AssetClassifier
+- **Exposure & Leverage Control**: Max portfolio exposure (80%), max single position (25%), kill switch at 95%, leverage ratio, net long/short ratio
+- **Kill Switch / Circuit Breakers**: `activate_kill_switch()` closes all positions immediately, daily loss breaker, drawdown breaker, `is_trading_allowed()`, `circuit_breaker_status()`
+- **Portfolio Analytics**: `get_portfolio_summary()`, `get_position_report()`, `get_exposure_breakdown()`, `get_risk_report()`
+- **Session Persistence**: `save_state()` / `load_state()` to JSON, auto-save
+
+#### 2. `src/ppmt/terminal/` — Web Dashboard (NEW, ~4 files)
+
+FastAPI + WebSocket real-time dashboard:
+
+- **`state.py`** — TerminalState: Shared state hub between engine and dashboard. Thread-safe with asyncio.Lock. Tracks: connection status, current price, pattern buffer, entropy, regime, signals history (last 50), positions, portfolio metrics, circuit breakers, equity curve (last 200 points), feed stats.
+- **`server.py`** — FastAPI app with: `GET /` (dashboard HTML), `GET /api/status`, `GET /api/portfolio`, `GET /api/signals`, `GET /api/performance`, `GET /api/risk`, `WS /ws` (real-time WebSocket broadcast every 1s)
+- **`static/index.html`** — Self-contained dark-themed dashboard (33KB, zero external dependencies). Shows: price card, pattern visualization (colored SAX blocks), entropy meter, regime badge, portfolio value with P&L, positions table, signals feed, equity curve (canvas), performance stats, circuit breaker panel.
+- **`__init__.py`** — Exports: app, run_server, terminal_state
+
+#### 3. CLI Commands (UPDATED in `src/ppmt/cli/main.py`)
+
+Three new commands added:
+
+- **`ppmt terminal`** — Launch web dashboard (FastAPI on port 8420, `--open-browser` flag)
+- **`ppmt scan`** — Scan exchange markets, rank by volume/volatility/change (`-e`, `-q`, `--top`, `--sort-by`)
+- **`ppmt portfolio`** — Show portfolio overview, P&L, exposure, circuit breakers (`-s`, `-c`)
+
+#### 4. Branding Update
+
+- Project name: `ppmt` → `ppmt-terminal` (in pyproject.toml)
+- CLI description: "PPMT Terminal - Autonomous Pattern-Based Trading Terminal"
+- Version: 0.13.0 → 0.14.0
+- New dependencies: `fastapi>=0.110.0`, `uvicorn>=0.29.0`
+- New entry point: `ppmt-terminal = "ppmt.cli.main:cli"` (alias)
+
+### File Change Manifest
+
+| File | Change |
+|------|--------|
+| `src/ppmt/risk/money_manager.py` | NEW — MoneyManager, MoneyManagerConfig, PortfolioSnapshot (~600 lines) |
+| `src/ppmt/risk/__init__.py` | UPDATED — exports MoneyManager, MoneyManagerConfig, PortfolioSnapshot |
+| `src/ppmt/terminal/__init__.py` | NEW — module init with exports |
+| `src/ppmt/terminal/state.py` | NEW — TerminalState shared state hub (~300 lines) |
+| `src/ppmt/terminal/server.py` | NEW — FastAPI + WebSocket server (~150 lines) |
+| `src/ppmt/terminal/static/index.html` | NEW — self-contained dark dashboard UI (~33KB) |
+| `src/ppmt/cli/main.py` | UPDATED — 3 new commands (terminal, scan, portfolio), branding update |
+| `pyproject.toml` | UPDATED — v0.14.0, name=ppmt-terminal, fastapi+uvicorn deps, ppmt-terminal entry point |
+| `TRACEABILITY.md` | UPDATED — v0.14.0 section, anti-integration decision |
+
+### Complete CLI Command Reference (v0.14.0)
+
+| Command | Purpose |
+|---------|---------|
+| `ppmt init` | Initialize database and config |
+| `ppmt ingest -s BTC/USDT` | Fetch and store historical data |
+| `ppmt build -s BTC/USDT` | Build Trie from stored data |
+| `ppmt predict -s BTC/USDT` | Show prediction from current pattern |
+| `ppmt run -s BTC/USDT` | Real-time pattern matching (WebSocket + dashboard) |
+| `ppmt run -s BTC/USDT --replay` | Replay historical data |
+| `ppmt backtest -s BTC/USDT` | Run backtest on stored data |
+| `ppmt monte-carlo -s BTC/USDT` | Monte Carlo validation |
+| `ppmt validate -s BTC/USDT` | Full out-of-sample validation |
+| `ppmt stats -s BTC/USDT` | Show pattern statistics |
+| `ppmt list` | List tracked assets |
+| `ppmt terminal` | Launch web dashboard (port 8420) |
+| `ppmt scan` | Scan and rank exchange assets |
+| `ppmt portfolio` | Portfolio overview and money management |
+
+### Setup for Local Computer
+
+```bash
+# Clone
+git clone https://github.com/coverdraft/ppmt.git
+cd ppmt
+
+# Create virtual environment
+python3 -m venv venv
+source venv/bin/activate
+
+# Install in development mode
+pip install -e .
+
+# Optional: exchange support
+pip install -e ".[exchange]"
+
+# Initialize
+ppmt init
+
+# Fetch data
+ppmt ingest -s BTC/USDT -t 1h -d 30
+
+# Build Trie
+ppmt build -s BTC/USDT -t 1h
+
+# Run
+ppmt run -s BTC/USDT --replay        # Test with historical data
+ppmt run -s BTC/USDT                  # Live WebSocket from Binance
+ppmt terminal                          # Web dashboard at http://localhost:8420
+```
+
+### Known Limitations (v0.14.0)
+
+1. **TerminalState not yet connected to RealtimeTrader** — The dashboard runs but doesn't receive live data from the engine yet. Needs integration in `realtime.py` to update `TerminalState` on each candle.
+2. **Asset scan requires ccxt** — The `ppmt scan` command needs `ccxt` installed (optional dependency).
+3. **Money Manager not yet integrated into RealtimeTrader** — The engine still uses RiskManager directly. MoneyManager integration is next.
+4. **Dashboard is static-only** — No backend logic for placing orders from the web UI yet.

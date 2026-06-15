@@ -1,14 +1,17 @@
 """
-PPMT CLI - Command Line Interface
+PPMT Terminal CLI - Command Line Interface
 
 Usage:
   ppmt init                          Initialize database and config
   ppmt ingest --symbol BTC/USDT      Fetch and store historical data
   ppmt build --symbol BTC/USDT       Build Trie from stored data
   ppmt predict --symbol BTC/USDT     Show prediction from current pattern
-  ppmt run --symbol BTC/USDT         Real-time pattern matching
+  ppmt run --symbol BTC/USDT         Real-time pattern matching + dashboard
+  ppmt terminal                      Launch web dashboard
+  ppmt scan                          Scan and analyze assets
   ppmt stats --symbol BTC/USDT       Show pattern statistics
   ppmt list                          List tracked assets
+  ppmt portfolio                     Portfolio and money management
 """
 
 from __future__ import annotations
@@ -44,9 +47,9 @@ def load_config() -> dict:
 
 
 @click.group()
-@click.version_option(version="0.1.0")
+@click.version_option(version="0.14.0")
 def cli():
-    """PPMT - Progressive Pattern Matching Trie Engine"""
+    """PPMT Terminal - Autonomous Pattern-Based Trading Terminal"""
     pass
 
 
@@ -879,3 +882,238 @@ def validate(symbol: str, timeframe: str, pattern_length: int, output: str):
         console.print(f"\n[green]Validation report saved to {output_path}[/green]")
 
     storage.close()
+
+
+# ============================================================
+# v0.14.0: TERMINAL DASHBOARD & PORTFOLIO COMMANDS
+# ============================================================
+
+@cli.command()
+@click.option("--host", "-h", default="0.0.0.0", help="Dashboard host")
+@click.option("--port", "-p", default=8420, type=int, help="Dashboard port")
+@click.option("--open-browser", is_flag=True, default=False, help="Open browser automatically")
+def terminal(host: str, port: int, open_browser: bool):
+    """Launch the PPMT Terminal web dashboard.
+
+    Starts a FastAPI server with WebSocket support for real-time
+    monitoring of the PPMT trading engine. The dashboard shows:
+
+      - Live price and pattern visualization
+      - Portfolio value, P&L, and exposure
+      - Open positions with SL/TP tracking
+      - Signal feed and equity curve
+      - Circuit breaker status
+
+    Examples:
+      ppmt terminal                      # Start dashboard on port 8420
+      ppmt terminal -p 9000             # Custom port
+      ppmt terminal --open-browser      # Auto-open in browser
+    """
+    console.print("[bold cyan]PPMT Terminal Dashboard[/bold cyan]")
+    console.print(f"  Starting server on http://{host}:{port}")
+
+    if open_browser:
+        import webbrowser
+        import threading
+        url = f"http://localhost:{port}"
+        threading.Timer(1.5, lambda: webbrowser.open(url)).start()
+        console.print(f"  Opening browser at {url}")
+
+    try:
+        from ppmt.terminal.server import run_server
+        console.print(f"\n[green]Dashboard ready: http://localhost:{port}[/green]")
+        console.print("[dim]Press Ctrl+C to stop[/dim]\n")
+        run_server(host=host, port=port)
+    except ImportError as e:
+        console.print(f"[red]Terminal dashboard not available: {e}[/red]")
+        console.print("[dim]Install dependencies: pip install fastapi uvicorn[/dim]")
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Dashboard stopped.[/yellow]")
+
+
+@cli.command()
+@click.option("--exchange", "-e", default="binance", help="Exchange to scan")
+@click.option("--quote", "-q", default="USDT", help="Quote currency")
+@click.option("--top", default=20, type=int, help="Number of top assets to show")
+@click.option("--sort-by", type=click.Choice(["volume", "volatility", "change"]), default="volume", help="Sort criterion")
+def scan(exchange: str, quote: str, top: int, sort_by: str):
+    """Scan and analyze available trading assets.
+
+    Fetches market data from the exchange and ranks assets by
+    the selected criterion. Useful for finding high-activity
+    or high-volatility assets to trade.
+
+    Examples:
+      ppmt scan                           # Top 20 USDT pairs by volume on Binance
+      ppmt scan -e bybit -q USDC         # USDC pairs on Bybit
+      ppmt scan --sort-by volatility      # Most volatile assets
+    """
+    console.print(f"[bold cyan]Scanning {exchange} markets ({quote} pairs)...[/bold cyan]")
+
+    try:
+        from ppmt.data.collector import DataCollector
+        storage = PPMTStorage()
+        collector = DataCollector(exchange=exchange, storage=storage)
+
+        # Get markets
+        markets = collector.get_markets()
+        if not markets:
+            console.print("[red]No markets found. Check exchange connection.[/red]")
+            collector.close()
+            storage.close()
+            return
+
+        # Filter by quote currency
+        pairs = [m for m in markets if m.endswith(f"/{quote}")]
+        if not pairs:
+            console.print(f"[red]No {quote} pairs found on {exchange}[/red]")
+            collector.close()
+            storage.close()
+            return
+
+        # Fetch tickers for ranking
+        console.print(f"  Found {len(pairs)} {quote} pairs. Fetching tickers...")
+
+        tickers = collector.get_tickers(pairs[:100])  # Limit to avoid rate limits
+
+        # Build ranking
+        rankings = []
+        for symbol, ticker in tickers.items():
+            volume = ticker.get("quoteVolume", 0) or 0
+            change = ticker.get("percentage", 0) or 0
+            high = ticker.get("high", 0) or 0
+            low = ticker.get("low", 0) or 0
+            last = ticker.get("last", 0) or 0
+
+            volatility = ((high - low) / last * 100) if last > 0 else 0
+
+            rankings.append({
+                "symbol": symbol,
+                "price": last,
+                "volume_24h": volume,
+                "change_24h": change,
+                "volatility": volatility,
+                "high": high,
+                "low": low,
+            })
+
+        # Sort
+        sort_key = {"volume": "volume_24h", "volatility": "volatility", "change": "change_24h"}[sort_by]
+        rankings.sort(key=lambda x: x[sort_key], reverse=True)
+
+        # Display table
+        table = Table(title=f"Top {top} {quote} Pairs on {exchange} (by {sort_by})")
+        table.add_column("#", style="dim", width=4)
+        table.add_column("Symbol", style="bold")
+        table.add_column("Price", justify="right")
+        table.add_column("24h Volume", justify="right")
+        table.add_column("24h Change", justify="right")
+        table.add_column("Volatility", justify="right")
+
+        for i, r in enumerate(rankings[:top], 1):
+            change_color = "green" if r["change_24h"] >= 0 else "red"
+            change_sign = "+" if r["change_24h"] >= 0 else ""
+
+            vol_str = f"${r['volume_24h']:,.0f}" if r['volume_24h'] >= 1e6 else f"${r['volume_24h']:,.0f}"
+            price_str = f"${r['price']:,.2f}" if r['price'] >= 1 else f"${r['price']:,.6f}"
+
+            table.add_row(
+                str(i),
+                r["symbol"],
+                price_str,
+                vol_str,
+                f"[{change_color}]{change_sign}{r['change_24h']:.1f}%[/{change_color}]",
+                f"{r['volatility']:.1f}%",
+            )
+
+        console.print(table)
+        console.print(f"\n[dim]To ingest data: ppmt ingest -s <SYMBOL> -e {exchange}[/dim]")
+
+        collector.close()
+        storage.close()
+
+    except ImportError:
+        console.print("[red]ccxt is required for market scanning. Install with: pip install ccxt>=4.0.0[/red]")
+    except Exception as e:
+        console.print(f"[red]Scan failed: {e}[/red]")
+
+
+@cli.command()
+@click.option("--symbol", "-s", default=None, help="Filter by symbol")
+@click.option("--capital", "-c", default=None, type=float, help="Set initial capital")
+def portfolio(symbol: str, capital: float):
+    """Show portfolio and money management status.
+
+    Displays current portfolio value, open positions, exposure,
+    circuit breaker status, and risk metrics.
+
+    Examples:
+      ppmt portfolio                       # Show portfolio overview
+      ppmt portfolio -s BTC/USDT           # Filter by symbol
+      ppmt portfolio -c 50000              # Set initial capital
+    """
+    from ppmt.risk.money_manager import MoneyManager, MoneyManagerConfig
+
+    config = MoneyManagerConfig()
+
+    # Try to load saved state
+    state_file = os.path.join(CONFIG_DIR, "money_manager_state.json")
+    if os.path.exists(state_file):
+        config.state_file = state_file
+
+    if capital is not None:
+        config.initial_capital = capital
+
+    mgr = MoneyManager(config=config)
+
+    # Load state if exists
+    if os.path.exists(state_file):
+        try:
+            mgr.load_state(state_file)
+        except Exception:
+            pass
+
+    if capital is not None:
+        console.print(f"[yellow]Setting capital to ${capital:,.2f}[/yellow]")
+        mgr.initial_capital = capital
+        if mgr.cash == 0:
+            mgr.cash = capital
+
+    # Display portfolio summary
+    summary = mgr.get_portfolio_summary()
+
+    console.print("\n[bold cyan]PPMT Terminal — Portfolio Overview[/bold cyan]\n")
+
+    # Portfolio value panel
+    pnl_color = "green" if summary["realized_pnl"] >= 0 else "red"
+    pnl_sign = "+" if summary["realized_pnl"] >= 0 else ""
+
+    console.print(f"  Portfolio Value:  [bold]${summary['total_value']:,.2f}[/bold]")
+    console.print(f"  Cash:             ${summary['cash']:,.2f}")
+    console.print(f"  Unrealized P&L:   ${summary['unrealized_pnl']:+,.2f}")
+    console.print(f"  Realized P&L:     [{pnl_color}]{pnl_sign}${summary['realized_pnl']:,.2f}[/{pnl_color}]")
+    console.print(f"  Total Return:     {summary['total_return_pct']:+.2f}%")
+    console.print(f"  Exposure:         {summary['exposure_pct']:.1f}%")
+    console.print(f"  Leverage:         {summary['leverage_ratio']:.2f}x")
+    console.print(f"  Open Positions:   {summary['num_positions']}")
+    console.print(f"  Drawdown:         {summary['current_drawdown']:.1%}")
+
+    # Circuit breakers
+    breakers = mgr.circuit_breaker_status()
+    if any(breakers.values()):
+        console.print("\n  [bold yellow]⚠ Circuit Breakers Active:[/bold yellow]")
+        for name, active in breakers.items():
+            if active:
+                console.print(f"    [red]● {name}[/red]")
+    else:
+        console.print("\n  [green]● All circuit breakers clear[/green]")
+
+    trading = mgr.is_trading_allowed()
+    status = "[green]ALLOWED[/green]" if trading else "[red]BLOCKED[/red]"
+    console.print(f"  Trading Status:   {status}")
+
+    # Save state
+    try:
+        mgr.save_state(state_file)
+    except Exception:
+        pass

@@ -1,0 +1,879 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PPMT Terminal</title>
+<style>
+/* ============================================================ */
+/* Reset & Base                                                  */
+/* ============================================================ */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg-primary:#0d1117;
+  --bg-card:#161b22;
+  --bg-card-hover:#1c2129;
+  --border:#30363d;
+  --text-primary:#c9d1d9;
+  --text-secondary:#8b949e;
+  --accent:#58a6ff;
+  --green:#3fb950;
+  --red:#f85149;
+  --yellow:#d29922;
+  --orange:#db6d28;
+  --purple:#bc8cff;
+  --font-mono:'SF Mono','Cascadia Code','Fira Code','Consolas',monospace;
+  --font-sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;
+  --radius:8px;
+  --shadow:0 1px 3px rgba(0,0,0,.4);
+}
+html{font-size:14px}
+body{
+  background:var(--bg-primary);
+  color:var(--text-primary);
+  font-family:var(--font-sans);
+  line-height:1.5;
+  min-height:100vh;
+  overflow-x:hidden;
+}
+
+/* ============================================================ */
+/* Header                                                        */
+/* ============================================================ */
+.header{
+  background:var(--bg-card);
+  border-bottom:1px solid var(--border);
+  padding:0 20px;
+  height:52px;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  position:sticky;
+  top:0;
+  z-index:100;
+}
+.header-left{display:flex;align-items:center;gap:14px}
+.header-logo{
+  font-family:var(--font-mono);
+  font-size:1.15rem;
+  font-weight:700;
+  color:var(--accent);
+  letter-spacing:1px;
+}
+.header-logo span{color:var(--text-primary);font-weight:400}
+.conn-indicator{display:flex;align-items:center;gap:6px;font-size:.8rem;color:var(--text-secondary)}
+.conn-dot{
+  width:8px;height:8px;border-radius:50%;
+  background:var(--red);
+  transition:background .3s;
+}
+.conn-dot.connected{background:var(--green);animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.mode-badge{
+  font-family:var(--font-mono);
+  font-size:.7rem;
+  font-weight:700;
+  padding:2px 8px;
+  border-radius:4px;
+  letter-spacing:1px;
+  background:transparent;
+  border:1px solid var(--border);
+  color:var(--text-secondary);
+}
+.mode-badge.live{background:rgba(63,185,80,.15);border-color:var(--green);color:var(--green)}
+.mode-badge.replay{background:rgba(210,153,34,.15);border-color:var(--yellow);color:var(--yellow)}
+.mode-badge.paper{background:rgba(88,166,255,.15);border-color:var(--accent);color:var(--accent)}
+.header-right{display:flex;align-items:center;gap:14px;font-size:.8rem;color:var(--text-secondary);font-family:var(--font-mono)}
+
+/* ============================================================ */
+/* Main Grid                                                     */
+/* ============================================================ */
+.main{padding:16px 20px;max-width:1600px;margin:0 auto}
+.grid{
+  display:grid;
+  grid-template-columns:repeat(3,1fr);
+  gap:14px;
+}
+@media(max-width:1100px){.grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:680px){.grid{grid-template-columns:1fr}}
+
+/* ============================================================ */
+/* Card                                                          */
+/* ============================================================ */
+.card{
+  background:var(--bg-card);
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  padding:16px;
+  box-shadow:var(--shadow);
+  transition:border-color .2s;
+  overflow:hidden;
+}
+.card:hover{border-color:rgba(88,166,255,.3)}
+.card-title{
+  font-size:.7rem;
+  font-weight:600;
+  text-transform:uppercase;
+  letter-spacing:1.5px;
+  color:var(--text-secondary);
+  margin-bottom:10px;
+}
+.card-span-2{grid-column:span 2}
+.card-span-3{grid-column:span 3}
+@media(max-width:680px){.card-span-2,.card-span-3{grid-column:span 1}}
+
+/* ============================================================ */
+/* Price Card                                                    */
+/* ============================================================ */
+.price-value{
+  font-family:var(--font-mono);
+  font-size:2rem;
+  font-weight:700;
+  color:var(--text-primary);
+  line-height:1.1;
+}
+.price-meta{display:flex;gap:12px;margin-top:6px;font-size:.8rem;font-family:var(--font-mono)}
+.price-change{font-weight:600}
+.price-change.positive{color:var(--green)}
+.price-change.negative{color:var(--red)}
+
+/* ============================================================ */
+/* Pattern Card                                                  */
+/* ============================================================ */
+.pattern-row{display:flex;gap:3px;flex-wrap:wrap;margin:8px 0}
+.pattern-block{
+  width:22px;height:22px;
+  border-radius:3px;
+  font-family:var(--font-mono);
+  font-size:.65rem;
+  font-weight:700;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  color:#fff;
+  transition:transform .15s;
+}
+.pattern-block:hover{transform:scale(1.2)}
+.pat-a{background:#3fb950}.pat-b{background:#58a6ff}.pat-c{background:#d29922}
+.pat-d{background:#f85149}.pat-e{background:#bc8cff}.pat-f{background:#db6d28}
+.pat-g{background:#39d353}.pat-h{background:#79c0ff}.pat-i{background:#e3b341}
+.pat-j{background:#ff7b72}.pat-k{background:#d2a8ff}.pat-l{background:#ffa657}
+.entropy-meter{display:flex;align-items:center;gap:8px;margin-top:6px}
+.entropy-bar-bg{
+  flex:1;height:6px;background:var(--bg-primary);border-radius:3px;overflow:hidden
+}
+.entropy-bar-fill{height:100%;border-radius:3px;transition:width .4s,background .4s}
+.regime-badge{
+  display:inline-block;
+  font-family:var(--font-mono);
+  font-size:.7rem;
+  padding:2px 8px;
+  border-radius:4px;
+  font-weight:600;
+  margin-top:6px;
+}
+.regime-bull{background:rgba(63,185,80,.15);color:var(--green)}
+.regime-bear{background:rgba(248,81,73,.15);color:var(--red)}
+.regime-neutral{background:rgba(139,148,158,.15);color:var(--text-secondary)}
+.regime-volatile{background:rgba(210,153,34,.15);color:var(--yellow)}
+
+/* ============================================================ */
+/* Portfolio Card                                                */
+/* ============================================================ */
+.portfolio-value{
+  font-family:var(--font-mono);font-size:1.5rem;font-weight:700
+}
+.pnl-positive{color:var(--green)}
+.pnl-negative{color:var(--red)}
+.portfolio-row{display:flex;justify-content:space-between;padding:3px 0;font-size:.82rem}
+.portfolio-row .label{color:var(--text-secondary)}
+.portfolio-row .value{font-family:var(--font-mono);font-weight:600}
+.exposure-bar-bg{
+  height:8px;background:var(--bg-primary);border-radius:4px;overflow:hidden;margin-top:6px
+}
+.exposure-bar-fill{height:100%;border-radius:4px;transition:width .4s,background .4s}
+
+/* ============================================================ */
+/* Positions Table                                               */
+/* ============================================================ */
+.positions-table{width:100%;border-collapse:collapse;font-size:.78rem}
+.positions-table th{
+  text-align:left;font-weight:600;color:var(--text-secondary);padding:4px 6px;
+  border-bottom:1px solid var(--border);font-size:.68rem;text-transform:uppercase;letter-spacing:.5px
+}
+.positions-table td{
+  padding:5px 6px;font-family:var(--font-mono);border-bottom:1px solid rgba(48,54,61,.4)
+}
+.positions-table tr:hover td{background:rgba(88,166,255,.04)}
+.dir-long{color:var(--green);font-weight:600}
+.dir-short{color:var(--red);font-weight:600}
+.no-data{color:var(--text-secondary);font-style:italic;padding:12px 0;text-align:center}
+
+/* ============================================================ */
+/* Signals Feed                                                  */
+/* ============================================================ */
+.signal-list{max-height:260px;overflow-y:auto;font-size:.78rem}
+.signal-list::-webkit-scrollbar{width:4px}
+.signal-list::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+.signal-item{
+  display:flex;align-items:center;gap:8px;
+  padding:6px 4px;border-bottom:1px solid rgba(48,54,61,.3);
+  transition:background .15s;
+}
+.signal-item:hover{background:rgba(88,166,255,.04)}
+.signal-dir{
+  font-family:var(--font-mono);font-weight:700;font-size:.7rem;
+  padding:1px 6px;border-radius:3px;min-width:40px;text-align:center
+}
+.signal-dir.long{background:rgba(63,185,80,.15);color:var(--green)}
+.signal-dir.short{background:rgba(248,81,73,.15);color:var(--red)}
+.signal-dir.exit{background:rgba(139,148,158,.15);color:var(--text-secondary)}
+.signal-time{color:var(--text-secondary);font-family:var(--font-mono);font-size:.7rem;min-width:55px}
+.signal-pattern{font-family:var(--font-mono);font-size:.72rem;color:var(--accent)}
+.signal-conf{font-family:var(--font-mono);font-size:.72rem;margin-left:auto}
+
+/* ============================================================ */
+/* Equity Curve                                                  */
+/* ============================================================ */
+.equity-canvas{width:100%;height:200px;display:block;border-radius:4px}
+
+/* ============================================================ */
+/* Performance Stats                                             */
+/* ============================================================ */
+.stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.stat-item{}
+.stat-label{font-size:.68rem;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px}
+.stat-value{font-family:var(--font-mono);font-size:1.2rem;font-weight:700}
+
+/* ============================================================ */
+/* Risk Panel                                                    */
+/* ============================================================ */
+.risk-item{display:flex;justify-content:space-between;padding:4px 0;font-size:.82rem}
+.risk-item .label{color:var(--text-secondary)}
+.risk-item .value{font-family:var(--font-mono);font-weight:600}
+.breaker-item{
+  display:flex;align-items:center;gap:6px;padding:3px 0;font-size:.78rem
+}
+.breaker-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
+.breaker-dot.ok{background:var(--green)}
+.breaker-dot.tripped{background:var(--red)}
+
+/* ============================================================ */
+/* Footer                                                        */
+/* ============================================================ */
+.footer{
+  background:var(--bg-card);
+  border-top:1px solid var(--border);
+  padding:8px 20px;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  font-size:.72rem;
+  color:var(--text-secondary);
+  font-family:var(--font-mono);
+  margin-top:20px;
+}
+.footer-left,.footer-right{display:flex;gap:16px;align-items:center}
+
+/* ============================================================ */
+/* Value animation                                               */
+/* ============================================================ */
+@keyframes flash-green{0%{background:rgba(63,185,80,.2)}100%{background:transparent}}
+@keyframes flash-red{0%{background:rgba(248,81,73,.2)}100%{background:transparent}}
+.flash-up{animation:flash-green .6s ease-out}
+.flash-down{animation:flash-red .6s ease-out}
+
+/* ============================================================ */
+/* Scrollbar global                                              */
+/* ============================================================ */
+::-webkit-scrollbar{width:6px}
+::-webkit-scrollbar-track{background:var(--bg-primary)}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+</style>
+</head>
+<body>
+
+<!-- ============================================================ -->
+<!-- HEADER                                                        -->
+<!-- ============================================================ -->
+<header class="header">
+  <div class="header-left">
+    <div class="header-logo">PPMT<span> Terminal</span></div>
+    <div class="conn-indicator">
+      <div class="conn-dot" id="connDot"></div>
+      <span id="connText">Disconnected</span>
+    </div>
+    <div class="mode-badge" id="modeBadge">--</div>
+  </div>
+  <div class="header-right">
+    <span id="uptimeDisplay">Uptime: --</span>
+    <span id="clockDisplay">--:--:--</span>
+  </div>
+</header>
+
+<!-- ============================================================ -->
+<!-- MAIN DASHBOARD                                                -->
+<!-- ============================================================ -->
+<div class="main">
+<div class="grid">
+
+  <!-- Row 1: Price + Pattern -->
+  <div class="card card-span-2">
+    <div class="card-title">Market Price</div>
+    <div class="price-value" id="priceValue">--</div>
+    <div class="price-meta">
+      <span id="symbolLabel">--</span>
+      <span id="tfLabel">--</span>
+      <span id="exchangeLabel">--</span>
+      <span class="price-change" id="priceChange">--</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">SAX Pattern</div>
+    <div class="pattern-row" id="patternRow"></div>
+    <div class="entropy-meter">
+      <span style="font-size:.72rem;color:var(--text-secondary)">Entropy</span>
+      <div class="entropy-bar-bg"><div class="entropy-bar-fill" id="entropyFill" style="width:0;background:var(--accent)"></div></div>
+      <span id="entropyVal" style="font-family:var(--font-mono);font-size:.78rem">0.00</span>
+    </div>
+    <div class="regime-badge regime-neutral" id="regimeBadge">--</div>
+    <div style="font-size:.72rem;color:var(--text-secondary);margin-top:4px">Symbols produced: <span id="saxCount" style="font-family:var(--font-mono)">0</span></div>
+  </div>
+
+  <!-- Row 2: Portfolio + Positions + Signals -->
+  <div class="card">
+    <div class="card-title">Portfolio</div>
+    <div class="portfolio-value" id="portfolioValue">$0.00</div>
+    <div class="portfolio-row"><span class="label">Cash</span><span class="value" id="cashValue">$0.00</span></div>
+    <div class="portfolio-row"><span class="label">Unrealized P&L</span><span class="value" id="unrealizedPnl">$0.00</span></div>
+    <div class="portfolio-row"><span class="label">Realized P&L</span><span class="value" id="realizedPnl">$0.00</span></div>
+    <div class="portfolio-row"><span class="label">Total P&L %</span><span class="value" id="totalPnlPct">0.00%</span></div>
+    <div class="portfolio-row"><span class="label">Daily Return</span><span class="value" id="dailyReturn">0.00%</span></div>
+    <div style="font-size:.72rem;color:var(--text-secondary);margin-top:6px">Exposure</div>
+    <div class="exposure-bar-bg"><div class="exposure-bar-fill" id="exposureFill" style="width:0;background:var(--accent)"></div></div>
+    <div style="font-family:var(--font-mono);font-size:.72rem;text-align:right" id="exposurePct">0%</div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Open Positions</div>
+    <table class="positions-table">
+      <thead><tr><th>Symbol</th><th>Dir</th><th>Entry</th><th>Current</th><th>P&L%</th><th>SL</th><th>TP</th></tr></thead>
+      <tbody id="positionsBody"><tr><td colspan="7" class="no-data">No open positions</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Signals Feed</div>
+    <div class="signal-list" id="signalList"><div class="no-data">No signals yet</div></div>
+  </div>
+
+  <!-- Row 3: Equity Curve + Performance + Risk -->
+  <div class="card card-span-2">
+    <div class="card-title">Equity Curve</div>
+    <canvas class="equity-canvas" id="equityCanvas"></canvas>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Performance</div>
+    <div class="stat-grid">
+      <div class="stat-item"><div class="stat-label">Total Trades</div><div class="stat-value" id="totalTrades">0</div></div>
+      <div class="stat-item"><div class="stat-label">Win Rate</div><div class="stat-value" id="winRate">0%</div></div>
+      <div class="stat-item"><div class="stat-label">Winning</div><div class="stat-value" style="color:var(--green)" id="winningTrades">0</div></div>
+      <div class="stat-item"><div class="stat-label">Max DD</div><div class="stat-value" style="color:var(--red)" id="maxDD">0%</div></div>
+    </div>
+  </div>
+
+  <!-- Risk Panel -->
+  <div class="card card-span-3">
+    <div class="card-title">Risk & Circuit Breakers</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px">
+      <div>
+        <div class="risk-item"><span class="label">Trading Allowed</span><span class="value" id="tradingAllowed" style="color:var(--green)">Yes</span></div>
+        <div class="risk-item"><span class="label">Exposure</span><span class="value" id="riskExposure">0%</span></div>
+        <div class="risk-item"><span class="label">Daily Return</span><span class="value" id="riskDailyReturn">0%</span></div>
+        <div class="risk-item"><span class="label">Max Drawdown</span><span class="value" id="riskMaxDD">0%</span></div>
+      </div>
+      <div style="grid-column:span 2">
+        <div style="font-size:.72rem;color:var(--text-secondary);margin-bottom:4px">Circuit Breakers</div>
+        <div id="circuitBreakers"><span class="no-data">None active</span></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+</div>
+
+<!-- ============================================================ -->
+<!-- FOOTER                                                        -->
+<!-- ============================================================ -->
+<footer class="footer">
+  <div class="footer-left">
+    <span>Candles: <span id="candlesCount">0</span></span>
+    <span>WS: <span id="wsStatus">disconnected</span></span>
+    <span>Reconnects: <span id="reconnectCount">0</span></span>
+  </div>
+  <div class="footer-right">
+    <span>PPMT Terminal v1.0</span>
+  </div>
+</footer>
+
+<!-- ============================================================ -->
+<!-- JAVASCRIPT                                                    -->
+<!-- ============================================================ -->
+<script>
+(function(){
+  "use strict";
+
+  // ---- State -------------------------------------------------
+  var lastState = null;
+  var ws = null;
+  var wsReconnects = 0;
+  var wsConnected = false;
+  var restPolling = false;
+  var restTimer = null;
+
+  // ---- DOM refs ----------------------------------------------
+  var $ = function(id){ return document.getElementById(id); };
+
+  // ---- Helpers -----------------------------------------------
+  function fmt$(v){ return "$" + (v||0).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2}); }
+  function fmtPct(v){ return (v||0).toFixed(2) + "%"; }
+  function fmtPrice(v){
+    if(!v) return "--";
+    if(v >= 1000) return v.toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2});
+    if(v >= 1) return v.toFixed(4);
+    return v.toFixed(6);
+  }
+  function timeStr(ts){
+    if(!ts) return "--";
+    var d = new Date(ts * 1000);
+    return d.toLocaleTimeString();
+  }
+  function uptimeStr(sec){
+    if(!sec) return "--";
+    var h = Math.floor(sec/3600);
+    var m = Math.floor((sec%3600)/60);
+    var s = Math.floor(sec%60);
+    return h + "h " + m + "m " + s + "s";
+  }
+
+  function flash(el, direction){
+    el.classList.remove("flash-up","flash-down");
+    void el.offsetWidth; // force reflow
+    el.classList.add(direction === "up" ? "flash-up" : "flash-down");
+  }
+
+  // ---- Clock -------------------------------------------------
+  function updateClock(){
+    $("clockDisplay").textContent = new Date().toLocaleTimeString();
+  }
+  setInterval(updateClock, 1000);
+  updateClock();
+
+  // ---- WebSocket ---------------------------------------------
+  function connectWS(){
+    var proto = location.protocol === "https:" ? "wss:" : "ws:";
+    var url = proto + "//" + location.host + "/ws";
+    ws = new WebSocket(url);
+
+    ws.onopen = function(){
+      wsConnected = true;
+      setConnUI(true);
+      if(restPolling){
+        restPolling = false;
+        clearInterval(restTimer);
+      }
+    };
+
+    ws.onmessage = function(evt){
+      try{
+        var data = JSON.parse(evt.data);
+        applyState(data);
+      }catch(e){ console.error("WS parse error", e); }
+    };
+
+    ws.onclose = function(){
+      wsConnected = false;
+      setConnUI(false);
+      // Fallback to REST polling
+      if(!restPolling) startRestPolling();
+      // Auto-reconnect WS
+      setTimeout(connectWS, 3000);
+    };
+
+    ws.onerror = function(){
+      ws.close();
+    };
+  }
+
+  function startRestPolling(){
+    if(restPolling) return;
+    restPolling = true;
+    restTimer = setInterval(pollREST, 2000);
+    pollREST();
+  }
+
+  function pollREST(){
+    fetch("/api/snapshot")
+      .then(function(r){ return r.json(); })
+      .then(function(data){ applyState(data); })
+      .catch(function(e){ console.warn("REST poll error", e); });
+  }
+
+  function setConnUI(connected){
+    var dot = $("connDot");
+    var txt = $("connText");
+    if(connected){
+      dot.classList.add("connected");
+      txt.textContent = "Connected";
+    }else{
+      dot.classList.remove("connected");
+      txt.textContent = "Disconnected";
+    }
+  }
+
+  // ---- Apply state to DOM ------------------------------------
+  function applyState(s){
+    var prev = lastState || {};
+    lastState = s;
+
+    // Mode badge
+    var badge = $("modeBadge");
+    badge.textContent = (s.mode || "--").toUpperCase();
+    badge.className = "mode-badge " + (s.mode || "");
+
+    // Uptime
+    if(s.uptime_seconds){
+      $("uptimeDisplay").textContent = "Uptime: " + uptimeStr(s.uptime_seconds);
+    }else if(s.started_at){
+      var up = Date.now()/1000 - s.started_at;
+      $("uptimeDisplay").textContent = "Uptime: " + uptimeStr(up > 0 ? up : 0);
+    }
+
+    // Price
+    var priceEl = $("priceValue");
+    var oldPrice = prev.current_price || 0;
+    var newPrice = s.current_price || 0;
+    priceEl.textContent = fmtPrice(newPrice);
+    if(oldPrice && newPrice && oldPrice !== newPrice){
+      flash(priceEl, newPrice > oldPrice ? "up" : "down");
+    }
+    $("symbolLabel").textContent = s.symbol || "--";
+    $("tfLabel").textContent = s.timeframe || "--";
+    $("exchangeLabel").textContent = s.exchange || "--";
+
+    // Price change (daily return as proxy)
+    var pcEl = $("priceChange");
+    var pc = s.daily_return_pct || 0;
+    pcEl.textContent = (pc >= 0 ? "+" : "") + fmtPct(pc);
+    pcEl.className = "price-change " + (pc >= 0 ? "positive" : "negative");
+
+    // Pattern
+    renderPattern(s.pattern_buffer || []);
+    var ent = s.entropy || 0;
+    $("entropyFill").style.width = Math.min(ent * 100, 100) + "%";
+    var entColor = ent > 0.8 ? "var(--red)" : ent > 0.5 ? "var(--yellow)" : "var(--green)";
+    $("entropyFill").style.background = entColor;
+    $("entropyVal").textContent = ent.toFixed(3);
+
+    // Regime
+    var rBadge = $("regimeBadge");
+    var regime = (s.regime || "--").toLowerCase();
+    rBadge.textContent = s.regime || "--";
+    rBadge.className = "regime-badge regime-" + regime;
+
+    $("saxCount").textContent = s.sax_symbols_produced || 0;
+
+    // Portfolio
+    $("portfolioValue").textContent = fmt$(s.portfolio_value);
+    $("cashValue").textContent = fmt$(s.cash);
+
+    var upnl = s.unrealized_pnl || 0;
+    var upnlEl = $("unrealizedPnl");
+    upnlEl.textContent = (upnl >= 0 ? "+" : "") + fmt$(upnl);
+    upnlEl.className = "value " + (upnl >= 0 ? "pnl-positive" : "pnl-negative");
+
+    var rpnl = s.realized_pnl || 0;
+    var rpnlEl = $("realizedPnl");
+    rpnlEl.textContent = (rpnl >= 0 ? "+" : "") + fmt$(rpnl);
+    rpnlEl.className = "value " + (rpnl >= 0 ? "pnl-positive" : "pnl-negative");
+
+    var tpnl = s.total_pnl_pct || 0;
+    var tpnlEl = $("totalPnlPct");
+    tpnlEl.textContent = (tpnl >= 0 ? "+" : "") + fmtPct(tpnl);
+    tpnlEl.className = "value " + (tpnl >= 0 ? "pnl-positive" : "pnl-negative");
+
+    var dr = s.daily_return_pct || 0;
+    var drEl = $("dailyReturn");
+    drEl.textContent = (dr >= 0 ? "+" : "") + fmtPct(dr);
+    drEl.className = "value " + (dr >= 0 ? "pnl-positive" : "pnl-negative");
+
+    var exp = Math.min(s.exposure_pct || 0, 100);
+    $("exposureFill").style.width = exp + "%";
+    $("exposureFill").style.background = exp > 80 ? "var(--red)" : exp > 50 ? "var(--yellow)" : "var(--accent)";
+    $("exposurePct").textContent = fmtPct(s.exposure_pct);
+
+    // Positions
+    renderPositions(s.positions || []);
+
+    // Signals
+    renderSignals(s.signals_history || []);
+
+    // Equity Curve
+    drawEquity(s.equity_curve || [], s.equity_timestamps || []);
+
+    // Performance
+    $("totalTrades").textContent = s.total_trades || 0;
+    $("winRate").textContent = fmtPct((s.win_rate || 0) * 100);
+    $("winningTrades").textContent = s.winning_trades || 0;
+    $("maxDD").textContent = fmtPct((s.max_drawdown || 0) * 100);
+
+    // Risk
+    var taEl = $("tradingAllowed");
+    if(s.is_trading_allowed){
+      taEl.textContent = "Yes"; taEl.style.color = "var(--green)";
+    }else{
+      taEl.textContent = "No"; taEl.style.color = "var(--red)";
+    }
+    $("riskExposure").textContent = fmtPct(s.exposure_pct);
+    $("riskDailyReturn").textContent = (dr >= 0 ? "+" : "") + fmtPct(dr);
+    $("riskMaxDD").textContent = fmtPct((s.max_drawdown || 0) * 100);
+
+    // Circuit breakers
+    renderBreakers(s.circuit_breakers || {});
+
+    // Footer
+    $("candlesCount").textContent = s.candles_processed || 0;
+    $("wsStatus").textContent = s.websocket_status || "disconnected";
+    $("reconnectCount").textContent = s.reconnect_count || 0;
+  }
+
+  // ---- Pattern rendering -------------------------------------
+  function renderPattern(buf){
+    var el = $("patternRow");
+    var html = "";
+    for(var i = 0; i < buf.length; i++){
+      var sym = buf[i].toLowerCase();
+      var cls = "pat-" + sym;
+      if(!document.querySelector || sym.length > 2) cls = "pat-a"; // fallback
+      html += '<div class="pattern-block ' + cls + '">' + buf[i] + '</div>';
+    }
+    if(!html) html = '<span style="color:var(--text-secondary);font-size:.78rem">No pattern data</span>';
+    el.innerHTML = html;
+  }
+
+  // ---- Positions rendering -----------------------------------
+  function renderPositions(positions){
+    var body = $("positionsBody");
+    if(!positions.length){
+      body.innerHTML = '<tr><td colspan="7" class="no-data">No open positions</td></tr>';
+      return;
+    }
+    var html = "";
+    for(var i = 0; i < positions.length; i++){
+      var p = positions[i];
+      var dir = (p.direction || p.side || "").toLowerCase();
+      var dirClass = dir === "long" || dir === "buy" ? "dir-long" : "dir-short";
+      var pnl = p.pnl_pct || 0;
+      var pnlClass = pnl >= 0 ? "pnl-positive" : "pnl-negative";
+      html += "<tr>"
+        + "<td>" + (p.symbol || "--") + "</td>"
+        + '<td class="' + dirClass + '">' + (p.direction || p.side || "--") + '</td>'
+        + "<td>" + fmtPrice(p.entry_price || p.entry || 0) + "</td>"
+        + "<td>" + fmtPrice(p.current_price || p.current || 0) + "</td>"
+        + '<td class="' + pnlClass + '">' + (pnl >= 0 ? "+" : "") + fmtPct(pnl) + "</td>"
+        + "<td>" + fmtPrice(p.stop_loss || p.sl || 0) + "</td>"
+        + "<td>" + fmtPrice(p.take_profit || p.tp || 0) + "</td>"
+        + "</tr>";
+    }
+    body.innerHTML = html;
+  }
+
+  // ---- Signals rendering -------------------------------------
+  function renderSignals(signals){
+    var el = $("signalList");
+    if(!signals.length){
+      el.innerHTML = '<div class="no-data">No signals yet</div>';
+      return;
+    }
+    // Show newest first
+    var html = "";
+    for(var i = signals.length - 1; i >= 0; i--){
+      var s = signals[i];
+      var dir = (s.direction || s.side || "").toLowerCase();
+      var dirClass = "exit";
+      if(dir === "long" || dir === "buy") dirClass = "long";
+      else if(dir === "short" || dir === "sell") dirClass = "short";
+      var conf = s.confidence || 0;
+      var confColor = conf >= 0.7 ? "var(--green)" : conf >= 0.4 ? "var(--yellow)" : "var(--text-secondary)";
+      html += '<div class="signal-item">'
+        + '<span class="signal-dir ' + dirClass + '">' + (s.direction || s.side || "--").toUpperCase() + '</span>'
+        + '<span class="signal-time">' + timeStr(s.timestamp) + '</span>'
+        + '<span class="signal-pattern">' + (s.pattern || s.sax_pattern || "--") + '</span>'
+        + '<span class="signal-conf" style="color:' + confColor + '">' + (conf * 100).toFixed(1) + '%</span>'
+        + '</div>';
+    }
+    el.innerHTML = html;
+  }
+
+  // ---- Circuit Breakers rendering ----------------------------
+  function renderBreakers(breakers){
+    var el = $("circuitBreakers");
+    var keys = Object.keys(breakers);
+    if(!keys.length){
+      el.innerHTML = '<span class="no-data">None active</span>';
+      return;
+    }
+    var html = "";
+    for(var i = 0; i < keys.length; i++){
+      var k = keys[i];
+      var v = breakers[k];
+      var tripped = v === true || v === "tripped" || v === 1;
+      html += '<div class="breaker-item">'
+        + '<div class="breaker-dot ' + (tripped ? "tripped" : "ok") + '"></div>'
+        + '<span style="font-family:var(--font-mono);font-size:.78rem">' + k + '</span>'
+        + '<span style="margin-left:auto;font-family:var(--font-mono);font-size:.72rem;color:'
+          + (tripped ? "var(--red)" : "var(--green)") + '">'
+          + (tripped ? "TRIPPED" : "OK") + '</span>'
+        + '</div>';
+    }
+    el.innerHTML = html;
+  }
+
+  // ---- Equity Curve drawing ----------------------------------
+  function drawEquity(curve, timestamps){
+    var canvas = $("equityCanvas");
+    var dpr = window.devicePixelRatio || 1;
+    var rect = canvas.getBoundingClientRect();
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    var ctx = canvas.getContext("2d");
+    ctx.scale(dpr, dpr);
+
+    var W = rect.width;
+    var H = rect.height;
+    var pad = {top:10, right:10, bottom:24, left:60};
+
+    // Background
+    ctx.fillStyle = "#0d1117";
+    ctx.fillRect(0, 0, W, H);
+
+    if(curve.length < 2){
+      ctx.fillStyle = "#8b949e";
+      ctx.font = "12px " + getComputedStyle(document.body).getPropertyValue("--font-mono");
+      ctx.textAlign = "center";
+      ctx.fillText("Waiting for equity data...", W/2, H/2);
+      return;
+    }
+
+    var minV = Math.min.apply(null, curve);
+    var maxV = Math.max.apply(null, curve);
+    if(maxV === minV){ maxV = minV + 1; }
+
+    var plotW = W - pad.left - pad.right;
+    var plotH = H - pad.top - pad.bottom;
+
+    function xOf(i){ return pad.left + (i / (curve.length - 1)) * plotW; }
+    function yOf(v){ return pad.top + plotH - ((v - minV) / (maxV - minV)) * plotH; }
+
+    // Grid lines
+    ctx.strokeStyle = "rgba(48,54,61,0.5)";
+    ctx.lineWidth = 0.5;
+    var gridSteps = 4;
+    for(var g = 0; g <= gridSteps; g++){
+      var gy = pad.top + (g / gridSteps) * plotH;
+      ctx.beginPath();
+      ctx.moveTo(pad.left, gy);
+      ctx.lineTo(W - pad.right, gy);
+      ctx.stroke();
+
+      // Y-axis labels
+      var labelV = maxV - (g / gridSteps) * (maxV - minV);
+      ctx.fillStyle = "#8b949e";
+      ctx.font = "10px monospace";
+      ctx.textAlign = "right";
+      ctx.fillText(labelV.toFixed(2), pad.left - 6, gy + 3);
+    }
+
+    // Gradient fill under curve
+    var grad = ctx.createLinearGradient(0, pad.top, 0, H - pad.bottom);
+    var lastVal = curve[curve.length - 1];
+    var firstVal = curve[0];
+    if(lastVal >= firstVal){
+      grad.addColorStop(0, "rgba(63,185,80,0.25)");
+      grad.addColorStop(1, "rgba(63,185,80,0.01)");
+    }else{
+      grad.addColorStop(0, "rgba(248,81,73,0.25)");
+      grad.addColorStop(1, "rgba(248,81,73,0.01)");
+    }
+
+    // Fill area
+    ctx.beginPath();
+    ctx.moveTo(xOf(0), yOf(curve[0]));
+    for(var i = 1; i < curve.length; i++){
+      ctx.lineTo(xOf(i), yOf(curve[i]));
+    }
+    ctx.lineTo(xOf(curve.length - 1), H - pad.bottom);
+    ctx.lineTo(xOf(0), H - pad.bottom);
+    ctx.closePath();
+    ctx.fillStyle = grad;
+    ctx.fill();
+
+    // Line
+    ctx.beginPath();
+    ctx.moveTo(xOf(0), yOf(curve[0]));
+    for(var i = 1; i < curve.length; i++){
+      ctx.lineTo(xOf(i), yOf(curve[i]));
+    }
+    ctx.strokeStyle = lastVal >= firstVal ? "#3fb950" : "#f85149";
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Current value dot
+    var lastX = xOf(curve.length - 1);
+    var lastY = yOf(lastVal);
+    ctx.beginPath();
+    ctx.arc(lastX, lastY, 4, 0, Math.PI * 2);
+    ctx.fillStyle = lastVal >= firstVal ? "#3fb950" : "#f85149";
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(lastX, lastY, 7, 0, Math.PI * 2);
+    ctx.strokeStyle = lastVal >= firstVal ? "rgba(63,185,80,0.3)" : "rgba(248,81,73,0.3)";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // X-axis time labels
+    if(timestamps && timestamps.length >= 2){
+      var labelCount = Math.min(5, timestamps.length);
+      ctx.fillStyle = "#8b949e";
+      ctx.font = "9px monospace";
+      ctx.textAlign = "center";
+      for(var l = 0; l < labelCount; l++){
+        var idx = Math.floor((l / (labelCount - 1)) * (timestamps.length - 1));
+        var tx = xOf(idx);
+        var d = new Date(timestamps[idx] * 1000);
+        var lbl = d.getHours().toString().padStart(2,"0") + ":" + d.getMinutes().toString().padStart(2,"0");
+        ctx.fillText(lbl, tx, H - 4);
+      }
+    }
+  }
+
+  // ---- Init --------------------------------------------------
+  connectWS();
+  // Also start REST polling immediately for first load
+  pollREST();
+
+  // Redraw equity on resize
+  var resizeTimer;
+  window.addEventListener("resize", function(){
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(function(){
+      if(lastState) drawEquity(lastState.equity_curve || [], lastState.equity_timestamps || []);
+    }, 200);
+  });
+
+})();
+</script>
+</body>
+</html>
