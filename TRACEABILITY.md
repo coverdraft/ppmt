@@ -1,4 +1,4 @@
-# PPMT Terminal v0.16.0 — TRACEABILITY DOCUMENT
+# PPMT Terminal v0.16.4 — TRACEABILITY DOCUMENT
 
 > Last updated: 2026-06-15
 > Data source: Bybit 12 tokens (BTC, ETH, SOL, BNB, XRP, ADA, LINK, UNI, ATOM, DOGE, SHIB, PEPE) 1h (14,400 real candles each) + 5m (57,600 candles) + 1m (288,000 candles)
