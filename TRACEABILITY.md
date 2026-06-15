@@ -2660,40 +2660,69 @@ ppmt portfolio --serve-api --api-port 8430
 
 ---
 
-#### Phase 2: Bridge API — Python ↔ TypeScript Integration (PENDING)
+#### Phase 2: Bridge API — Python ↔ TypeScript Integration (COMPLETE)
 
 **Problem:** The Python PPMT core and TypeScript Next.js dashboard are two parallel worlds with no connection. The PortfolioIntelligenceEngine (TS) reads from static/configured data, not from the real Python MoneyManager/PortfolioManager.
 
-**TODO:**
+**Implementation:**
 
-- [ ] 2.1 — Start the Python Portfolio API server as a sidecar process from Next.js
-  - Add `ppmt portfolio --serve-api --api-port 8430` to the `ppmt terminal` startup sequence
-  - Auto-detect if the API is already running before spawning a new process
-  - Health check on `/api/portfolio/health` before connecting
+- [x] 2.1 — Portfolio Sidecar Launcher (`portfolio-sidecar.ts`)
+  - Auto-detect if Python API is running via health check (`/api/portfolio/health`)
+  - Auto-spawn `ppmt portfolio --serve-api` as detached sidecar process
+  - Wait for API readiness with exponential backoff polling
+  - Find `ppmt` CLI via PATH, env var, or common pip locations
+  - Cleanup on Node.js process exit
 
-- [ ] 2.2 — Create TypeScript API client `src/lib/services/portfolio/portfolio-api-client.ts`
+- [x] 2.2 — TypeScript API Client (ALREADY EXISTED — `portfolio-bridge-service.ts`, 657 lines)
   - Typed fetch wrappers for all 14 REST endpoints
   - SSE connection to `/api/portfolio/stream` for real-time updates
-  - Auto-reconnect on connection loss
-  - Request caching and deduplication
+  - Auto-reconnect on connection loss (EventSource handles this)
+  - Request caching (2s TTL) and deduplication
+  - Polling fallback with configurable interval
+  - Retry with exponential backoff (500ms → 2s)
+  - Connection state tracking (connected, lastError)
 
-- [ ] 2.3 — Connect `PortfolioIntelligenceEngine` (TS) to real Python data via the API client
-  - Replace static VaR/CVaR computation with real portfolio state from Python
-  - Feed real correlation matrix from `CrossTokenCorrelationEngine` to the TS dashboard
-  - Display live allocation, exposure, and circuit breaker status
+- [x] 2.3 — Portfolio Intelligence Adapter (ALREADY EXISTED — `portfolio-intelligence-adapter.ts`, 311 lines)
+  - Transforms Python API data → TypeScript PortfolioIntelligenceEngine types
+  - `getAdaptedPortfolioState()` — Full portfolio state for the engine
+  - `getRealRiskMetrics()` — VaR, CVaR, HHI from Python
+  - `getRealCorrelationMatrix()` — Real correlation from Python engine
+  - `getPortfolioHealth()` — Combined health check (Python + TS metrics)
+  - Asset class → MarketCapTier mapping
 
-- [ ] 2.4 — Add dashboard pages for portfolio management
-  - Portfolio overview page (total value, P&L, exposure pie chart, slot table)
-  - Correlation matrix heatmap (real-time from Python engine)
-  - Allocation page (current vs target, rebalance button)
-  - Risk report page (VaR, CVaR, HHI, diversification ratio)
+- [x] 2.4 — Dashboard Components (NEW)
+  - `PortfolioOverview` — Total value, P&L, exposure, token slots table, circuit breakers, diversification
+  - `PortfolioCorrelationHeatmap` — Color-coded NxN matrix, hover tooltips, most correlated pairs
+  - `PortfolioAllocation` — Stacked bar by asset class, per-token allocation bars, recommendation panel
+  - `PortfolioRiskPanel` — VaR 95/99, CVaR, HHI, diversification ratio, exposure breakdown
+  - API Route `/api/portfolio/ppmt-state` — Proxy + auto-start sidecar
 
-- [ ] 2.5 — Real-time updates via SSE
-  - Dashboard subscribes to `/api/portfolio/stream`
-  - React context/provider for portfolio state
-  - Auto-refresh correlation matrix and allocation every 30s
+- [x] 2.5 — React Hook `usePortfolio` (NEW)
+  - SSE real-time streaming with automatic connection management
+  - Polling fallback when SSE unavailable
+  - All portfolio actions exposed (rebalance, kill switch, add/remove tokens, update regime)
+  - Connection status tracking (connected, streaming, error, lastUpdate)
+  - Auto-connect on mount, auto-reconnect on failure
+  - Auto-start Python API via server-side proxy on connection failure
+  - Periodic full refresh every 30s for correlation/risk data
 
-**Estimated LOC:** ~1,500 (TS client + dashboard components)
+**Files (New in Phase 2):**
+- `src/lib/services/portfolio/portfolio-sidecar.ts` — 175 lines (NEW)
+- `src/hooks/use-portfolio.ts` — 330 lines (NEW)
+- `src/components/dashboard/portfolio-overview.tsx` — 310 lines (NEW)
+- `src/components/dashboard/portfolio-correlation-heatmap.tsx` — 220 lines (NEW)
+- `src/components/dashboard/portfolio-allocation.tsx` — 290 lines (NEW)
+- `src/components/dashboard/portfolio-risk-panel.tsx` — 260 lines (NEW)
+- `src/app/api/portfolio/ppmt-state/route.ts` — 80 lines (NEW)
+- `src/lib/services/portfolio/index.ts` — Updated exports
+
+**Pre-existing Files (Used in Phase 2):**
+- `src/lib/services/portfolio/portfolio-bridge-service.ts` — 657 lines (pre-existing)
+- `src/lib/services/portfolio/portfolio-intelligence-adapter.ts` — 311 lines (pre-existing)
+- `src/lib/services/portfolio/portfolio-intelligence-engine.ts` — ~1800 lines (pre-existing)
+- `src/lib/services/portfolio/types.ts` — 327 lines (pre-existing)
+
+**Total New LOC:** ~1,665
 
 ---
 
@@ -2790,10 +2819,10 @@ ppmt portfolio --serve-api --api-port 8430
 | Phase | Description | Status | LOC | Tests |
 |-------|-------------|--------|-----|-------|
 | Phase 1 | Multi-Token Portfolio Core | COMPLETE | 4,799 | 38/38 |
-| Phase 2 | Bridge API Python ↔ TypeScript | PENDING | ~1,500 | TBD |
+| Phase 2 | Bridge API Python ↔ TypeScript | COMPLETE | 1,665 (new) + 3,095 (pre-existing) | Type-check OK |
 | Phase 3 | Portfolio Intelligence Fusion | PENDING | ~2,000 | TBD |
 | Phase 4 | Live Portfolio Trading & Backtesting | PENDING | ~2,500 | TBD |
-| **Total** | | | **~10,800** | |
+| **Total** | | | **~11,500** | |
 
 ### Critical Dependency Chain
 
