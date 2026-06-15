@@ -1,37 +1,35 @@
-# PPMT Terminal v0.14.0 — TRACEABILITY DOCUMENT
+# PPMT Terminal v0.14.1 — TRACEABILITY DOCUMENT
 
 > Last updated: 2026-06-15
 > Data source: Bybit 12 tokens (BTC, ETH, SOL, BNB, XRP, ADA, LINK, UNI, ATOM, DOGE, SHIB, PEPE) 1h (14,400 real candles each) + 5m (57,600 candles) + 1m (288,000 candles)
 
 ---
 
-## ⚠️ ARCHITECTURAL DECISION — DO NOT INTEGRATE WITH CryptoQuant Terminal
+## ⚠️ ARCHITECTURAL DECISION — Dashboard Architecture (UPDATED v0.14.1)
 
-**Date: 2026-06-15 | Status: PERMANENT — Do not reverse unless EXPLICITLY requested by user**
+**Date: 2026-06-15 | Status: ACTIVE**
 
 ### Decision
 
-PPMT Terminal is a **standalone, self-contained** trading terminal. It does NOT integrate with CryptoQuant Terminal (github.com/coverdraft/cryptoquant-terminal).
+PPMT Terminal uses **both** the Next.js dashboard (primary) and the FastAPI dashboard (lightweight fallback). The Next.js dashboard is already in the PPMT repo and includes 56+ dashboard components, 13 PPMT-specific components, 14 PPMT API routes, Prisma ORM, and Socket.IO for real-time updates.
 
-### Rationale
+### Original "No CQT Integration" Decision — REVISED
 
-1. **Integration overhead**: Connecting two separate projects (Python engine + Next.js dashboard) creates complexity without proportional value
-2. **PPMT has everything it needs**: SAX encoding, Trie matching, risk management, and now its own built-in web dashboard — all in one project
-3. **Faster to deliver**: Building features directly in PPMT Terminal is faster than maintaining an integration layer
-4. **CryptoQuant Terminal is visualization-only**: It serves a different purpose and can continue as a separate repo
+The original v0.14.0 decision said "DO NOT INTEGRATE with CryptoQuant Terminal." This was based on the assumption that CQT was a separate repo. In reality, the Next.js dashboard code is **already in the PPMT repo** (same root directory). It makes no sense to ignore a working, feature-complete dashboard that's already here.
 
-### What This Means
+### What Changed in v0.14.1
 
-- CryptoQuant Terminal remains at `github.com/coverdraft/cryptoquant-terminal` as a separate project
-- PPMT Terminal has its OWN dashboard at `ppmt terminal` (FastAPI + WebSocket, port 8420)
-- No APIs, webhooks, or data bridges between the two projects
-- If the user ever wants integration, it must be **explicitly requested** — do not assume it
+1. `ppmt terminal` now launches the **Next.js dashboard** by default (port 3000)
+2. `ppmt terminal --lite` launches the FastAPI dashboard (port 8420) as fallback
+3. The Next.js dashboard is the PRIMARY interface — it has backtesting, strategy management, Monte Carlo, trie explorer, real-time panel, etc.
+4. The FastAPI dashboard is a lightweight alternative when Node.js isn't available
 
-### CryptoQuant Terminal Status
+### CryptoQuant Terminal Relationship
 
-- Code safe on GitHub (`github.com/coverdraft/cryptoquant-terminal`)
-- Local directory exists at `/home/z/my-project/cryptoquant-terminal/` but contains only `.git/`
-- Can be cloned again if needed, but NOT for PPMT integration
+- The Next.js code in this repo was originally called "cryptoquant-terminal"
+- It has been **absorbed into PPMT Terminal** — same repo, same project
+- The separate CQT repo (`github.com/coverdraft/cryptoquant-terminal`) still exists but is not actively maintained
+- No integration needed — the code is already here
 
 ---
 
@@ -2321,3 +2319,96 @@ ppmt terminal                          # Web dashboard at http://localhost:8420
 2. **Asset scan requires ccxt** — The `ppmt scan` command needs `ccxt` installed (optional dependency).
 3. **Money Manager not yet integrated into RealtimeTrader** — The engine still uses RiskManager directly. MoneyManager integration is next.
 4. **Dashboard is static-only** — No backend logic for placing orders from the web UI yet.
+
+---
+
+## v0.14.1 — Bug Fixes & Dashboard Architecture Correction (2026-06-15)
+
+### Problem 1: Replay produces 0 trades despite generating 4026 signals
+
+**Root Cause**: `RiskManager.can_open()` was rejecting ALL signals because `min_quality_score=0.3` was too strict. The `quality_score` formula is:
+```
+quality = confidence × (0.4 + 0.3 × win_rate + 0.2 × rr_bonus + 0.1 × sample_bonus)
+```
+
+With typical PPMT confidence values (0.20-0.40), the quality_score rarely exceeds 0.3:
+- confidence=0.30, win_rate=0.40, RR=2.0 → quality ≈ 0.20 (below 0.3)
+- confidence=0.50, win_rate=0.40, RR=2.0 → quality ≈ 0.33 (barely passes)
+
+**Fix**: Lowered `min_quality_score` from 0.3 to 0.10 in RiskConfig defaults. Also lowered `min_risk_reward` from 1.5 to 1.0 to match the RealtimeTrader's existing config.
+
+**Files Changed**:
+- `src/ppmt/risk/manager.py`: `min_quality_score` default 0.3 → 0.10, `min_risk_reward` default 1.5 → 1.0
+- `src/ppmt/engine/realtime.py`: Added explicit `min_quality_score=0.10` in RealtimeTrader risk_config
+
+### Problem 2: `ppmt terminal` fails with "No module named 'fastapi'"
+
+**Root Cause**: FastAPI was a hard dependency in pyproject.toml but wasn't installed. Also, the FastAPI dashboard is a minimal, incomplete replacement for the existing Next.js dashboard that was already in the repo.
+
+**Fix**:
+1. Made `ppmt terminal` launch the **Next.js dashboard** by default (port 3000) — it's already in the repo with 56+ components
+2. Added `--lite` flag for the FastAPI lightweight dashboard (port 8420)
+3. Moved fastapi/uvicorn to optional `[terminal]` dependency group
+4. Auto-fallback to FastAPI if Node.js isn't available
+
+**Files Changed**:
+- `src/ppmt/cli/main.py`: Rewrote `terminal` command to detect and use Next.js dashboard
+- `pyproject.toml`: v0.14.1, fastapi/uvicorn moved to optional `[terminal]` group
+- `TRACEABILITY.md`: Updated dashboard architecture decision
+
+### Dashboard Architecture Decision — REVISED
+
+The v0.14.0 decision "DO NOT INTEGRATE with CryptoQuant Terminal" was based on the wrong assumption that CQT was a separate project. In reality, the Next.js dashboard code was already in the PPMT repo root directory. It makes no sense to build a new, inferior dashboard when a full one already exists here.
+
+The Next.js dashboard includes:
+- 56+ dashboard components (executive dashboard, backtesting lab, Monte Carlo, kill switch, etc.)
+- 13 PPMT-specific components (lifecycle pipeline, overview, strategies, trie explorer, realtime panel, etc.)
+- 14 PPMT API routes (ingest, build, backtest, predict, monte-carlo, signals, etc.)
+- Prisma ORM, Socket.IO real-time, Zustand state management
+- `run_papertrader.py` bridge script connecting Python engine to Next.js API
+
+### File Change Manifest (v0.14.1)
+
+| File | Change |
+|------|--------|
+| `src/ppmt/risk/manager.py` | FIXED — min_quality_score 0.3→0.10, min_risk_reward 1.5→1.0 |
+| `src/ppmt/engine/realtime.py` | FIXED — added min_quality_score=0.10 to risk_config |
+| `src/ppmt/cli/main.py` | UPDATED — terminal command now uses Next.js dashboard by default, --lite for FastAPI |
+| `pyproject.toml` | UPDATED — v0.14.1, fastapi/uvicorn → optional [terminal] group |
+| `TRACEABILITY.md` | UPDATED — dashboard architecture decision revised, v0.14.1 section |
+
+### Setup for Local Computer (v0.14.1)
+
+```bash
+# Clone
+git clone https://github.com/coverdraft/ppmt.git
+cd ppmt
+
+# Create virtual environment
+python3 -m venv venv
+source venv/bin/activate
+
+# Install in development mode
+pip install -e .
+
+# Optional: lightweight terminal dashboard (FastAPI)
+pip install -e ".[terminal]"
+
+# Optional: exchange support
+pip install -e ".[exchange]"
+
+# Initialize
+ppmt init
+
+# Fetch data
+ppmt ingest -s BTC/USDT -t 1h -d 30
+
+# Build Trie
+ppmt build -s BTC/USDT -t 1h
+
+# Run
+ppmt run -s BTC/USDT --replay        # Test with historical data
+ppmt run -s BTC/USDT                  # Live WebSocket from Binance
+ppmt terminal                          # Next.js dashboard at http://localhost:3000
+ppmt terminal --lite                   # FastAPI dashboard at http://localhost:8420
+```

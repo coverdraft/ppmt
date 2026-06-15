@@ -47,7 +47,7 @@ def load_config() -> dict:
 
 
 @click.group()
-@click.version_option(version="0.14.0")
+@click.version_option(version="0.14.1")
 def cli():
     """PPMT Terminal - Autonomous Pattern-Based Trading Terminal"""
     pass
@@ -889,46 +889,86 @@ def validate(symbol: str, timeframe: str, pattern_length: int, output: str):
 # ============================================================
 
 @cli.command()
-@click.option("--host", "-h", default="0.0.0.0", help="Dashboard host")
-@click.option("--port", "-p", default=8420, type=int, help="Dashboard port")
+@click.option("--host", "-h", default="localhost", help="Dashboard host")
+@click.option("--port", "-p", default=3000, type=int, help="Dashboard port")
 @click.option("--open-browser", is_flag=True, default=False, help="Open browser automatically")
-def terminal(host: str, port: int, open_browser: bool):
+@click.option("--lite", is_flag=True, default=False, help="Use lightweight FastAPI dashboard instead of Next.js")
+def terminal(host: str, port: int, open_browser: bool, lite: bool):
     """Launch the PPMT Terminal web dashboard.
 
-    Starts a FastAPI server with WebSocket support for real-time
-    monitoring of the PPMT trading engine. The dashboard shows:
-
-      - Live price and pattern visualization
-      - Portfolio value, P&L, and exposure
-      - Open positions with SL/TP tracking
-      - Signal feed and equity curve
-      - Circuit breaker status
+    Tries the full Next.js dashboard first (port 3000), which includes
+    backtesting, strategy management, monte carlo, and all PPMT panels.
+    Falls back to the lightweight FastAPI dashboard (port 8420) if
+    Node.js is not available.
 
     Examples:
-      ppmt terminal                      # Start dashboard on port 8420
+      ppmt terminal                      # Start Next.js dashboard on port 3000
+      ppmt terminal --lite               # Start lightweight FastAPI dashboard on port 8420
       ppmt terminal -p 9000             # Custom port
       ppmt terminal --open-browser      # Auto-open in browser
     """
     console.print("[bold cyan]PPMT Terminal Dashboard[/bold cyan]")
-    console.print(f"  Starting server on http://{host}:{port}")
 
     if open_browser:
         import webbrowser
         import threading
-        url = f"http://localhost:{port}"
-        threading.Timer(1.5, lambda: webbrowser.open(url)).start()
-        console.print(f"  Opening browser at {url}")
 
-    try:
-        from ppmt.terminal.server import run_server
-        console.print(f"\n[green]Dashboard ready: http://localhost:{port}[/green]")
-        console.print("[dim]Press Ctrl+C to stop[/dim]\n")
-        run_server(host=host, port=port)
-    except ImportError as e:
-        console.print(f"[red]Terminal dashboard not available: {e}[/red]")
-        console.print("[dim]Install dependencies: pip install fastapi uvicorn[/dim]")
-    except KeyboardInterrupt:
-        console.print("\n[yellow]Dashboard stopped.[/yellow]")
+    # --- Try Next.js dashboard (full-featured) ---
+    if not lite:
+        # Find the Next.js app directory (it's in the repo root)
+        repo_root = Path(__file__).resolve().parent.parent.parent.parent
+        package_json = repo_root / "package.json"
+        node_modules = repo_root / "node_modules"
+
+        if package_json.exists() and node_modules.exists():
+            import subprocess
+            console.print(f"  [green]Found Next.js dashboard at {repo_root}[/green]")
+            console.print(f"  Starting on http://localhost:{port}")
+
+            if open_browser:
+                url = f"http://localhost:{port}"
+                threading.Timer(3.0, lambda: webbrowser.open(url)).start()
+                console.print(f"  Opening browser at {url}")
+
+            console.print("[dim]Press Ctrl+C to stop[/dim]\n")
+            try:
+                env = os.environ.copy()
+                env["PORT"] = str(port)
+                subprocess.run(
+                    ["npx", "next", "dev", "--port", str(port), "--turbopack"],
+                    cwd=str(repo_root),
+                    env=env,
+                )
+            except KeyboardInterrupt:
+                console.print("\n[yellow]Dashboard stopped.[/yellow]")
+            except FileNotFoundError:
+                console.print("[yellow]npx not found. Install Node.js or use --lite for FastAPI dashboard.[/yellow]")
+                lite = True  # Fall through to FastAPI
+        else:
+            console.print("[yellow]Next.js dashboard not found (no package.json/node_modules).[/yellow]")
+            console.print("[dim]Use --lite for the FastAPI dashboard, or run 'npm install' in the repo root.[/dim]")
+            lite = True  # Fall through to FastAPI
+
+    # --- FastAPI lightweight dashboard (fallback) ---
+    if lite:
+        fastapi_port = 8420 if port == 3000 else port
+        console.print(f"  Starting lightweight dashboard on http://{host}:{fastapi_port}")
+
+        if open_browser:
+            url = f"http://localhost:{fastapi_port}"
+            threading.Timer(1.5, lambda: webbrowser.open(url)).start()
+            console.print(f"  Opening browser at {url}")
+
+        try:
+            from ppmt.terminal.server import run_server
+            console.print(f"\n[green]Dashboard ready: http://localhost:{fastapi_port}[/green]")
+            console.print("[dim]Press Ctrl+C to stop[/dim]\n")
+            run_server(host=host, port=fastapi_port)
+        except ImportError as e:
+            console.print(f"[red]Terminal dashboard not available: {e}[/red]")
+            console.print("[dim]Install dependencies: pip install fastapi uvicorn[/dim]")
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Dashboard stopped.[/yellow]")
 
 
 @cli.command()

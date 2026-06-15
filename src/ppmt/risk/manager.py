@@ -58,8 +58,8 @@ class RiskConfig:
     min_position_size_pct: float = 0.005  # 0.5% min (base × 0.25x)
     max_daily_loss_pct: float = 0.05      # 5% max daily loss
     max_drawdown_pct: float = 0.15        # 15% max portfolio drawdown
-    min_risk_reward: float = 1.5          # Minimum R:R to accept signal
-    min_quality_score: float = 0.3        # Minimum quality to accept
+    min_risk_reward: float = 1.0          # Minimum R:R to accept signal (v0.14.1: lowered from 1.5)
+    min_quality_score: float = 0.10       # Minimum quality to accept (v0.14.1: lowered from 0.3, quality_score = confidence × factor so 0.3 filtered out most signals)
     max_open_positions: int = 5           # Max simultaneous positions
     max_correlated_positions: int = 2     # Max positions in same asset class
 

@@ -220,6 +220,7 @@ class RealtimeTrader:
             max_position_size_pct=0.04,
             min_position_size_pct=0.005,
             min_risk_reward=1.0,
+            min_quality_score=0.10,
             max_daily_loss_pct=0.10,
             max_drawdown_pct=0.80,
         )
