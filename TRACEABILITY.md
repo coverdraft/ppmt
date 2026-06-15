@@ -1,4 +1,4 @@
-# PPMT Terminal v0.15.0 — TRACEABILITY DOCUMENT
+# PPMT Terminal v0.16.0 — TRACEABILITY DOCUMENT
 
 > Last updated: 2026-06-15
 > Data source: Bybit 12 tokens (BTC, ETH, SOL, BNB, XRP, ADA, LINK, UNI, ATOM, DOGE, SHIB, PEPE) 1h (14,400 real candles each) + 5m (57,600 candles) + 1m (288,000 candles)
@@ -2500,3 +2500,140 @@ Or with Next.js dashboard:
 ppmt terminal           # Next.js on port 3000
 ppmt run -s BTC/USDT --replay   # In another terminal
 ```
+
+---
+
+## 25. v0.16.0 — Portfolio Management System (2026-06-15)
+
+### Overview
+
+v0.16.0 introduces a complete **Multi-Token Portfolio Management System** that shifts PPMT from single-token trading to portfolio-level governance. The key innovation is that PPMT's pattern quality metadata directly drives portfolio composition — better patterns get more capital, weaker patterns get less.
+
+### New Modules
+
+| Module | File | Purpose |
+|--------|------|---------|
+| **PortfolioManager** | `src/ppmt/risk/portfolio_manager.py` | Multi-token slot management with shared capital, exposure caps, circuit breakers, kill switch |
+| **CrossTokenCorrelationEngine** | `src/ppmt/risk/correlation_engine.py` | Real-time NxN correlation matrix with Pearson/Spearman, regime detection, alerts |
+| **RegimeAwareAllocator** | `src/ppmt/risk/regime_allocator.py` | Dynamic capital allocation based on market regime, token performance, pattern quality, drawdown state |
+| **PortfolioBacktester** | `src/ppmt/risk/portfolio_backtester.py` | Multi-token simultaneous backtesting with shared capital and rebalancing |
+| **Portfolio API Bridge** | `src/ppmt/risk/portfolio_api.py` | FastAPI REST server connecting Python PPMT to Next.js dashboard |
+
+### Architecture: 3-Layer Risk Stack
+
+```
+Layer 3: PortfolioManager (portfolio-level governance)
+  • Capital allocation across tokens
+  • Cross-token correlation limits
+  • Portfolio-wide circuit breakers & kill switch
+  • Regime-aware rebalancing
+         │
+Layer 2: MoneyManager (portfolio-level tracking)
+  • Equity curve & drawdown tracking
+  • Exposure & leverage control
+  • Portfolio analytics & risk reports
+         │
+Layer 1: RiskManager (per-trade decisions)
+  • Adaptive sizing from PPMT metadata
+  • Per-trade quality/R:R/confidence checks
+  • SL/TP management
+```
+
+### Allocation Methods
+
+| Method | Description | Best For |
+|--------|-------------|----------|
+| `EQUAL_WEIGHT` | Split capital equally across tokens | Simple setups, testing |
+| `RISK_PARITY` | More capital to less volatile tokens (inverse-vol weighting) | Conservative portfolios |
+| `REGIME_AWARE` | Adjust by market regime + performance + quality | Active trading (default) |
+| `QUALITY_WEIGHTED` | Weight by PPMT signal quality + win rate | PPMT-optimized |
+
+### Regime Profiles
+
+| Regime | Blue Chip | Large Cap | Mid Cap | DeFi | Meme | Position Mult |
+|--------|-----------|-----------|---------|------|------|---------------|
+| TRENDING_UP | 40% | 30% | 15% | 8% | 5% | 1.2x |
+| TRENDING_DOWN | 55% | 25% | 10% | 5% | 3% | 0.6x |
+| RANGING | 25% | 25% | 20% | 15% | 10% | 1.0x |
+| VOLATILE | 50% | 25% | 10% | 8% | 5% | 0.4x |
+| CRISIS | 70% | 20% | 5% | 3% | 1% | 0.25x |
+
+### Correlation Engine Features
+
+- **Pearson & Spearman** correlation methods
+- **Rolling window** with configurable lookback
+- **Exponential decay** for recency weighting
+- **Regime detection**: NORMAL / ELEVATED / CRISIS based on avg correlation
+- **Alert generation**: High correlation warnings, spike detection, negative correlation hedging
+- **Diversification scoring**: Score, HHI, effective positions, cluster count
+- **Portfolio VaR**: Correlation-adjusted variance computation
+
+### API Bridge Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/portfolio/state` | GET | Full portfolio state |
+| `/api/portfolio/summary` | GET | Compact summary |
+| `/api/portfolio/risk` | GET | Risk report |
+| `/api/portfolio/positions` | GET | Open positions |
+| `/api/portfolio/correlation` | GET | Correlation matrix |
+| `/api/portfolio/diversification` | GET | Diversification score |
+| `/api/portfolio/allocation` | GET | Current allocation |
+| `/api/portfolio/allocation/compute` | POST | Compute recommended allocation |
+| `/api/portfolio/rebalance` | POST | Trigger rebalance |
+| `/api/portfolio/kill-switch` | POST/DELETE | Activate/deactivate kill switch |
+| `/api/portfolio/tokens/{symbol}` | POST/DELETE | Add/remove token |
+| `/api/portfolio/regime/{symbol}` | POST | Update regime |
+| `/api/portfolio/health` | GET | Health check |
+
+### CLI Commands
+
+```bash
+# Portfolio overview
+ppmt portfolio
+
+# Multi-token portfolio
+ppmt portfolio -t BTC/USDT,ETH/USDT,SOL/USDT,DOGE/USDT -c 50000
+
+# Allocation methods
+ppmt portfolio -m RISK_PARITY
+ppmt portfolio -m REGIME_AWARE
+ppmt portfolio -m QUALITY_WEIGHTED
+
+# Correlation matrix
+ppmt portfolio --correlation
+
+# Trigger rebalance
+ppmt portfolio --rebalance
+
+# Start API server for dashboard
+ppmt portfolio --serve-api --api-port 8430
+```
+
+### Test Results
+
+38/38 tests pass covering:
+- PortfolioManager (13 tests): creation, allocation, add/remove tokens, positions, kill switch, summary, risk report, rebalance, persistence
+- CrossTokenCorrelationEngine (10 tests): proxy matrix, real matrix, regime detection, diversification, pair lookup, alerts, portfolio variance
+- RegimeAwareAllocator (8 tests): trending up, crisis, performance adjustment, drawdown, smooth transition, regime summary, correlation crisis
+- PortfolioBacktester (5 tests): creation, simple backtest, result structure, serialization, save/load
+- Integration (2 tests): full workflow, allocation with correlation
+
+### Files Modified
+
+- `src/ppmt/risk/__init__.py` — Added all new exports
+- `src/ppmt/risk/portfolio_manager.py` — NEW (570 lines)
+- `src/ppmt/risk/correlation_engine.py` — NEW (500 lines)
+- `src/ppmt/risk/regime_allocator.py` — NEW (380 lines)
+- `src/ppmt/risk/portfolio_backtester.py` — NEW (420 lines)
+- `src/ppmt/risk/portfolio_api.py` — NEW (300 lines)
+- `src/ppmt/cli/main.py` — Updated portfolio command with new options
+- `tests/test_portfolio_manager.py` — NEW (822 lines, 38 tests)
+- `TRACEABILITY.md` — Updated to v0.16.0
+
+### Next Steps
+
+1. **Portfolio-level backtest with real data**: Run multi-token backtest using the 12-token Bybit dataset
+2. **Dashboard integration**: Connect Next.js PortfolioIntelligenceEngine to the API bridge
+3. **Live portfolio mode**: Run `ppmt portfolio --serve-api` alongside `ppmt run` for live portfolio management
+4. **Rebalance automation**: Add configurable rebalance triggers (time-based, regime-change, drawdown-threshold)

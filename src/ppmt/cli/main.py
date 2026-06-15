@@ -47,7 +47,7 @@ def load_config() -> dict:
 
 
 @click.group()
-@click.version_option(version="0.15.0")
+@click.version_option(version="0.16.0")
 def cli():
     """PPMT Terminal - Autonomous Pattern-Based Trading Terminal"""
     pass
@@ -1154,79 +1154,109 @@ def scan(exchange: str, quote: str, top: int, sort_by: str):
 @cli.command()
 @click.option("--symbol", "-s", default=None, help="Filter by symbol")
 @click.option("--capital", "-c", default=None, type=float, help="Set initial capital")
-def portfolio(symbol: str, capital: float):
+@click.option("--tokens", "-t", default=None, help="Comma-separated token list (e.g. BTC/USDT,ETH/USDT)")
+@click.option("--method", "-m", default="REGIME_AWARE", help="Allocation method: EQUAL_WEIGHT, RISK_PARITY, REGIME_AWARE, QUALITY_WEIGHTED")
+@click.option("--correlation", is_flag=True, help="Show cross-token correlation matrix")
+@click.option("--rebalance", is_flag=True, help="Trigger portfolio rebalance")
+@click.option("--serve-api", is_flag=True, help="Start Portfolio API server")
+@click.option("--api-port", default=8430, type=int, help="API server port")
+def portfolio(symbol: str, capital: float, tokens: str, method: str, correlation: bool, rebalance: bool, serve_api: bool, api_port: int):
     """Show portfolio and money management status.
 
     Displays current portfolio value, open positions, exposure,
     circuit breaker status, and risk metrics.
 
-    Examples:
-      ppmt portfolio                       # Show portfolio overview
-      ppmt portfolio -s BTC/USDT           # Filter by symbol
-      ppmt portfolio -c 50000              # Set initial capital
-    """
-    from ppmt.risk.money_manager import MoneyManager, MoneyManagerConfig
+    v0.16.0: Now supports multi-token portfolio management with
+    cross-token correlation, regime-aware allocation, and
+    a REST API bridge for the dashboard.
 
-    config = MoneyManagerConfig()
+    Examples:
+      ppmt portfolio                                    # Show portfolio overview
+      ppmt portfolio -s BTC/USDT                        # Filter by symbol
+      ppmt portfolio -c 50000                           # Set initial capital
+      ppmt portfolio -t BTC/USDT,ETH/USDT,SOL/USDT      # Multi-token portfolio
+      ppmt portfolio -m RISK_PARITY                     # Use risk parity allocation
+      ppmt portfolio --correlation                      # Show correlation matrix
+      ppmt portfolio --rebalance                        # Trigger rebalance
+      ppmt portfolio --serve-api --api-port 8430         # Start API server
+    """
+    from ppmt.risk.portfolio_manager import PortfolioManager, PortfolioConfig
+    from ppmt.risk.correlation_engine import CrossTokenCorrelationEngine
+    from ppmt.risk.regime_allocator import RegimeAwareAllocator
+
+    # Start API server if requested
+    if serve_api:
+        from ppmt.risk.portfolio_api import serve as portfolio_serve
+        portfolio_serve(port=api_port)
+        return
+
+    # Parse token list
+    token_list = None
+    if tokens:
+        token_list = [t.strip() for t in tokens.split(",")]
+
+    # Build portfolio config
+    config_kwargs = {}
+    if capital is not None:
+        config_kwargs["initial_capital"] = capital
+    if token_list:
+        config_kwargs["tokens"] = token_list
+    config_kwargs["allocation_method"] = method
+
+    pm_config = PortfolioConfig(**config_kwargs)
 
     # Try to load saved state
-    state_file = os.path.join(CONFIG_DIR, "money_manager_state.json")
-    if os.path.exists(state_file):
-        config.state_file = state_file
+    state_file = os.path.join(CONFIG_DIR, "portfolio_state.json")
+    pm_config.state_file = state_file
 
-    if capital is not None:
-        config.initial_capital = capital
-
-    mgr = MoneyManager(config=config)
+    pm = PortfolioManager(config=pm_config)
 
     # Load state if exists
     if os.path.exists(state_file):
         try:
-            mgr.load_state(state_file)
+            pm.load_state(state_file)
         except Exception:
             pass
 
     if capital is not None:
         console.print(f"[yellow]Setting capital to ${capital:,.2f}[/yellow]")
-        mgr.initial_capital = capital
-        if mgr.cash == 0:
-            mgr.cash = capital
 
-    # Display portfolio summary
-    summary = mgr.get_portfolio_summary()
+    # Trigger rebalance if requested
+    if rebalance:
+        result = pm.rebalance(reason="cli_request")
+        console.print(f"\n[bold green]Portfolio rebalanced![/bold green]")
+        if result.capital_moves:
+            for move in result.capital_moves:
+                delta_color = "green" if move["move"] >= 0 else "red"
+                console.print(
+                    f"  {move['symbol']}: ${move['from']:,.0f} -> ${move['to']:,.0f} "
+                    f"[{delta_color}]{move['move']:+,.0f}[/{delta_color}]"
+                )
+        else:
+            console.print("  No capital moves needed")
+        pm.save_state()
+        return
 
-    console.print("\n[bold cyan]PPMT Terminal — Portfolio Overview[/bold cyan]\n")
+    # Show correlation matrix if requested
+    if correlation:
+        corr_engine = CrossTokenCorrelationEngine(
+            tokens=list(pm._slots.keys()),
+        )
+        result = corr_engine.compute_matrix()
+        corr_engine.display_matrix(result)
 
-    # Portfolio value panel
-    pnl_color = "green" if summary["realized_pnl"] >= 0 else "red"
-    pnl_sign = "+" if summary["realized_pnl"] >= 0 else ""
+        # Show diversification score
+        div = corr_engine.compute_diversification_score()
+        console.print(f"\n  Diversification Score: [bold]{div['score']:.2f}[/bold] ({div['rating']})")
+        console.print(f"  Effective Positions: {div['effective_positions']:.1f}")
+        console.print(f"  Correlation Clusters: {div['clusters']}")
+        return
 
-    console.print(f"  Portfolio Value:  [bold]${summary['total_value']:,.2f}[/bold]")
-    console.print(f"  Cash:             ${summary['cash']:,.2f}")
-    console.print(f"  Unrealized P&L:   ${summary['unrealized_pnl']:+,.2f}")
-    console.print(f"  Realized P&L:     [{pnl_color}]{pnl_sign}${summary['realized_pnl']:,.2f}[/{pnl_color}]")
-    console.print(f"  Total Return:     {summary['total_return_pct']:+.2f}%")
-    console.print(f"  Exposure:         {summary['exposure_pct']:.1f}%")
-    console.print(f"  Leverage:         {summary['leverage_ratio']:.2f}x")
-    console.print(f"  Open Positions:   {summary['num_positions']}")
-    console.print(f"  Drawdown:         {summary['current_drawdown']:.1%}")
-
-    # Circuit breakers
-    breakers = mgr.circuit_breaker_status()
-    if any(breakers.values()):
-        console.print("\n  [bold yellow]⚠ Circuit Breakers Active:[/bold yellow]")
-        for name, active in breakers.items():
-            if active:
-                console.print(f"    [red]● {name}[/red]")
-    else:
-        console.print("\n  [green]● All circuit breakers clear[/green]")
-
-    trading = mgr.is_trading_allowed()
-    status = "[green]ALLOWED[/green]" if trading else "[red]BLOCKED[/red]"
-    console.print(f"  Trading Status:   {status}")
+    # Display portfolio summary using the PortfolioManager's rich display
+    pm.display_summary()
 
     # Save state
     try:
-        mgr.save_state(state_file)
+        pm.save_state()
     except Exception:
         pass

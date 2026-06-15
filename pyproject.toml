@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ppmt-terminal"
-version = "0.15.0"
+version = "0.16.0"
 description = "PPMT Terminal - Autonomous Pattern-Based Trading Terminal with Real-Time Visualization"
 readme = "README.md"
 requires-python = ">=3.9"
