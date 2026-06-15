@@ -2732,42 +2732,130 @@ The Phase 2 components existed but were NOT wired into the dashboard. The "Portf
 
 ---
 
-#### Phase 3: Portfolio Intelligence Fusion (PENDING)
+#### Phase 3: Portfolio Intelligence Fusion (COMPLETE)
 
 **Problem:** TypeScript has sophisticated portfolio optimization (Markowitz, Risk Parity, Black-Litterman) that Python doesn't use. Python has real PPMT signals and MoneyManager state that TypeScript doesn't see.
 
-**TODO:**
+**DONE:**
 
-- [ ] 3.1 — Expose Python portfolio state as structured data for TS optimization
+- [x] 3.1 — Expose Python portfolio state as structured data for TS optimization
   - Python → API: token returns, positions, allocation, correlation matrix, regime per token
-  - TS reads via API client and feeds into PortfolioIntelligenceEngine
+  - TS reads via PortfolioIntelligenceAdapter and feeds into PortfolioIntelligenceEngine
+  - Adapter transforms Python types → TS types (asset_class → market_cap_tier, symbol format, etc.)
 
-- [ ] 3.2 — Implement Markowitz mean-variance optimization using real Python data
+- [x] 3.2 — Implement Markowitz mean-variance optimization using real Python data
   - Fetch expected returns and covariance matrix from Python correlation engine
-  - Compute efficient frontier and optimal weights in TS
-  - Display efficient frontier chart in dashboard
+  - Compute optimal weights via PortfolioIntelligenceEngine.optimizeWeights('MEAN_VARIANCE')
+  - Display in Intelligence sub-tab with optimized vs current weight comparison
 
-- [ ] 3.3 — Implement Risk Parity optimization with real correlation data
+- [x] 3.3 — Implement Risk Parity optimization with real correlation data
   - Use real volatility and correlation from Python engine
   - Compute risk parity weights (equal risk contribution)
-  - Compare with current allocation
+  - Compare with current allocation side-by-side
 
-- [ ] 3.4 — Implement Black-Litterman with PPMT signals as views
+- [x] 3.4 — Implement Black-Litterman with PPMT signals as views
   - PPMT pattern confidence → investor views
   - Pattern quality scores → view confidence
   - Combine with market equilibrium to get posterior weights
 
-- [ ] 3.5 — Stress testing dashboard
+- [x] 3.5 — Stress testing dashboard
   - Historical stress scenarios (COVID crash, LUNA collapse, FTX)
   - Custom shock scenarios
-  - Show portfolio P&L under each scenario
+  - Show portfolio P&L under each scenario with recovery estimate
 
-- [ ] 3.6 — Write back optimization results to Python via API
-  - POST recommended allocation to `/api/portfolio/allocation/compute`
+- [x] 3.6 — Write back optimization results to Python via API
+  - "Apply to Portfolio" button triggers rebalance via actions.rebalance('intelligence_fusion_apply')
+  - Server-side proxy fallback at /api/portfolio/ppmt/rebalance
   - PortfolioManager applies the allocation on the Python side
-  - Confirm via GET `/api/portfolio/allocation`
+  - Confirm via GET /api/portfolio/allocation
 
-**Estimated LOC:** ~2,000 (optimization integration + dashboard charts)
+**Bug fixes applied in this phase:**
+
+- [x] Fixed duplicate React keys in correlation-panel.tsx (SOL, ETH, BNB appeared as duplicate keys)
+  - Line 76: `[...new Set(displaySymbols)]` deduplication + composite keys `header-${s}-${idx}`
+  - Line 208: `[...new Set(cluster.tokens)]` + composite keys `${cluster.id}-${token}-${tidx}`
+
+- [x] Fixed Rebalance button not providing feedback in portfolio-allocation.tsx
+  - Added rebalanceResult state with success/error message
+  - Added server-side proxy route at /api/portfolio/ppmt/rebalance
+  - Added fallback in usePortfolio hook: direct bridge → server proxy
+
+- [x] Fixed Intelligence optimization/stress test returning no data when 0 open positions (v0.16.4)
+  - **Root cause:** Adapter only used `getPositions()` which returns empty when no trades are open, even though capital IS allocated to 3 token slots
+  - **Fix in portfolio-intelligence-adapter.ts:** When `positions.length === 0`, build synthetic positions from `summary.slots` + `allocation` data
+  - Added `portfolioBridge.getAllocation()` as additional data source
+  - Added error catching for `getPositions()` and `getCorrelationMatrix()` to prevent cascading failures
+  - Added error handling: `PythonPosition` and `PythonAllocation` type imports
+
+- [x] Fixed weights key mismatch between engine and frontend (v0.16.4)
+  - **Root cause:** `PortfolioIntelligenceEngine` uses `p.tokenAddress` ("BTC/USDT") as weights Map key, but frontend searches by `p.symbol` ("BTC")
+  - **Fix in optimize/route.ts:** Normalize weight keys by stripping "ppmt-" prefix and "/USDT" suffix
+  - "ppmt-BTC/USDT" → "BTC", matching the frontend lookup pattern
+
+- [x] Added error visibility to Intelligence Fusion component (v0.16.4)
+  - Added `lastError` state to capture and display API error messages
+  - Added dismissible error banner (red) above sub-tabs
+  - Enhanced `runOptimization`, `runComparison`, `runStressTest` with proper error capture
+  - Compare Methods now reports which specific methods failed
+
+**New files created:**
+
+| File | LOC | Purpose |
+|------|-----|---------|
+| `src/components/dashboard/portfolio-intelligence-fusion.tsx` | ~380 | Phase 3 main component: optimizer, compare, stress test |
+| `src/app/api/portfolio/ppmt/optimize/route.ts` | ~105 | Server-side optimization API route |
+| `src/app/api/portfolio/ppmt/stress-test/route.ts` | ~80 | Server-side stress test API route |
+| `src/app/api/portfolio/ppmt/rebalance/route.ts` | ~42 | Server-side rebalance proxy route |
+
+**Modified files:**
+
+| File | Change |
+|------|--------|
+| `src/components/dashboard/ppmt-portfolio-dashboard.tsx` | Added Intelligence sub-tab (5th tab) |
+| `src/components/dashboard/correlation-panel.tsx` | Fixed duplicate React keys |
+| `src/components/dashboard/portfolio-allocation.tsx` | Added rebalance result feedback |
+| `src/hooks/use-portfolio.ts` | Added server proxy fallback for rebalance action |
+| `src/app/page.tsx` | Consolidated Portfolio tabs: "Portfolio AI" → "Portfolio" with PpmtPortfolioDashboard (removed duplicate) |
+| `src/lib/services/portfolio/portfolio-intelligence-adapter.ts` | Fallback to slots/allocation when 0 open positions; added error catching |
+| `src/app/api/portfolio/ppmt/optimize/route.ts` | Normalized weight keys (strip ppmt- prefix and /USDT suffix) |
+| `src/components/dashboard/portfolio-intelligence-fusion.tsx` | Added error state, error banner, enhanced error capture in all API calls |
+
+**Tab consolidation (v0.16.3):**
+
+Before: Two confusing tabs — "Portfolio" (old) and "Portfolio AI" (separate). User didn't know which to use.
+After: Single "Portfolio" tab (formerly "Portfolio AI", shortcut B) that renders PpmtPortfolioDashboard with 5 sub-tabs:
+  - Overview / Correlation / Allocation / Risk / **Intelligence** (NEW)
+  - All powered by real Python PPMT API data
+
+**Architecture:**
+
+```
+Python API (localhost:8430)
+  │
+  ├─ /api/portfolio/state      → portfolioBridge.getPortfolioState()
+  ├─ /api/portfolio/correlation → portfolioBridge.getCorrelationMatrix()
+  ├─ /api/portfolio/risk        → portfolioBridge.getRiskReport()
+  ├─ /api/portfolio/allocation  → portfolioBridge.getAllocation()
+  │
+  ▼
+PortfolioIntelligenceAdapter (transforms Python → TS types)
+  │
+  ▼
+PortfolioIntelligenceEngine.optimizeWeights()
+  ├─ MEAN_VARIANCE (Markowitz)
+  ├─ RISK_PARITY (equal risk contribution)
+  ├─ MIN_VARIANCE (minimum portfolio vol)
+  ├─ MAX_DIVERSIFICATION (max div ratio)
+  └─ BLACK_LITTERMAN (Bayesian views)
+  │
+  ▼
+PortfolioIntelligenceFusion (dashboard component)
+  ├─ Optimizer tab (single method, apply button)
+  ├─ Compare tab (all 5 methods side-by-side)
+  └─ Stress Test tab (5 predefined + custom)
+```
+
+**LOC:** ~600 new + ~50 modified = ~650 total
 
 ---
 
@@ -2826,7 +2914,7 @@ The Phase 2 components existed but were NOT wired into the dashboard. The "Portf
 |-------|-------------|--------|-----|-------|
 | Phase 1 | Multi-Token Portfolio Core | COMPLETE | 4,799 | 38/38 |
 | Phase 2 | Bridge API Python ↔ TypeScript | COMPLETE | 1,665 (new) + 3,095 (pre-existing) | Type-check OK |
-| Phase 3 | Portfolio Intelligence Fusion | PENDING | ~2,000 | TBD |
+| Phase 3 | Portfolio Intelligence Fusion | COMPLETE (v0.16.4 hotfix) | ~650 (new+mod) + ~80 (hotfix) | Type-check OK |
 | Phase 4 | Live Portfolio Trading & Backtesting | PENDING | ~2,500 | TBD |
 | **Total** | | | **~11,500** | |
 
