@@ -1,6 +1,6 @@
-# PPMT Terminal v0.16.4 — TRACEABILITY DOCUMENT
+# PPMT Terminal v0.17.0 — TRACEABILITY DOCUMENT
 
-> Last updated: 2026-06-15
+> Last updated: 2026-06-16
 > Data source: Bybit 12 tokens (BTC, ETH, SOL, BNB, XRP, ADA, LINK, UNI, ATOM, DOGE, SHIB, PEPE) 1h (14,400 real candles each) + 5m (57,600 candles) + 1m (288,000 candles)
 
 ---
@@ -2888,11 +2888,20 @@ PortfolioIntelligenceFusion (dashboard component)
 
 **TODO:**
 
-- [ ] 4.1 — Create `PortfolioRunner` — orchestrates multiple PPMT engines in parallel
+- [x] 4.1 — Create `PortfolioRunner` — orchestrates multiple PPMT engines in parallel
   - One PPMT engine per token (Trie + SAX + RiskManager)
   - Shared PortfolioManager for capital allocation
   - Time-synchronized candle processing
   - Signal prioritization when multiple tokens signal simultaneously
+  - Living Trie feedback per token
+  - Regime-aware confidence adjustment
+  - SHORT gating (regime + TokenProfile)
+  - Trailing stop management
+  - Pattern break grace period
+  - 3 signal priority methods (QUALITY_WEIGHTED, CONFIDENCE_FIRST, EXPECTED_VALUE)
+  - Portfolio-level rebalancing (periodic + regime-shift)
+  - Full API endpoints (start/result/status/stop)
+  - Dashboard UI component
 
 - [ ] 4.2 — Live portfolio mode with WebSocket data feeds
   - Connect to exchange WebSocket for each token
@@ -2918,6 +2927,9 @@ PortfolioIntelligenceFusion (dashboard component)
 
 | File | LOC | Purpose |
 |------|-----|---------|
+| `src/ppmt/risk/portfolio_runner.py` | ~850 | Multi-engine portfolio orchestrator with signal prioritization |
+| `src/app/api/ppmt/runner/route.ts` | ~95 | TypeScript API route for PortfolioRunner |
+| `src/components/dashboard/portfolio-runner-panel.tsx` | ~310 | Dashboard UI for Portfolio Runner |
 | `src/lib/services/portfolio/rebalance-automation.ts` | ~337 | Auto-rebalance service with 4 configurable triggers |
 | `src/app/api/portfolio/ppmt/monte-carlo/route.ts` | ~295 | Monte Carlo simulation API using real portfolio data |
 
@@ -2925,12 +2937,13 @@ PortfolioIntelligenceFusion (dashboard component)
 
 | File | Change |
 |------|--------|
+| `src/ppmt/risk/portfolio_api.py` | Added PortfolioRunner endpoints (start/result/status/stop) |
 | `src/components/dashboard/portfolio-intelligence-fusion.tsx` | Added Auto-Rebalance + Monte Carlo tabs (5 sub-tabs total) |
 
 **Intelligence Fusion sub-tabs (5):**
   Optimizer | Compare | Stress | Auto-Rebalance | Monte Carlo
 
-**Estimated LOC:** ~1,040 new (4.3 + 4.5)
+**Estimated LOC:** ~1,890 new (4.1: ~850 + ~405 TS/TSX, 4.3: ~337, 4.5: ~295)
 
 ---
 
@@ -2941,7 +2954,7 @@ PortfolioIntelligenceFusion (dashboard component)
 | Phase 1 | Multi-Token Portfolio Core | COMPLETE | 4,799 | 38/38 |
 | Phase 2 | Bridge API Python ↔ TypeScript | COMPLETE | 1,665 (new) + 3,095 (pre-existing) | Type-check OK |
 | Phase 3 | Portfolio Intelligence Fusion | COMPLETE (v0.16.4 hotfix) | ~650 (new+mod) + ~80 (hotfix) | Type-check OK |
-| Phase 4 | Live Portfolio Trading & Backtesting | IN PROGRESS (4.3 + 4.5 done) | ~1,040 new | Type-check OK |
+| Phase 4 | Live Portfolio Trading & Backtesting | IN PROGRESS (4.1 + 4.3 + 4.5 done) | ~1,040 + ~850 new | Type-check OK |
 | **Total** | | | **~11,500** | |
 
 ### Critical Dependency Chain

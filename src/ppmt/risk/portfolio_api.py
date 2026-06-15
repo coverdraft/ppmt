@@ -47,6 +47,7 @@ except ImportError:
 from ppmt.risk.portfolio_manager import PortfolioManager, PortfolioConfig
 from ppmt.risk.correlation_engine import CrossTokenCorrelationEngine, CorrelationMethod
 from ppmt.risk.regime_allocator import RegimeAwareAllocator
+from ppmt.risk.portfolio_runner import PortfolioRunner, PortfolioRunnerConfig
 from ppmt.data.classifier import AssetClassifier
 
 
@@ -57,6 +58,8 @@ from ppmt.data.classifier import AssetClassifier
 _portfolio: Optional[PortfolioManager] = None
 _correlation: Optional[CrossTokenCorrelationEngine] = None
 _allocator: Optional[RegimeAwareAllocator] = None
+_runner: Optional[PortfolioRunner] = None
+_runner_result: Optional[dict] = None
 _classifier = AssetClassifier()
 
 # Config directory for state persistence
@@ -446,6 +449,76 @@ def create_app() -> "FastAPI":
                 "X-Accel-Buffering": "no",
             },
         )
+
+    # -------------------------------------------------------------------
+    # Portfolio Runner
+    # -------------------------------------------------------------------
+
+    @app.post("/api/portfolio/runner/start")
+    async def start_runner(
+        tokens: Optional[str] = Query(None),
+        timeframe: str = Query("1h"),
+        allocation_method: str = Query("REGIME_AWARE"),
+        initial_capital: float = Query(50_000),
+    ):
+        """Start a PortfolioRunner session.
+
+        Creates one PPMT engine per token and runs the full
+        portfolio trading loop. Returns session info immediately;
+        results are available via /api/portfolio/runner/result.
+        """
+        global _runner, _runner_result
+
+        token_list = tokens.split(",") if tokens else ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+
+        config = PortfolioRunnerConfig(
+            tokens=token_list,
+            timeframe=timeframe,
+            initial_capital=initial_capital,
+            allocation_method=allocation_method,
+        )
+
+        try:
+            _runner = PortfolioRunner(config=config)
+            result = _runner.run(progress=False)
+            _runner_result = result.to_dict()
+            return {
+                "success": True,
+                "tokens": token_list,
+                "result": _runner_result,
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    @app.get("/api/portfolio/runner/result")
+    async def get_runner_result():
+        """Get the latest PortfolioRunner result."""
+        if _runner_result is None:
+            return {"success": False, "error": "No runner session yet"}
+        return {"success": True, "result": _runner_result}
+
+    @app.get("/api/portfolio/runner/status")
+    async def get_runner_status():
+        """Get current PortfolioRunner status."""
+        if _runner is None:
+            return {
+                "running": False,
+                "tokens": [],
+                "message": "No runner session",
+            }
+        return {
+            "running": True,
+            "tokens": list(_runner.engines.keys()) if _runner else [],
+            "portfolio_value": _runner.portfolio.total_value if _runner else 0,
+            "open_positions": _runner.portfolio.total_open_positions if _runner else 0,
+        }
+
+    @app.post("/api/portfolio/runner/stop")
+    async def stop_runner():
+        """Stop the PortfolioRunner session."""
+        global _runner
+        _runner = None
+        return {"success": True, "message": "Runner stopped"}
 
     return app
 
