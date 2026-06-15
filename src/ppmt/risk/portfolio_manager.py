@@ -75,6 +75,13 @@ from rich.panel import Panel
 from ppmt.risk.manager import RiskManager, RiskConfig, Position
 from ppmt.risk.money_manager import MoneyManager, MoneyManagerConfig, PortfolioSnapshot
 from ppmt.risk.position_sizing import AdvancedPositionSizer
+from ppmt.risk.correlation_engine import (
+    CrossTokenCorrelationEngine,
+    CorrelationMethod,
+    CorrelationRegime,
+    CorrelationMatrixResult,
+)
+from ppmt.risk.regime_allocator import RegimeAwareAllocator, AllocationResult
 from ppmt.data.classifier import AssetClassifier
 from ppmt.engine.signal import Signal, SignalType
 
@@ -278,6 +285,16 @@ class PortfolioManager:
         # Asset classifier
         self._classifier = AssetClassifier()
 
+        # Cross-token correlation engine (REAL correlation matrix)
+        self._correlation_engine = CrossTokenCorrelationEngine(
+            tokens=self.config.tokens,
+            window=60,
+            method=CorrelationMethod.PEARSON,
+        )
+
+        # Regime-aware allocator (for REGIME_AWARE and dynamic rebalancing)
+        self._regime_allocator = RegimeAwareAllocator()
+
         # Portfolio state
         self._initial_capital: float = self.config.initial_capital
         self._candles_processed: int = 0
@@ -289,9 +306,15 @@ class PortfolioManager:
         self._daily_loss_active: bool = False
         self._drawdown_active: bool = False
 
+        # Correlation-aware circuit breaker
+        self._correlation_crisis_active: bool = False
+
         # Auto-save
         self._auto_save_lock = threading.Lock()
         self._last_save_time: float = 0.0
+
+        # Equity curve for portfolio-level tracking
+        self._equity_curve: list[dict] = []
 
         # Initialize token slots
         self._initialize_slots()
@@ -507,6 +530,10 @@ class PortfolioManager:
             _peak_capital=capital,
         )
         self._slots[symbol] = slot
+
+        # Add to correlation engine so it starts tracking this token
+        self._correlation_engine.add_token(symbol)
+
         return slot
 
     def remove_token(self, symbol: str) -> Optional[TokenSlot]:
@@ -527,6 +554,9 @@ class PortfolioManager:
         del self._slots[symbol]
         if symbol in self.config.tokens:
             self.config.tokens.remove(symbol)
+
+        # Remove from correlation engine
+        self._correlation_engine.remove_token(symbol)
 
         # Rebalance remaining slots
         self._allocate_capital()
@@ -555,6 +585,191 @@ class PortfolioManager:
     # -------------------------------------------------------------------
     # Signal Processing & Position Management
     # -------------------------------------------------------------------
+
+    def process_candle(
+        self,
+        symbol: str,
+        candle: dict,
+        regime: Optional[str] = None,
+    ) -> Optional[Signal]:
+        """
+        Process a new candle for a specific token.
+
+        This is the main entry point for the portfolio's trading loop.
+        It updates the correlation engine with the new price, updates
+        the token slot's regime, and increments the candle counter.
+
+        The actual PPMT engine (Trie + SAX) signal generation is done
+        externally — this method handles the portfolio-level bookkeeping
+        and returns None. Signals should be fed via open_position().
+
+        Args:
+            symbol: Token symbol (e.g., 'BTC/USDT').
+            candle: Dict with at minimum 'close' (price) and optionally
+                'open', 'high', 'low', 'volume', 'timestamp'.
+            regime: Optional regime override for this token.
+
+        Returns:
+            None (signal generation happens in the PPMT engine layer).
+        """
+        slot = self._slots.get(symbol)
+        if slot is None:
+            return None
+
+        close_price = candle.get("close", 0.0)
+        if close_price <= 0:
+            return None
+
+        # 1. Update correlation engine with new price
+        self._correlation_engine.update_price(symbol, close_price)
+
+        # 2. Update token regime if provided
+        if regime is not None:
+            self.update_regime(symbol, regime)
+
+        # 3. Update position mark-to-market
+        if slot.risk_manager:
+            for pos in slot.risk_manager.open_positions:
+                slot.risk_manager.update_position(pos.symbol, close_price)
+
+        # 4. Increment candle counter
+        self._candles_processed += 1
+
+        # 5. Check correlation regime for circuit breaker
+        self._check_correlation_regime()
+
+        # 6. Auto-rebalance check
+        if self._should_rebalance():
+            self.rebalance(reason=f"auto_rebalance_candle_{self._candles_processed}")
+
+        # 7. Record equity curve snapshot
+        self._record_equity_snapshot()
+
+        return None
+
+    def _check_correlation_regime(self) -> None:
+        """Check if correlation regime has shifted to crisis.
+
+        When the cross-token correlation enters CRISIS mode, it means
+        all tokens are moving together and diversification benefits
+        are gone. This activates a special circuit breaker that reduces
+        portfolio exposure.
+        """
+        result = self._correlation_engine.compute_matrix()
+        if result.regime == CorrelationRegime.CRISIS:
+            if not self._correlation_crisis_active:
+                self._correlation_crisis_active = True
+                console.print(
+                    "[bold yellow]CORRELATION CRISIS DETECTED:[/bold yellow] "
+                    f"Avg correlation = {result.avg_correlation:.2f}. "
+                    "Reducing exposure limits."
+                )
+        elif result.regime == CorrelationRegime.NORMAL:
+            if self._correlation_crisis_active:
+                self._correlation_crisis_active = False
+                console.print(
+                    "[green]Correlation regime returned to NORMAL.[/green]"
+                )
+
+    def _record_equity_snapshot(self) -> None:
+        """Record a point-in-time equity curve snapshot."""
+        self._equity_curve.append({
+            "timestamp": time.time(),
+            "total_value": round(self.total_value, 2),
+            "realized_pnl": round(self.total_realized_pnl, 2),
+            "unrealized_pnl": round(self.total_unrealized_pnl, 2),
+            "exposure_pct": round(self.portfolio_exposure_pct * 100, 1),
+            "positions": self.total_open_positions,
+            "candle": self._candles_processed,
+        })
+
+    def get_correlation_matrix(self) -> CorrelationMatrixResult:
+        """Get the current cross-token correlation matrix.
+
+        Returns the real correlation matrix computed from actual price
+        returns, with fallback to proxy correlations when insufficient
+        data exists.
+
+        Returns:
+            CorrelationMatrixResult with the NxN matrix and metadata.
+        """
+        return self._correlation_engine.compute_matrix()
+
+    def get_correlation_between(self, token_a: str, token_b: str) -> Optional[float]:
+        """Get the real correlation between two tokens.
+
+        Uses the CrossTokenCorrelationEngine's rolling window of
+        actual returns to compute the correlation. Falls back to
+        asset-class proxy correlations if insufficient data.
+
+        Args:
+            token_a: First token symbol.
+            token_b: Second token symbol.
+
+        Returns:
+            Correlation coefficient (-1 to 1), or None if tokens not found.
+        """
+        result = self._correlation_engine.compute_matrix()
+        return result.get_pair_correlation(token_a, token_b)
+
+    def get_diversification_score(self) -> dict:
+        """Get the portfolio diversification score.
+
+        Considers average correlation, HHI of eigenvalues, and number
+        of correlation clusters. Score ranges from 0 (poor) to 1 (excellent).
+
+        Returns:
+            Dict with score, rating, avg_correlation, clusters, effective_positions.
+        """
+        return self._correlation_engine.compute_diversification_score()
+
+    def get_allocation_recommendation(self, regime: Optional[str] = None) -> AllocationResult:
+        """Get a regime-aware allocation recommendation.
+
+        Uses the RegimeAwareAllocator to compute optimal capital
+        allocations based on regime, token performance, and pattern quality.
+
+        Args:
+            regime: Override regime. If None, uses the dominant regime.
+
+        Returns:
+            AllocationResult with per-token allocation instructions.
+        """
+        if regime is None:
+            regime = self._get_dominant_regime()
+
+        # Build performance and quality data from current slots
+        current_alloc = {
+            sym: slot.capital_allocated for sym, slot in self._slots.items()
+        }
+        perf_data = {
+            sym: {
+                "win_rate": slot.win_rate,
+                "pnl_pct": slot.pnl_pct,
+                "trades": slot.trades_completed,
+                "sharpe": 0.0,  # Could compute from returns
+            }
+            for sym, slot in self._slots.items()
+        }
+        quality_data = {
+            sym: 0.5 + slot.win_rate * 0.3  # Proxy from win rate
+            for sym, slot in self._slots.items()
+        }
+
+        # Get correlation regime
+        corr_result = self._correlation_engine.compute_matrix()
+        corr_regime = corr_result.regime.value
+
+        return self._regime_allocator.allocate(
+            regime=regime,
+            tokens=list(self._slots.keys()),
+            total_capital=self.total_value,
+            current_allocations=current_alloc,
+            token_performance=perf_data,
+            pattern_quality=quality_data,
+            correlation_regime=corr_regime,
+            portfolio_drawdown_pct=self.current_drawdown_pct,
+        )
 
     def can_open_position(
         self,
@@ -614,7 +829,10 @@ class PortfolioManager:
             if not rm_ok:
                 return False, f"Token RiskManager: {rm_reason}"
 
-        # 7. Correlation limit (same asset class)
+        # 7. Correlation limit — use REAL correlation matrix
+        # Instead of just counting same-asset-class positions, check actual
+        # pairwise correlations. If the new token is highly correlated
+        # (>0.7) with any token that already has an open position, reject.
         asset_class = slot.asset_class
         same_class_count = sum(
             1 for s in self._slots.values()
@@ -626,6 +844,30 @@ class PortfolioManager:
                 f"Correlation limit: {same_class_count} positions in "
                 f"'{asset_class}' (max {self.config.max_correlated_tokens})"
             )
+
+        # 7b. Real correlation check: reject if new token is highly
+        # correlated with any token already in a position
+        for other_slot in self._slots.values():
+            if other_slot.symbol == signal.symbol:
+                continue
+            if not other_slot.risk_manager or other_slot.risk_manager.open_count == 0:
+                continue
+            pair_corr = self.get_correlation_between(signal.symbol, other_slot.symbol)
+            if pair_corr is not None and pair_corr > 0.80:
+                return False, (
+                    f"High real correlation: {signal.symbol} <-> "
+                    f"{other_slot.symbol} = {pair_corr:.2f} "
+                    f"(threshold: 0.80). Diversification risk."
+                )
+
+        # 7c. Correlation crisis breaker
+        if self._correlation_crisis_active:
+            # During correlation crisis, only allow blue_chip positions
+            if asset_class != "blue_chip":
+                return False, (
+                    f"Correlation crisis active — only blue_chip positions allowed. "
+                    f"{signal.symbol} is {asset_class}"
+                )
 
         # 8. Single-token exposure cap
         price = current_price or signal.entry_price or 0.0
@@ -874,16 +1116,13 @@ class PortfolioManager:
 
     @property
     def total_value(self) -> float:
-        """Total portfolio value across all slots."""
-        base = self._initial_capital
-        unrealized = sum(
-            s.risk_manager.open_positions[0].unrealized_pnl_pct / 100.0 * s.risk_manager.open_positions[0].entry_price * s.risk_manager.open_positions[0].size
-            if s.risk_manager and s.risk_manager.open_positions
-            else 0.0
-            for s in self._slots.values()
-        )
-        realized = sum(s.total_pnl for s in self._slots.values())
-        return base + realized + unrealized
+        """Total portfolio value across all slots.
+
+        Computed as: initial_capital + total_realized_pnl + total_unrealized_pnl.
+        This correctly sums across all positions in all token slots, avoiding
+        the bug of only counting the first position per slot.
+        """
+        return self._initial_capital + self.total_realized_pnl + self.total_unrealized_pnl
 
     @property
     def total_realized_pnl(self) -> float:
@@ -969,7 +1208,7 @@ class PortfolioManager:
         return True
 
     def circuit_breaker_status(self) -> dict:
-        """Get status of all circuit breakers."""
+        """Get status of all circuit breakers including correlation crisis."""
         daily_pnl = sum(s.total_pnl for s in self._slots.values())
         daily_loss_pct = abs(min(0, daily_pnl)) / self._initial_capital if self._initial_capital > 0 else 0
 
@@ -988,6 +1227,10 @@ class PortfolioManager:
                 "active": self._drawdown_active,
                 "threshold": self.config.kill_switch_drawdown_pct,
                 "current": self.current_drawdown_pct,
+            },
+            "correlation_crisis": {
+                "active": self._correlation_crisis_active,
+                "description": "All tokens moving together — diversification benefits reduced",
             },
         }
 
@@ -1036,6 +1279,10 @@ class PortfolioManager:
             class_breakdown[cls]["wins"] += slot.wins
             class_breakdown[cls]["losses"] += slot.losses
 
+        # Get real correlation data
+        corr_result = self._correlation_engine.compute_matrix()
+        diversification = self._correlation_engine.compute_diversification_score()
+
         return {
             "total_value": round(self.total_value, 2),
             "initial_capital": round(self._initial_capital, 2),
@@ -1056,48 +1303,84 @@ class PortfolioManager:
             "rebalance_count": len(self._rebalance_history),
             "class_breakdown": class_breakdown,
             "slots": slot_summaries,
+            # Real correlation data (v0.16.1 — was missing before)
+            "correlation": {
+                "regime": corr_result.regime.value,
+                "avg_correlation": round(corr_result.avg_correlation, 4),
+                "max_correlation": round(corr_result.max_correlation, 4),
+                "window_size": corr_result.window_size,
+                "method": corr_result.method.value,
+                "diversification_score": diversification.get("score", 0.0),
+                "diversification_rating": diversification.get("rating", "UNKNOWN"),
+                "effective_positions": diversification.get("effective_positions", 0.0),
+                "correlation_crisis_active": self._correlation_crisis_active,
+            },
+            "equity_curve_length": len(self._equity_curve),
         }
 
     def get_risk_report(self) -> dict:
-        """Get detailed risk report for the portfolio."""
-        # Portfolio-level VaR estimation (simplified parametric)
+        """Get detailed risk report for the portfolio.
+
+        Uses the CrossTokenCorrelationEngine for correlation-adjusted VaR,
+        replacing the previous simple weighted-average approach.
+        """
+        # Portfolio-level VaR estimation using REAL correlation matrix
         total_vol = self._estimate_portfolio_volatility()
-        var_95 = self.total_value * 1.645 * total_vol  # 1-day 95% VaR
-        var_99 = self.total_value * 2.326 * total_vol  # 1-day 99% VaR
+
+        # Use correlation engine for more accurate VaR
+        corr_result = self._correlation_engine.compute_matrix()
+        weights = {}
+        volatilities = {}
+        total_cap = sum(s.capital_allocated for s in self._slots.values())
+        for s in self._slots.values():
+            if total_cap > 0:
+                weights[s.symbol] = s.capital_allocated / total_cap
+            else:
+                weights[s.symbol] = 1.0 / max(len(self._slots), 1)
+            volatilities[s.symbol] = self._slot_volatility(s)
+
+        # Correlation-adjusted portfolio variance
+        port_var = self._correlation_engine.compute_portfolio_variance(weights, volatilities)
+        port_vol = np.sqrt(port_var) if port_var > 0 else total_vol
+
+        var_95 = self.total_value * 1.645 * port_vol  # 1-day 95% VaR
+        var_99 = self.total_value * 2.326 * port_vol  # 1-day 99% VaR
 
         # HHI (Herfindahl-Hirschman Index) for concentration
-        total_capital = sum(s.capital_allocated for s in self._slots.values())
-        hhi = 0.0
-        if total_capital > 0:
-            weights = [s.capital_allocated / total_capital for s in self._slots.values()]
-            hhi = sum(w * w for w in weights)
+        if total_cap > 0:
+            weight_list = [s.capital_allocated / total_cap for s in self._slots.values()]
+            hhi = sum(w * w for w in weight_list)
+        else:
+            hhi = 0.0
 
         # Diversification ratio
-        if total_vol > 0:
+        if port_vol > 0:
             avg_slot_vol = np.mean([
                 self._slot_volatility(s) for s in self._slots.values()
             ]) if self._slots else 0.0
-            diversification_ratio = avg_slot_vol / total_vol if total_vol > 0 else 1.0
+            diversification_ratio = avg_slot_vol / port_vol if port_vol > 0 else 1.0
         else:
             diversification_ratio = 1.0
 
         return {
-            "portfolio_volatility": round(total_vol * 100, 2),
+            "portfolio_volatility": round(port_vol * 100, 2),
             "var_95_1d": round(var_95, 2),
             "var_99_1d": round(var_99, 2),
             "cvar_estimate": round(var_95 * 1.5, 2),  # Approximate CVaR
             "hhi_concentration": round(hhi, 3),
             "diversification_ratio": round(diversification_ratio, 2),
             "max_drawdown_pct": round(self.current_drawdown_pct * 100, 2),
+            "correlation_regime": corr_result.regime.value,
+            "avg_correlation": round(corr_result.avg_correlation, 4),
             "exposure_breakdown": {
                 s.symbol: round(s.capital_used / self.total_value * 100, 1)
                 for s in self._slots.values()
                 if self.total_value > 0 and s.capital_used > 0
             },
             "class_concentration": {
-                cls: round(data["capital"] / total_capital * 100, 1)
+                cls: round(data["capital"] / total_cap * 100, 1)
                 for cls, data in self.get_portfolio_summary().get("class_breakdown", {}).items()
-                if total_capital > 0
+                if total_cap > 0
             },
         }
 

@@ -2631,9 +2631,176 @@ ppmt portfolio --serve-api --api-port 8430
 - `tests/test_portfolio_manager.py` — NEW (822 lines, 38 tests)
 - `TRACEABILITY.md` — Updated to v0.16.0
 
-### Next Steps
+### Phase 1-4 Detailed TODO — Portfolio Management System Roadmap
 
-1. **Portfolio-level backtest with real data**: Run multi-token backtest using the 12-token Bybit dataset
-2. **Dashboard integration**: Connect Next.js PortfolioIntelligenceEngine to the API bridge
-3. **Live portfolio mode**: Run `ppmt portfolio --serve-api` alongside `ppmt run` for live portfolio management
-4. **Rebalance automation**: Add configurable rebalance triggers (time-based, regime-change, drawdown-threshold)
+> Added: 2026-06-15 | Status: Phase 1 COMPLETE, Phase 2-4 PENDING
+
+---
+
+#### Phase 1: Multi-Token Portfolio Core (COMPLETE)
+
+- [x] `PortfolioManager` — Multi-token slot orchestration with `TokenSlot` dataclass
+- [x] `CrossTokenCorrelationEngine` — Real rolling correlation matrix (Pearson + Spearman)
+- [x] `RegimeAwareAllocator` — 6 regime profiles (TRENDING_UP/DOWN, RANGING, VOLATILE, CRISIS, UNKNOWN)
+- [x] 4 allocation methods: EQUAL_WEIGHT, RISK_PARITY, REGIME_AWARE, QUALITY_WEIGHTED
+- [x] Portfolio-level circuit breakers: kill switch, daily loss, drawdown, correlation crisis
+- [x] `PortfolioBacktester` — Multi-token simultaneous backtest with shared capital
+- [x] `PortfolioAPI` — FastAPI bridge (14 REST endpoints + SSE stream)
+- [x] State persistence (save/load JSON)
+- [x] CLI `ppmt portfolio` command with all options
+- [x] 38/38 tests passing (PortfolioManager 13, Correlation 10, Allocator 8, Backtester 5, Integration 2)
+
+**Files (4,799 LOC total):**
+- `src/ppmt/risk/portfolio_manager.py` — 1,543 lines
+- `src/ppmt/risk/correlation_engine.py` — 751 lines
+- `src/ppmt/risk/regime_allocator.py` — 529 lines
+- `src/ppmt/risk/portfolio_api.py` — 478 lines
+- `src/ppmt/risk/portfolio_backtester.py` — 672 lines
+- `tests/test_portfolio_manager.py` — 826 lines
+
+---
+
+#### Phase 2: Bridge API — Python ↔ TypeScript Integration (PENDING)
+
+**Problem:** The Python PPMT core and TypeScript Next.js dashboard are two parallel worlds with no connection. The PortfolioIntelligenceEngine (TS) reads from static/configured data, not from the real Python MoneyManager/PortfolioManager.
+
+**TODO:**
+
+- [ ] 2.1 — Start the Python Portfolio API server as a sidecar process from Next.js
+  - Add `ppmt portfolio --serve-api --api-port 8430` to the `ppmt terminal` startup sequence
+  - Auto-detect if the API is already running before spawning a new process
+  - Health check on `/api/portfolio/health` before connecting
+
+- [ ] 2.2 — Create TypeScript API client `src/lib/services/portfolio/portfolio-api-client.ts`
+  - Typed fetch wrappers for all 14 REST endpoints
+  - SSE connection to `/api/portfolio/stream` for real-time updates
+  - Auto-reconnect on connection loss
+  - Request caching and deduplication
+
+- [ ] 2.3 — Connect `PortfolioIntelligenceEngine` (TS) to real Python data via the API client
+  - Replace static VaR/CVaR computation with real portfolio state from Python
+  - Feed real correlation matrix from `CrossTokenCorrelationEngine` to the TS dashboard
+  - Display live allocation, exposure, and circuit breaker status
+
+- [ ] 2.4 — Add dashboard pages for portfolio management
+  - Portfolio overview page (total value, P&L, exposure pie chart, slot table)
+  - Correlation matrix heatmap (real-time from Python engine)
+  - Allocation page (current vs target, rebalance button)
+  - Risk report page (VaR, CVaR, HHI, diversification ratio)
+
+- [ ] 2.5 — Real-time updates via SSE
+  - Dashboard subscribes to `/api/portfolio/stream`
+  - React context/provider for portfolio state
+  - Auto-refresh correlation matrix and allocation every 30s
+
+**Estimated LOC:** ~1,500 (TS client + dashboard components)
+
+---
+
+#### Phase 3: Portfolio Intelligence Fusion (PENDING)
+
+**Problem:** TypeScript has sophisticated portfolio optimization (Markowitz, Risk Parity, Black-Litterman) that Python doesn't use. Python has real PPMT signals and MoneyManager state that TypeScript doesn't see.
+
+**TODO:**
+
+- [ ] 3.1 — Expose Python portfolio state as structured data for TS optimization
+  - Python → API: token returns, positions, allocation, correlation matrix, regime per token
+  - TS reads via API client and feeds into PortfolioIntelligenceEngine
+
+- [ ] 3.2 — Implement Markowitz mean-variance optimization using real Python data
+  - Fetch expected returns and covariance matrix from Python correlation engine
+  - Compute efficient frontier and optimal weights in TS
+  - Display efficient frontier chart in dashboard
+
+- [ ] 3.3 — Implement Risk Parity optimization with real correlation data
+  - Use real volatility and correlation from Python engine
+  - Compute risk parity weights (equal risk contribution)
+  - Compare with current allocation
+
+- [ ] 3.4 — Implement Black-Litterman with PPMT signals as views
+  - PPMT pattern confidence → investor views
+  - Pattern quality scores → view confidence
+  - Combine with market equilibrium to get posterior weights
+
+- [ ] 3.5 — Stress testing dashboard
+  - Historical stress scenarios (COVID crash, LUNA collapse, FTX)
+  - Custom shock scenarios
+  - Show portfolio P&L under each scenario
+
+- [ ] 3.6 — Write back optimization results to Python via API
+  - POST recommended allocation to `/api/portfolio/allocation/compute`
+  - PortfolioManager applies the allocation on the Python side
+  - Confirm via GET `/api/portfolio/allocation`
+
+**Estimated LOC:** ~2,000 (optimization integration + dashboard charts)
+
+---
+
+#### Phase 4: Live Portfolio Trading & Backtesting (PENDING)
+
+**Problem:** No end-to-end system exists that runs multiple PPMT engines simultaneously with shared capital, real rebalancing, and live dashboard updates.
+
+**TODO:**
+
+- [ ] 4.1 — Create `PortfolioRunner` — orchestrates multiple PPMT engines in parallel
+  - One PPMT engine per token (Trie + SAX + RiskManager)
+  - Shared PortfolioManager for capital allocation
+  - Time-synchronized candle processing
+  - Signal prioritization when multiple tokens signal simultaneously
+
+- [ ] 4.2 — Live portfolio mode with WebSocket data feeds
+  - Connect to exchange WebSocket for each token
+  - Feed candles to the appropriate PPMT engine slot
+  - Portfolio-level signal approval before execution
+  - Real-time dashboard updates
+
+- [ ] 4.3 — Rebalance automation with configurable triggers
+  - Time-based (every N candles)
+  - Regime-change trigger (when dominant regime shifts)
+  - Drawdown-threshold trigger (when drawdown exceeds X%)
+  - Performance-drift trigger (when actual weights deviate >Y% from target)
+  - Manual trigger via dashboard button
+
+- [ ] 4.4 — Multi-token portfolio backtest with real historical data
+  - Load 12-token Bybit dataset (14,400 candles each at 1h)
+  - Run PortfolioBacktester with each allocation method
+  - Compare: EQUAL_WEIGHT vs RISK_PARITY vs REGIME_AWARE vs QUALITY_WEIGHTED
+  - Generate portfolio-level metrics (Sharpe, Sortino, max DD, Calmar)
+
+- [ ] 4.5 — Monte Carlo portfolio simulation
+  - Bootstrap from historical returns
+  - Simulate 10,000 portfolio paths
+  - Compute confidence intervals for P&L, drawdown, recovery time
+  - Display fan chart in dashboard
+
+- [ ] 4.6 — End-to-end integration test
+  - Start Portfolio API server
+  - Run portfolio backtest
+  - Verify dashboard receives data via SSE
+  - Trigger rebalance from dashboard
+  - Verify allocation change in Python
+  - Full circuit breaker test (kill switch from dashboard)
+
+**Estimated LOC:** ~2,500 (runner + live mode + backtest integration + dashboard)
+
+---
+
+### Total Roadmap Summary
+
+| Phase | Description | Status | LOC | Tests |
+|-------|-------------|--------|-----|-------|
+| Phase 1 | Multi-Token Portfolio Core | COMPLETE | 4,799 | 38/38 |
+| Phase 2 | Bridge API Python ↔ TypeScript | PENDING | ~1,500 | TBD |
+| Phase 3 | Portfolio Intelligence Fusion | PENDING | ~2,000 | TBD |
+| Phase 4 | Live Portfolio Trading & Backtesting | PENDING | ~2,500 | TBD |
+| **Total** | | | **~10,800** | |
+
+### Critical Dependency Chain
+
+```
+Phase 1 (DONE) ──→ Phase 2 (Bridge API) ──→ Phase 3 (Intelligence Fusion) ──→ Phase 4 (Live Trading)
+                         │                          │                                  │
+                         │                          │                                  └─ Needs 1-3 working
+                         │                          └─ Needs Phase 2 API client
+                         └─ Needs Phase 1 PortfolioManager running
+```

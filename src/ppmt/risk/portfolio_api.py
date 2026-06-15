@@ -393,6 +393,60 @@ def create_app() -> "FastAPI":
             "positions": get_portfolio().total_open_positions,
         }
 
+    # -------------------------------------------------------------------
+    # Server-Sent Events (SSE) — Real-Time Streaming
+    # -------------------------------------------------------------------
+
+    @app.get("/api/portfolio/stream")
+    async def portfolio_stream():
+        """
+        SSE endpoint for real-time portfolio updates.
+
+        The dashboard can connect to this endpoint to receive
+        portfolio state updates every 2 seconds without polling.
+
+        Usage (JavaScript):
+            const es = new EventSource('http://localhost:8430/api/portfolio/stream');
+            es.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                updateDashboard(data);
+            };
+        """
+        import asyncio
+
+        async def event_generator():
+            while True:
+                try:
+                    pm = get_portfolio()
+                    summary = pm.get_portfolio_summary()
+                    yield {
+                        "event": "portfolio_update",
+                        "data": json.dumps(summary, default=float),
+                    }
+                except Exception as e:
+                    yield {
+                        "event": "error",
+                        "data": json.dumps({"error": str(e)}),
+                    }
+                await asyncio.sleep(2)  # 2-second update interval
+
+        from starlette.responses import StreamingResponse
+
+        async def sse_generator():
+            async for event in event_generator():
+                yield f"event: {event['event']}\n"
+                yield f"data: {event['data']}\n\n"
+
+        return StreamingResponse(
+            sse_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
     return app
 
 
