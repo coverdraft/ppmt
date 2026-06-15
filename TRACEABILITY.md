@@ -2798,6 +2798,12 @@ The Phase 2 components existed but were NOT wired into the dashboard. The "Portf
   - Enhanced `runOptimization`, `runComparison`, `runStressTest` with proper error capture
   - Compare Methods now reports which specific methods failed
 
+- [x] Polish fixes (v0.16.4)
+  - stress-test/route.ts: normalize positionImpacts keys (strip /USDT) — consistent with optimize route
+  - ppmt-portfolio-dashboard.tsx: header shows "slots" and "trades" instead of "tokens" and "positions"
+  - optimize/route.ts: removed dead ppmt- prefix stripping (engine uses tokenAddress, not id)
+  - portfolio-intelligence-adapter.ts: fixed fallback entryPrice to use slot.capital_used (per-unit)
+
 **New files created:**
 
 | File | LOC | Purpose |
