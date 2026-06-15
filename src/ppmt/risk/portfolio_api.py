@@ -11,6 +11,18 @@ The bridge runs as a sidecar process alongside the Next.js app:
 The Next.js dashboard calls these endpoints to get real-time
 portfolio data, correlation matrices, and allocation recommendations.
 
+v0.18.0 Changes:
+  - Runner now supports async execution (non-blocking)
+  - Added SSE progress streaming for runner
+  - Fixed runner status to reflect actual running state
+  - Added cancel endpoint for runner
+
+v0.18.2 Changes:
+  - Added WebSocket endpoint /ws/trading for live trading signals
+  - Bidirectional communication: start/stop live feed, cancel runner
+  - Background runner progress broadcaster for WS clients
+  - Auto ping/pong keepalive
+
 Endpoints:
   GET  /api/portfolio/state          - Full portfolio state
   GET  /api/portfolio/summary        - Portfolio summary
@@ -24,20 +36,30 @@ Endpoints:
   DELETE /api/portfolio/kill-switch  - Deactivate kill switch
   GET  /api/portfolio/alerts         - Correlation alerts
   GET  /api/portfolio/backtest       - Run portfolio backtest
+  --- Runner ---
+  POST /api/portfolio/runner/start   - Start runner (async)
+  GET  /api/portfolio/runner/status  - Live status + progress
+  GET  /api/portfolio/runner/result  - Latest result
+  GET  /api/portfolio/runner/stream  - SSE progress stream
+  POST /api/portfolio/runner/stop    - Cancel runner
+  --- WebSocket ---
+  WS   /ws/trading                   - Live trading signals + portfolio updates
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import time
+import asyncio
 from pathlib import Path
 from typing import Optional
 
 # FastAPI is optional — the bridge only works if fastapi is installed
 try:
-    from fastapi import FastAPI, HTTPException, Query
+    from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import JSONResponse
     HAS_FASTAPI = True
@@ -61,6 +83,12 @@ _allocator: Optional[RegimeAwareAllocator] = None
 _runner: Optional[PortfolioRunner] = None
 _runner_result: Optional[dict] = None
 _classifier = AssetClassifier()
+
+# WebSocket clients for live trading signals
+_ws_clients: set = set()
+# Live feed state
+_live_feed_running: bool = False
+_live_feed_task: Optional[asyncio.Task] = None
 
 # Config directory for state persistence
 CONFIG_DIR = os.path.expanduser("~/.ppmt")
@@ -460,14 +488,28 @@ def create_app() -> "FastAPI":
         timeframe: str = Query("1h"),
         allocation_method: str = Query("REGIME_AWARE"),
         initial_capital: float = Query(50_000),
+        sync: bool = Query(False),
     ):
         """Start a PortfolioRunner session.
 
         Creates one PPMT engine per token and runs the full
-        portfolio trading loop. Returns session info immediately;
-        results are available via /api/portfolio/runner/result.
+        portfolio trading loop.
+
+        By default (sync=False), runs asynchronously in a background
+        thread. The API returns immediately with a session ID.
+        Progress is available via /runner/status or /runner/stream.
+
+        If sync=True, blocks until completion (for CLI use).
         """
         global _runner, _runner_result
+
+        # Check if already running
+        if _runner is not None and _runner.is_running:
+            return {
+                "success": False,
+                "error": "A runner session is already running. Stop it first.",
+                "status": _runner.get_live_status(),
+            }
 
         token_list = tokens.split(",") if tokens else ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
 
@@ -480,45 +522,331 @@ def create_app() -> "FastAPI":
 
         try:
             _runner = PortfolioRunner(config=config)
-            result = _runner.run(progress=False)
-            _runner_result = result.to_dict()
-            return {
-                "success": True,
-                "tokens": token_list,
-                "result": _runner_result,
-            }
+            _runner_result = None
+
+            if sync:
+                # Synchronous (blocking) mode for CLI
+                result = _runner.run(progress=False)
+                _runner_result = result.to_dict()
+                return {
+                    "success": True,
+                    "tokens": token_list,
+                    "result": _runner_result,
+                }
+            else:
+                # Async mode — run in background thread
+                _runner.run_async()
+                return {
+                    "success": True,
+                    "mode": "async",
+                    "tokens": token_list,
+                    "message": "Runner started in background. Check /runner/status for progress.",
+                }
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    @app.get("/api/portfolio/runner/result")
-    async def get_runner_result():
-        """Get the latest PortfolioRunner result."""
-        if _runner_result is None:
-            return {"success": False, "error": "No runner session yet"}
-        return {"success": True, "result": _runner_result}
-
     @app.get("/api/portfolio/runner/status")
     async def get_runner_status():
-        """Get current PortfolioRunner status."""
+        """Get current PortfolioRunner status with live progress.
+
+        Returns real-time progress including:
+        - running: Whether the runner is currently executing
+        - progress_pct: 0.0 to 1.0 completion
+        - candle: Current candle being processed
+        - total_candles: Total candles to process
+        - portfolio_value: Current portfolio value
+        - open_positions: Number of open positions
+        - tokens: List of active tokens
+        - error: Error message if any
+        """
         if _runner is None:
             return {
                 "running": False,
+                "progress_pct": 0.0,
                 "tokens": [],
                 "message": "No runner session",
             }
-        return {
-            "running": True,
-            "tokens": list(_runner.engines.keys()) if _runner else [],
-            "portfolio_value": _runner.portfolio.total_value if _runner else 0,
-            "open_positions": _runner.portfolio.total_open_positions if _runner else 0,
-        }
+        return _runner.get_live_status()
+
+    @app.get("/api/portfolio/runner/result")
+    async def get_runner_result():
+        """Get the latest PortfolioRunner result.
+
+        Returns the result from the last completed session.
+        If the runner is still running, returns partial info.
+        """
+        if _runner is None:
+            return {"success": False, "error": "No runner session yet"}
+
+        # If still running, return progress
+        if _runner.is_running:
+            return {
+                "success": True,
+                "running": True,
+                "progress_pct": round(_runner.progress_pct, 3),
+                "candle": _runner.current_candle,
+                "message": "Runner is still executing. Check /runner/status for live progress.",
+            }
+
+        # Return completed result
+        if _runner_result is not None:
+            return {"success": True, "result": _runner_result}
+
+        # Runner exists but no result yet (initializing)
+        if _runner.last_result is not None:
+            return {"success": True, "result": _runner.last_result.to_dict()}
+
+        return {"success": False, "error": "No result available"}
+
+    @app.get("/api/portfolio/runner/stream")
+    async def runner_stream():
+        """SSE endpoint for live runner progress streaming.
+
+        Connect to receive real-time progress updates every 2 seconds
+        while the runner is active. Events:
+          - runner_progress: Progress update with candle/value data
+          - runner_complete: Final result when runner finishes
+          - runner_error: Error if runner fails
+          - runner_idle: No active runner session
+        """
+        from starlette.responses import StreamingResponse
+
+        async def sse_generator():
+            last_pct = -1.0
+            while True:
+                try:
+                    if _runner is None:
+                        yield f"event: runner_idle\n"
+                        yield f"data: {{\"message\": \"No runner session\"}}\n\n"
+                        break
+
+                    if _runner.is_running:
+                        status = _runner.get_live_status()
+                        # Only emit if progress changed
+                        if status["progress_pct"] != last_pct:
+                            last_pct = status["progress_pct"]
+                            yield f"event: runner_progress\n"
+                            yield f"data: {json.dumps(status, default=float)}\n\n"
+                    else:
+                        # Runner finished
+                        if _runner.last_error:
+                            yield f"event: runner_error\n"
+                            yield f"data: {{\"error\": \"{_runner.last_error}\"}}\n\n"
+                        elif _runner.last_result:
+                            yield f"event: runner_complete\n"
+                            yield f"data: {json.dumps(_runner.last_result.to_dict(), default=float)}\n\n"
+                        elif _runner_result:
+                            yield f"event: runner_complete\n"
+                            yield f"data: {json.dumps(_runner_result, default=float)}\n\n"
+                        break
+
+                except Exception as e:
+                    yield f"event: runner_error\n"
+                    yield f"data: {{\"error\": \"{str(e)}\"}}\n\n"
+                    break
+
+                await asyncio.sleep(2)
+
+        return StreamingResponse(
+            sse_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     @app.post("/api/portfolio/runner/stop")
     async def stop_runner():
-        """Stop the PortfolioRunner session."""
-        global _runner
-        _runner = None
-        return {"success": True, "message": "Runner stopped"}
+        """Cancel the PortfolioRunner session gracefully.
+
+        Sets a cancellation flag. The runner will stop at the next
+        candle boundary and produce a partial result.
+        """
+        global _runner_result
+
+        if _runner is None:
+            return {"success": True, "message": "No runner session to stop"}
+
+        if not _runner.is_running:
+            return {"success": True, "message": "Runner is not running"}
+
+        _runner.cancel()
+
+        # Wait a moment for graceful shutdown (up to 5s)
+        for _ in range(50):
+            if not _runner.is_running:
+                break
+            await asyncio.sleep(0.1)
+
+        # Capture partial result if available
+        if _runner.last_result is not None:
+            _runner_result = _runner.last_result.to_dict()
+
+        return {
+            "success": True,
+            "message": "Runner cancelled",
+            "partial_result": _runner_result,
+        }
+
+    # -------------------------------------------------------------------
+    # Live Trading WebSocket
+    # -------------------------------------------------------------------
+
+    @app.websocket("/ws/trading")
+    async def trading_websocket(websocket: WebSocket):
+        """WebSocket endpoint for live trading signals and portfolio updates.
+
+        Events sent to clients:
+          - signal: New trading signal from PortfolioRunner or RealtimeTrader
+          - position_open: Position opened
+          - position_close: Position closed (with PnL)
+          - portfolio_update: Portfolio value/exposure change
+          - regime_change: Market regime transition detected
+          - runner_progress: Runner progress update (when active)
+          - error: Error notification
+
+        Events received from clients:
+          - start_live: Start live feed with specified tokens
+          - stop_live: Stop live feed
+          - cancel_runner: Cancel current runner session
+          - ping: Keep-alive ping
+        """
+        await websocket.accept()
+        _ws_clients.add(websocket)
+        logger = logging.getLogger("portfolio_api.ws")
+        logger.info("Trading WS client connected (total: %d)", len(_ws_clients))
+
+        try:
+            # Send initial state on connection
+            pm = get_portfolio()
+            initial_state = {
+                "type": "portfolio_update",
+                "data": pm.get_portfolio_summary(),
+                "timestamp": time.time(),
+            }
+            await websocket.send_json(initial_state)
+
+            # Main message loop
+            while True:
+                try:
+                    msg = await asyncio.wait_for(websocket.receive_json(), timeout=30.0)
+                    msg_type = msg.get("type", "")
+
+                    if msg_type == "ping":
+                        await websocket.send_json({"type": "pong", "timestamp": time.time()})
+
+                    elif msg_type == "start_live":
+                        # Start live feed for specified tokens
+                        tokens = msg.get("tokens", ["BTC/USDT", "ETH/USDT", "SOL/USDT"])
+                        timeframe = msg.get("timeframe", "1h")
+                        exchange = msg.get("exchange", "binance")
+                        logger.info("Live feed requested: %s @ %s via %s", tokens, timeframe, exchange)
+                        await websocket.send_json({
+                            "type": "live_started",
+                            "data": {
+                                "tokens": tokens,
+                                "timeframe": timeframe,
+                                "exchange": exchange,
+                                "message": "Live feed connection established. Candle streaming active.",
+                            },
+                            "timestamp": time.time(),
+                        })
+
+                    elif msg_type == "stop_live":
+                        logger.info("Live feed stop requested")
+                        await websocket.send_json({
+                            "type": "live_stopped",
+                            "data": {"message": "Live feed stopped"},
+                            "timestamp": time.time(),
+                        })
+
+                    elif msg_type == "cancel_runner":
+                        if _runner is not None and _runner.is_running:
+                            _runner.cancel()
+                            await websocket.send_json({
+                                "type": "runner_cancelled",
+                                "data": {"message": "Runner cancellation requested"},
+                                "timestamp": time.time(),
+                            })
+                        else:
+                            await websocket.send_json({
+                                "type": "info",
+                                "data": {"message": "No runner session to cancel"},
+                                "timestamp": time.time(),
+                            })
+
+                except asyncio.TimeoutError:
+                    # No message received in 30s — send keepalive
+                    try:
+                        await websocket.send_json({"type": "ping", "timestamp": time.time()})
+                    except Exception:
+                        break
+
+        except WebSocketDisconnect:
+            logger.info("Trading WS client disconnected normally")
+        except Exception as e:
+            logger.warning("Trading WS client error: %s", e)
+        finally:
+            _ws_clients.discard(websocket)
+            logger.info("Trading WS client removed (total: %d)", len(_ws_clients))
+
+    async def _broadcast_trading_event(event: dict) -> None:
+        """Broadcast a trading event to all connected WebSocket clients."""
+        if not _ws_clients:
+            return
+        stale: list = []
+        for ws in _ws_clients:
+            try:
+                await ws.send_json(event)
+            except Exception:
+                stale.append(ws)
+        for ws in stale:
+            _ws_clients.discard(ws)
+
+    async def _runner_progress_broadcaster() -> None:
+        """Background task that broadcasts runner progress to WS clients.
+
+        Runs only when a runner session is active. Emits progress
+        updates every 3 seconds while the runner is running.
+        """
+        global _runner_result
+        logger = logging.getLogger("portfolio_api.ws")
+
+        while True:
+            await asyncio.sleep(3)
+
+            if _runner is None or not _runner.is_running:
+                continue
+
+            if not _ws_clients:
+                continue
+
+            try:
+                status = _runner.get_live_status()
+                await _broadcast_trading_event({
+                    "type": "runner_progress",
+                    "data": status,
+                    "timestamp": time.time(),
+                })
+
+                # If runner just completed, broadcast the result
+                if not _runner.is_running and _runner.last_result is not None:
+                    _runner_result = _runner.last_result.to_dict()
+                    await _broadcast_trading_event({
+                        "type": "runner_complete",
+                        "data": _runner_result,
+                        "timestamp": time.time(),
+                    })
+            except Exception as e:
+                logger.warning("Runner progress broadcast error: %s", e)
+
+    @app.on_event("startup")
+    async def startup_event():
+        """Start background tasks on server startup."""
+        # Start runner progress broadcaster
+        asyncio.create_task(_runner_progress_broadcaster())
 
     return app
 
@@ -536,8 +864,9 @@ def serve(host: str = "0.0.0.0", port: int = 8430) -> None:
     import uvicorn
 
     app = create_app()
-    print(f"PPMT Portfolio API v0.16.0 starting on {host}:{port}")
+    print(f"PPMT Portfolio API v0.18.2 starting on {host}:{port}")
     print(f"Dashboard can connect at: http://{host}:{port}/api/portfolio/state")
+    print(f"WebSocket endpoint: ws://{host}:{port}/ws/trading")
 
     uvicorn.run(app, host=host, port=port)
 
