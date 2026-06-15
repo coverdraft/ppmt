@@ -2660,7 +2660,7 @@ ppmt portfolio --serve-api --api-port 8430
 
 ---
 
-#### Phase 2: Bridge API — Python ↔ TypeScript Integration (COMPLETE)
+#### Phase 2: Bridge API — Python ↔ TypeScript Integration (COMPLETE — Verified v0.16.2)
 
 **Problem:** The Python PPMT core and TypeScript Next.js dashboard are two parallel worlds with no connection. The PortfolioIntelligenceEngine (TS) reads from static/configured data, not from the real Python MoneyManager/PortfolioManager.
 
@@ -2707,14 +2707,17 @@ ppmt portfolio --serve-api --api-port 8430
   - Periodic full refresh every 30s for correlation/risk data
 
 **Files (New in Phase 2):**
-- `src/lib/services/portfolio/portfolio-sidecar.ts` — 175 lines (NEW)
-- `src/hooks/use-portfolio.ts` — 330 lines (NEW)
-- `src/components/dashboard/portfolio-overview.tsx` — 310 lines (NEW)
-- `src/components/dashboard/portfolio-correlation-heatmap.tsx` — 220 lines (NEW)
-- `src/components/dashboard/portfolio-allocation.tsx` — 290 lines (NEW)
-- `src/components/dashboard/portfolio-risk-panel.tsx` — 260 lines (NEW)
-- `src/app/api/portfolio/ppmt-state/route.ts` — 80 lines (NEW)
+- `src/lib/services/portfolio/portfolio-sidecar.ts` — 291 lines (NEW)
+- `src/hooks/use-portfolio.ts` — 451 lines (NEW)
+- `src/components/dashboard/portfolio-overview.tsx` — 360 lines (NEW)
+- `src/components/dashboard/portfolio-correlation-heatmap.tsx` — 202 lines (NEW)
+- `src/components/dashboard/portfolio-allocation.tsx` — 286 lines (NEW)
+- `src/components/dashboard/portfolio-risk-panel.tsx` — 256 lines (NEW)
+- `src/components/dashboard/ppmt-portfolio-dashboard.tsx` — 157 lines (NEW — v0.16.2 dashboard integration)
+- `src/app/api/portfolio/ppmt-state/route.ts` — 103 lines (NEW)
 - `src/lib/services/portfolio/index.ts` — Updated exports
+- `src/components/dashboard/lazy-tabs.tsx` — Added PpmtPortfolioDashboard dynamic import
+- `src/app/page.tsx` — Portfolio tab now renders PpmtPortfolioDashboard (replaces old PortfolioView)
 
 **Pre-existing Files (Used in Phase 2):**
 - `src/lib/services/portfolio/portfolio-bridge-service.ts` — 657 lines (pre-existing)
@@ -2722,7 +2725,10 @@ ppmt portfolio --serve-api --api-port 8430
 - `src/lib/services/portfolio/portfolio-intelligence-engine.ts` — ~1800 lines (pre-existing)
 - `src/lib/services/portfolio/types.ts` — 327 lines (pre-existing)
 
-**Total New LOC:** ~1,665
+**v0.16.2 Dashboard Connection Fix:**
+The Phase 2 components existed but were NOT wired into the dashboard. The "Portfolio" tab was still rendering the old `PortfolioView` (Prisma DB-based). Created `PpmtPortfolioDashboard` as a unified multi-tab container (Overview/Correlation/Allocation/Risk) and connected it via lazy-tabs + page.tsx. Now the portfolio tab displays real Python PPMT data.
+
+**Total New LOC:** ~1,822
 
 ---
 
