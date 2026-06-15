@@ -920,34 +920,83 @@ def terminal(host: str, port: int, open_browser: bool, lite: bool):
         package_json = repo_root / "package.json"
         node_modules = repo_root / "node_modules"
 
-        if package_json.exists() and node_modules.exists():
-            import subprocess
-            console.print(f"  [green]Found Next.js dashboard at {repo_root}[/green]")
-            console.print(f"  Starting on http://localhost:{port}")
+        if package_json.exists():
+            # Auto-install node_modules if missing
+            if not node_modules.exists():
+                import subprocess
+                console.print("[yellow]Node modules not found. Running npm install...[/yellow]")
+                try:
+                    result = subprocess.run(
+                        ["npm", "install"],
+                        cwd=str(repo_root),
+                        capture_output=True,
+                        text=True,
+                        timeout=300,
+                    )
+                    if result.returncode == 0:
+                        console.print("[green]npm install complete![/green]")
+                    else:
+                        console.print(f"[red]npm install failed: {result.stderr[:200]}[/red]")
+                        console.print("[dim]Use --lite for the FastAPI dashboard, or run 'npm install' manually.[/dim]")
+                        lite = True
+                except FileNotFoundError:
+                    console.print("[yellow]npm not found. Install Node.js from https://nodejs.org[/yellow]")
+                    console.print("[dim]Use --lite for the FastAPI dashboard instead.[/dim]")
+                    lite = True
+                except subprocess.TimeoutExpired:
+                    console.print("[red]npm install timed out.[/red]")
+                    lite = True
 
-            if open_browser:
-                url = f"http://localhost:{port}"
-                threading.Timer(3.0, lambda: webbrowser.open(url)).start()
-                console.print(f"  Opening browser at {url}")
+            if not lite and node_modules.exists():
+                import subprocess
 
-            console.print("[dim]Press Ctrl+C to stop[/dim]\n")
-            try:
-                env = os.environ.copy()
-                env["PORT"] = str(port)
-                subprocess.run(
-                    ["npx", "next", "dev", "--port", str(port), "--turbopack"],
-                    cwd=str(repo_root),
-                    env=env,
-                )
-            except KeyboardInterrupt:
-                console.print("\n[yellow]Dashboard stopped.[/yellow]")
-            except FileNotFoundError:
-                console.print("[yellow]npx not found. Install Node.js or use --lite for FastAPI dashboard.[/yellow]")
-                lite = True  # Fall through to FastAPI
+                # Ensure .env and Prisma DB exist
+                env_file = repo_root / ".env"
+                if not env_file.exists():
+                    env_file.write_text('DATABASE_URL="file:./prisma/dev.db"\n')
+                    console.print("[green]Created .env file[/green]")
+
+                prisma_db = repo_root / "prisma" / "dev.db"
+                if not prisma_db.exists():
+                    console.print("[yellow]Prisma DB not found. Initializing...[/yellow]")
+                    try:
+                        subprocess.run(
+                            ["npx", "prisma", "db", "push", "--schema=./prisma/schema.prisma"],
+                            cwd=str(repo_root),
+                            capture_output=True,
+                            text=True,
+                            timeout=60,
+                        )
+                        console.print("[green]Prisma DB initialized![/green]")
+                    except Exception as e:
+                        console.print(f"[yellow]Prisma setup skipped: {e}[/yellow]")
+
+                console.print(f"  [green]Found Next.js dashboard at {repo_root}[/green]")
+                console.print(f"  Starting on http://localhost:{port}")
+
+                if open_browser:
+                    url = f"http://localhost:{port}"
+                    threading.Timer(3.0, lambda: webbrowser.open(url)).start()
+                    console.print(f"  Opening browser at {url}")
+
+                console.print("[dim]Press Ctrl+C to stop[/dim]\n")
+                try:
+                    env = os.environ.copy()
+                    env["PORT"] = str(port)
+                    subprocess.run(
+                        ["npx", "next", "dev", "--port", str(port), "--turbopack"],
+                        cwd=str(repo_root),
+                        env=env,
+                    )
+                except KeyboardInterrupt:
+                    console.print("\n[yellow]Dashboard stopped.[/yellow]")
+                except FileNotFoundError:
+                    console.print("[yellow]npx not found. Install Node.js or use --lite for FastAPI dashboard.[/yellow]")
+                    lite = True
         else:
-            console.print("[yellow]Next.js dashboard not found (no package.json/node_modules).[/yellow]")
-            console.print("[dim]Use --lite for the FastAPI dashboard, or run 'npm install' in the repo root.[/dim]")
-            lite = True  # Fall through to FastAPI
+            console.print("[yellow]Next.js dashboard not found (no package.json).[/yellow]")
+            console.print("[dim]Use --lite for the FastAPI dashboard.[/dim]")
+            lite = True
 
     # --- FastAPI lightweight dashboard (fallback) ---
     if lite:
