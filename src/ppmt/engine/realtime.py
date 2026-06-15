@@ -62,6 +62,13 @@ from ppmt.core.metadata import BlockLifecycleMetadata
 from ppmt.risk.manager import RiskManager, RiskConfig
 from ppmt.engine.buffer import StreamingPatternBuffer
 
+# v0.15.0: TerminalState integration for live dashboard
+try:
+    from ppmt.terminal.state import get_terminal_state
+    _terminal_state = get_terminal_state()
+except ImportError:
+    _terminal_state = None
+
 
 console = Console()
 
@@ -224,6 +231,18 @@ class RealtimeTrader:
             max_daily_loss_pct=0.10,
             max_drawdown_pct=0.80,
         )
+
+    def _update_terminal_state(self, **kwargs) -> None:
+        """Push state update to TerminalState for dashboard consumption.
+
+        Safe to call from synchronous code — uses update_sync().
+        No-op if terminal module is not available.
+        """
+        if _terminal_state is not None:
+            try:
+                _terminal_state.update_sync(**kwargs)
+            except Exception:
+                pass  # Never let dashboard updates crash the engine
 
     def _setup_token_profile(self, cfg, info, storage, df=None):
         """
@@ -551,6 +570,20 @@ class RealtimeTrader:
         console.print(f"  Regime-aware: {'ON' if cfg.regime_aware else 'OFF'}")
         console.print()
 
+        # v0.15.0: Initialize TerminalState for dashboard
+        self._update_terminal_state(
+            is_running=True,
+            mode="replay",
+            started_at=time.time(),
+            symbol=cfg.symbol,
+            timeframe=cfg.timeframe,
+            exchange="replay",
+            portfolio_value=cfg.initial_capital,
+            cash=cfg.initial_capital,
+            candles_processed=0,
+            websocket_status="replay",
+        )
+
         # Live display
         live_display = Live(console=console, refresh_per_second=4)
 
@@ -867,6 +900,28 @@ class RealtimeTrader:
                                 position_state = PositionState.LONG if signal.direction == "LONG" else PositionState.SHORT
                                 trade_counter += 1
 
+                                # v0.15.0: Update TerminalState — position opened
+                                self._update_terminal_state(
+                                    signal={
+                                        "type": signal.signal_type.value,
+                                        "direction": signal.direction,
+                                        "confidence": signal.confidence,
+                                        "price": current_price,
+                                        "pattern": current_symbols,
+                                        "trie_level": best_trie_level,
+                                        "timestamp": time.time(),
+                                    },
+                                    positions=[{
+                                        "symbol": cfg.symbol,
+                                        "direction": signal.direction or "LONG",
+                                        "entry_price": current_price,
+                                        "sl": sl_price,
+                                        "tp": tp_price,
+                                        "size": size,
+                                        "confidence": signal.confidence,
+                                    }],
+                                )
+
                 # Record equity
                 if candle_idx % 10 == 0:
                     unrealized = risk_mgr.capital
@@ -874,6 +929,17 @@ class RealtimeTrader:
                     result.capital_history.append(unrealized)
                     if risk_mgr.capital > peak_capital:
                         peak_capital = risk_mgr.capital
+
+                    # v0.15.0: Push equity to TerminalState
+                    pnl_pct = (risk_mgr.capital - cfg.initial_capital) / cfg.initial_capital * 100
+                    self._update_terminal_state(
+                        current_price=current_price,
+                        portfolio_value=risk_mgr.capital,
+                        cash=risk_mgr.capital,
+                        total_pnl_pct=pnl_pct,
+                        equity_point={"value": risk_mgr.capital, "timestamp": time.time()},
+                        regime=current_regime,
+                    )
 
                 result.candles_processed += 1
 
@@ -937,6 +1003,21 @@ class RealtimeTrader:
                         max_dd = dd
                 result.max_drawdown = max_dd
 
+        # v0.15.0: Final TerminalState update with complete results
+        self._update_terminal_state(
+            is_running=False,
+            portfolio_value=risk_mgr.capital,
+            cash=risk_mgr.capital,
+            total_pnl_pct=result.total_pnl_pct,
+            total_trades=result.total_trades,
+            winning_trades=result.winning_trades,
+            win_rate=result.win_rate,
+            max_drawdown=result.max_drawdown,
+            positions=[],
+            candles_processed=result.candles_processed,
+            sax_symbols_produced=result.sax_symbols_produced,
+        )
+
         storage.close()
         return result
 
@@ -981,6 +1062,25 @@ class RealtimeTrader:
                 })
             except Exception:
                 pass
+
+        # v0.15.0: Update TerminalState — trade closed
+        self._update_terminal_state(
+            signal={
+                "type": "TRADE_CLOSED",
+                "direction": trade.direction,
+                "entry_price": trade.entry_price,
+                "exit_price": exit_price,
+                "pnl_pct": trade.pnl_pct,
+                "exit_reason": exit_reason,
+                "timestamp": time.time(),
+            },
+            portfolio_value=risk_mgr.capital,
+            cash=risk_mgr.capital,
+            total_trades=result.total_trades,
+            winning_trades=result.winning_trades,
+            equity_point={"value": risk_mgr.capital, "timestamp": time.time()},
+            positions=[],  # Will be updated by next candle
+        )
 
     async def process_new_candle(
         self,
@@ -1531,6 +1631,20 @@ class RealtimeTrader:
         console.print(f"  SAX: window={cfg.sax_window_size}, alphabet={cfg.sax_alphabet_size}")
         console.print(f"  Trie: {trie.pattern_count} patterns")
         console.print()
+
+        # v0.15.0: Initialize TerminalState for live dashboard
+        self._update_terminal_state(
+            is_running=True,
+            mode="live",
+            started_at=time.time(),
+            symbol=cfg.symbol,
+            timeframe=cfg.timeframe,
+            exchange=cfg.exchange,
+            portfolio_value=cfg.initial_capital,
+            cash=cfg.initial_capital,
+            candles_processed=0,
+            websocket_status="connecting",
+        )
 
         try:
             with Live(console=console, refresh_per_second=2) as live_display:

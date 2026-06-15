@@ -1,4 +1,4 @@
-# PPMT Terminal v0.14.1 — TRACEABILITY DOCUMENT
+# PPMT Terminal v0.15.0 — TRACEABILITY DOCUMENT
 
 > Last updated: 2026-06-15
 > Data source: Bybit 12 tokens (BTC, ETH, SOL, BNB, XRP, ADA, LINK, UNI, ATOM, DOGE, SHIB, PEPE) 1h (14,400 real candles each) + 5m (57,600 candles) + 1m (288,000 candles)
@@ -2411,4 +2411,92 @@ ppmt run -s BTC/USDT --replay        # Test with historical data
 ppmt run -s BTC/USDT                  # Live WebSocket from Binance
 ppmt terminal                          # Next.js dashboard at http://localhost:3000
 ppmt terminal --lite                   # FastAPI dashboard at http://localhost:8420
+```
+
+---
+
+## v0.15.0 — Engine → Dashboard Integration (2026-06-15)
+
+### Feature: TerminalState Connected to RealtimeTrader
+
+The trading engine now pushes live state to the web dashboard via TerminalState.
+Before this, the dashboard ran but showed no data because it wasn't connected
+to the engine. Now both `ppmt run --replay` and `ppmt run` (live) update the
+dashboard in real-time.
+
+### What Changed
+
+**RealtimeTrader** (`src/ppmt/engine/realtime.py`):
+- Added `_update_terminal_state()` helper method — safe, no-op if terminal module unavailable
+- On **engine start**: pushes `is_running=True`, mode, symbol, timeframe, initial capital
+- On **position open**: pushes signal data (type, direction, confidence, price, pattern, trie level) + position data
+- On **position close** (`_close_trade`): pushes trade result (pnl, exit reason) + updated portfolio/trade stats + equity point
+- On **equity recording** (every 10 candles): pushes current price, portfolio value, P&L %, equity curve point, regime
+- On **engine finish**: pushes final stats (total trades, win rate, max drawdown, etc.) and `is_running=False`
+- Applied to both `run_replay()` and `run_live()` paths
+
+**Import** (top of realtime.py):
+```python
+try:
+    from ppmt.terminal.state import get_terminal_state
+    _terminal_state = get_terminal_state()
+except ImportError:
+    _terminal_state = None
+```
+
+### Architecture
+
+```
+RealtimeTrader → _update_terminal_state() → TerminalState (singleton)
+                                                    ↓
+                                            FastAPI /ws endpoint
+                                                    ↓
+                                            Next.js Dashboard (browser)
+                                            FastAPI Lite Dashboard (browser)
+```
+
+The TerminalState is a shared singleton. Both the engine and the dashboard
+server import the same instance. The engine writes, the dashboard reads.
+
+### Data Flow
+
+1. Engine processes candle → updates TerminalState with price, regime, equity
+2. Signal generated → TerminalState gets signal dict (type, direction, confidence, pattern)
+3. Position opened → TerminalState gets position data (entry, SL, TP, size)
+4. Position closed → TerminalState gets trade result (P&L, exit reason, equity update)
+5. WebSocket endpoint polls TerminalState.to_dict() every 1 second
+6. Dashboard JavaScript receives JSON and updates DOM
+
+### Remaining Work
+
+1. **MoneyManager not yet integrated into engine** — RealtimeTrader still uses RiskManager directly. MoneyManager should wrap RiskManager for portfolio-level checks.
+2. **Next.js dashboard doesn't consume TerminalState API yet** — The Next.js components use their own Zustand stores. Need to add a panel that reads from `/api/status` (FastAPI endpoint) or add a Next.js API route that proxies TerminalState.
+3. **Live WebSocket mode** — TerminalState updates work for replay. For live mode via `run_live()`, updates are pushed via `process_new_candle()` which already calls back to the live loop. Need to add TerminalState updates there too.
+
+### File Change Manifest (v0.15.0)
+
+| File | Change |
+|------|--------|
+| `src/ppmt/engine/realtime.py` | ADDED — _update_terminal_state(), TerminalState updates at key engine points |
+| `src/ppmt/cli/main.py` | UPDATED — version 0.15.0 |
+| `pyproject.toml` | UPDATED — version 0.15.0 |
+| `TRACEABILITY.md` | UPDATED — v0.15.0 section |
+
+### How to Test
+
+```bash
+# Terminal 1: Start the dashboard
+ppmt terminal --lite    # FastAPI on port 8420 (simpler to test)
+
+# Terminal 2: Run the engine
+ppmt run -s BTC/USDT --replay
+
+# Browser: Open http://localhost:8420
+# You should see: price updating, equity curve moving, signals appearing
+```
+
+Or with Next.js dashboard:
+```bash
+ppmt terminal           # Next.js on port 3000
+ppmt run -s BTC/USDT --replay   # In another terminal
 ```
