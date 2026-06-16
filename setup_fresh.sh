@@ -7,7 +7,7 @@
 #   bash setup_fresh.sh
 #
 # After setup, start the dashboard with:
-#   ppmt terminal --lite
+#   ppmt terminal
 #   → open http://localhost:8420
 
 set -e
@@ -95,7 +95,8 @@ echo ""
 echo "=== Setup Complete! ==="
 echo ""
 echo "Quick Start:"
-echo "  ppmt terminal --lite                            # Start dashboard → http://localhost:8420"
+echo "  ppmt terminal                                   # Start dashboard → http://localhost:8420"
+echo "  ppmt terminal --open-browser                    # Start + open browser automatically"
 echo ""
 echo "  ppmt init                                       # Initialize database"
 echo "  ppmt ingest --symbol BTC/USDT --timeframe 1h --days 30    # Fetch historical data"
@@ -104,5 +105,5 @@ echo "  ppmt predict --symbol BTC/USDT --timeframe 1h  # See current prediction"
 echo "  ppmt list                                       # List tracked assets"
 echo ""
 echo "Or open the dashboard and use 'PREPARAR Y VALIDAR' button:"
-echo "  ppmt terminal --lite"
+echo "  ppmt terminal --open-browser"
 echo "  → http://localhost:8420"
