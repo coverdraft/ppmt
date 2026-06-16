@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import time
 import asyncio
+import os
 from dataclasses import dataclass, field
 from typing import Optional, Callable
 from enum import Enum
@@ -60,6 +61,8 @@ from ppmt.engine.prediction import PredictionEngine
 from ppmt.engine.signal import SignalType, Signal
 from ppmt.core.metadata import BlockLifecycleMetadata
 from ppmt.risk.manager import RiskManager, RiskConfig
+from ppmt.risk.money_manager import MoneyManager, MoneyManagerConfig
+from ppmt.risk.position_sizing import AdvancedPositionSizer
 from ppmt.engine.buffer import StreamingPatternBuffer
 
 # v0.15.0: TerminalState integration for live dashboard
@@ -129,7 +132,10 @@ class ReplayConfig:
 
 @dataclass
 class LiveConfig:
-    """Configuration for live mode (requires ccxt)."""
+    """Configuration for live mode (requires ccxt).
+
+    v0.20.0: Added leverage, auto_mode, money management fields.
+    """
     symbol: str = "BTC/USDT"
     timeframe: str = "1h"
     initial_capital: float = 10_000.0
@@ -160,6 +166,32 @@ class LiveConfig:
     """Use exchange testnet (paper trading on exchange)."""
     dry_run: bool = True
     """If True, process signals but don't actually execute orders."""
+
+    # v0.20.0: Money Management & Portfolio Controls
+    leverage: int = 1
+    """Exchange leverage multiplier (1=spot, 2-125=futures). Applied via ccxt."""
+    auto_mode: bool = True
+    """If True, signals execute automatically. If False, signals are displayed only (manual confirmation)."""
+    max_open_positions: int = 5
+    """Max simultaneous open positions."""
+    max_portfolio_exposure_pct: float = 0.80
+    """Max total portfolio exposure (0.80 = 80% of capital at risk)."""
+    max_single_position_pct: float = 0.25
+    """Max single position as fraction of portfolio (0.25 = 25%)."""
+    max_correlated_positions: int = 2
+    """Max positions in same asset class."""
+    kill_switch_pct: float = 0.95
+    """If exposure exceeds this fraction, auto-close all positions."""
+    daily_loss_limit_pct: float = 0.05
+    """Max daily loss as fraction of capital. 0.05 = 5%."""
+    max_drawdown_pct: float = 0.15
+    """Max drawdown from peak before circuit breaker. 0.15 = 15%."""
+    use_kelly_sizing: bool = True
+    """Use Kelly Criterion + AdvancedPositionSizer instead of basic RiskManager sizing."""
+    kelly_fraction: float = 0.25
+    """Fraction of Kelly to use (0.25 = Quarter-Kelly, conservative)."""
+    trie_persist_interval: int = 100
+    """Save Living Trie to DB every N candles. 0 = only on shutdown."""""
 
 
 @dataclass
@@ -1522,7 +1554,33 @@ class RealtimeTrader:
             strategy=cfg.sax_strategy,
         )
         pred_engine = PredictionEngine(trie, prediction_depth=cfg.pattern_length)
-        risk_mgr = RiskManager(capital=cfg.initial_capital, config=self.risk_config)
+
+        # v0.20.0: MoneyManager replaces basic RiskManager for live mode
+        # MoneyManager adds: portfolio exposure caps, kill switch, circuit breakers,
+        # leverage tracking, correlation limits, auto-save, and Kelly sizing
+        money_config = MoneyManagerConfig(
+            initial_capital=cfg.initial_capital,
+            max_open_positions=getattr(cfg, 'max_open_positions', 5),
+            max_correlated_positions=getattr(cfg, 'max_correlated_positions', 2),
+            max_portfolio_exposure_pct=getattr(cfg, 'max_portfolio_exposure_pct', 0.80),
+            max_single_position_exposure_pct=getattr(cfg, 'max_single_position_pct', 0.25),
+            kill_switch_exposure_pct=getattr(cfg, 'kill_switch_pct', 0.95),
+            max_daily_loss_pct=getattr(cfg, 'daily_loss_limit_pct', 0.05),
+            max_drawdown_pct=getattr(cfg, 'max_drawdown_pct', 0.15),
+            auto_save_interval_minutes=5,
+            state_file=os.path.join(os.path.expanduser("~/.ppmt"), f"money_mgr_{cfg.symbol.replace('/', '_')}.json"),
+        )
+        money_mgr = MoneyManager(config=money_config)
+        risk_mgr = money_mgr.risk_manager  # Backward compat reference
+
+        # v0.20.0: Advanced position sizer (Kelly Criterion + regime + drawdown)
+        position_sizer = None
+        if getattr(cfg, 'use_kelly_sizing', True):
+            position_sizer = AdvancedPositionSizer(
+                max_position_pct=getattr(cfg, 'max_single_position_pct', 0.25),
+                min_position_pct=0.005,
+                kelly_fraction=getattr(cfg, 'kelly_fraction', 0.25),
+            )
 
         # v0.12.0: FuzzyMatcher
         fuzzy_threshold = token_profile.fuzzy_threshold if token_profile else 0.80
@@ -1569,6 +1627,16 @@ class RealtimeTrader:
                         console.print(f"[yellow]Using {cfg.exchange} TESTNET for orders[/yellow]")
 
                     await exchange.load_markets()
+
+                    # v0.20.0: Set leverage on exchange if > 1
+                    leverage = getattr(cfg, 'leverage', 1)
+                    if leverage > 1:
+                        try:
+                            await exchange.set_leverage(leverage, cfg.symbol)
+                            console.print(f"[bold cyan]Leverage set to {leverage}x on {cfg.exchange}[/bold cyan]")
+                        except Exception as e:
+                            console.print(f"[yellow]Could not set leverage: {e} — using default[/yellow]")
+
                     console.print(f"[green]Connected to {cfg.exchange} for order execution[/green]")
             except ImportError:
                 console.print("[yellow]ccxt not installed — order execution disabled[/yellow]")
@@ -1626,7 +1694,14 @@ class RealtimeTrader:
         console.print(f"  Exchange: {cfg.exchange} ({'TESTNET' if cfg.testnet else 'MAINNET'})")
         console.print(f"  Data Source: {'WebSocket' if use_websocket else 'REST polling'}")
         console.print(f"  Dry Run: {'YES' if cfg.dry_run else 'NO - REAL ORDERS'}")
+        console.print(f"  Mode: {'AUTO' if getattr(cfg, 'auto_mode', True) else 'MANUAL (signals displayed only)'}")
         console.print(f"  Capital: ${cfg.initial_capital:,.2f}")
+        console.print(f"  Leverage: {getattr(cfg, 'leverage', 1)}x")
+        console.print(f"  Max Positions: {getattr(cfg, 'max_open_positions', 5)}")
+        console.print(f"  Max Exposure: {getattr(cfg, 'max_portfolio_exposure_pct', 0.80):.0%}")
+        console.print(f"  Kelly Sizing: {'ON' if getattr(cfg, 'use_kelly_sizing', True) else 'OFF'}")
+        console.print(f"  Kill Switch: {getattr(cfg, 'kill_switch_pct', 0.95):.0%} exposure")
+        console.print(f"  Daily Loss Limit: {getattr(cfg, 'daily_loss_limit_pct', 0.05):.0%}")
         console.print(f"  Warmup: {warmup_candles} candles")
         console.print(f"  SAX: window={cfg.sax_window_size}, alphabet={cfg.sax_alphabet_size}")
         console.print(f"  Trie: {trie.pattern_count} patterns")
@@ -1716,6 +1791,45 @@ class RealtimeTrader:
                                 and candles_since_calibration >= recalc_interval):
                             _recalibrate(sax_encoder, cfg, storage, info)
                             candles_since_calibration = 0
+
+                        # v0.20.0: Periodic Living Trie persistence
+                        trie_persist_interval = getattr(cfg, 'trie_persist_interval', 100)
+                        if trie_persist_interval > 0 and result.candles_processed % trie_persist_interval == 0:
+                            try:
+                                for level_name, level_trie in [("n3", trie)]:
+                                    if level_trie is not None:
+                                        storage.save_trie(cfg.symbol, level_name, level_trie)
+                            except Exception:
+                                pass  # Non-critical
+
+                        # v0.20.0: Periodic MoneyManager auto-save + update TerminalState
+                        try:
+                            money_mgr._maybe_auto_save()
+                        except Exception:
+                            pass
+
+                        # v0.20.0: Update TerminalState with portfolio data
+                        self._update_terminal_state(
+                            current_price=recent_prices[-1] if recent_prices else 0,
+                            candles_processed=result.candles_processed,
+                            portfolio_value=money_mgr.total_value,
+                            cash=money_mgr.cash,
+                            unrealized_pnl=money_mgr.unrealized_pnl,
+                            realized_pnl=money_mgr.realized_pnl,
+                            total_trades=result.total_trades,
+                            winning_trades=result.winning_trades,
+                            exposure_pct=money_mgr.exposure_pct,
+                            pattern_symbol=stream_buf.last_symbol if stream_buf.last_symbol else None,
+                            entropy=stream_buf.entropy,
+                            regime=current_regime,
+                        )
+
+                        # v0.20.0: Update money manager positions
+                        if current_position is not None and recent_prices:
+                            try:
+                                money_mgr.update_position(cfg.symbol, recent_prices[-1])
+                            except Exception:
+                                pass
 
                         # Update display
                         _update_live_display(live_display, cfg, result, position_state,
@@ -1875,6 +1989,23 @@ class RealtimeTrader:
                 except Exception:
                     pass
 
+            # v0.20.0: Save Living Trie to database on shutdown
+            if getattr(cfg, 'living_trie', False):
+                try:
+                    for level_name, level_trie in [("n3", trie), ("n1", trie_n1), ("n2", trie_n2), ("n4", trie_n4)]:
+                        if level_trie is not None:
+                            storage.save_trie(cfg.symbol, level_name, level_trie)
+                    console.print("[green]Living Trie saved to database[/green]")
+                except Exception as e:
+                    console.print(f"[yellow]Failed to save Living Trie: {e}[/yellow]")
+
+            # v0.20.0: Save MoneyManager state on shutdown
+            try:
+                money_mgr.save_state()
+                console.print("[green]Money Manager state saved[/green]")
+            except Exception as e:
+                console.print(f"[yellow]Failed to save Money Manager state: {e}[/yellow]")
+
             # Close any open position
             if current_position is not None:
                 if cfg.dry_run:
@@ -1882,14 +2013,40 @@ class RealtimeTrader:
                     self._close_trade(risk_mgr, current_position,
                                       last_price, "shutdown", "shutdown", result)
                 else:
-                    console.print("[bold yellow]WARNING: Open position exists! Close manually on the exchange.[/bold yellow]")
+                    # v0.20.0: Try to close position on exchange before shutdown
+                    if exchange is not None:
+                        try:
+                            side = 'sell' if current_position.direction == "LONG" else 'buy'
+                            await exchange.create_order(
+                                cfg.symbol, 'market', side, current_position.size
+                            )
+                            console.print(f"[yellow]Emergency closed {current_position.direction} position on exchange[/yellow]")
+                        except Exception as e:
+                            console.print(f"[bold red]FAILED to close position on exchange: {e}[/bold red]")
+                            console.print("[bold yellow]WARNING: Open position exists! Close manually on the exchange.[/bold yellow]")
+                    else:
+                        console.print("[bold yellow]WARNING: Open position exists! Close manually on the exchange.[/bold yellow]")
 
             # Compute final statistics
             duration = time.time() - start_time
             result.duration_seconds = duration
-            result.final_capital = risk_mgr.capital
-            result.total_pnl = risk_mgr.capital - cfg.initial_capital
+            result.final_capital = money_mgr.total_value
+            result.total_pnl = money_mgr.realized_pnl
             result.total_pnl_pct = result.total_pnl / cfg.initial_capital * 100 if cfg.initial_capital > 0 else 0
+
+            # v0.20.0: Show MoneyManager portfolio summary on exit
+            try:
+                summary = money_mgr.get_portfolio_summary()
+                console.print(f"\n[bold]Portfolio Summary:[/bold]")
+                console.print(f"  Total Value: ${summary['total_value']:,.2f}")
+                console.print(f"  Cash: ${summary['cash']:,.2f}")
+                console.print(f"  Exposure: {summary['exposure_pct']:.1%}")
+                console.print(f"  Leverage: {summary['leverage_ratio']:.2f}x")
+                console.print(f"  Drawdown: {summary['current_drawdown']:.1%}")
+                console.print(f"  Kill Switch: {'ACTIVE' if summary['kill_switch_active'] else 'OFF'}")
+                console.print(f"  Circuit Breakers: {summary['circuit_breakers']}")
+            except Exception:
+                pass
 
             if result.total_trades > 0:
                 result.win_rate = result.winning_trades / result.total_trades
@@ -1903,6 +2060,20 @@ class RealtimeTrader:
                         if dd > max_dd:
                             max_dd = dd
                     result.max_drawdown = max_dd
+
+            # Update terminal state with final values
+            self._update_terminal_state(
+                is_running=False,
+                portfolio_value=money_mgr.total_value,
+                cash=money_mgr.cash,
+                unrealized_pnl=money_mgr.unrealized_pnl,
+                realized_pnl=money_mgr.realized_pnl,
+                total_trades=result.total_trades,
+                winning_trades=result.winning_trades,
+                win_rate=result.win_rate,
+                max_drawdown=result.max_drawdown,
+                websocket_status="stopped",
+            )
 
             storage.close()
 

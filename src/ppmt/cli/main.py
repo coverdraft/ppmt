@@ -47,7 +47,7 @@ def load_config() -> dict:
 
 
 @click.group()
-@click.version_option(version="0.16.0")
+@click.version_option(version="0.20.0")
 def cli():
     """PPMT Terminal - Autonomous Pattern-Based Trading Terminal"""
     pass
@@ -384,7 +384,7 @@ def predict(symbol: str, timeframe: str, depth: int, price: float):
 @cli.command()
 @click.option("--symbol", "-s", required=True, help="Trading pair")
 @click.option("--timeframe", "-t", default="1h", help="Candle timeframe")
-@click.option("--exchange", "-e", default="binance", help="Exchange (binance/bybit)")
+@click.option("--exchange", "-e", default="binance", help="Exchange (binance/bybit/mexc)")
 @click.option("--capital", "-c", default=10000.0, type=float, help="Initial capital")
 @click.option("--dry-run", is_flag=True, default=True, help="Paper trading (no real orders)")
 @click.option("--live", "dry_run_false", is_flag=True, help="Execute REAL orders on exchange")
@@ -400,6 +400,14 @@ def predict(symbol: str, timeframe: str, depth: int, price: float):
 @click.option("--no-calibrate", "no_calibrate", is_flag=True, help="Skip auto-calibration")
 @click.option("--regime-aware", is_flag=True, default=True, help="Enable regime detection")
 @click.option("--multi-level", is_flag=True, default=True, help="Enable 4-level matching")
+@click.option("--leverage", "-l", default=1, type=int, help="Leverage (1=spot, 2-125=futures)")
+@click.option("--auto/--manual", default=True, help="Auto mode (execute signals) or manual (display only)")
+@click.option("--max-positions", default=5, type=int, help="Max simultaneous open positions")
+@click.option("--max-exposure", default=0.80, type=float, help="Max portfolio exposure (0-1)")
+@click.option("--kill-switch", default=0.95, type=float, help="Exposure % to trigger kill switch (0-1)")
+@click.option("--daily-loss", default=0.05, type=float, help="Max daily loss (0-1)")
+@click.option("--kelly", is_flag=True, default=True, help="Use Kelly Criterion sizing")
+@click.option("--no-kelly", "no_kelly", is_flag=True, help="Disable Kelly Criterion sizing")
 def run(
     symbol: str, timeframe: str, exchange: str, capital: float,
     dry_run: bool, dry_run_false: bool, testnet: bool, testnet_false: bool,
@@ -408,10 +416,15 @@ def run(
     pattern_length: int, min_confidence: float,
     auto_calibrate: bool, no_calibrate: bool,
     regime_aware: bool, multi_level: bool,
+    leverage: int, auto: bool,
+    max_positions: int, max_exposure: float,
+    kill_switch: float, daily_loss: float,
+    kelly: bool, no_kelly: bool,
 ):
     """Run real-time pattern matching and trading.
 
-    v0.12.0: Now supports WebSocket streaming, REST polling, and replay modes.
+    v0.20.0: Supports Binance, Bybit, MEXC exchanges.
+    WebSocket streaming, REST polling, and replay modes.
 
     Modes:
       --replay          Replay historical data (for testing)
@@ -421,7 +434,9 @@ def run(
       ppmt run -s BTC/USDT                      # Dry run with Binance WebSocket
       ppmt run -s BTC/USDT --replay             # Replay stored data
       ppmt run -s ETH/USDT -e bybit             # Bybit WebSocket
+      ppmt run -s BTC/USDT -t 5m -e mexc        # MEXC 5-minute WebSocket
       ppmt run -s BTC/USDT --live --mainnet     # REAL trading on Binance
+      ppmt run -s BTC/USDT -e mexc --live       # REAL trading on MEXC
     """
     # Resolve flag conflicts
     actual_dry_run = not dry_run_false  # --live flag disables dry-run
@@ -480,6 +495,13 @@ def run(
             use_token_profile=True,
             testnet=actual_testnet,
             dry_run=actual_dry_run,
+            leverage=leverage,
+            auto_mode=auto,
+            max_open_positions=max_positions,
+            max_portfolio_exposure_pct=max_exposure,
+            kill_switch_pct=kill_switch,
+            daily_loss_limit_pct=daily_loss,
+            use_kelly_sizing=kelly and not no_kelly,
         )
 
         trader = RealtimeTrader(config=config)
@@ -672,7 +694,7 @@ def monte_carlo(
       ppmt monte-carlo -s BTC/USDT -o mc_results.json   # Save results
     """
     from ppmt.engine.realtime import RealtimeTrader, ReplayConfig
-    from ppmt.risk.monte_carlo import MonteCarloSimulator
+    from ppmt.risk.monte_carlo import MonteCarloSimulator, MonteCarloConfig
 
     # Step 1: Run backtest to collect trades
     console.print(f"[bold cyan]Step 1/2: Running Backtest for {symbol}...[/bold cyan]")
@@ -705,64 +727,79 @@ def monte_carlo(
     # Step 2: Run Monte Carlo
     console.print(f"\n[bold cyan]Step 2/2: Running {simulations} Monte Carlo simulations...[/bold cyan]")
 
-    trade_pnls = [t.pnl_pct for t in result.trades]
-    mc = MonteCarloSimulator(
-        trade_pnls=trade_pnls,
+    # Extract trade PnL percentages as fractions (e.g., 0.05 = +5%)
+    trade_pnls_pct = [t.pnl_pct / 100.0 for t in result.trades]
+
+    mc_config = MonteCarloConfig(
+        simulations=simulations,
         initial_capital=capital,
-        n_simulations=simulations,
-        confidence_level=confidence_level,
     )
-    mc_results = mc.run()
+    mc = MonteCarloSimulator()
+    mc_results = mc.simulate(trades_pnl_pct=trade_pnls_pct, config=mc_config)
 
     # Display results
     console.print(f"\n[bold]Monte Carlo Simulation Results: {symbol} ({timeframe})[/bold]")
     console.print(f"  Base Trades:       {result.total_trades}")
     console.print(f"  Simulations:       {simulations}")
-    console.print(f"  Confidence Level:  {confidence_level:.0%}")
     console.print("")
 
     # Risk metrics
-    risk_of_ruin = mc_results.get("risk_of_ruin", 0)
-    prob_profit = mc_results.get("probability_of_profit", 0)
-    mean_final = mc_results.get("mean_final_capital", capital)
-    median_final = mc_results.get("median_final_capital", capital)
+    risk_of_ruin = mc_results.risk_of_ruin
+    prob_profit = mc_results.probability_of_profit
+    mean_final = mc_results.mean_final_equity
+    median_final = mc_results.median_final_equity
 
     console.print(f"  [bold]Risk of Ruin:[/bold]          {risk_of_ruin:.1%}")
     console.print(f"  [bold]Probability of Profit:[/bold]  {prob_profit:.1%}")
     console.print(f"  Mean Final Capital:    ${mean_final:,.2f}")
     console.print(f"  Median Final Capital:  ${median_final:,.2f}")
 
-    # Confidence intervals
-    ci_lower = mc_results.get("ci_lower_capital", capital)
-    ci_upper = mc_results.get("ci_upper_capital", capital)
-    console.print(f"  {confidence_level:.0%} CI:             ${ci_lower:,.2f} — ${ci_upper:,.2f}")
+    # Confidence intervals for equity
+    if mc_results.equity_percentiles:
+        console.print(f"\n  [bold]Equity Confidence Intervals:[/bold]")
+        for ci in mc_results.equity_percentiles:
+            console.print(f"    P{ci.level:>2}: ${ci.value:>12,.2f}")
 
-    # Max drawdown
-    mean_dd = mc_results.get("mean_max_drawdown", 0)
-    worst_dd = mc_results.get("worst_max_drawdown", 0)
-    console.print(f"  Mean Max DD:          {mean_dd:.1%}")
-    console.print(f"  Worst Max DD:         {worst_dd:.1%}")
+    # Drawdown intervals
+    if mc_results.drawdown_percentiles:
+        console.print(f"\n  [bold]Max Drawdown Confidence Intervals:[/bold]")
+        for ci in mc_results.drawdown_percentiles:
+            console.print(f"    P{ci.level:>2}: {ci.value * 100:>8.2f}%")
 
-    # Sharpe
-    mean_sharpe = mc_results.get("mean_sharpe_ratio", 0)
-    console.print(f"  Mean Sharpe Ratio:    {mean_sharpe:.2f}")
+    # P95 max drawdown
+    console.print(f"\n  P95 Max Drawdown:     {mc_results.p95_max_drawdown:.1%}")
 
-    # Verdict
+    # Original path metrics
+    if mc_results.original_metrics:
+        om = mc_results.original_metrics
+        console.print(f"\n  [bold]Original (Unshuffled) Path:[/bold]")
+        console.print(f"    Final Equity:  ${om.final_equity:>12,.2f}")
+        console.print(f"    Max Drawdown:  {om.max_drawdown:.1%}")
+        console.print(f"    Sharpe Ratio:  {om.sharpe_ratio:.3f}")
+        console.print(f"    Win Rate:      {om.win_rate:.1%}")
+        pf_str = "INF" if om.profit_factor == float('inf') else f"{om.profit_factor:.2f}"
+        console.print(f"    Profit Factor: {pf_str}")
+
+    # Verdict — gate live trading
     if risk_of_ruin > 0.20:
         console.print(f"\n  [bold red]VERDICT: HIGH RISK — Risk of ruin {risk_of_ruin:.0%} exceeds 20%[/bold red]")
+        console.print(f"  [red]DO NOT deploy this strategy with real money.[/red]")
     elif risk_of_ruin > 0.05:
         console.print(f"\n  [bold yellow]VERDICT: MODERATE RISK — Risk of ruin {risk_of_ruin:.0%}[/bold yellow]")
+        console.print(f"  [yellow]Consider reducing position size before live trading.[/yellow]")
     else:
         console.print(f"\n  [bold green]VERDICT: LOW RISK — Risk of ruin only {risk_of_ruin:.0%}[/bold green]")
+        console.print(f"  [green]Strategy passed Monte Carlo validation. Safe to deploy.[/green]")
 
     # Save to JSON
     if output:
-        import json
+        import json as json_mod
         from pathlib import Path
         output_path = Path(output)
         if not output_path.is_absolute():
             output_path = Path.cwd() / output_path
 
+        # Build summary using the simulator's generate_summary method
         mc_dict = {
             "symbol": symbol,
             "timeframe": timeframe,
@@ -770,21 +807,24 @@ def monte_carlo(
             "base_win_rate": result.win_rate,
             "base_pnl_pct": result.total_pnl_pct,
             "simulations": simulations,
-            "confidence_level": confidence_level,
             "risk_of_ruin": risk_of_ruin,
             "probability_of_profit": prob_profit,
-            "mean_final_capital": mean_final,
-            "median_final_capital": median_final,
-            "ci_lower_capital": ci_lower,
-            "ci_upper_capital": ci_upper,
-            "mean_max_drawdown": mean_dd,
-            "worst_max_drawdown": worst_dd,
-            "mean_sharpe_ratio": mean_sharpe,
+            "mean_final_equity": mean_final,
+            "median_final_equity": median_final,
+            "p95_max_drawdown": mc_results.p95_max_drawdown,
+            "equity_percentiles": [
+                {"level": ci.level, "value": ci.value}
+                for ci in mc_results.equity_percentiles
+            ],
+            "drawdown_percentiles": [
+                {"level": ci.level, "value": ci.value}
+                for ci in mc_results.drawdown_percentiles
+            ],
         }
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with open(output_path, "w") as f:
-            json.dump(mc_dict, f, indent=2, default=str)
+            json_mod.dump(mc_dict, f, indent=2, default=str)
         console.print(f"\n[green]Results saved to {output_path}[/green]")
 
 
@@ -1064,11 +1104,10 @@ def scan(exchange: str, quote: str, top: int, sort_by: str):
     console.print(f"[bold cyan]Scanning {exchange} markets ({quote} pairs)...[/bold cyan]")
 
     try:
-        from ppmt.data.collector import DataCollector
         storage = PPMTStorage()
         collector = DataCollector(exchange=exchange, storage=storage)
 
-        # Get markets
+        # Get markets via ccxt (v0.20.0: now implemented)
         markets = collector.get_markets()
         if not markets:
             console.print("[red]No markets found. Check exchange connection.[/red]")
@@ -1084,7 +1123,7 @@ def scan(exchange: str, quote: str, top: int, sort_by: str):
             storage.close()
             return
 
-        # Fetch tickers for ranking
+        # Fetch tickers for ranking (v0.20.0: now implemented)
         console.print(f"  Found {len(pairs)} {quote} pairs. Fetching tickers...")
 
         tickers = collector.get_tickers(pairs[:100])  # Limit to avoid rate limits

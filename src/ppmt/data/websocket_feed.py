@@ -48,6 +48,7 @@ class ExchangeWS(Enum):
     """Supported WebSocket exchanges."""
     BINANCE = "binance"
     BYBIT = "bybit"
+    MEXC = "mexc"
 
 
 @dataclass
@@ -139,6 +140,54 @@ def _parse_binance_kline(data: dict) -> Optional[Candle]:
 
 BYBIT_WS_PUBLIC = "wss://stream.bybit.com/v5/public/spot"
 BYBIT_WS_PUBLIC_LINEAR = "wss://stream.bybit.com/v5/public/linear"
+
+# ============================================================
+# MEXC WEBSOCKET
+# ============================================================
+
+MEXC_WS_SPOT = "wss://wbs.mexc.com/ws"
+
+MEXC_WS_INTERVALS = {
+    "1m": "Min1", "5m": "Min5", "15m": "Min15", "30m": "Min30",
+    "1h": "Min60", "4h": "Hour4", "1d": "Day1", "1w": "Week1",
+}
+
+
+def _mexc_subscribe_msg(symbol: str, timeframe: str) -> dict:
+    """Build MEXC spot WebSocket subscription message."""
+    interval = MEXC_WS_INTERVALS.get(timeframe, "Min5")
+    # MEXC uses lowercase symbol without slash for spot WS
+    mexc_symbol = symbol.replace("/", "").lower()
+    return {
+        "method": "SUBSCRIPTION",
+        "params": [f"spot@public.kline.v3.api+{interval}+{mexc_symbol}"],
+    }
+
+
+def _parse_mexc_kline(data: dict, symbol: str, timeframe: str) -> Optional[Candle]:
+    """Parse a MEXC spot kline WebSocket message into a Candle."""
+    try:
+        # MEXC v3 kline format: {"d": {"e": "spot@public.kline.v3.api", "k": {...}}}
+        # Or directly: {"k": {...}}
+        k = data.get("k", data.get("d", {}).get("k", {}))
+        if not k:
+            return None
+
+        return Candle(
+            timestamp=int(k.get("t", 0)),
+            open=float(k.get("o", 0)),
+            high=float(k.get("h", 0)),
+            low=float(k.get("l", 0)),
+            close=float(k.get("c", 0)),
+            volume=float(k.get("v", 0)),
+            closed=k.get("x", False),
+            exchange="mexc",
+            symbol=symbol,
+            timeframe=timeframe,
+        )
+    except (KeyError, ValueError, TypeError) as e:
+        logger.warning(f"Failed to parse MEXC kline: {e}")
+        return None
 
 BYBIT_WS_INTERVALS = {
     "1m": "1", "3m": "3", "5m": "5", "15m": "15", "30m": "30",
@@ -336,8 +385,16 @@ class WebSocketFeed:
             await self._listen_binance(websockets, url)
         elif self.exchange == "bybit":
             await self._listen_bybit(websockets)
+        elif self.exchange == "mexc":
+            await self._listen_mexc(websockets)
         else:
-            raise ValueError(f"WebSocket not supported for exchange: {self.exchange}")
+            # Fallback: try ccxt REST polling for unsupported WS exchanges
+            logger.warning(f"WebSocket not supported for {self.exchange}. Use REST polling via ccxt.")
+            raise ValueError(
+                f"WebSocket not supported for exchange: {self.exchange}. "
+                f"Supported: binance, bybit, mexc. "
+                f"For other exchanges, use REST polling (ccxt)."
+            )
 
     # ============================================================
     # BINANCE WEBSOCKET
@@ -495,6 +552,86 @@ class WebSocketFeed:
                     logger.warning("Invalid JSON from Bybit WS")
                 except Exception as e:
                     logger.error(f"Error processing Bybit message: {e}")
+
+    # ============================================================
+    # MEXC WEBSOCKET (v0.20.0)
+    # ============================================================
+
+    async def _listen_mexc(self, websockets) -> None:
+        """Connect and listen to MEXC spot kline WebSocket."""
+        url = MEXC_WS_SPOT
+        logger.info(f"Connecting to MEXC WS: {url}")
+
+        if self.on_status:
+            self.on_status("connected", f"Connecting to MEXC ({self.symbol})")
+
+        async with websockets.connect(
+            url,
+            ping_interval=15,
+            ping_timeout=10,
+            close_timeout=5,
+        ) as ws:
+            self._ws = ws
+
+            # Subscribe to kline channel
+            sub_msg = _mexc_subscribe_msg(self.symbol, self.timeframe)
+            await ws.send(json.dumps(sub_msg))
+            logger.info(f"Subscribed to MEXC kline: {sub_msg}")
+
+            if self.on_status:
+                self.on_status("streaming", f"Streaming {self.symbol} {self.timeframe}")
+
+            self._reconnect_count = 0
+
+            async for raw_msg in ws:
+                if not self._running:
+                    break
+
+                try:
+                    msg = json.loads(raw_msg)
+
+                    # MEXC subscription confirmation
+                    if msg.get("method") == "SUBSCRIPTION" or "id" in msg:
+                        logger.info(f"MEXC subscription confirmed: {msg}")
+                        continue
+
+                    # MEXC ping — respond with pong
+                    if msg.get("method") == "ping" or msg.get("ping"):
+                        pong = msg.get("id", 0)
+                        await ws.send(json.dumps({"method": "pong", "id": pong}))
+                        continue
+
+                    # MEXC kline data
+                    # MEXC format: {"c": "spot@public.kline.v3.api+Min5+btcusdt", "d": {...}, "s": "BTCUSDT", "t": 1234567890}
+                    if "d" in msg or "k" in msg:
+                        candle = _parse_mexc_kline(msg, self.symbol, self.timeframe)
+                        if candle is None:
+                            continue
+
+                        self._ticks_received += 1
+
+                        if self.on_tick:
+                            try:
+                                self.on_tick(candle)
+                            except Exception:
+                                pass
+
+                        if candle.closed and candle.timestamp != self._last_candle_ts:
+                            self._last_candle_ts = candle.timestamp
+                            self._candles_received += 1
+
+                            if self.on_candle:
+                                try:
+                                    result = self.on_candle(candle)
+                                    if asyncio.iscoroutine(result):
+                                        await result
+                                except Exception as e:
+                                    logger.error(f"on_candle callback error: {e}")
+
+                except json.JSONDecodeError:
+                    logger.warning("Invalid JSON from MEXC WS")
+                except Exception as e:
+                    logger.error(f"Error processing MEXC message: {e}")
 
     # ============================================================
     # WARMUP: Fetch recent candles via REST before streaming

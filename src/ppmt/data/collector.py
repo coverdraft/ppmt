@@ -681,10 +681,78 @@ class DataCollector:
                     break
         return 3_600_000  # Default: 1h
 
+    # ================================================================
+    # MARKET DISCOVERY (required by ppmt scan)
+    # ================================================================
+
+    def get_markets(self) -> list[str]:
+        """
+        Get list of available trading pairs from the exchange.
+
+        Uses ccxt to fetch market info. Returns a list of symbol strings
+        in CCXT format (e.g., 'BTC/USDT', 'ETH/USDT').
+
+        v0.20.0: New method — required by `ppmt scan`.
+        """
+        if not self._init_ccxt():
+            raise RuntimeError(
+                f"ccxt is required for market scanning. "
+                f"Install with: pip install ccxt>=4.0.0"
+            )
+
+        try:
+            markets = self._ccxt_exchange.load_markets()
+            symbols = list(markets.keys())
+            logger.info(f"Loaded {len(symbols)} markets from {self.exchange}")
+            return symbols
+        except Exception as e:
+            raise RuntimeError(f"Failed to load markets from {self.exchange}: {e}") from e
+
+    def get_tickers(self, symbols: list[str]) -> dict:
+        """
+        Get 24h ticker data for a list of symbols.
+
+        Returns a dict mapping symbol → ticker dict with keys:
+          quoteVolume, percentage, high, low, last, bid, ask, etc.
+
+        v0.20.0: New method — required by `ppmt scan`.
+        """
+        if not self._init_ccxt():
+            raise RuntimeError(
+                f"ccxt is required for ticker data. "
+                f"Install with: pip install ccxt>=4.0.0"
+            )
+
+        try:
+            # ccxt fetch_tickers() returns ALL tickers at once (1 API call)
+            # Then we filter to requested symbols
+            all_tickers = self._ccxt_exchange.fetch_tickers()
+            result = {}
+            for sym in symbols:
+                if sym in all_tickers:
+                    result[sym] = all_tickers[sym]
+            logger.info(f"Fetched tickers for {len(result)}/{len(symbols)} symbols from {self.exchange}")
+            return result
+        except Exception as e:
+            # Fallback: try fetching tickers one by one (slower but more reliable)
+            logger.warning(f"Bulk ticker fetch failed: {e}. Trying one-by-one...")
+            result = {}
+            for sym in symbols:
+                try:
+                    ticker = self._ccxt_exchange.fetch_ticker(sym)
+                    result[sym] = ticker
+                    time.sleep(self._ccxt_exchange.rateLimit / 1000.0)
+                except Exception:
+                    pass  # Skip symbols that fail
+            return result
+
     def close(self) -> None:
         """Clean up resources."""
         if self._ccxt_exchange:
-            self._ccxt_exchange.close()
+            try:
+                self._ccxt_exchange.close()
+            except Exception:
+                pass
             self._ccxt_exchange = None
         if self.storage:
             self.storage.close()
