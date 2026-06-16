@@ -1088,7 +1088,9 @@ function updateValidationResult(vr) {
   container.style.display = 'block';
 
   const badge = document.getElementById('validationBadge');
-  const passed = vr.passed || vr.valid || false;
+  // v0.32.3: accept `passed`, `valid`, OR `verdict === 'PASS'` (server returns verdict).
+  // Previously only checked `passed`/`valid` which the server didn't send → always FAIL.
+  const passed = vr.passed === true || vr.valid === true || vr.verdict === 'PASS';
   validationPassed = passed;
 
   if (passed) {
@@ -1300,9 +1302,12 @@ async function autoSetup() {
       updateSetupProgress(data.auto_setup_status);
     }
 
-    // Show validation result if returned
-    if (data.validation_result) {
-      updateValidationResult(data.validation_result);
+    // v0.32.3: Show validation result. Server returns result directly at top level
+    // (with `verdict`/`passed`/`checks`), NOT nested under `validation_result`.
+    // Accept both formats for safety.
+    const vr = data.validation_result || (data.verdict || data.passed !== undefined ? data : null);
+    if (vr) {
+      updateValidationResult(vr);
     }
 
     // Update chart selectors
@@ -1337,8 +1342,12 @@ async function validateToken() {
     if (!res.ok) throw new Error('Error en validacion');
     const data = await res.json();
 
-    if (data.validation_result) {
-      updateValidationResult(data.validation_result);
+    // v0.32.3: Server returns the result directly at top level (not nested).
+    // Accept both: `data.validation_result` (WebSocket push format) AND
+    // `data` itself (direct REST response with `verdict`/`passed`/`checks`).
+    const vr = data.validation_result || (data.verdict || data.passed !== undefined ? data : null);
+    if (vr) {
+      updateValidationResult(vr);
     }
   } catch (e) {
     console.error('validateToken error:', e);
