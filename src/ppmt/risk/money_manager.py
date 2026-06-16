@@ -865,8 +865,8 @@ class MoneyManager:
         if std_return == 0:
             return 0.0
 
-        # Annualize assuming ~252 trading days
-        sharpe = (mean_return / std_return) * np.sqrt(252)
+        # v0.19.1: Annualize assuming 365 trading days (crypto markets trade 24/7)
+        sharpe = (mean_return / std_return) * np.sqrt(365)
         return float(sharpe)
 
     def get_portfolio_summary(self) -> dict:

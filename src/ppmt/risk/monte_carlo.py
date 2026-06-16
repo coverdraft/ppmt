@@ -161,8 +161,9 @@ def _compute_sharpe_ratio(returns: List[float]) -> float:
         return 0.0
 
     raw_sharpe = mean_ret / std_dev
-    # Annualize assuming ~252 trading days, typical trade frequency
-    annualized_sharpe = raw_sharpe * math.sqrt(252)
+    # v0.19.1: Annualize assuming 365 trading days (crypto markets trade 24/7).
+    # Previously used 252 (stock market) which underestimated Sharpe by ~20%.
+    annualized_sharpe = raw_sharpe * math.sqrt(365)
     return annualized_sharpe
 
 

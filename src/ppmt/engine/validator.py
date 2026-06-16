@@ -1225,7 +1225,7 @@ def _compute_sharpe(pnl_pcts: List[float]) -> float:
     mean_ret = np.mean(returns)
     std_ret = np.std(returns, ddof=1)
     if std_ret > 1e-10:
-        return float((mean_ret / std_ret) * np.sqrt(252))
+        return float((mean_ret / std_ret) * np.sqrt(365))  # v0.19.1: crypto 365 days
     return 0.0
 
 

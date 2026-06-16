@@ -497,6 +497,8 @@ class PPMT:
         current_price: float,
         is_in_position: bool = False,
         entry_price: Optional[float] = None,
+        paa_mean: Optional[float] = None,
+        paa_std: Optional[float] = None,
     ) -> Optional[PPMTResult]:
         """
         Process a single new candle through the SAX pipeline.
@@ -506,28 +508,63 @@ class PPMT:
 
         This is the primary method for real-time operation.
 
+        v0.19.1: Fully implemented using StreamingPatternBuffer.
+        The streaming buffer maintains a sliding window of SAX symbols
+        and automatically provides the current pattern for matching.
+
         Args:
             candle_df: Single-row DataFrame with OHLCV data
             current_price: Current price (usually close)
             is_in_position: Whether we have an open position
             entry_price: Entry price of current position
+            paa_mean: Training PAA mean for consistent incremental encoding
+            paa_std: Training PAA std for consistent incremental encoding
 
         Returns:
             PPMTResult if a new SAX symbol was produced, None otherwise
         """
-        new_symbols, self._sax_buffer = self.sax.encode_incremental(
-            candle_df, self._sax_buffer
+        from ppmt.engine.buffer import StreamingPatternBuffer
+
+        # Initialize streaming buffer on first call
+        if not hasattr(self, '_streaming_buffer') or self._streaming_buffer is None:
+            self._streaming_buffer = StreamingPatternBuffer(
+                pattern_length=5,  # default, should match build() pattern_length
+                max_buffer_length=0,  # auto
+            )
+
+        buf = self._streaming_buffer
+
+        # Incremental SAX encoding (v0.19.1: fixed z-score bug)
+        new_symbols, updated_sax_buffer = self.sax.encode_incremental(
+            candle_df, buf.sax_buffer,
+            paa_mean=paa_mean, paa_std=paa_std,
         )
 
-        if not new_symbols:
+        # Update streaming buffer with new symbols
+        matchable = buf.update(new_symbols, updated_sax_buffer)
+
+        if not matchable or not buf.has_pattern():
             return None
 
-        # We need a pattern of sufficient length
-        # Keep track of all recent symbols
-        # For simplicity, we'll need to maintain a sliding window
-        # This would be enhanced with the streaming buffer
-        # For now, return None — full implementation needs state
-        return None  # TODO: Implement streaming pattern buffer
+        # Get current pattern for matching
+        current_pattern = buf.get_pattern()
+
+        # Run 4-level match
+        result = self.match(
+            current_symbols=current_pattern,
+            current_price=current_price,
+            is_in_position=is_in_position,
+            entry_price=entry_price,
+        )
+
+        # Record match/break in buffer
+        if result.signal.signal_type != SignalType.NO_SIGNAL:
+            buf.record_match(
+                confidence=result.weighted_confidence,
+                matched_pattern=current_pattern,
+            )
+
+        return result
 
     def adapt_weights(self) -> None:
         """

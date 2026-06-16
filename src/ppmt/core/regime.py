@@ -91,7 +91,7 @@ class RegimeDetector:
         returns = np.diff(window) / window[:-1]
 
         # Volatility (annualized)
-        vol = float(np.std(returns) * np.sqrt(252))
+        vol = float(np.std(returns) * np.sqrt(365))  # v0.19.1: crypto trades 365 days
 
         # Trend: linear regression
         x = np.arange(len(window))

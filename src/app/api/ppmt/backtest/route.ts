@@ -72,7 +72,7 @@ function computeStats(trades: Trade[], equityCurve: EquityPoint[]) {
   const returns = trades.map(t => t.pnl_pct);
   const avgReturn = returns.reduce((a, b) => a + b, 0) / returns.length;
   const stdReturn = Math.sqrt(returns.reduce((sum, r) => sum + (r - avgReturn) ** 2, 0) / returns.length);
-  const sharpe = stdReturn > 0 ? (avgReturn / stdReturn) * Math.sqrt(252) : 0;
+  const sharpe = stdReturn > 0 ? (avgReturn / stdReturn) * Math.sqrt(365) : 0; // v0.19.1: crypto 365 days
 
   return {
     total_return: parseFloat(totalReturn.toFixed(2)),

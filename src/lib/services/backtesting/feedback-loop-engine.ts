@@ -456,7 +456,7 @@ class FeedbackLoopEngine {
       const avgReturn = returns.reduce((s, r) => s + r, 0) / returns.length;
       const variance = returns.reduce((s, r) => s + (r - avgReturn) ** 2, 0) / returns.length;
       const stdDev = Math.sqrt(variance);
-      const sharpe = stdDev > 0 ? (avgReturn / stdDev) * Math.sqrt(252) : 0;
+      const sharpe = stdDev > 0 ? (avgReturn / stdDev) * Math.sqrt(365) : 0;
 
       const phaseMetrics = {
         phase: phase as TokenPhase,
@@ -544,7 +544,7 @@ class FeedbackLoopEngine {
       const avgReturn = returns.reduce((s, r) => s + r, 0) / returns.length;
       const variance = returns.reduce((s, r) => s + (r - avgReturn) ** 2, 0) / returns.length;
       const stdDev = Math.sqrt(variance);
-      const sharpe = stdDev > 0 ? (avgReturn / stdDev) * Math.sqrt(252) : 0;
+      const sharpe = stdDev > 0 ? (avgReturn / stdDev) * Math.sqrt(365) : 0;
 
       metricsToStore.push({
         sourceType: 'backtest',
@@ -1248,7 +1248,7 @@ class FeedbackLoopEngine {
       const avgReturn = returns.reduce((s, r) => s + r, 0) / totalOps;
       const variance = returns.reduce((s, r) => s + (r - avgReturn) ** 2, 0) / totalOps;
       const stdDev = Math.sqrt(variance);
-      const sharpe = stdDev > 0 ? (avgReturn / stdDev) * Math.sqrt(252) : 0;
+      const sharpe = stdDev > 0 ? (avgReturn / stdDev) * Math.sqrt(365) : 0;
 
       result[phase] = { winRate, sharpe, totalOps };
     }
@@ -1596,7 +1596,7 @@ class FeedbackLoopEngine {
       const avgReturn = returns.reduce((s, r) => s + r, 0) / totalOps;
       const variance = returns.reduce((s, r) => s + (r - avgReturn) ** 2, 0) / totalOps;
       const stdDev = Math.sqrt(variance);
-      const sharpe = stdDev > 0 ? (avgReturn / stdDev) * Math.sqrt(252) : 0;
+      const sharpe = stdDev > 0 ? (avgReturn / stdDev) * Math.sqrt(365) : 0;
 
       result[phase] = { winRate, sharpe, totalOps };
     }

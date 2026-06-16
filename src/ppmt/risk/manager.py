@@ -123,6 +123,9 @@ class RiskManager:
 
         V3: Also checks quality_score from PPMT metadata.
         Low quality patterns are rejected outright.
+
+        v0.19.1: Now enforces max_correlated_positions — rejects if too many
+        positions already exist in the same asset class.
         """
         # Must be an entry signal
         if not signal.is_entry:
@@ -151,6 +154,15 @@ class RiskManager:
         # Check if already in this symbol
         if signal.symbol in self._positions:
             return False, f"Already in position: {signal.symbol}"
+
+        # v0.19.1: Check max correlated positions in same asset class
+        if asset_class and self.config.max_correlated_positions > 0:
+            correlated_count = sum(
+                1 for p in self._positions.values()
+                if getattr(p, '_asset_class', '') == asset_class
+            )
+            if correlated_count >= self.config.max_correlated_positions:
+                return False, f"Max correlated positions ({asset_class}): {correlated_count}"
 
         # Check daily loss limit
         if abs(self._daily_pnl) / self.initial_capital >= self.config.max_daily_loss_pct:

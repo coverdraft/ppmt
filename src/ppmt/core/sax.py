@@ -287,6 +287,8 @@ class SAXEncoder:
         self,
         new_candles: pd.DataFrame,
         buffer: list[float] | None = None,
+        paa_mean: float | None = None,
+        paa_std: float | None = None,
     ) -> tuple[list[str], list[float]]:
         """
         Incremental SAX encoding for real-time streaming.
@@ -295,9 +297,31 @@ class SAXEncoder:
         a buffer of partial window data and only produces a new symbol
         when a full window is completed.
 
+        v0.19.1 FIX: The previous implementation z-scored each window against
+        itself (mean of window - mean of window = 0), always producing the
+        middle symbol. Now uses one of three normalization strategies:
+
+        1. **External stats** (paa_mean, paa_std provided): Uses training
+           statistics for consistent encoding between build and live. This
+           is the RECOMMENDED mode for production — call encode_with_normalization()
+           during build, then pass the same stats here.
+
+        2. **Running stats** (no external stats, buffer has enough history):
+           Maintains a running mean/std over all observed PAA values and
+           z-scores new windows against the global distribution. This provides
+           reasonable incremental encoding without requiring precomputed stats.
+
+        3. **Window-only** (no external stats, insufficient history):
+           Falls back to z-scoring the window mean against 0 with unit std,
+           which effectively just discretizes the raw PAA value. This is a
+           degraded mode — at minimum 2 symbols should be accumulated before
+           meaningful encoding is possible.
+
         Args:
             new_candles: New candle data (can be 1 or more rows)
             buffer: Previous partial window buffer (or None for first call)
+            paa_mean: Training PAA mean for consistent z-scoring (recommended)
+            paa_std: Training PAA std for consistent z-scoring (recommended)
 
         Returns:
             Tuple of (new_symbols, updated_buffer)
@@ -308,19 +332,55 @@ class SAXEncoder:
         series = self._extract_series(new_candles)
         buffer.extend(series.tolist())
 
+        # Running PAA statistics for incremental normalization
+        # These accumulate across calls to maintain a global reference distribution
+        if not hasattr(self, '_running_paa_values'):
+            self._running_paa_values: list[float] = []
+        if paa_mean is not None:
+            # Use external stats — reset running values since we have the truth
+            self._running_paa_mean = paa_mean
+            self._running_paa_std = paa_std if paa_std is not None else 1.0
+        elif not hasattr(self, '_running_paa_mean'):
+            self._running_paa_mean = None
+            self._running_paa_std = None
+
         symbols = []
         while len(buffer) >= self.window_size:
             window_data = np.array(buffer[:self.window_size])
             buffer = buffer[self.window_size:]
 
-            # Z-score the window
-            mean = np.mean(window_data)
-            std = np.std(window_data)
+            # Compute PAA value (mean of window)
+            paa_value = float(np.mean(window_data))
+
+            # Update running stats
+            self._running_paa_values.append(paa_value)
+            # Keep last 500 PAA values for running stats (prevents unbounded growth)
+            if len(self._running_paa_values) > 500:
+                self._running_paa_values = self._running_paa_values[-500:]
+
+            # Z-score normalization
+            if self._running_paa_mean is not None:
+                # Strategy 1: External stats (from training) — best quality
+                mean = self._running_paa_mean
+                std = self._running_paa_std
+            elif len(self._running_paa_values) >= 2:
+                # Strategy 2: Running stats — good quality after warmup
+                arr = np.array(self._running_paa_values)
+                mean = float(np.mean(arr))
+                std = float(np.std(arr))
+            else:
+                # Strategy 3: Degraded — first window only, can't z-score yet
+                # Use the PAA value directly mapped to breakpoints
+                # Since breakpoints are z-score boundaries, we assume mean=0, std=sigma
+                # where sigma is estimated from the PAA value magnitude
+                mean = 0.0
+                std = max(abs(paa_value), 1e-10)
+
             if std < 1e-10:
                 mid = self.alphabet_size // 2
                 symbols.append(SAX_ALPHABET[mid])
             else:
-                z = (np.mean(window_data) - mean) / std
+                z = (paa_value - mean) / std
                 idx = int(np.searchsorted(self.breakpoints, z))
                 symbols.append(SAX_ALPHABET[idx])
 

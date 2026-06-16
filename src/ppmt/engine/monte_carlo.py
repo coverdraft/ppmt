@@ -92,7 +92,7 @@ class MonteCarloResult:
             "best_max_drawdown_pct": round(float(np.max(dds)), 2),
             "mean_pnl_pct": round(float(np.mean(pnls)), 2),
             "mean_win_rate_pct": round(float(np.mean(wrs) * 100), 2),
-            "sharpe_ratio": round(float(np.mean(pnls) / (np.std(pnls) + 1e-12) * np.sqrt(252)), 2),
+            "sharpe_ratio": round(float(np.mean(pnls) / (np.std(pnls) + 1e-12) * np.sqrt(365)), 2),  # v0.19.1: crypto 365 days
         }
 
     def to_dict(self) -> Dict:
