@@ -168,8 +168,8 @@ class LiveConfig:
     """v0.11.0: Enable 4-level matching."""
     living_trie: bool = True
     """v0.11.0: Enable Living Trie updates in live mode."""
-    testnet: bool = True
-    """Use exchange testnet (paper trading on exchange)."""
+    testnet: bool = False
+    """Use exchange testnet (for order execution only, NOT for market data)."""
     dry_run: bool = True
     """If True, process signals but don't actually execute orders."""
 

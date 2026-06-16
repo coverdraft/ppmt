@@ -41,7 +41,7 @@ CONFIG_DIR = os.path.expanduser("~/.ppmt")
 # ------------------------------------------------------------------ #
 # FastAPI application
 # ------------------------------------------------------------------ #
-app = FastAPI(title="PPMT Terminal", version="0.28.0")
+app = FastAPI(title="PPMT Terminal", version="0.29.0")
 
 # Global terminal state (shared with engine)
 terminal_state: TerminalState = get_terminal_state()
@@ -543,7 +543,7 @@ async def ingest_data(req: IngestRequest) -> dict:
 
 
 # ------------------------------------------------------------------ #
-# Background Trading Session Management (v0.28.0)
+# Background Trading Session Management (v0.29.0)
 # ------------------------------------------------------------------ #
 
 # Active trading task
@@ -641,7 +641,7 @@ async def start_trading(req: StartTradingRequest) -> dict:
                 initial_capital=req.capital,
                 exchange=req.exchange,
                 dry_run=True,  # Always paper trading from dashboard
-                testnet=True,
+                testnet=False,  # v0.29.0: Use mainnet data feed (testnet=404 on Binance WS)
                 leverage=req.leverage,
                 auto_mode=req.auto_mode,
                 max_open_positions=req.max_positions,

@@ -47,7 +47,7 @@ def load_config() -> dict:
 
 
 @click.group()
-@click.version_option(version="0.28.0")
+@click.version_option(version="0.29.0")
 def cli():
     """PPMT Terminal - Autonomous Pattern-Based Trading Terminal"""
     pass
@@ -388,7 +388,7 @@ def predict(symbol: str, timeframe: str, depth: int, price: float):
 @click.option("--capital", "-c", default=10000.0, type=float, help="Initial capital")
 @click.option("--dry-run", is_flag=True, default=True, help="Paper trading (no real orders)")
 @click.option("--live", "dry_run_false", is_flag=True, help="Execute REAL orders on exchange")
-@click.option("--testnet", is_flag=True, default=True, help="Use exchange testnet")
+@click.option("--testnet", is_flag=True, default=False, help="Use exchange testnet (for order execution only)")
 @click.option("--mainnet", "testnet_false", is_flag=True, help="Use exchange MAINNET (real money)")
 @click.option("--api-key", envvar="PPMT_API_KEY", default="", help="Exchange API key")
 @click.option("--api-secret", envvar="PPMT_API_SECRET", default="", help="Exchange API secret")
@@ -440,7 +440,12 @@ def run(
     """
     # Resolve flag conflicts
     actual_dry_run = not dry_run_false  # --live flag disables dry-run
-    actual_testnet = not testnet_false  # --mainnet flag disables testnet
+    actual_testnet = testnet and not testnet_false  # Testnet only if explicitly requested; --mainnet overrides
+    # v0.29.0: For paper trading (dry_run), always use mainnet data feed.
+    # Testnet is only for order execution routing, NOT for market data.
+    if actual_dry_run and actual_testnet:
+        actual_testnet = False
+        console.print("[dim]Note: Using mainnet data feed (testnet only affects order execution)[/dim]")
 
     if no_calibrate:
         auto_calibrate = False
@@ -995,7 +1000,7 @@ def validate(symbol: str, timeframe: str, pattern_length: int, output: str):
 def terminal(host: str, port: int, open_browser: bool):
     """Launch the PPMT Terminal web dashboard.
 
-    v0.28.0: FastAPI dashboard with real-time candlestick chart,
+    v0.29.0: FastAPI dashboard with real-time candlestick chart,
     entry/exit markers, Money Management, Node Management, Backtest,
     and live trading controls with start/stop from dashboard.
     Runs on port 8420 by default.
@@ -1005,7 +1010,7 @@ def terminal(host: str, port: int, open_browser: bool):
       ppmt terminal -p 9000             # Custom port
       ppmt terminal --open-browser      # Auto-open in browser
     """
-    console.print("[bold cyan]PPMT Terminal Dashboard v0.28.0[/bold cyan]")
+    console.print("[bold cyan]PPMT Terminal Dashboard v0.29.0[/bold cyan]")
 
     if open_browser:
         import webbrowser
