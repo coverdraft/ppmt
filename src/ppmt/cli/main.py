@@ -47,7 +47,7 @@ def load_config() -> dict:
 
 
 @click.group()
-@click.version_option(version="0.25.0")
+@click.version_option(version="0.26.0")
 def cli():
     """PPMT Terminal - Autonomous Pattern-Based Trading Terminal"""
     pass
@@ -996,152 +996,65 @@ def validate(symbol: str, timeframe: str, pattern_length: int, output: str):
 def terminal(host: str, port: int, open_browser: bool, lite: bool):
     """Launch the PPMT Terminal web dashboard.
 
-    Tries the full Next.js dashboard first (port 3000), which includes
-    backtesting, strategy management, monte carlo, and all PPMT panels.
-    Falls back to the lightweight FastAPI dashboard (port 8420) if
-    Node.js is not available.
+    v0.26.0: Launches FastAPI dashboard by default (port 3000) with full
+    Money Management, Node Management, Backtest, and real-time controls.
+    Use --lite for the old port 8420 behavior.
 
     Examples:
-      ppmt terminal                      # Start Next.js dashboard on port 3000
-      ppmt terminal --lite               # Start lightweight FastAPI dashboard on port 8420
+      ppmt terminal                      # Start dashboard on port 3000
+      ppmt terminal --lite               # Start on port 8420
       ppmt terminal -p 9000             # Custom port
       ppmt terminal --open-browser      # Auto-open in browser
     """
-    console.print("[bold cyan]PPMT Terminal Dashboard[/bold cyan]")
+    console.print("[bold cyan]PPMT Terminal Dashboard v0.26.0[/bold cyan]")
 
     if open_browser:
         import webbrowser
         import threading
 
-    # --- Try Next.js dashboard (full-featured) ---
-    if not lite:
-        # Find the Next.js app directory (it's in the repo root)
-        repo_root = Path(__file__).resolve().parent.parent.parent.parent
-        package_json = repo_root / "package.json"
-        node_modules = repo_root / "node_modules"
+    # v0.26.0: Default to FastAPI dashboard on port 3000 (no Next.js dependency)
+    # The FastAPI dashboard now has full Money Management, Node controls,
+    # Backtest runner, and real-time WebSocket updates.
+    fastapi_port = port if not lite else (8420 if port == 3000 else port)
 
-        if package_json.exists():
-            # Auto-install node_modules if missing
-            if not node_modules.exists():
-                import subprocess
-                console.print("[yellow]Node modules not found. Running npm install...[/yellow]")
+    # Kill any existing process on the target port
+    try:
+        import subprocess as _sp
+        check = _sp.run(
+            ["lsof", "-ti", f":{fastapi_port}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if check.returncode == 0 and check.stdout.strip():
+            pids = check.stdout.strip().split('\n')
+            console.print(f"  [yellow]Port {fastapi_port} in use. Killing...[/yellow]")
+            for pid in pids:
                 try:
-                    result = subprocess.run(
-                        ["npm", "install"],
-                        cwd=str(repo_root),
-                        capture_output=True,
-                        text=True,
-                        timeout=300,
-                    )
-                    if result.returncode == 0:
-                        console.print("[green]npm install complete![/green]")
-                    else:
-                        console.print(f"[red]npm install failed: {result.stderr[:200]}[/red]")
-                        console.print("[dim]Use --lite for the FastAPI dashboard, or run 'npm install' manually.[/dim]")
-                        lite = True
-                except FileNotFoundError:
-                    console.print("[yellow]npm not found. Install Node.js from https://nodejs.org[/yellow]")
-                    console.print("[dim]Use --lite for the FastAPI dashboard instead.[/dim]")
-                    lite = True
-                except subprocess.TimeoutExpired:
-                    console.print("[red]npm install timed out.[/red]")
-                    lite = True
-
-            if not lite and node_modules.exists():
-                import subprocess
-
-                # Ensure .env and Prisma DB exist
-                env_file = repo_root / ".env"
-                if not env_file.exists():
-                    env_file.write_text('DATABASE_URL="file:./prisma/dev.db"\n')
-                    console.print("[green]Created .env file[/green]")
-
-                prisma_db = repo_root / "prisma" / "dev.db"
-                if not prisma_db.exists():
-                    console.print("[yellow]Prisma DB not found. Initializing...[/yellow]")
-                    try:
-                        subprocess.run(
-                            ["npx", "prisma", "db", "push", "--schema=./prisma/schema.prisma"],
-                            cwd=str(repo_root),
-                            capture_output=True,
-                            text=True,
-                            timeout=60,
-                        )
-                        console.print("[green]Prisma DB initialized![/green]")
-                    except Exception as e:
-                        console.print(f"[yellow]Prisma setup skipped: {e}[/yellow]")
-
-                console.print(f"  [green]Found Next.js dashboard at {repo_root}[/green]")
-
-                # Check if port is already in use and kill it
-                import subprocess as _sp
-                try:
-                    check = _sp.run(
-                        ["lsof", "-ti", f":{port}"],
-                        capture_output=True, text=True, timeout=5,
-                    )
-                    if check.returncode == 0 and check.stdout.strip():
-                        pids = check.stdout.strip().split('\n')
-                        console.print(f"  [yellow]Port {port} in use by PID(s): {', '.join(pids)}. Killing...[/yellow]")
-                        for pid in pids:
-                            try:
-                                _sp.run(["kill", "-9", pid], capture_output=True, timeout=5)
-                            except Exception:
-                                pass
-                        import time as _time
-                        _time.sleep(1)
-                        console.print(f"  [green]Port {port} freed.[/green]")
-                except FileNotFoundError:
-                    pass  # lsof not available on this OS
+                    _sp.run(["kill", "-9", pid], capture_output=True, timeout=5)
                 except Exception:
                     pass
+            import time as _time
+            _time.sleep(1)
+    except Exception:
+        pass
 
-                console.print(f"  Starting on http://localhost:{port}")
+    console.print(f"  Starting PPMT Terminal Dashboard on http://localhost:{fastapi_port}")
 
-                if open_browser:
-                    url = f"http://localhost:{port}"
-                    threading.Timer(3.0, lambda: webbrowser.open(url)).start()
-                    console.print(f"  Opening browser at {url}")
+    if open_browser:
+        url = f"http://localhost:{fastapi_port}"
+        threading.Timer(2.0, lambda: webbrowser.open(url)).start()
+        console.print(f"  Opening browser at {url}")
 
-                console.print("[dim]Press Ctrl+C to stop[/dim]\n")
-                try:
-                    env = os.environ.copy()
-                    env["PORT"] = str(port)
-                    subprocess.run(
-                        ["npx", "next", "dev", "--port", str(port), "--turbopack"],
-                        cwd=str(repo_root),
-                        env=env,
-                    )
-                except KeyboardInterrupt:
-                    console.print("\n[yellow]Dashboard stopped.[/yellow]")
-                except FileNotFoundError:
-                    console.print("[yellow]npx not found. Install Node.js or use --lite for FastAPI dashboard.[/yellow]")
-                    lite = True
-        else:
-            console.print("[yellow]Next.js dashboard not found (no package.json).[/yellow]")
-            console.print("[dim]Use --lite for the FastAPI dashboard.[/dim]")
-            lite = True
+    console.print("[dim]Press Ctrl+C to stop[/dim]")
+    console.print("[dim]Dashboard features: Portfolio, Money Management, Node Control, Backtest, Real-time[/dim]\n")
 
-    # --- FastAPI lightweight dashboard (fallback) ---
-    if lite:
-        fastapi_port = 8420 if port == 3000 else port
-        console.print(f"  Starting lightweight dashboard on http://{host}:{fastapi_port}")
-
-        if open_browser:
-            url = f"http://localhost:{fastapi_port}"
-            threading.Timer(1.5, lambda: webbrowser.open(url)).start()
-            console.print(f"  Opening browser at {url}")
-
-        try:
-            from ppmt.terminal.server import run_server
-            console.print(f"\n[green]Dashboard ready: http://localhost:{fastapi_port}[/green]")
-            console.print("[dim]Press Ctrl+C to stop[/dim]\n")
-            run_server(host=host, port=fastapi_port)
-        except ImportError as e:
-            console.print(f"[red]Terminal dashboard not available: {e}[/red]")
-            console.print("[dim]Install dependencies: pip install fastapi uvicorn[/dim]")
-        except KeyboardInterrupt:
-            console.print("\n[yellow]Dashboard stopped.[/yellow]")
+    try:
+        from ppmt.terminal.server import run_server
+        run_server(host=host, port=fastapi_port)
+    except ImportError as e:
+        console.print(f"[red]Terminal dashboard not available: {e}[/red]")
+        console.print("[dim]Install dependencies: pip3 install fastapi uvicorn --break-system-packages[/dim]")
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Dashboard stopped.[/yellow]")
 
 
 @cli.command()

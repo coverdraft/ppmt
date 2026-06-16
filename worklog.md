@@ -149,3 +149,17 @@ Stage Summary:
 - Leverage CLI bug fixed
 - Strategy should produce fewer but much higher quality trades
 - Dashboard available via: ppmt terminal --lite (FastAPI) or ppmt terminal (Next.js)
+
+---
+Task ID: 7
+Agent: main
+Task: Phase 7 - Dashboard con Money Management completo
+Work Log:
+- Enhanced server.py with full Money Management REST API (nodes, leverage, kill-switch, backtest)
+- Enhanced dashboard HTML with Money Management panel, Child Nodes table, Quick Backtest
+- Changed ppmt terminal to launch FastAPI on port 3000 (no Next.js dependency)
+- Updated version to 0.26.0
+Stage Summary:
+- Phase 7 COMPLETE - Dashboard has full Money Management, Node Control, Backtest
+- ppmt terminal -> http://localhost:3000 (FastAPI dashboard)
+

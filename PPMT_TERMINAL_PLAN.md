@@ -3,7 +3,7 @@
 > **MAXIMUM PRIORITY**: This is THE ONLY plan. No other plans or side-quests.
 > If you get lost, come back to this document. Everything we do must trace back here.
 
-**Version**: v0.20.0
+**Version**: v0.26.0
 **Date**: 2026-06-16
 **Status**: ACTIVE - IN PROGRESS
 
@@ -92,20 +92,25 @@ ppmt scan → ppmt ingest → ppmt build → ppmt run → ppmt backtest → ppmt
 - [x] TerminalState updates with portfolio data during live mode
 - [x] Periodic MoneyManager auto-save
 
-### Phase 7: TerminalState Population + Dashboard ⬜ TODO
-**Files**: `src/ppmt/terminal/state.py`, `src/ppmt/terminal/server.py`
+### Phase 7: TerminalState Population + Dashboard ✅ DONE
+**Files**: `src/ppmt/terminal/state.py`, `src/ppmt/terminal/server.py`, `src/ppmt/terminal/static/index.html`
 
-- [ ] Add Monte Carlo results to TerminalState
-- [ ] Add Living Trie stats to TerminalState
-- [ ] Enhance terminal HTML dashboard with portfolio controls
-- [ ] WebSocket broadcast of all state changes
+- [x] Add Monte Carlo results to TerminalState
+- [x] Add Living Trie stats to TerminalState
+- [x] Enhance terminal HTML dashboard with portfolio controls
+- [x] WebSocket broadcast of all state changes
+- [x] Money Management panel with leverage, auto/manual, kill switch
+- [x] Child Nodes table with add/remove/leverage controls
+- [x] Quick Backtest runner from dashboard
+- [x] Dashboard launches on port 3000 (FastAPI, no Next.js dependency)
+- [x] REST API endpoints for node management (add/remove/leverage/auto-mode/kill-switch)
 
-### Phase 8: Bug Fixes + Push to GitHub ⬜ TODO
+### Phase 8: Bug Fixes + Push to GitHub ⬜ IN PROGRESS
 **Files**: Various
 
 - [ ] Fix ATR inconsistency between ppmt.py build() and paper_trader.py
 - [ ] End-to-end test: full lifecycle
-- [ ] Push everything to GitHub
+- [x] Push everything to GitHub
 
 ---
 

@@ -259,6 +259,146 @@ body{
 .breaker-dot.tripped{background:var(--red)}
 
 /* ============================================================ */
+/* Money Management Panel (v0.26.0)                              */
+/* ============================================================ */
+.mm-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:680px){.mm-grid{grid-template-columns:1fr}}
+.mm-stat{background:var(--bg-primary);border-radius:6px;padding:10px 12px}
+.mm-stat-label{font-size:.68rem;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px;margin-bottom:2px}
+.mm-stat-value{font-family:var(--font-mono);font-size:1.15rem;font-weight:700}
+.mm-exposure-bar{height:10px;background:var(--bg-primary);border-radius:5px;overflow:hidden;margin-top:6px}
+.mm-exposure-fill{height:100%;border-radius:5px;transition:width .4s,background .4s}
+.mm-pnl-row{display:flex;justify-content:space-between;padding:3px 0;font-size:.82rem}
+.mm-pnl-row .label{color:var(--text-secondary)}
+.mm-pnl-row .value{font-family:var(--font-mono);font-weight:600}
+.mm-controls{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:10px}
+.mm-controls label{font-size:.78rem;color:var(--text-secondary);display:flex;align-items:center;gap:6px}
+.mm-select{
+  font-family:var(--font-mono);font-size:.78rem;
+  background:var(--bg-primary);color:var(--text-primary);
+  border:1px solid var(--border);border-radius:4px;
+  padding:4px 8px;cursor:pointer;
+}
+.mm-select:focus{outline:none;border-color:var(--accent)}
+
+/* Toggle Switch */
+.toggle-switch{
+  position:relative;width:42px;height:22px;display:inline-block;cursor:pointer;
+}
+.toggle-switch input{opacity:0;width:0;height:0}
+.toggle-slider{
+  position:absolute;inset:0;
+  background:var(--border);border-radius:11px;
+  transition:background .25s;
+}
+.toggle-slider::before{
+  content:'';position:absolute;width:16px;height:16px;
+  left:3px;top:3px;border-radius:50%;
+  background:var(--text-secondary);
+  transition:transform .25s,background .25s;
+}
+.toggle-switch input:checked + .toggle-slider{background:var(--green)}
+.toggle-switch input:checked + .toggle-slider::before{transform:translateX(20px);background:#fff}
+
+/* Kill Switch Button */
+.kill-switch-btn{
+  font-family:var(--font-mono);font-weight:700;font-size:.82rem;
+  padding:10px 24px;border-radius:6px;border:2px solid var(--red);
+  background:rgba(248,81,73,.12);color:var(--red);
+  cursor:pointer;text-transform:uppercase;letter-spacing:1px;
+  transition:all .2s;
+}
+.kill-switch-btn:hover{background:rgba(248,81,73,.25);border-color:#ff6b63}
+.kill-switch-btn.active{
+  background:var(--red);color:#fff;border-color:var(--red);
+  animation:kill-pulse 1.5s infinite;
+}
+@keyframes kill-pulse{
+  0%,100%{box-shadow:0 0 0 0 rgba(248,81,73,.4)}
+  50%{box-shadow:0 0 12px 4px rgba(248,81,73,.25)}
+}
+.kill-switch-btn:focus{outline:none}
+
+/* ============================================================ */
+/* Child Nodes Table (v0.26.0)                                   */
+/* ============================================================ */
+.nodes-table{width:100%;border-collapse:collapse;font-size:.78rem}
+.nodes-table th{
+  text-align:left;font-weight:600;color:var(--text-secondary);padding:6px 8px;
+  border-bottom:1px solid var(--border);font-size:.68rem;text-transform:uppercase;letter-spacing:.5px;
+  white-space:nowrap;
+}
+.nodes-table td{
+  padding:6px 8px;font-family:var(--font-mono);border-bottom:1px solid rgba(48,54,61,.4);
+  white-space:nowrap;
+}
+.nodes-table tr:hover td{background:rgba(88,166,255,.04)}
+.node-enabled{color:var(--green);font-weight:600}
+.node-disabled{color:var(--red);font-weight:600}
+.node-mode-auto{background:rgba(63,185,80,.15);color:var(--green);padding:1px 6px;border-radius:3px;font-size:.7rem;font-weight:600}
+.node-mode-manual{background:rgba(210,153,34,.15);color:var(--yellow);padding:1px 6px;border-radius:3px;font-size:.7rem;font-weight:600}
+.btn-sm{
+  font-family:var(--font-mono);font-size:.7rem;font-weight:600;
+  padding:3px 8px;border-radius:4px;border:1px solid var(--border);
+  background:var(--bg-primary);color:var(--text-primary);
+  cursor:pointer;transition:all .15s;
+}
+.btn-sm:hover{border-color:var(--accent);color:var(--accent)}
+.btn-sm.btn-danger:hover{border-color:var(--red);color:var(--red)}
+
+/* Add Node Form */
+.add-node-form{
+  display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;
+  padding-top:10px;border-top:1px solid var(--border);margin-top:10px;
+}
+.form-group{display:flex;flex-direction:column;gap:3px}
+.form-group label{font-size:.68rem;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px}
+.form-input{
+  font-family:var(--font-mono);font-size:.78rem;
+  background:var(--bg-primary);color:var(--text-primary);
+  border:1px solid var(--border);border-radius:4px;
+  padding:5px 8px;width:100%;
+}
+.form-input:focus{outline:none;border-color:var(--accent)}
+.form-input-sm{width:90px}
+.btn-add-node{
+  font-family:var(--font-mono);font-size:.78rem;font-weight:700;
+  padding:6px 16px;border-radius:4px;border:1px solid var(--accent);
+  background:rgba(88,166,255,.12);color:var(--accent);
+  cursor:pointer;transition:all .15s;text-transform:uppercase;letter-spacing:.5px;
+}
+.btn-add-node:hover{background:rgba(88,166,255,.25)}
+
+/* ============================================================ */
+/* Backtest Quick Run (v0.26.0)                                  */
+/* ============================================================ */
+.backtest-form{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;margin-bottom:12px}
+.btn-run-backtest{
+  font-family:var(--font-mono);font-size:.78rem;font-weight:700;
+  padding:6px 18px;border-radius:4px;border:1px solid var(--purple);
+  background:rgba(188,140,255,.12);color:var(--purple);
+  cursor:pointer;transition:all .15s;text-transform:uppercase;letter-spacing:.5px;
+}
+.btn-run-backtest:hover{background:rgba(188,140,255,.25)}
+.btn-run-backtest:disabled{opacity:.5;cursor:not-allowed}
+.backtest-results{
+  background:var(--bg-primary);border-radius:6px;padding:12px;
+  font-size:.82rem;display:none;
+}
+.backtest-results.visible{display:block}
+.backtest-results-title{font-size:.72rem;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
+.backtest-stat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:8px}
+@media(max-width:680px){.backtest-stat-grid{grid-template-columns:1fr 1fr}}
+.backtest-stat-item{background:var(--bg-card);border-radius:4px;padding:8px;text-align:center}
+.backtest-stat-item .bs-label{font-size:.65rem;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px}
+.backtest-stat-item .bs-value{font-family:var(--font-mono);font-size:1rem;font-weight:700;margin-top:2px}
+.backtest-trades{max-height:150px;overflow-y:auto;font-size:.72rem}
+.backtest-trades::-webkit-scrollbar{width:4px}
+.backtest-trades::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+.bt-trade-row{display:flex;gap:12px;padding:3px 0;border-bottom:1px solid rgba(48,54,61,.3)}
+.bt-trade-row span{font-family:var(--font-mono)}
+
+/* ============================================================ */
 /* Footer                                                        */
 /* ============================================================ */
 .footer{
@@ -411,6 +551,177 @@ body{
     </div>
   </div>
 
+  <!-- ============================================================ -->
+  <!-- v0.26.0: Money Management Panel                               -->
+  <!-- ============================================================ -->
+  <div class="card card-span-3">
+    <div class="card-title">Money Management</div>
+    <div class="mm-grid">
+      <!-- Capital Stats -->
+      <div class="mm-stat">
+        <div class="mm-stat-label">Total Capital</div>
+        <div class="mm-stat-value" id="mmTotalCapital">$0.00</div>
+      </div>
+      <div class="mm-stat">
+        <div class="mm-stat-label">Reserve Capital</div>
+        <div class="mm-stat-value" id="mmReserveCapital">$0.00</div>
+      </div>
+      <div class="mm-stat">
+        <div class="mm-stat-label">Total Exposure</div>
+        <div class="mm-stat-value" id="mmTotalExposure">0.00%</div>
+        <div class="mm-exposure-bar"><div class="mm-exposure-fill" id="mmExposureFill" style="width:0;background:var(--accent)"></div></div>
+      </div>
+      <div class="mm-stat">
+        <div class="mm-stat-label">Total P&L (Realized + Unrealized)</div>
+        <div class="mm-stat-value" id="mmTotalPnl">$0.00</div>
+        <div class="mm-pnl-row"><span class="label">Realized</span><span class="value" id="mmRealizedPnl">$0.00</span></div>
+        <div class="mm-pnl-row"><span class="label">Unrealized</span><span class="value" id="mmUnrealizedPnl">$0.00</span></div>
+      </div>
+    </div>
+    <!-- Controls Row -->
+    <div class="mm-controls">
+      <label>
+        Leverage
+        <select class="mm-select" id="mmLeverage">
+          <option value="1">1x</option>
+          <option value="2">2x</option>
+          <option value="3">3x</option>
+          <option value="5">5x</option>
+          <option value="10">10x</option>
+          <option value="25">25x</option>
+          <option value="50">50x</option>
+          <option value="100">100x</option>
+          <option value="125">125x</option>
+        </select>
+      </label>
+      <label>
+        Auto Mode
+        <label class="toggle-switch">
+          <input type="checkbox" id="mmAutoMode" checked>
+          <span class="toggle-slider"></span>
+        </label>
+      </label>
+      <button class="kill-switch-btn" id="killSwitchBtn">ACTIVATE KILL SWITCH</button>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- v0.26.0: Child Nodes Table                                    -->
+  <!-- ============================================================ -->
+  <div class="card card-span-3">
+    <div class="card-title">Child Nodes</div>
+    <div style="overflow-x:auto">
+      <table class="nodes-table">
+        <thead>
+          <tr>
+            <th>Node ID</th>
+            <th>Symbol</th>
+            <th>TF</th>
+            <th>Allocation %</th>
+            <th>Available Capital</th>
+            <th>Leverage</th>
+            <th>Mode</th>
+            <th>Enabled</th>
+            <th>P&L</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="nodesBody">
+          <tr><td colspan="10" class="no-data">No child nodes</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <!-- Add Node Form -->
+    <div class="add-node-form">
+      <div class="form-group">
+        <label>Symbol</label>
+        <input type="text" class="form-input form-input-sm" id="addNodeSymbol" placeholder="BTC/USDT">
+      </div>
+      <div class="form-group">
+        <label>Timeframe</label>
+        <select class="form-input" id="addNodeTF" style="width:80px">
+          <option value="1m">1m</option>
+          <option value="5m">5m</option>
+          <option value="15m">15m</option>
+          <option value="1h">1h</option>
+          <option value="4h">4h</option>
+          <option value="1d">1d</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Allocation %</label>
+        <input type="number" class="form-input form-input-sm" id="addNodeAllocation" placeholder="10" min="1" max="100">
+      </div>
+      <div class="form-group">
+        <label>Leverage</label>
+        <select class="form-input" id="addNodeLeverage" style="width:80px">
+          <option value="1">1x</option>
+          <option value="2">2x</option>
+          <option value="3">3x</option>
+          <option value="5">5x</option>
+          <option value="10">10x</option>
+          <option value="25">25x</option>
+          <option value="50">50x</option>
+          <option value="100">100x</option>
+          <option value="125">125x</option>
+        </select>
+      </div>
+      <button class="btn-add-node" id="addNodeBtn">+ Add Node</button>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- v0.26.0: Backtest Quick Run                                   -->
+  <!-- ============================================================ -->
+  <div class="card card-span-3">
+    <div class="card-title">Backtest Quick Run</div>
+    <div class="backtest-form">
+      <div class="form-group">
+        <label>Symbol</label>
+        <input type="text" class="form-input form-input-sm" id="btSymbol" placeholder="BTC/USDT">
+      </div>
+      <div class="form-group">
+        <label>Timeframe</label>
+        <select class="form-input" id="btTimeframe" style="width:80px">
+          <option value="1m">1m</option>
+          <option value="5m">5m</option>
+          <option value="15m">15m</option>
+          <option value="1h">1h</option>
+          <option value="4h">4h</option>
+          <option value="1d">1d</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Capital</label>
+        <input type="number" class="form-input form-input-sm" id="btCapital" placeholder="10000" min="100">
+      </div>
+      <button class="btn-run-backtest" id="btRunBtn">Run Backtest</button>
+    </div>
+    <div class="backtest-results" id="btResults">
+      <div class="backtest-results-title">Backtest Results</div>
+      <div class="backtest-stat-grid">
+        <div class="backtest-stat-item">
+          <div class="bs-label">Total Trades</div>
+          <div class="bs-value" id="btTotalTrades">--</div>
+        </div>
+        <div class="backtest-stat-item">
+          <div class="bs-label">Win Rate</div>
+          <div class="bs-value" id="btWinRate">--</div>
+        </div>
+        <div class="backtest-stat-item">
+          <div class="bs-label">Total P&L</div>
+          <div class="bs-value" id="btPnl">--</div>
+        </div>
+        <div class="backtest-stat-item">
+          <div class="bs-label">Max Drawdown</div>
+          <div class="bs-value" id="btMaxDD">--</div>
+        </div>
+      </div>
+      <div style="font-size:.72rem;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px">Recent Trades</div>
+      <div class="backtest-trades" id="btTrades"></div>
+    </div>
+  </div>
+
 </div>
 </div>
 
@@ -424,7 +735,7 @@ body{
     <span>Reconnects: <span id="reconnectCount">0</span></span>
   </div>
   <div class="footer-right">
-    <span>PPMT Terminal v0.20.0</span>
+    <span>PPMT Terminal v0.26.0</span>
   </div>
 </footer>
 
@@ -442,6 +753,8 @@ body{
   var wsConnected = false;
   var restPolling = false;
   var restTimer = null;
+  var killSwitchActive = false;
+  var nodesData = [];
 
   // ---- DOM refs ----------------------------------------------
   var $ = function(id){ return document.getElementById(id); };
@@ -472,6 +785,22 @@ body{
     el.classList.remove("flash-up","flash-down");
     void el.offsetWidth; // force reflow
     el.classList.add(direction === "up" ? "flash-up" : "flash-down");
+  }
+
+  // ---- API helper --------------------------------------------
+  function apiPost(url, body){
+    return fetch(url, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body)
+    }).then(function(r){ return r.json(); })
+      .catch(function(e){ console.error("API error:", url, e); });
+  }
+
+  function apiGet(url){
+    return fetch(url)
+      .then(function(r){ return r.json(); })
+      .catch(function(e){ console.error("API error:", url, e); });
   }
 
   // ---- Clock -------------------------------------------------
@@ -664,10 +993,13 @@ body{
     if(s.kill_switch_active){
       ksEl.textContent = "ACTIVE — ALL STOP";
       ksEl.style.color = "var(--red)";
+      killSwitchActive = true;
     } else {
       ksEl.textContent = "INACTIVE";
       ksEl.style.color = "var(--green)";
+      killSwitchActive = false;
     }
+    updateKillSwitchBtn();
 
     // v0.20.0: Monte Carlo
     var mcEl = $("monteCarloInfo");
@@ -702,6 +1034,42 @@ body{
     $("candlesCount").textContent = s.candles_processed || 0;
     $("wsStatus").textContent = s.websocket_status || "disconnected";
     $("reconnectCount").textContent = s.reconnect_count || 0;
+
+    // ---- v0.26.0: Money Management Panel ----
+    var totalCap = s.total_capital || s.portfolio_value || 0;
+    var reserveCap = s.reserve_capital || (totalCap * 0.3);
+    var totalExp = s.total_exposure_pct || s.exposure_pct || 0;
+    var totalPnl = (s.realized_pnl || 0) + (s.unrealized_pnl || 0);
+
+    $("mmTotalCapital").textContent = fmt$(totalCap);
+    $("mmReserveCapital").textContent = fmt$(reserveCap);
+
+    var mmExpPct = Math.min(totalExp, 100);
+    $("mmTotalExposure").textContent = fmtPct(totalExp);
+    $("mmExposureFill").style.width = mmExpPct + "%";
+    $("mmExposureFill").style.background = mmExpPct > 80 ? "var(--red)" : mmExpPct > 50 ? "var(--yellow)" : "var(--accent)";
+
+    $("mmTotalPnl").textContent = (totalPnl >= 0 ? "+" : "") + fmt$(totalPnl);
+    $("mmTotalPnl").style.color = totalPnl >= 0 ? "var(--green)" : "var(--red)";
+    $("mmRealizedPnl").textContent = (rpnl >= 0 ? "+" : "") + fmt$(rpnl);
+    $("mmRealizedPnl").style.color = rpnl >= 0 ? "var(--green)" : "var(--red)";
+    $("mmUnrealizedPnl").textContent = (upnl >= 0 ? "+" : "") + fmt$(upnl);
+    $("mmUnrealizedPnl").style.color = upnl >= 0 ? "var(--green)" : "var(--red)";
+
+    // Sync leverage selector with state
+    if(s.leverage !== undefined){
+      $("mmLeverage").value = s.leverage;
+    }
+    // Sync auto-mode toggle with state
+    if(s.auto_mode !== undefined){
+      $("mmAutoMode").checked = s.auto_mode;
+    }
+
+    // ---- v0.26.0: Child Nodes from WS snapshot ----
+    if(s.nodes && Array.isArray(s.nodes)){
+      nodesData = s.nodes;
+      renderNodes(nodesData);
+    }
   }
 
   // ---- Pattern rendering -------------------------------------
@@ -914,10 +1282,242 @@ body{
     }
   }
 
+  // ============================================================ //
+  // v0.26.0: Child Nodes Rendering                               //
+  // ============================================================ //
+  function renderNodes(nodes){
+    var body = $("nodesBody");
+    if(!nodes || !nodes.length){
+      body.innerHTML = '<tr><td colspan="10" class="no-data">No child nodes</td></tr>';
+      return;
+    }
+    var html = "";
+    for(var i = 0; i < nodes.length; i++){
+      var n = nodes[i];
+      var nid = n.node_id || n.id || ("node-" + i);
+      var sym = n.symbol || "--";
+      var tf = n.timeframe || n.tf || "--";
+      var alloc = n.allocation_pct || n.allocation || 0;
+      var cap = n.available_capital || n.capital || 0;
+      var lev = n.leverage || 1;
+      var mode = n.auto_mode !== undefined ? n.auto_mode : (n.mode === "auto");
+      var enabled = n.enabled !== undefined ? n.enabled : true;
+      var pnl = n.pnl || 0;
+      var modeClass = mode ? "node-mode-auto" : "node-mode-manual";
+      var modeText = mode ? "AUTO" : "MANUAL";
+      var enabledClass = enabled ? "node-enabled" : "node-disabled";
+      var enabledText = enabled ? "Yes" : "No";
+      var pnlClass = pnl >= 0 ? "pnl-positive" : "pnl-negative";
+
+      html += "<tr>"
+        + "<td>" + nid + "</td>"
+        + "<td>" + sym + "</td>"
+        + "<td>" + tf + "</td>"
+        + "<td>" + fmtPct(alloc) + "</td>"
+        + "<td>" + fmt$(cap) + "</td>"
+        + "<td>" + lev + "x</td>"
+        + '<td><span class="' + modeClass + '">' + modeText + '</span></td>'
+        + '<td class="' + enabledClass + '">' + enabledText + '</td>'
+        + '<td class="' + pnlClass + '">' + (pnl >= 0 ? "+" : "") + fmt$(pnl) + '</td>'
+        + '<td>'
+        + '<button class="btn-sm" onclick="window._toggleNodeMode(\'' + nid + '\',' + !mode + ')">Toggle Mode</button> '
+        + '<button class="btn-sm btn-danger" onclick="window._removeNode(\'' + nid + '\')">Remove</button>'
+        + '</td>'
+        + "</tr>";
+    }
+    body.innerHTML = html;
+  }
+
+  // ============================================================ //
+  // v0.26.0: Kill Switch UI                                      //
+  // ============================================================ //
+  function updateKillSwitchBtn(){
+    var btn = $("killSwitchBtn");
+    if(killSwitchActive){
+      btn.textContent = "DEACTIVATE KILL SWITCH";
+      btn.classList.add("active");
+    }else{
+      btn.textContent = "ACTIVATE KILL SWITCH";
+      btn.classList.remove("active");
+    }
+  }
+
+  $("killSwitchBtn").addEventListener("click", function(){
+    if(killSwitchActive){
+      apiPost("/api/nodes/kill-switch/deactivate", {}).then(function(r){
+        if(r && r.success){ killSwitchActive = false; updateKillSwitchBtn(); }
+      });
+    }else{
+      apiPost("/api/nodes/kill-switch/activate", {}).then(function(r){
+        if(r && r.success){ killSwitchActive = true; updateKillSwitchBtn(); }
+      });
+    }
+  });
+
+  // ============================================================ //
+  // v0.26.0: Leverage selector                                   //
+  // ============================================================ //
+  $("mmLeverage").addEventListener("change", function(){
+    var lev = parseInt(this.value, 10);
+    apiPost("/api/nodes/leverage", {leverage: lev});
+  });
+
+  // ============================================================ //
+  // v0.26.0: Auto/Manual toggle                                  //
+  // ============================================================ //
+  $("mmAutoMode").addEventListener("change", function(){
+    var auto = this.checked;
+    apiPost("/api/nodes/auto-mode", {auto_mode: auto});
+  });
+
+  // ============================================================ //
+  // v0.26.0: Add Node                                            //
+  // ============================================================ //
+  $("addNodeBtn").addEventListener("click", function(){
+    var symbol = $("addNodeSymbol").value.trim();
+    var tf = $("addNodeTF").value;
+    var allocation = parseFloat($("addNodeAllocation").value) || 0;
+    var leverage = parseInt($("addNodeLeverage").value, 10) || 1;
+
+    if(!symbol){
+      $("addNodeSymbol").style.borderColor = "var(--red)";
+      setTimeout(function(){ $("addNodeSymbol").style.borderColor = ""; }, 1500);
+      return;
+    }
+    if(allocation <= 0 || allocation > 100){
+      $("addNodeAllocation").style.borderColor = "var(--red)";
+      setTimeout(function(){ $("addNodeAllocation").style.borderColor = ""; }, 1500);
+      return;
+    }
+
+    apiPost("/api/nodes/add", {
+      symbol: symbol,
+      timeframe: tf,
+      allocation_pct: allocation,
+      leverage: leverage
+    }).then(function(r){
+      if(r && r.success){
+        $("addNodeSymbol").value = "";
+        $("addNodeAllocation").value = "";
+        fetchNodes();
+      }
+    });
+  });
+
+  // ============================================================ //
+  // v0.26.0: Node actions (global handlers)                      //
+  // ============================================================ //
+  window._toggleNodeMode = function(nodeId, newMode){
+    apiPost("/api/nodes/auto-mode", {node_id: nodeId, auto_mode: newMode}).then(function(){
+      fetchNodes();
+    });
+  };
+
+  window._removeNode = function(nodeId){
+    if(!confirm("Remove node " + nodeId + "?")) return;
+    apiPost("/api/nodes/remove", {node_id: nodeId}).then(function(){
+      fetchNodes();
+    });
+  };
+
+  // ============================================================ //
+  // v0.26.0: Fetch nodes via API                                 //
+  // ============================================================ //
+  function fetchNodes(){
+    apiGet("/api/nodes").then(function(data){
+      if(data && Array.isArray(data)){
+        nodesData = data;
+        renderNodes(nodesData);
+      } else if(data && data.nodes && Array.isArray(data.nodes)){
+        nodesData = data.nodes;
+        renderNodes(nodesData);
+      }
+    });
+  }
+
+  // ============================================================ //
+  // v0.26.0: Backtest Quick Run                                  //
+  // ============================================================ //
+  $("btRunBtn").addEventListener("click", function(){
+    var symbol = $("btSymbol").value.trim();
+    var timeframe = $("btTimeframe").value;
+    var capital = parseFloat($("btCapital").value) || 10000;
+
+    if(!symbol){
+      $("btSymbol").style.borderColor = "var(--red)";
+      setTimeout(function(){ $("btSymbol").style.borderColor = ""; }, 1500);
+      return;
+    }
+
+    var btn = $("btRunBtn");
+    btn.disabled = true;
+    btn.textContent = "Running...";
+
+    apiPost("/api/backtest", {
+      symbol: symbol,
+      timeframe: timeframe,
+      capital: capital
+    }).then(function(r){
+      btn.disabled = false;
+      btn.textContent = "Run Backtest";
+
+      if(!r){
+        $("btResults").classList.remove("visible");
+        return;
+      }
+
+      $("btResults").classList.add("visible");
+
+      var trades = r.total_trades || r.trades_count || 0;
+      var winRate = r.win_rate || 0;
+      var pnl = r.pnl || r.total_pnl || 0;
+      var maxDD = r.max_drawdown || r.max_dd || 0;
+
+      $("btTotalTrades").textContent = trades;
+      $("btWinRate").textContent = fmtPct(winRate * 100);
+      $("btWinRate").style.color = winRate >= 0.5 ? "var(--green)" : "var(--red)";
+
+      $("btPnl").textContent = (pnl >= 0 ? "+" : "") + fmt$(pnl);
+      $("btPnl").style.color = pnl >= 0 ? "var(--green)" : "var(--red)";
+
+      $("btMaxDD").textContent = fmtPct(maxDD * 100);
+      $("btMaxDD").style.color = "var(--red)";
+
+      // Render trades list if available
+      var tradesEl = $("btTrades");
+      var tradesList = r.trades || [];
+      if(tradesList.length){
+        var tHtml = "";
+        for(var i = 0; i < Math.min(tradesList.length, 50); i++){
+          var t = tradesList[i];
+          var tDir = (t.direction || t.side || "--").toUpperCase();
+          var tDirColor = tDir === "LONG" || tDir === "BUY" ? "var(--green)" : "var(--red)";
+          var tPnl = t.pnl || 0;
+          var tPnlClass = tPnl >= 0 ? "pnl-positive" : "pnl-negative";
+          tHtml += '<div class="bt-trade-row">'
+            + '<span style="color:' + tDirColor + ';font-weight:600;min-width:50px">' + tDir + '</span>'
+            + '<span>' + (t.symbol || "--") + '</span>'
+            + '<span>' + (t.entry_price ? fmtPrice(t.entry_price) : "--") + '</span>'
+            + '<span>' + (t.exit_price ? fmtPrice(t.exit_price) : "--") + '</span>'
+            + '<span class="' + tPnlClass + '">' + (tPnl >= 0 ? "+" : "") + fmt$(tPnl) + '</span>'
+            + '</div>';
+        }
+        tradesEl.innerHTML = tHtml;
+      }else{
+        tradesEl.innerHTML = '<div class="no-data" style="padding:6px 0">No trade details</div>';
+      }
+    }).catch(function(){
+      btn.disabled = false;
+      btn.textContent = "Run Backtest";
+    });
+  });
+
   // ---- Init --------------------------------------------------
   connectWS();
   // Also start REST polling immediately for first load
   pollREST();
+  // Fetch initial nodes data
+  fetchNodes();
 
   // Redraw equity on resize
   var resizeTimer;
