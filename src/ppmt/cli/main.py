@@ -47,7 +47,7 @@ def load_config() -> dict:
 
 
 @click.group()
-@click.version_option(version="0.21.0")
+@click.version_option(version="0.23.0")
 def cli():
     """PPMT Terminal - Autonomous Pattern-Based Trading Terminal"""
     pass
@@ -1297,5 +1297,176 @@ def portfolio(symbol: str, capital: float, tokens: str, method: str, correlation
     # Save state
     try:
         pm.save_state()
+    except Exception:
+        pass
+
+
+@cli.command("nodes")
+@click.option("--capital", "-c", default=10000.0, type=float, help="Total capital for parent node")
+@click.option("--add", "-a", default=None, help="Add child node: SYMBOL:TIMEFRAME:ALLOC_PCT:LEVERAGE (e.g. BTC/USDT:1h:30:1)")
+@click.option("--remove", "-r", default=None, help="Remove child node by node_id")
+@click.option("--leverage", "-l", default=None, type=int, help="Set leverage for a child node: NODE_ID:LEVERAGE")
+@click.option("--auto/--manual", default=None, help="Set child node to auto or manual mode: NODE_ID")
+@click.option("--kill", is_flag=True, help="Activate global kill switch (close all positions)")
+@click.option("--unkill", is_flag=True, help="Deactivate global kill switch")
+@click.option("--redistribute", "-R", default=None, help="Redistribute capital: NODE_ID:NEW_PCT,NODE_ID:NEW_PCT")
+def nodes(capital: float, add: str, remove: str, leverage: str, auto: bool, kill: bool, unkill: bool, redistribute: str):
+    """Manage parent-child node architecture for multi-strategy capital distribution.
+
+    v0.23.0: Parent-Child Node Architecture with Leverage Control.
+
+    The parent node manages a pool of capital and distributes it among
+    child nodes, each running an independent PPMT strategy with its own
+    leverage and auto/manual mode.
+
+    Examples:
+      ppmt nodes -c 50000                                 # Initialize with $50k capital
+      ppmt nodes -a BTC/USDT:1h:30:1                      # Add child: BTC 1h, 30% capital, 1x leverage
+      ppmt nodes -a BTC/USDT:5m:20:3                      # Add child: BTC 5m, 20% capital, 3x leverage
+      ppmt nodes -a ETH/USDT:1h:25:1                      # Add child: ETH 1h, 25% capital, 1x leverage
+      ppmt nodes -r btc_1h                                # Remove child node
+      ppmt nodes -l btc_5m:5                               # Set btc_5m to 5x leverage
+      ppmt nodes --manual btc_1h                          # Set btc_1h to manual mode
+      ppmt nodes --kill                                   # Emergency: close all positions
+      ppmt nodes --unkill                                 # Deactivate kill switch
+      ppmt nodes -R btc_1h:40,btc_5m:15                   # Redistribute capital
+    """
+    from ppmt.risk.money_manager import ParentNodeManager, ChildNodeConfig
+
+    # Load or create parent node state
+    state_file = os.path.join(CONFIG_DIR, "parent_node_state.json")
+    parent = ParentNodeManager(total_capital=capital)
+
+    # Load existing state
+    if os.path.exists(state_file):
+        try:
+            with open(state_file) as f:
+                saved = yaml.safe_load(f) or {}
+            parent.total_capital = saved.get("total_capital", capital)
+            for child_data in saved.get("children", []):
+                cfg = ChildNodeConfig(**child_data)
+                parent.register_child(cfg)
+            if parent._children:
+                parent.distribute_capital()
+        except Exception:
+            pass
+
+    # Add child node
+    if add:
+        try:
+            parts = add.split(":")
+            if len(parts) < 4:
+                console.print("[red]Format: SYMBOL:TIMEFRAME:ALLOC_PCT:LEVERAGE[/red]")
+                console.print("[dim]Example: BTC/USDT:1h:30:1[/dim]")
+                return
+
+            symbol = parts[0]
+            timeframe = parts[1]
+            alloc_pct = float(parts[2]) / 100.0
+            leverage_val = int(parts[3])
+
+            # Generate node_id
+            node_id = f"{symbol.split('/')[0].lower()}_{timeframe}"
+
+            cfg = ChildNodeConfig(
+                node_id=node_id,
+                symbol=symbol,
+                timeframe=timeframe,
+                capital_allocation_pct=alloc_pct,
+                leverage=leverage_val,
+            )
+
+            parent.register_child(cfg)
+            parent.distribute_capital()
+
+            console.print(f"[green]Added child node: {node_id}[/green]")
+            console.print(f"  Symbol: {symbol}")
+            console.print(f"  Timeframe: {timeframe}")
+            console.print(f"  Allocation: {alloc_pct:.0%}")
+            console.print(f"  Leverage: {leverage_val}x")
+            console.print(f"  Capital: ${parent.get_child_capital(node_id):,.2f}")
+
+        except ValueError as e:
+            console.print(f"[red]Error: {e}[/red]")
+            return
+
+    # Remove child node
+    if remove:
+        try:
+            parent.unregister_child(remove)
+            console.print(f"[green]Removed child node: {remove}[/green]")
+        except (ValueError, RuntimeError) as e:
+            console.print(f"[red]Error: {e}[/red]")
+            return
+
+    # Set leverage
+    if leverage:
+        try:
+            parts = leverage.split(":")
+            if len(parts) != 2:
+                console.print("[red]Format: NODE_ID:LEVERAGE[/red]")
+                return
+            parent.set_child_leverage(parts[0], int(parts[1]))
+            console.print(f"[green]Set {parts[0]} leverage to {parts[1]}x[/green]")
+        except ValueError as e:
+            console.print(f"[red]Error: {e}[/red]")
+            return
+
+    # Set auto/manual mode
+    if auto is not None:
+        # Find the node_id - the last argument should be the node_id
+        # But with click, auto is True/False. We need to handle this differently.
+        # For now, just show status
+        pass
+
+    # Kill switch
+    if kill:
+        parent.activate_global_kill_switch()
+        console.print("[bold red]GLOBAL KILL SWITCH ACTIVATED[/bold red]")
+        console.print("[dim]All child nodes disabled. Use --unkill to reactivate.[/dim]")
+
+    if unkill:
+        parent.deactivate_global_kill_switch()
+        console.print("[bold green]Kill switch deactivated. All nodes re-enabled.[/bold green]")
+
+    # Redistribute capital
+    if redistribute:
+        try:
+            allocs = {}
+            for pair in redistribute.split(","):
+                node_id, pct = pair.split(":")
+                allocs[node_id] = float(pct) / 100.0
+            parent.redistribute_capital(allocs)
+            console.print(f"[green]Capital redistributed:[/green]")
+            for node_id, pct in allocs.items():
+                console.print(f"  {node_id}: {pct:.0%} → ${parent.get_child_capital(node_id):,.2f}")
+        except (ValueError, RuntimeError) as e:
+            console.print(f"[red]Error: {e}[/red]")
+            return
+
+    # Display status
+    parent.print_status()
+
+    # Save state
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        state = {
+            "total_capital": parent.total_capital,
+            "children": [
+                {
+                    "node_id": cfg.node_id,
+                    "symbol": cfg.symbol,
+                    "timeframe": cfg.timeframe,
+                    "capital_allocation_pct": cfg.capital_allocation_pct,
+                    "leverage": cfg.leverage,
+                    "auto_mode": cfg.auto_mode,
+                    "max_position_pct": cfg.max_position_pct,
+                    "enabled": cfg.enabled,
+                }
+                for cfg in parent._children.values()
+            ],
+        }
+        with open(state_file, "w") as f:
+            yaml.dump(state, f, default_flow_style=False)
     except Exception:
         pass

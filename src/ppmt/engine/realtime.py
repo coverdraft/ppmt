@@ -850,24 +850,29 @@ class RealtimeTrader:
                             except Exception:
                                 pass
 
-                        # v0.21.0: Adaptive signal gating
+                        # v0.22.0: Adaptive signal gating
                         # Confidence from Bayesian shrinkage is typically 0.08-0.22,
                         # so we also check overall_probability and expected_move as
                         # alternative quality indicators. A pattern with confidence=0.10
                         # but probability=0.80 and move=1.5% is a valid signal.
-                        move_threshold = 0.15  # v0.21.0: lowered from 0.3 (alpha=5 patterns have smaller moves)
-                        prob_threshold = 0.10  # v0.21.0: lowered from 0.20
+                        move_threshold = 0.30  # v0.22.0: raised from 0.15 to filter noise
+                        prob_threshold = 0.15  # v0.22.0: raised from 0.10 for better quality
 
                         # Confidence boost: if overall_probability is strong and move is
                         # significant, boost confidence up to min_confidence level
                         boosted_confidence = weighted_confidence
-                        if (prediction.overall_probability >= 0.40
+                        if (prediction.overall_probability >= 0.35
                                 and abs(prediction.expected_total_move_pct) >= 0.5):
                             # Strong pattern match — boost confidence by probability
                             boosted_confidence = max(
                                 weighted_confidence,
                                 weighted_confidence * (1 + prediction.overall_probability),
                             )
+
+                        # v0.22.0: Extra quality gate — reject if win_rate too low
+                        # and move is tiny (likely noise signal)
+                        if prediction.overall_probability < 0.25 and abs(prediction.expected_total_move_pct) < 0.5:
+                            continue
 
                         if (position_state == PositionState.FLAT
                                 and prediction.direction != "FLAT"
@@ -878,16 +883,18 @@ class RealtimeTrader:
                             result.signals_generated += 1
 
                             # v0.11.0: Prediction-aware SL/TP (same as PaperTrader)
+                            # v0.22.0: Tightened SL (1.2x) and lowered TP (2.0x) for better
+                            # win rate. Previous 1.5x/2.5x was too loose SL and too greedy TP.
                             expected_move_abs = abs(prediction.expected_total_move_pct)
 
                             if prediction.direction == "LONG":
-                                sl_distance_pct = max(min(expected_move_abs * 1.5, 5.0), 0.5)
-                                tp_distance_pct = expected_move_abs * 2.5
+                                sl_distance_pct = max(min(expected_move_abs * 1.2, 3.0), 0.5)
+                                tp_distance_pct = expected_move_abs * 2.0
                                 if tp_distance_pct < sl_distance_pct * 1.5:
                                     tp_distance_pct = sl_distance_pct * 1.5
                             else:  # SHORT
-                                sl_distance_pct = max(min(expected_move_abs * 1.5, 5.0), 0.5)
-                                tp_distance_pct = expected_move_abs * 2.5
+                                sl_distance_pct = max(min(expected_move_abs * 1.2, 3.0), 0.5)
+                                tp_distance_pct = expected_move_abs * 2.0
                                 if tp_distance_pct < sl_distance_pct * 1.5:
                                     tp_distance_pct = sl_distance_pct * 1.5
 
@@ -1422,18 +1429,18 @@ class RealtimeTrader:
                     except Exception:
                         pass
 
-                # Entry signal check
+                # Entry signal check (v0.22.0: tightened thresholds)
                 if (prediction.direction != "FLAT"
                         and weighted_confidence >= effective_min_conf
-                        and abs(prediction.expected_total_move_pct) > 0.3
-                        and prediction.overall_probability > 0.20):
+                        and abs(prediction.expected_total_move_pct) > 0.30
+                        and prediction.overall_probability > 0.15):
 
                     result.signals_generated += 1
 
-                    # v0.12.0: Prediction-aware SL/TP
+                    # v0.22.0: Prediction-aware SL/TP with tighter stops
                     expected_move_abs = abs(prediction.expected_total_move_pct)
-                    sl_distance_pct = max(min(expected_move_abs * 1.5, 5.0), 0.5)
-                    tp_distance_pct = expected_move_abs * 2.5
+                    sl_distance_pct = max(min(expected_move_abs * 1.2, 3.0), 0.5)
+                    tp_distance_pct = expected_move_abs * 2.0
                     if tp_distance_pct < sl_distance_pct * 1.5:
                         tp_distance_pct = sl_distance_pct * 1.5
 
@@ -2318,8 +2325,10 @@ def _recalibrate(sax_encoder, cfg, storage, info) -> None:
             # Update SAX encoder parameters
             sax_encoder.alphabet_size = new_alpha
             sax_encoder.window_size = new_window
-            # Reset normalization stats for new params
-            sax_encoder._zscore_stats = None
+            # Reset normalization stats for new params (v0.22.0: fixed attr name)
+            sax_encoder._running_paa_mean = None
+            sax_encoder._running_paa_std = None
+            sax_encoder._running_paa_values = []
 
             console.print(f"[bold yellow]Recalibrated:[/bold yellow] "
                           f"alpha={old_alpha}->{new_alpha}, window={old_window}->{new_window}")

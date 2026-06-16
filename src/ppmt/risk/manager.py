@@ -48,6 +48,8 @@ class Position:
     remaining_candles: int = 0
     """Predicted candles remaining from metadata."""
     unrealized_pnl_pct: float = 0.0
+    asset_class: str = ""
+    """Asset class (e.g., 'blue_chip', 'mid_cap') for correlation checks."""
 
 
 @dataclass
@@ -159,7 +161,7 @@ class RiskManager:
         if asset_class and self.config.max_correlated_positions > 0:
             correlated_count = sum(
                 1 for p in self._positions.values()
-                if getattr(p, '_asset_class', '') == asset_class
+                if p.asset_class == asset_class
             )
             if correlated_count >= self.config.max_correlated_positions:
                 return False, f"Max correlated positions ({asset_class}): {correlated_count}"
@@ -233,7 +235,7 @@ class RiskManager:
         max_size = self.capital / signal.entry_price
         return min(size, max_size)
 
-    def open_position(self, signal: Signal, size: float) -> Position:
+    def open_position(self, signal: Signal, size: float, asset_class: str = "") -> Position:
         """Open a new position from a signal."""
         import time as _time
 
@@ -250,6 +252,7 @@ class RiskManager:
             sizing_multiplier=signal.sizing_multiplier,
             expected_move_pct=signal.expected_move_pct,
             remaining_candles=signal.remaining_candles,
+            asset_class=asset_class,
         )
 
         self._positions[signal.symbol] = position

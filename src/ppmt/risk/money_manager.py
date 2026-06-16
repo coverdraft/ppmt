@@ -1458,3 +1458,479 @@ class MoneyManager:
             f"\n[dim]Closed positions: {report['closed_position_count']}  |  "
             f"Total realized: ${report['closed_position_total_pnl']:+,.2f}[/dim]"
         )
+
+
+# ---------------------------------------------------------------------------
+# v0.23.0: Parent-Child Node Architecture & Leverage Control
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ChildNodeConfig:
+    """Configuration for a child trading node.
+
+    A child node represents a subprocess or independent strategy running
+    under a parent MoneyManager. Each child gets allocated a portion of
+    the parent's capital and can operate semi-independently.
+
+    Attributes:
+        node_id: Unique identifier for this child node (e.g., 'btc_1m', 'eth_5m').
+        symbol: Trading pair this node handles (e.g., 'BTC/USDT').
+        timeframe: Candle timeframe (e.g., '1m', '5m', '1h').
+        capital_allocation_pct: Fraction of parent capital allocated to this node (0-1).
+        leverage: Leverage multiplier (1 = spot, 2-125 = futures).
+        auto_mode: If True, signals execute automatically. If False, require manual confirmation.
+        max_position_pct: Max position size as fraction of this node's allocated capital.
+        enabled: Whether this child node is actively trading.
+    """
+    node_id: str = ""
+    symbol: str = ""
+    timeframe: str = "1h"
+    capital_allocation_pct: float = 0.20  # 20% of parent capital by default
+    leverage: int = 1
+    auto_mode: bool = True
+    max_position_pct: float = 0.10  # 10% of allocated capital per trade
+    enabled: bool = True
+
+
+@dataclass
+class ChildNodeState:
+    """Runtime state for a child trading node.
+
+    Tracks the child's allocated capital, P&L, and position state
+    independently from the parent MoneyManager.
+    """
+    node_id: str
+    allocated_capital: float = 0.0
+    available_capital: float = 0.0
+    realized_pnl: float = 0.0
+    unrealized_pnl: float = 0.0
+    open_positions: int = 0
+    total_trades: int = 0
+    winning_trades: int = 0
+    leverage: int = 1
+    last_heartbeat: float = 0.0
+
+
+class ParentNodeManager:
+    """
+    Parent-Child Node Architecture for Multi-Strategy Capital Distribution (v0.23.0).
+
+    The Parent Node manages a pool of capital and distributes it among
+    Child Nodes, each running an independent PPMT strategy. This enables:
+
+    1. **Capital Distribution**: Allocate specific % of total capital to each child.
+       Parent retains a reserve for safety.
+
+    2. **Leverage Control**: Each child can have different leverage settings.
+       BTC 1h might use 1x (spot), while BTC 5m uses 3x leverage.
+
+    3. **Auto/Manual Modes**: Each child operates in auto or manual mode.
+       Auto mode executes signals automatically. Manual mode displays signals
+       but waits for human confirmation.
+
+    4. **Parent-Child Communication**: Parent sends capital allocation updates,
+       children report back P&L and position state.
+
+    5. **Risk Aggregation**: Parent monitors total exposure across all children,
+       can trigger kill switches globally or per-child.
+
+    Architecture:
+        ParentNodeManager (capital pool, risk aggregation)
+          ├── ChildNode (BTC/USDT, 1h, 30% capital, leverage=1, auto)
+          ├── ChildNode (BTC/USDT, 5m, 20% capital, leverage=3, auto)
+          ├── ChildNode (ETH/USDT, 1h, 25% capital, leverage=1, manual)
+          └── Reserve (25% capital, not allocated)
+
+    Usage:
+        parent = ParentNodeManager(total_capital=100_000)
+
+        # Register children
+        parent.register_child(ChildNodeConfig(
+            node_id="btc_1h", symbol="BTC/USDT", timeframe="1h",
+            capital_allocation_pct=0.30, leverage=1, auto_mode=True,
+        ))
+        parent.register_child(ChildNodeConfig(
+            node_id="btc_5m", symbol="BTC/USDT", timeframe="5m",
+            capital_allocation_pct=0.20, leverage=3, auto_mode=True,
+        ))
+
+        # Distribute capital
+        parent.distribute_capital()
+
+        # Get capital for a specific child
+        child_capital = parent.get_child_capital("btc_1h")
+
+        # Update child P&L
+        parent.update_child_pnl("btc_1h", realized=150.0, unrealized=-20.0)
+
+        # Check if child can open a position
+        if parent.can_child_open("btc_1h", position_notional=5000):
+            parent.allocate_child_capital("btc_1h", 5000)
+
+        # Emergency: kill all children
+        parent.activate_global_kill_switch()
+    """
+
+    def __init__(self, total_capital: float = 10_000.0):
+        self.total_capital = total_capital
+        self._children: dict[str, ChildNodeConfig] = {}
+        self._child_states: dict[str, ChildNodeState] = {}
+        self._global_kill_switch: bool = False
+        self._global_kill_switch_time: Optional[float] = None
+
+    @property
+    def reserve_capital(self) -> float:
+        """Capital not allocated to any child node."""
+        allocated = sum(s.allocated_capital for s in self._child_states.values())
+        return self.total_capital - allocated
+
+    @property
+    def total_realized_pnl(self) -> float:
+        """Sum of realized P&L across all children."""
+        return sum(s.realized_pnl for s in self._child_states.values())
+
+    @property
+    def total_unrealized_pnl(self) -> float:
+        """Sum of unrealized P&L across all children."""
+        return sum(s.unrealized_pnl for s in self._child_states.values())
+
+    @property
+    def total_portfolio_value(self) -> float:
+        """Total portfolio value across all children + reserve."""
+        return (self.reserve_capital +
+                self.total_realized_pnl +
+                self.total_unrealized_pnl)
+
+    @property
+    def total_exposure_pct(self) -> float:
+        """Total exposure as fraction of total portfolio value."""
+        if self.total_portfolio_value <= 0:
+            return 0.0
+        total_notional = 0.0
+        for node_id, state in self._child_states.items():
+            if state.open_positions > 0:
+                config = self._children.get(node_id)
+                if config:
+                    # Estimate notional from available capital and leverage
+                    position_capital = state.allocated_capital - state.available_capital
+                    total_notional += position_capital * state.leverage
+        return total_notional / self.total_portfolio_value
+
+    def register_child(self, config: ChildNodeConfig) -> None:
+        """Register a new child node with the parent.
+
+        Args:
+            config: ChildNodeConfig with allocation and trading parameters.
+        """
+        if config.node_id in self._children:
+            raise ValueError(f"Child node '{config.node_id}' already registered")
+
+        if config.capital_allocation_pct <= 0 or config.capital_allocation_pct > 1:
+            raise ValueError(f"capital_allocation_pct must be (0, 1], got {config.capital_allocation_pct}")
+
+        self._children[config.node_id] = config
+        self._child_states[config.node_id] = ChildNodeState(
+            node_id=config.node_id,
+            leverage=config.leverage,
+            last_heartbeat=time.time(),
+        )
+
+    def unregister_child(self, node_id: str) -> None:
+        """Remove a child node. Its allocated capital returns to reserve."""
+        if node_id not in self._children:
+            raise ValueError(f"Child node '{node_id}' not found")
+
+        # Close any open positions first
+        state = self._child_states[node_id]
+        if state.open_positions > 0:
+            raise RuntimeError(
+                f"Cannot unregister '{node_id}': has {state.open_positions} open positions. "
+                f"Close all positions first."
+            )
+
+        # Return capital to reserve
+        state.available_capital = 0.0
+        state.allocated_capital = 0.0
+
+        del self._children[node_id]
+        del self._child_states[node_id]
+
+    def distribute_capital(self) -> None:
+        """Distribute capital among all registered child nodes.
+
+        Allocates capital based on each child's capital_allocation_pct.
+        If total allocation exceeds 100%, scales down proportionally.
+        """
+        total_allocation = sum(c.capital_allocation_pct for c in self._children.values())
+
+        if total_allocation > 1.0:
+            # Scale down proportionally to fit within 100%
+            scale_factor = 0.95 / total_allocation  # Leave 5% reserve
+            for config in self._children.values():
+                effective_pct = config.capital_allocation_pct * scale_factor
+                allocated = self.total_capital * effective_pct
+                self._child_states[config.node_id].allocated_capital = allocated
+                self._child_states[config.node_id].available_capital = allocated
+        else:
+            for config in self._children.values():
+                allocated = self.total_capital * config.capital_allocation_pct
+                self._child_states[config.node_id].allocated_capital = allocated
+                self._child_states[config.node_id].available_capital = allocated
+
+    def get_child_capital(self, node_id: str) -> float:
+        """Get the current available capital for a child node."""
+        if node_id not in self._child_states:
+            raise ValueError(f"Child node '{node_id}' not found")
+        return self._child_states[node_id].available_capital
+
+    def get_child_leverage(self, node_id: str) -> int:
+        """Get the leverage setting for a child node."""
+        if node_id not in self._children:
+            raise ValueError(f"Child node '{node_id}' not found")
+        return self._children[node_id].leverage
+
+    def set_child_leverage(self, node_id: str, leverage: int) -> None:
+        """Update leverage for a child node (v0.23.0).
+
+        Leverage can be changed dynamically. Must be between 1 (spot)
+        and 125 (max futures leverage). Changes take effect on the next
+        trade — existing positions are not affected.
+        """
+        if node_id not in self._children:
+            raise ValueError(f"Child node '{node_id}' not found")
+        if leverage < 1 or leverage > 125:
+            raise ValueError(f"Leverage must be 1-125, got {leverage}")
+
+        self._children[node_id].leverage = leverage
+        self._child_states[node_id].leverage = leverage
+
+    def set_child_auto_mode(self, node_id: str, auto: bool) -> None:
+        """Switch a child node between auto and manual mode.
+
+        Auto mode: signals execute automatically.
+        Manual mode: signals are displayed but require confirmation.
+        """
+        if node_id not in self._children:
+            raise ValueError(f"Child node '{node_id}' not found")
+        self._children[node_id].auto_mode = auto
+
+    def can_child_open(self, node_id: str, position_notional: float) -> tuple[bool, str]:
+        """Check if a child node can open a new position.
+
+        Checks:
+          1. Child node exists and is enabled
+          2. Global kill switch is not active
+          3. Child has enough available capital
+          4. Position doesn't exceed max_position_pct of allocated capital
+          5. Total portfolio exposure is within limits
+        """
+        if self._global_kill_switch:
+            return False, "Global kill switch active"
+
+        if node_id not in self._children:
+            return False, f"Child node '{node_id}' not found"
+
+        config = self._children[node_id]
+        if not config.enabled:
+            return False, f"Child node '{node_id}' is disabled"
+
+        state = self._child_states[node_id]
+
+        # Check available capital (with leverage)
+        leveraged_capital = state.available_capital * config.leverage
+        if position_notional > leveraged_capital:
+            return False, f"Insufficient capital: need ${position_notional:,.2f}, have ${leveraged_capital:,.2f}"
+
+        # Check max position size
+        max_notional = state.allocated_capital * config.max_position_pct * config.leverage
+        if position_notional > max_notional:
+            return False, f"Position exceeds max: ${max_notional:,.2f}"
+
+        # Check total exposure
+        if self.total_exposure_pct > 0.90:
+            return False, f"Portfolio exposure too high: {self.total_exposure_pct:.1%}"
+
+        return True, "OK"
+
+    def allocate_child_capital(self, node_id: str, amount: float) -> None:
+        """Allocate capital from a child's available pool to a position."""
+        if node_id not in self._child_states:
+            raise ValueError(f"Child node '{node_id}' not found")
+
+        state = self._child_states[node_id]
+        if amount > state.available_capital:
+            raise ValueError(
+                f"Cannot allocate ${amount:,.2f}: only ${state.available_capital:,.2f} available"
+            )
+        state.available_capital -= amount
+        state.open_positions += 1
+
+    def release_child_capital(self, node_id: str, amount: float, pnl: float = 0.0) -> None:
+        """Release capital back to a child's available pool when a position closes.
+
+        Args:
+            node_id: Child node identifier.
+            amount: Original allocated amount to return.
+            pnl: Realized P&L from the closed position (positive = profit).
+        """
+        if node_id not in self._child_states:
+            raise ValueError(f"Child node '{node_id}' not found")
+
+        state = self._child_states[node_id]
+        state.available_capital += amount + pnl
+        state.realized_pnl += pnl
+        state.open_positions = max(0, state.open_positions - 1)
+        state.total_trades += 1
+        if pnl > 0:
+            state.winning_trades += 1
+
+    def update_child_pnl(self, node_id: str, realized: float = 0.0, unrealized: float = 0.0) -> None:
+        """Update P&L tracking for a child node."""
+        if node_id not in self._child_states:
+            raise ValueError(f"Child node '{node_id}' not found")
+
+        state = self._child_states[node_id]
+        state.realized_pnl += realized
+        state.unrealized_pnl = unrealized
+        state.last_heartbeat = time.time()
+
+    def activate_global_kill_switch(self) -> None:
+        """Emergency: activate kill switch for ALL child nodes.
+
+        All children should immediately close all positions and stop trading.
+        """
+        self._global_kill_switch = True
+        self._global_kill_switch_time = time.time()
+        # Disable all children
+        for config in self._children.values():
+            config.enabled = False
+
+    def deactivate_global_kill_switch(self) -> None:
+        """Deactivate the global kill switch, re-enabling all children."""
+        self._global_kill_switch = False
+        self._global_kill_switch_time = None
+        for config in self._children.values():
+            config.enabled = True
+
+    def activate_child_kill_switch(self, node_id: str) -> None:
+        """Emergency: activate kill switch for a single child node."""
+        if node_id not in self._children:
+            raise ValueError(f"Child node '{node_id}' not found")
+        self._children[node_id].enabled = False
+
+    def redistribute_capital(self, allocations: dict[str, float]) -> None:
+        """Re-distribute capital among children with new allocation percentages.
+
+        This is used when market conditions change and you want to shift
+        capital between strategies. Children with open positions will not
+        have their capital reduced below current exposure.
+
+        Args:
+            allocations: Dict of node_id → new capital_allocation_pct.
+        """
+        for node_id, new_pct in allocations.items():
+            if node_id not in self._children:
+                raise ValueError(f"Child node '{node_id}' not found")
+            if new_pct < 0 or new_pct > 1:
+                raise ValueError(f"Allocation must be [0, 1], got {new_pct}")
+
+            config = self._children[node_id]
+            state = self._child_states[node_id]
+
+            # Calculate new allocation
+            new_allocated = self.total_capital * new_pct
+
+            # Don't reduce below current exposure
+            current_exposure = state.allocated_capital - state.available_capital
+            if new_allocated < current_exposure:
+                new_allocated = current_exposure
+
+            # Calculate difference and adjust available capital
+            delta = new_allocated - state.allocated_capital
+            state.allocated_capital = new_allocated
+            state.available_capital = max(0, state.available_capital + delta)
+
+            config.capital_allocation_pct = new_pct
+
+    def get_status(self) -> dict:
+        """Get comprehensive status of all child nodes and the parent."""
+        children_status = {}
+        for node_id, config in self._children.items():
+            state = self._child_states[node_id]
+            allocated = state.allocated_capital
+            available = state.available_capital
+            children_status[node_id] = {
+                "symbol": config.symbol,
+                "timeframe": config.timeframe,
+                "allocation_pct": f"{config.capital_allocation_pct:.0%}",
+                "allocated_capital": f"${allocated:,.2f}",
+                "available_capital": f"${available:,.2f}",
+                "leverage": f"{config.leverage}x",
+                "auto_mode": config.auto_mode,
+                "enabled": config.enabled,
+                "open_positions": state.open_positions,
+                "total_trades": state.total_trades,
+                "win_rate": f"{state.winning_trades / state.total_trades:.1%}" if state.total_trades > 0 else "N/A",
+                "realized_pnl": f"${state.realized_pnl:+,.2f}",
+                "unrealized_pnl": f"${state.unrealized_pnl:+,.2f}",
+            }
+
+        return {
+            "total_capital": f"${self.total_capital:,.2f}",
+            "portfolio_value": f"${self.total_portfolio_value:,.2f}",
+            "reserve_capital": f"${self.reserve_capital:,.2f}",
+            "total_exposure_pct": f"{self.total_exposure_pct:.1%}",
+            "total_realized_pnl": f"${self.total_realized_pnl:+,.2f}",
+            "total_unrealized_pnl": f"${self.total_unrealized_pnl:+,.2f}",
+            "global_kill_switch": self._global_kill_switch,
+            "children": children_status,
+        }
+
+    def print_status(self) -> None:
+        """Print a formatted status table of all child nodes."""
+        status = self.get_status()
+
+        console.print(Panel(
+            f"[bold]PPMT Parent Node Manager[/bold]\n"
+            f"Total Capital: {status['total_capital']}  |  "
+            f"Portfolio Value: {status['portfolio_value']}  |  "
+            f"Reserve: {status['reserve_capital']}\n"
+            f"Exposure: {status['total_exposure_pct']}  |  "
+            f"P&L: {status['total_realized_pnl']}  |  "
+            f"Kill Switch: {'🔴 ACTIVE' if status['global_kill_switch'] else '🟢 OFF'}",
+            border_style="cyan",
+        ))
+
+        if status["children"]:
+            table = Table(title="Child Nodes", show_header=True)
+            table.add_column("Node ID", style="cyan")
+            table.add_column("Symbol")
+            table.add_column("TF")
+            table.add_column("Alloc", justify="right")
+            table.add_column("Available", justify="right")
+            table.add_column("Lev", justify="right")
+            table.add_column("Mode")
+            table.add_column("Positions", justify="right")
+            table.add_column("P&L", justify="right")
+            table.add_column("WR", justify="right")
+
+            for node_id, info in status["children"].items():
+                pnl_color = "green" if "+" in info["realized_pnl"] else "red"
+                mode_color = "green" if info["auto_mode"] else "yellow"
+                mode_text = "AUTO" if info["auto_mode"] else "MANUAL"
+                enabled_text = "✓" if info["enabled"] else "✗"
+
+                table.add_row(
+                    f"{enabled_text} {node_id}",
+                    info["symbol"],
+                    info["timeframe"],
+                    info["allocation_pct"],
+                    info["available_capital"],
+                    info["leverage"],
+                    f"[{mode_color}]{mode_text}[/{mode_color}]",
+                    str(info["open_positions"]),
+                    f"[{pnl_color}]{info['realized_pnl']}[/{pnl_color}]",
+                    info["win_rate"],
+                )
+
+            console.print(table)

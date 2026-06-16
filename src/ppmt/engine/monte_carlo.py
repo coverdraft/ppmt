@@ -312,61 +312,48 @@ def run_monte_carlo_for_symbol(
     ruin_threshold: float = 0.5,
     position_size_pct: float = 0.02,
     seed: Optional[int] = None,
+    timeframe: str = "1h",
 ) -> MonteCarloResult:
     """
-    High-level function: load data, run backtest, then Monte Carlo.
+    High-level function: load data, run backtest via RealtimeTrader, then Monte Carlo.
     This is what the CLI command calls.
+
+    v0.22.0: Replaced broken `run_rolling_backtest` import with RealtimeTrader
+    replay mode, which is the actual working backtest pipeline.
     """
-    import sqlite3
-    from ppmt.engine.ppmt import run_rolling_backtest
+    from ppmt.data.storage import PPMTStorage
+    from ppmt.engine.realtime import RealtimeTrader, ReplayConfig
 
-    # Load candle data
-    conn = sqlite3.connect(db_path)
-    table_name = symbol.replace("/", "_").replace("-", "_")
-    try:
-        df = pd.read_sql_query(
-            f"SELECT timestamp, open, high, low, close, volume FROM {table_name} ORDER BY timestamp",
-            conn,
-        )
-    except Exception:
-        # Try with prefix
-        try:
-            df = pd.read_sql_query(
-                f"SELECT timestamp, open, high, low, close, volume FROM candles_{table_name} ORDER BY timestamp",
-                conn,
-            )
-        except Exception:
-            # Fallback: list tables and pick the right one
-            tables = pd.read_sql_query("SELECT name FROM sqlite_master WHERE type='table'", conn)
-            matching = [t for t in tables["name"] if table_name.lower() in t.lower()]
-            if matching:
-                df = pd.read_sql_query(
-                    f"SELECT timestamp, open, high, low, close, volume FROM {matching[0]} ORDER BY timestamp",
-                    conn,
-                )
-            else:
-                conn.close()
-                raise ValueError(f"No data found for {symbol} in {db_path}")
-    finally:
-        conn.close()
+    # Load candle data via PPMTStorage
+    storage = PPMTStorage(db_path=db_path)
+    df = storage.load_ohlcv(symbol, timeframe)
+    storage.close()
 
-    if len(df) < 100:
-        raise ValueError(f"Insufficient data for {symbol}: only {len(df)} candles")
+    if df.empty or len(df) < 100:
+        raise ValueError(f"Insufficient data for {symbol}: only {len(df)} candles. Run 'ppmt ingest' first.")
 
-    logger.info(f"Loaded {len(df)} candles for {symbol}, running backtest...")
+    logger.info(f"Loaded {len(df)} candles for {symbol}, running backtest via RealtimeTrader...")
 
-    # Run backtest
-    bt_result = run_rolling_backtest(df, symbol=symbol, initial_capital=initial_capital)
+    # Run backtest using RealtimeTrader in replay mode (the working pipeline)
+    config = ReplayConfig(
+        symbol=symbol,
+        timeframe=timeframe,
+        initial_capital=initial_capital,
+        speed=0,  # Maximum speed
+        use_token_profile=True,
+    )
+    trader = RealtimeTrader(config=config)
+    bt_result = trader.run_replay()
 
     if not bt_result.trades:
-        raise ValueError(f"Backtest produced no trades for {symbol}")
+        raise ValueError(f"Backtest produced no trades for {symbol}. Try lowering min-confidence.")
 
     logger.info(f"Backtest: {bt_result.total_trades} trades, "
                 f"WR={bt_result.win_rate:.1%}, PnL={bt_result.total_pnl_pct:.1f}%")
 
     # Extract trade PnLs for Monte Carlo
-    trade_pnl_pcts = np.array([t["pnl_pct"] for t in bt_result.trades])
-    trade_pnls = np.array([t["pnl"] for t in bt_result.trades])
+    trade_pnl_pcts = np.array([t.pnl_pct for t in bt_result.trades])
+    trade_pnls = np.array([t.pnl for t in bt_result.trades])
 
     # Run Monte Carlo
     engine = MonteCarloEngine(seed=seed)
@@ -384,6 +371,6 @@ def run_monte_carlo_for_symbol(
     mc_result.stats["backtest_total_trades"] = bt_result.total_trades
     mc_result.stats["backtest_win_rate"] = bt_result.win_rate
     mc_result.stats["backtest_pnl_pct"] = bt_result.total_pnl_pct
-    mc_result.stats["backtest_max_dd_pct"] = bt_result.max_drawdown_pct
+    mc_result.stats["backtest_max_dd_pct"] = bt_result.max_drawdown
 
     return mc_result

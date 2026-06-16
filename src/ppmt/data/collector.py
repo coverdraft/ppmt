@@ -199,8 +199,12 @@ class DataCollector:
             return self._fetch_kraken(symbol, timeframe, days)
         elif exchange == "binance":
             return self._fetch_binance(symbol, timeframe, days)
+        elif exchange == "mexc":
+            return self._fetch_ccxt_exchange("mexc", symbol, timeframe, days)
         else:
-            raise ValueError(f"Unknown exchange: {exchange}")
+            # v0.22.0: Try ccxt as universal fallback instead of raising
+            logger.info(f"No direct API for {exchange}, trying ccxt fallback...")
+            return self._fetch_ccxt_exchange(exchange, symbol, timeframe, days)
 
     # ================================================================
     # BYBIT V5 API (Primary — free, public, no account needed)
@@ -612,6 +616,61 @@ class DataCollector:
         df = df.drop(columns=["timestamp"])
         df = df[~df.index.duplicated(keep="first")]
         return df.sort_index()
+
+    def _fetch_ccxt_exchange(
+        self,
+        exchange_name: str,
+        symbol: str,
+        timeframe: str = "1h",
+        days: int = 365,
+    ) -> pd.DataFrame:
+        """
+        Fetch data from any exchange supported by ccxt (v0.22.0).
+
+        Creates a temporary ccxt exchange instance for the specified
+        exchange name (e.g., 'mexc', 'kucoin', 'gate', etc.)
+        and fetches OHLCV data.
+        """
+        try:
+            import ccxt
+        except ImportError:
+            raise RuntimeError(
+                f"ccxt is required for {exchange_name} data fetching. "
+                f"Install with: pip install ccxt>=4.0.0"
+            )
+
+        exchange_class = getattr(ccxt, exchange_name, None)
+        if exchange_class is None:
+            raise ValueError(f"ccxt does not support exchange: {exchange_name}")
+
+        exchange = exchange_class({"enableRateLimit": True})
+        try:
+            since = exchange.parse8601(
+                (datetime.now(timezone.utc) - __import__("datetime").timedelta(days=days)).isoformat()
+            )
+
+            all_ohlcv = []
+            while since < exchange.milliseconds():
+                ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=1000)
+                if not ohlcv:
+                    break
+                all_ohlcv.extend(ohlcv)
+                since = ohlcv[-1][0] + 1
+                time.sleep(exchange.rateLimit / 1000.0)
+
+            if not all_ohlcv:
+                return pd.DataFrame()
+
+            df = pd.DataFrame(all_ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
+            df = df.set_index(pd.to_datetime(df["timestamp"], unit="ms"))
+            df = df.drop(columns=["timestamp"])
+            df = df[~df.index.duplicated(keep="first")]
+            return df.sort_index()
+        finally:
+            try:
+                exchange.close()
+            except Exception:
+                pass
 
     # ================================================================
     # CSV Import (offline)

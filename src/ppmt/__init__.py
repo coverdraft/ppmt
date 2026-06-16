@@ -6,4 +6,4 @@ architecture with SAX symbolization, Block Lifecycle Metadata,
 and fuzzy matching.
 """
 
-__version__ = "0.21.0"
+__version__ = "0.23.0"
