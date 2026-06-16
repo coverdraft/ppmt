@@ -781,10 +781,13 @@ class RealtimeTrader:
                             symbol=cfg.symbol,
                         )
 
-                        # Cooldown check
+                        # Cooldown check (v0.24.0: increased from 1 to 3 symbols)
+                        # After a losing trade, wait 3 SAX symbols before re-entering
+                        # to avoid revenge trading and let the market settle.
                         sym_idx = result.sax_symbols_produced
+                        cooldown_period = 3
                         if (current_position is None and
-                                sym_idx - last_losing_trade_idx < 1 and
+                                sym_idx - last_losing_trade_idx < cooldown_period and
                                 last_losing_trade_idx >= 0):
                             continue
 
@@ -850,29 +853,45 @@ class RealtimeTrader:
                             except Exception:
                                 pass
 
-                        # v0.22.0: Adaptive signal gating
-                        # Confidence from Bayesian shrinkage is typically 0.08-0.22,
-                        # so we also check overall_probability and expected_move as
-                        # alternative quality indicators. A pattern with confidence=0.10
-                        # but probability=0.80 and move=1.5% is a valid signal.
-                        move_threshold = 0.30  # v0.22.0: raised from 0.15 to filter noise
-                        prob_threshold = 0.15  # v0.22.0: raised from 0.10 for better quality
+                        # v0.24.0: Improved adaptive signal gating
+                        # Raised thresholds to filter noise and improve win rate.
+                        # The old 0.30 move / 0.15 prob let too many weak signals through.
+                        move_threshold = 0.50   # v0.24.0: raised from 0.30 — skip tiny moves
+                        prob_threshold = 0.20   # v0.24.0: raised from 0.15 — need stronger patterns
 
                         # Confidence boost: if overall_probability is strong and move is
                         # significant, boost confidence up to min_confidence level
                         boosted_confidence = weighted_confidence
-                        if (prediction.overall_probability >= 0.35
-                                and abs(prediction.expected_total_move_pct) >= 0.5):
+                        if (prediction.overall_probability >= 0.40  # v0.24.0: raised from 0.35
+                                and abs(prediction.expected_total_move_pct) >= 0.8):  # v0.24.0: raised from 0.5
                             # Strong pattern match — boost confidence by probability
                             boosted_confidence = max(
                                 weighted_confidence,
                                 weighted_confidence * (1 + prediction.overall_probability),
                             )
 
-                        # v0.22.0: Extra quality gate — reject if win_rate too low
-                        # and move is tiny (likely noise signal)
-                        if prediction.overall_probability < 0.25 and abs(prediction.expected_total_move_pct) < 0.5:
+                        # v0.24.0: Stricter quality gate — reject weak signals early
+                        # Old gate: prob < 0.25 and move < 0.5 was too lenient
+                        if prediction.overall_probability < 0.30 and abs(prediction.expected_total_move_pct) < 0.8:
                             continue
+
+                        # v0.24.0: Regime-aware signal filtering
+                        # Skip LONG signals in trending_down, skip SHORT in trending_up
+                        # In volatile regime, require much stronger signals
+                        if current_regime == "volatile":
+                            # In volatile markets, require 2x the normal thresholds
+                            if prediction.overall_probability < prob_threshold * 1.5:
+                                continue
+                            if abs(prediction.expected_total_move_pct) < move_threshold * 1.5:
+                                continue
+                        elif current_regime == "trending_down" and prediction.direction == "LONG":
+                            # Counter-trend LONG in downtrend — very risky
+                            if prediction.overall_probability < 0.50:
+                                continue
+                        elif current_regime == "trending_up" and prediction.direction == "SHORT":
+                            # Counter-trend SHORT in uptrend — very risky
+                            if prediction.overall_probability < 0.50:
+                                continue
 
                         if (position_state == PositionState.FLAT
                                 and prediction.direction != "FLAT"
@@ -882,21 +901,28 @@ class RealtimeTrader:
 
                             result.signals_generated += 1
 
-                            # v0.11.0: Prediction-aware SL/TP (same as PaperTrader)
-                            # v0.22.0: Tightened SL (1.2x) and lowered TP (2.0x) for better
-                            # win rate. Previous 1.5x/2.5x was too loose SL and too greedy TP.
+                            # v0.24.0: Improved SL/TP calculation
+                            # Key insight from backtest analysis: 1.2x SL was too tight,
+                            # causing premature stop-outs before the move develops.
+                            # New: 1.5x SL gives room to breathe, 2.5x TP targets real moves.
+                            # Regime-adaptive: tighter in ranging, wider in trending.
                             expected_move_abs = abs(prediction.expected_total_move_pct)
 
-                            if prediction.direction == "LONG":
-                                sl_distance_pct = max(min(expected_move_abs * 1.2, 3.0), 0.5)
-                                tp_distance_pct = expected_move_abs * 2.0
-                                if tp_distance_pct < sl_distance_pct * 1.5:
-                                    tp_distance_pct = sl_distance_pct * 1.5
-                            else:  # SHORT
-                                sl_distance_pct = max(min(expected_move_abs * 1.2, 3.0), 0.5)
-                                tp_distance_pct = expected_move_abs * 2.0
-                                if tp_distance_pct < sl_distance_pct * 1.5:
-                                    tp_distance_pct = sl_distance_pct * 1.5
+                            # v0.24.0: Regime-adaptive SL/TP multipliers
+                            if current_regime in ("trending_up", "trending_down"):
+                                sl_mult = 1.3   # Tighter SL in trends (follows direction)
+                                tp_mult = 3.0   # Let profits run in trends
+                            elif current_regime == "ranging":
+                                sl_mult = 1.8   # Wider SL in ranges (noise is high)
+                                tp_mult = 1.8   # Smaller TP in ranges (moves are limited)
+                            else:  # volatile or unknown
+                                sl_mult = 1.5   # Moderate SL in volatile
+                                tp_mult = 2.5   # Decent TP in volatile
+
+                            sl_distance_pct = max(min(expected_move_abs * sl_mult, 4.0), 0.8)
+                            tp_distance_pct = expected_move_abs * tp_mult
+                            if tp_distance_pct < sl_distance_pct * 1.5:
+                                tp_distance_pct = sl_distance_pct * 1.5
 
                             if prediction.direction == "LONG":
                                 sl_price = current_price * (1 - sl_distance_pct / 100)

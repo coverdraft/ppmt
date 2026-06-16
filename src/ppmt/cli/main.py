@@ -47,7 +47,7 @@ def load_config() -> dict:
 
 
 @click.group()
-@click.version_option(version="0.23.0")
+@click.version_option(version="0.24.0")
 def cli():
     """PPMT Terminal - Autonomous Pattern-Based Trading Terminal"""
     pass
@@ -780,15 +780,75 @@ def monte_carlo(
         pf_str = "INF" if om.profit_factor == float('inf') else f"{om.profit_factor:.2f}"
         console.print(f"    Profit Factor: {pf_str}")
 
-    # Verdict — gate live trading
+    # Verdict — gate live trading (v0.24.0: comprehensive multi-factor verdict)
+    # The old logic only checked risk_of_ruin, which meant a strategy with
+    # 0% probability of profit but low ruin (slow bleed) was marked "LOW RISK".
+    # Now we also check probability_of_profit, profit_factor, and win_rate.
+
+    profit_factor = mc_results.original_metrics.profit_factor if mc_results.original_metrics else 0.0
+    win_rate = mc_results.original_metrics.win_rate if mc_results.original_metrics else 0.0
+
+    # Build a composite risk score (0-100, lower = safer)
+    risk_score = 0
+
+    # Factor 1: Risk of Ruin (0-40 points)
     if risk_of_ruin > 0.20:
-        console.print(f"\n  [bold red]VERDICT: HIGH RISK — Risk of ruin {risk_of_ruin:.0%} exceeds 20%[/bold red]")
-        console.print(f"  [red]DO NOT deploy this strategy with real money.[/red]")
+        risk_score += 40
+    elif risk_of_ruin > 0.10:
+        risk_score += 30
     elif risk_of_ruin > 0.05:
-        console.print(f"\n  [bold yellow]VERDICT: MODERATE RISK — Risk of ruin {risk_of_ruin:.0%}[/bold yellow]")
-        console.print(f"  [yellow]Consider reducing position size before live trading.[/yellow]")
+        risk_score += 15
     else:
-        console.print(f"\n  [bold green]VERDICT: LOW RISK — Risk of ruin only {risk_of_ruin:.0%}[/bold green]")
+        risk_score += 0
+
+    # Factor 2: Probability of Profit (0-30 points, inverted)
+    if prob_profit < 0.10:
+        risk_score += 30  # Almost never profitable
+    elif prob_profit < 0.30:
+        risk_score += 22
+    elif prob_profit < 0.50:
+        risk_score += 12
+    elif prob_profit < 0.70:
+        risk_score += 5
+    else:
+        risk_score += 0
+
+    # Factor 3: Profit Factor (0-15 points)
+    if profit_factor < 0.8:
+        risk_score += 15  # Losing money consistently
+    elif profit_factor < 1.0:
+        risk_score += 10  # Marginal loser
+    elif profit_factor < 1.2:
+        risk_score += 5   # Marginal winner
+    else:
+        risk_score += 0
+
+    # Factor 4: P95 Max Drawdown (0-15 points)
+    if mc_results.p95_max_drawdown > 0.30:
+        risk_score += 15
+    elif mc_results.p95_max_drawdown > 0.20:
+        risk_score += 8
+    elif mc_results.p95_max_drawdown > 0.10:
+        risk_score += 3
+    else:
+        risk_score += 0
+
+    # Render verdict based on composite score
+    if risk_score >= 50:
+        console.print(f"\n  [bold red]VERDICT: HIGH RISK (score: {risk_score}/100)[/bold red]")
+        if prob_profit < 0.10:
+            console.print(f"  [red]Probability of profit is {prob_profit:.0%} — this strategy LOSES money.[/red]")
+        if profit_factor < 1.0:
+            console.print(f"  [red]Profit factor {profit_factor:.2f} < 1.0 — losses exceed gains.[/red]")
+        console.print(f"  [red]DO NOT deploy this strategy with real money.[/red]")
+        console.print(f"  [dim]Suggestions: improve signal quality, widen SL, reduce position size, or tune parameters.[/dim]")
+    elif risk_score >= 30:
+        console.print(f"\n  [bold yellow]VERDICT: MODERATE RISK (score: {risk_score}/100)[/bold yellow]")
+        console.print(f"  [yellow]Risk of ruin: {risk_of_ruin:.0%} | Profit prob: {prob_profit:.0%} | PF: {profit_factor:.2f}[/yellow]")
+        console.print(f"  [yellow]Consider reducing position size or improving signal filters before live trading.[/yellow]")
+    else:
+        console.print(f"\n  [bold green]VERDICT: LOW RISK (score: {risk_score}/100)[/bold green]")
+        console.print(f"  [green]Risk of ruin: {risk_of_ruin:.0%} | Profit prob: {prob_profit:.0%} | PF: {profit_factor:.2f}[/green]")
         console.print(f"  [green]Strategy passed Monte Carlo validation. Safe to deploy.[/green]")
 
     # Save to JSON
