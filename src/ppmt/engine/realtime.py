@@ -1195,6 +1195,30 @@ class RealtimeTrader:
             except Exception:
                 pass
 
+        # v0.31.0: Save trade to persistent storage
+        try:
+            trade_storage = PPMTStorage()
+            trade_storage.save_trade({
+                "symbol": trade.symbol,
+                "timeframe": getattr(self.config, 'timeframe', '1h'),
+                "direction": trade.direction,
+                "entry_price": trade.entry_price,
+                "exit_price": trade.exit_price,
+                "entry_time": trade.entry_time,
+                "exit_time": trade.exit_time,
+                "size": abs(pnl) / trade.pnl_pct * 100 if trade.pnl_pct != 0 else 0,
+                "pnl": pnl,
+                "pnl_pct": trade.pnl_pct,
+                "confidence": trade.confidence,
+                "exit_reason": exit_reason,
+                "regime": trade.regime,
+                "leverage": getattr(self.config, 'leverage', 1),
+                "matched_pattern": trade.matched_pattern,
+            })
+            trade_storage.close()
+        except Exception:
+            pass  # Never let storage crash the engine
+
         # v0.15.0: Update TerminalState — trade closed
         self._update_terminal_state(
             signal={

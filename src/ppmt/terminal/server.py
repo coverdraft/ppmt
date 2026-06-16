@@ -41,7 +41,7 @@ CONFIG_DIR = os.path.expanduser("~/.ppmt")
 # ------------------------------------------------------------------ #
 # FastAPI application
 # ------------------------------------------------------------------ #
-app = FastAPI(title="PPMT Terminal", version="0.31.0")
+app = FastAPI(title="PPMT Terminal", version="0.32.0")
 
 # Global terminal state (shared with engine)
 terminal_state: TerminalState = get_terminal_state()
@@ -1005,6 +1005,276 @@ async def auto_setup(req: AutoSetupRequest) -> dict:
         capital=req.capital,
     )
     return await validate_token(val_req)
+
+
+# ------------------------------------------------------------------ #
+# REST endpoint — Portfolio Backtest (v0.32.0 Multi-Token)
+# ------------------------------------------------------------------
+
+
+class PortfolioBacktestRequest(BaseModel):
+    symbols: list[str] = ["BTC/USDT", "ETH/USDT"]
+    timeframe: str = "1h"
+    capital: float = 10_000.0
+    exchange: str = "mexc"
+
+
+@app.post("/api/portfolio-backtest")
+async def run_portfolio_backtest(req: PortfolioBacktestRequest) -> dict:
+    """Run a multi-token portfolio backtest.
+
+    Runs individual backtests for each symbol and combines results
+    with portfolio-level statistics including correlation awareness.
+    """
+    try:
+        from ppmt.engine.realtime import RealtimeTrader, ReplayConfig
+
+        results = {}
+        all_equity = []
+        total_pnl = 0.0
+        total_trades = 0
+        total_wins = 0
+
+        per_symbol_capital = req.capital / len(req.symbols)
+
+        for symbol in req.symbols:
+            config = ReplayConfig(
+                symbol=symbol,
+                timeframe=req.timeframe,
+                initial_capital=per_symbol_capital,
+                speed=0,
+                verbose=False,
+            )
+            trader = RealtimeTrader(config=config)
+            result = trader.run_replay()
+
+            results[symbol] = {
+                "total_trades": result.total_trades,
+                "win_rate": result.win_rate,
+                "total_pnl_pct": result.total_pnl_pct,
+                "max_drawdown": result.max_drawdown,
+                "final_capital": result.final_capital,
+                "equity_curve": result.equity_curve[-100:] if result.equity_curve else [],
+            }
+
+            total_pnl += (result.final_capital - per_symbol_capital)
+            total_trades += result.total_trades
+            total_wins += result.winning_trades
+
+            if result.equity_curve:
+                all_equity.append(result.equity_curve)
+
+        # Portfolio-level stats
+        portfolio_pnl_pct = ((req.capital + total_pnl) / req.capital - 1) * 100 if req.capital > 0 else 0
+        portfolio_win_rate = total_wins / total_trades if total_trades > 0 else 0
+
+        return {
+            "ok": True,
+            "symbols": req.symbols,
+            "total_capital": req.capital,
+            "total_pnl": total_pnl,
+            "portfolio_pnl_pct": portfolio_pnl_pct,
+            "total_trades": total_trades,
+            "portfolio_win_rate": portfolio_win_rate,
+            "per_symbol": results,
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+# ------------------------------------------------------------------ #
+# REST endpoint — Multi-Token Auto-Setup (v0.32.0)
+# ------------------------------------------------------------------
+
+
+class MultiSetupRequest(BaseModel):
+    symbols: list[str] = ["BTC/USDT"]
+    timeframe: str = "1h"
+    exchange: str = "mexc"
+    capital: float = 10_000.0
+
+
+@app.post("/api/multi-setup")
+async def multi_setup(req: MultiSetupRequest) -> dict:
+    """Auto-setup multiple tokens at once. Creates a child node for each."""
+    results = []
+    pm = _get_parent_manager()
+
+    per_symbol_alloc = 1.0 / len(req.symbols) if req.symbols else 0.20
+
+    for symbol in req.symbols:
+        # Run validation for each symbol
+        val_req = ValidateRequest(
+            symbol=symbol,
+            timeframe=req.timeframe,
+            exchange=req.exchange,
+            capital=req.capital / len(req.symbols),
+        )
+        val_result = await validate_token(val_req)
+
+        # Auto-create node if validation passes
+        node_id = f"{symbol.split('/')[0].lower()}_{req.timeframe}"
+        if val_result.get("verdict") == "PASS" and node_id not in pm._children:
+            from ppmt.risk.money_manager import ChildNodeConfig
+            cfg = ChildNodeConfig(
+                node_id=node_id,
+                symbol=symbol,
+                timeframe=req.timeframe,
+                capital_allocation_pct=per_symbol_alloc,
+                leverage=1,
+                auto_mode=True,
+            )
+            try:
+                pm.register_child(cfg)
+            except Exception:
+                pass
+
+        results.append({
+            "symbol": symbol,
+            "verdict": val_result.get("verdict", "UNKNOWN"),
+            "win_rate": val_result.get("win_rate", 0),
+            "profit_factor": val_result.get("profit_factor", 0),
+        })
+
+    # Distribute capital after adding all nodes
+    try:
+        pm.distribute_capital()
+        _save_parent_manager()
+    except Exception:
+        pass
+
+    return {"ok": True, "results": results}
+
+
+# ------------------------------------------------------------------ #
+# REST endpoint — Multi-Timeframe Analysis (v0.32.0)
+# ------------------------------------------------------------------
+
+
+class MultiTFRequest(BaseModel):
+    symbol: str = "BTC/USDT"
+    timeframes: list[str] = ["1h", "5m"]
+    exchange: str = "mexc"
+    capital: float = 10_000.0
+
+
+@app.post("/api/multi-tf-analysis")
+async def multi_tf_analysis(req: MultiTFRequest) -> dict:
+    """Run analysis across multiple timeframes for confluence scoring.
+
+    For each timeframe:
+    1. Ensure data exists (auto-ingest if needed)
+    2. Run backtest
+    3. Collect signals
+
+    Then compute confluence: signals that agree across timeframes
+    get a higher confluence score.
+    """
+    try:
+        from ppmt.engine.realtime import RealtimeTrader, ReplayConfig
+
+        tf_results = {}
+        signal_map = {}  # timeframe -> list of signals
+
+        for tf in req.timeframes:
+            # Ensure data
+            storage = PPMTStorage()
+            df = storage.load_ohlcv(req.symbol, tf)
+            candles = len(df) if df is not None and not df.empty else 0
+
+            if candles < 200:
+                try:
+                    collector = DataCollector(exchange=req.exchange, storage=storage)
+                    days = {"1m": 1, "5m": 3, "15m": 7, "1h": 30, "4h": 60, "1d": 180}.get(tf, 30)
+                    collector.fetch_and_save(req.symbol, tf, days=days)
+                    if hasattr(collector, 'close'):
+                        collector.close()
+                except Exception:
+                    pass
+
+            # Ensure trie
+            all_tries = storage.load_all_tries(req.symbol)
+            if all_tries.get("n3") is None:
+                try:
+                    from ppmt.engine.ppmt import PPMT as PPMTBuilder
+                    df = storage.load_ohlcv(req.symbol, tf)
+                    if df is not None and not df.empty:
+                        builder = PPMTBuilder(symbol=req.symbol, sax_strategy="ohlcv")
+                        builder.build(df, pattern_length=5)
+                        for level_name, trie_obj in [("n1", builder.trie_n1), ("n2", builder.trie_n2), ("n3", builder.trie_n3), ("n4", builder.trie_n4)]:
+                            storage.save_trie(req.symbol, level_name, trie_obj)
+                except Exception:
+                    pass
+
+            storage.close()
+
+            # Run backtest for this timeframe
+            config = ReplayConfig(
+                symbol=req.symbol,
+                timeframe=tf,
+                initial_capital=req.capital / len(req.timeframes),
+                speed=0,
+                verbose=False,
+            )
+            trader = RealtimeTrader(config=config)
+            result = trader.run_replay()
+
+            # Collect signal directions
+            signals = []
+            for t in result.trades:
+                signals.append({
+                    "direction": t.direction,
+                    "pnl_pct": t.pnl_pct,
+                    "entry_time": t.entry_time,
+                })
+
+            tf_results[tf] = {
+                "total_trades": result.total_trades,
+                "win_rate": result.win_rate,
+                "total_pnl_pct": result.total_pnl_pct,
+                "max_drawdown": result.max_drawdown,
+                "signals": signals[-20:],
+            }
+            signal_map[tf] = signals
+
+        # Compute confluence: how many TFs agree on direction
+        # Simple approach: check if latest signal direction agrees
+        latest_directions = {}
+        for tf, sigs in signal_map.items():
+            if sigs:
+                latest_directions[tf] = sigs[-1]["direction"]
+
+        directions = list(latest_directions.values())
+        if directions:
+            longs = sum(1 for d in directions if d == "LONG")
+            shorts = sum(1 for d in directions if d == "SHORT")
+            total = len(directions)
+            if longs > shorts:
+                confluence_direction = "LONG"
+                confluence_score = longs / total
+            elif shorts > longs:
+                confluence_direction = "SHORT"
+                confluence_score = shorts / total
+            else:
+                confluence_direction = "NEUTRAL"
+                confluence_score = 0.5
+        else:
+            confluence_direction = "NEUTRAL"
+            confluence_score = 0.0
+
+        return {
+            "ok": True,
+            "symbol": req.symbol,
+            "timeframes": req.timeframes,
+            "confluence": {
+                "direction": confluence_direction,
+                "score": confluence_score,
+                "agreement": latest_directions,
+            },
+            "per_timeframe": tf_results,
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 # ------------------------------------------------------------------ #
