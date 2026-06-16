@@ -403,7 +403,12 @@ class RealtimeTrader:
 
     def _compute_atr_pct(self, prices: np.ndarray, highs: np.ndarray,
                          lows: np.ndarray, period: int = 14) -> float:
-        """Compute current ATR as percentage of price."""
+        """Compute current ATR as percentage of price.
+
+        v0.20.0: Fixed to use Wilder's smoothing (same as paper_trader.py).
+        Previously used simple moving average which gave inconsistent ATR values
+        compared to the backtest engine.
+        """
         if len(prices) < period + 1:
             return 2.0  # Default
 
@@ -421,10 +426,14 @@ class RealtimeTrader:
             )
         )
 
-        # Wilder's smoothing for last value
-        atr_val = 0.0
+        # v0.20.0: Wilder's smoothing (exponential moving average)
+        # This matches paper_trader.py compute_atr_pct()
         if len(tr) >= period:
-            atr_val = np.mean(tr[-period:])
+            atr_val = np.mean(tr[:period])
+            for i in range(period, len(tr)):
+                atr_val = (atr_val * (period - 1) + tr[i]) / period
+        else:
+            atr_val = np.mean(tr)
 
         last_price = prices[-1] if prices[-1] > 0 else 1.0
         return (atr_val / last_price * 100) if last_price > 0 else 2.0

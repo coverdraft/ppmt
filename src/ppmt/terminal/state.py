@@ -3,6 +3,8 @@ PPMT Terminal State — Shared state between trading engine and web dashboard.
 
 This module provides a singleton-like state object that the trading engine updates
 and the dashboard reads from. Thread-safe updates are handled via asyncio.Lock.
+
+v0.20.0: Added leverage, kill_switch_active, monte_carlo, living_trie, auto_mode fields.
 """
 
 from __future__ import annotations
@@ -57,7 +59,7 @@ class TerminalState:
     positions: list[dict] = field(default_factory=list)
 
     # ------------------------------------------------------------------ #
-    # Portfolio
+    # Portfolio (v0.20.0: enhanced)
     # ------------------------------------------------------------------ #
     portfolio_value: float = 0.0
     cash: float = 0.0
@@ -66,12 +68,17 @@ class TerminalState:
     total_pnl_pct: float = 0.0
     exposure_pct: float = 0.0
     daily_return_pct: float = 0.0
+    leverage: int = 1
+    auto_mode: bool = True
 
     # ------------------------------------------------------------------ #
-    # Risk
+    # Risk (v0.20.0: enhanced)
     # ------------------------------------------------------------------ #
     circuit_breakers: dict = field(default_factory=dict)
     is_trading_allowed: bool = True
+    kill_switch_active: bool = False
+    max_drawdown_pct: float = 0.0
+    daily_loss_pct: float = 0.0
 
     # ------------------------------------------------------------------ #
     # Performance
@@ -82,6 +89,18 @@ class TerminalState:
     max_drawdown: float = 0.0
     equity_curve: list[float] = field(default_factory=list)  # last 200
     equity_timestamps: list[float] = field(default_factory=list)  # last 200
+
+    # ------------------------------------------------------------------ #
+    # Monte Carlo (v0.20.0)
+    # ------------------------------------------------------------------ #
+    monte_carlo: dict = field(default_factory=dict)
+    """Last Monte Carlo simulation results: risk_of_ruin, probability_of_profit, p95_dd, verdict."""
+
+    # ------------------------------------------------------------------ #
+    # Living Trie (v0.20.0)
+    # ------------------------------------------------------------------ #
+    living_trie_stats: dict = field(default_factory=dict)
+    """Living Trie stats: pattern_count, total_observations, last_update."""
 
     # ------------------------------------------------------------------ #
     # Feed stats
@@ -108,6 +127,8 @@ class TerminalState:
         self.circuit_breakers = {}
         self.equity_curve = []
         self.equity_timestamps = []
+        self.monte_carlo = {}
+        self.living_trie_stats = {}
         self._lock = asyncio.Lock()
 
     # ------------------------------------------------------------------ #
@@ -222,14 +243,21 @@ class TerminalState:
             "total_pnl_pct": self.total_pnl_pct,
             "exposure_pct": self.exposure_pct,
             "daily_return_pct": self.daily_return_pct,
+            "leverage": self.leverage,
+            "auto_mode": self.auto_mode,
             "circuit_breakers": self.circuit_breakers,
             "is_trading_allowed": self.is_trading_allowed,
+            "kill_switch_active": self.kill_switch_active,
+            "max_drawdown_pct": self.max_drawdown_pct,
+            "daily_loss_pct": self.daily_loss_pct,
             "total_trades": self.total_trades,
             "winning_trades": self.winning_trades,
             "win_rate": self.win_rate,
             "max_drawdown": self.max_drawdown,
             "equity_curve": self.equity_curve,
             "equity_timestamps": self.equity_timestamps,
+            "monte_carlo": self.monte_carlo,
+            "living_trie_stats": self.living_trie_stats,
             "candles_processed": self.candles_processed,
             "websocket_status": self.websocket_status,
             "reconnect_count": self.reconnect_count,
@@ -265,7 +293,12 @@ class TerminalState:
         self.total_pnl_pct = 0.0
         self.exposure_pct = 0.0
         self.daily_return_pct = 0.0
+        self.leverage = 1
+        self.auto_mode = True
         self.is_trading_allowed = True
+        self.kill_switch_active = False
+        self.max_drawdown_pct = 0.0
+        self.daily_loss_pct = 0.0
         self.total_trades = 0
         self.winning_trades = 0
         self.win_rate = 0.0
@@ -280,6 +313,8 @@ class TerminalState:
         self.circuit_breakers = {}
         self.equity_curve = []
         self.equity_timestamps = []
+        self.monte_carlo = {}
+        self.living_trie_stats = {}
 
 
 # ------------------------------------------------------------------ #

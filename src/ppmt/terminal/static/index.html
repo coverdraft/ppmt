@@ -393,10 +393,20 @@ body{
         <div class="risk-item"><span class="label">Exposure</span><span class="value" id="riskExposure">0%</span></div>
         <div class="risk-item"><span class="label">Daily Return</span><span class="value" id="riskDailyReturn">0%</span></div>
         <div class="risk-item"><span class="label">Max Drawdown</span><span class="value" id="riskMaxDD">0%</span></div>
+        <div class="risk-item"><span class="label">Leverage</span><span class="value" id="leverageValue">1x</span></div>
+        <div class="risk-item"><span class="label">Mode</span><span class="value" id="autoModeValue">AUTO</span></div>
       </div>
-      <div style="grid-column:span 2">
+      <div>
         <div style="font-size:.72rem;color:var(--text-secondary);margin-bottom:4px">Circuit Breakers</div>
         <div id="circuitBreakers"><span class="no-data">None active</span></div>
+        <div style="margin-top:8px;font-size:.72rem;color:var(--text-secondary);margin-bottom:4px">Kill Switch</div>
+        <div id="killSwitchStatus" style="font-weight:600;color:var(--green)">INACTIVE</div>
+      </div>
+      <div>
+        <div style="font-size:.72rem;color:var(--text-secondary);margin-bottom:4px">Monte Carlo</div>
+        <div id="monteCarloInfo"><span class="no-data">No MC data</span></div>
+        <div style="margin-top:8px;font-size:.72rem;color:var(--text-secondary);margin-bottom:4px">Living Trie</div>
+        <div id="livingTrieInfo"><span class="no-data">No trie data</span></div>
       </div>
     </div>
   </div>
@@ -414,7 +424,7 @@ body{
     <span>Reconnects: <span id="reconnectCount">0</span></span>
   </div>
   <div class="footer-right">
-    <span>PPMT Terminal v1.0</span>
+    <span>PPMT Terminal v0.20.0</span>
   </div>
 </footer>
 
@@ -642,6 +652,51 @@ body{
 
     // Circuit breakers
     renderBreakers(s.circuit_breakers || {});
+
+    // v0.20.0: Leverage & Mode
+    $("leverageValue").textContent = (s.leverage || 1) + "x";
+    $("leverageValue").style.color = (s.leverage || 1) > 1 ? "var(--yellow)" : "var(--text-primary)";
+    $("autoModeValue").textContent = s.auto_mode ? "AUTO" : "MANUAL";
+    $("autoModeValue").style.color = s.auto_mode ? "var(--green)" : "var(--yellow)";
+
+    // v0.20.0: Kill switch
+    var ksEl = $("killSwitchStatus");
+    if(s.kill_switch_active){
+      ksEl.textContent = "ACTIVE — ALL STOP";
+      ksEl.style.color = "var(--red)";
+    } else {
+      ksEl.textContent = "INACTIVE";
+      ksEl.style.color = "var(--green)";
+    }
+
+    // v0.20.0: Monte Carlo
+    var mcEl = $("monteCarloInfo");
+    var mc = s.monte_carlo || {};
+    if(mc.risk_of_ruin !== undefined){
+      var mcRisk = mc.risk_of_ruin;
+      var mcColor = mcRisk > 0.2 ? "var(--red)" : mcRisk > 0.05 ? "var(--yellow)" : "var(--green)";
+      mcEl.innerHTML = '<div style="font-size:.78rem">'
+        + '<div>Risk of Ruin: <span style="color:' + mcColor + ';font-weight:600">' + fmtPct(mcRisk * 100) + '</span></div>'
+        + '<div>Profit Prob: ' + fmtPct((mc.probability_of_profit || 0) * 100) + '</div>'
+        + '<div>P95 DD: ' + fmtPct((mc.p95_max_drawdown || 0) * 100) + '</div>'
+        + '<div style="font-weight:600;color:' + mcColor + '">' + (mc.verdict || '') + '</div>'
+        + '</div>';
+    } else {
+      mcEl.innerHTML = '<span class="no-data">No MC data</span>';
+    }
+
+    // v0.20.0: Living Trie
+    var ltEl = $("livingTrieInfo");
+    var lt = s.living_trie_stats || {};
+    if(lt.pattern_count !== undefined){
+      ltEl.innerHTML = '<div style="font-size:.78rem">'
+        + '<div>Patterns: ' + (lt.pattern_count || 0) + '</div>'
+        + '<div>Observations: ' + (lt.total_observations || 0) + '</div>'
+        + '<div>Updated: ' + (lt.last_update || '--') + '</div>'
+        + '</div>';
+    } else {
+      ltEl.innerHTML = '<span class="no-data">No trie data</span>';
+    }
 
     // Footer
     $("candlesCount").textContent = s.candles_processed || 0;
