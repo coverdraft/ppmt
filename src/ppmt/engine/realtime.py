@@ -1659,19 +1659,21 @@ class RealtimeTrader:
             strategy=cfg.sax_strategy,
         )
 
-        # v0.21.0: Compute training PAA statistics for consistent incremental encoding
+        # v0.21.0→v0.27.0: Compute training PAA statistics for consistent incremental encoding
+        # In live mode, we load historical data for warmup normalization stats
         _paa_mean = None
         _paa_std = None
-        if not df.empty and len(df) >= cfg.sax_window_size * 2:
-            try:
-                _, _paa_mean, _paa_std = sax_encoder.encode_with_normalization(df)
+        try:
+            df_warmup = storage.load_ohlcv(cfg.symbol, cfg.timeframe)
+            if df_warmup is not None and not df_warmup.empty and len(df_warmup) >= cfg.sax_window_size * 2:
+                _, _paa_mean, _paa_std = sax_encoder.encode_with_normalization(df_warmup)
                 if _paa_std < 1e-10:
                     _paa_mean = None
                     _paa_std = None
                 else:
                     console.print(f"  [green]Training PAA stats: mean={_paa_mean:.6f}, std={_paa_std:.6f}[/green]")
-            except Exception as e:
-                console.print(f"  [yellow]Warning: Could not compute PAA stats: {e}[/yellow]")
+        except Exception as e:
+            console.print(f"  [yellow]Warning: Could not compute PAA stats: {e}[/yellow]")
 
         pred_engine = PredictionEngine(trie, prediction_depth=cfg.pattern_length)
 

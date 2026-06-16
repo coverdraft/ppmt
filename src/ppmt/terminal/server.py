@@ -4,8 +4,8 @@ PPMT Terminal Server — FastAPI + WebSocket web dashboard with Money Management
 Serves the real-time trading dashboard and provides both REST and WebSocket
 endpoints for the front-end to consume state from :class:`TerminalState`.
 
-v0.25.0: Added Money Management API endpoints for node control, leverage,
-auto/manual mode, kill switch, and capital distribution.
+v0.27.0: Complete dashboard with candlestick chart, entry/exit markers,
+real-time MEXC data, paper trading, and backtesting with real data.
 """
 
 from __future__ import annotations
@@ -22,6 +22,8 @@ from fastapi.responses import HTMLResponse, FileResponse
 from pydantic import BaseModel
 
 from ppmt.terminal.state import TerminalState, get_terminal_state
+from ppmt.data.storage import PPMTStorage
+from ppmt.data.collector import DataCollector
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +41,7 @@ CONFIG_DIR = os.path.expanduser("~/.ppmt")
 # ------------------------------------------------------------------ #
 # FastAPI application
 # ------------------------------------------------------------------ #
-app = FastAPI(title="PPMT Terminal", version="0.25.0")
+app = FastAPI(title="PPMT Terminal", version="0.27.0")
 
 # Global terminal state (shared with engine)
 terminal_state: TerminalState = get_terminal_state()
@@ -419,6 +421,123 @@ async def run_backtest(req: BacktestRequest) -> dict:
             "max_drawdown": result.max_drawdown,
             "trades": trades,
         }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+# ------------------------------------------------------------------ #
+# REST endpoints — Market Data & OHLCV for Chart (v0.27.0)
+# ------------------------------------------------------------------ #
+
+
+@app.get("/api/ohlcv")
+async def get_ohlcv(
+    symbol: str = "BTC/USDT",
+    timeframe: str = "1m",
+    limit: int = 200,
+    exchange: str = "mexc",
+) -> dict:
+    """Fetch real OHLCV data from exchange via ccxt for the candlestick chart."""
+    try:
+        import ccxt
+        ex = getattr(ccxt, exchange, None)
+        if ex is None:
+            return {"ok": False, "error": f"Exchange '{exchange}' not found"}
+        exc = ex()
+        try:
+            ohlcv = exc.fetch_ohlcv(symbol, timeframe, limit=min(limit, 1000))
+            candles = []
+            for c in ohlcv:
+                candles.append({
+                    "t": c[0],       # timestamp
+                    "o": c[1],       # open
+                    "h": c[2],       # high
+                    "l": c[3],       # low
+                    "c": c[4],       # close
+                    "v": c[5],       # volume
+                })
+            return {"ok": True, "symbol": symbol, "timeframe": timeframe, "candles": candles}
+        finally:
+            if hasattr(exc, 'close'):
+                exc.close()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/market/price")
+async def get_market_price(
+    symbol: str = "BTC/USDT",
+    exchange: str = "mexc",
+) -> dict:
+    """Get current market price from exchange."""
+    try:
+        import ccxt
+        ex = getattr(ccxt, exchange, None)
+        if ex is None:
+            return {"ok": False, "error": f"Exchange '{exchange}' not found"}
+        exc = ex()
+        try:
+            ticker = exc.fetch_ticker(symbol)
+            return {
+                "ok": True,
+                "symbol": symbol,
+                "price": ticker.get("last", 0),
+                "change_24h": ticker.get("percentage", 0),
+                "high_24h": ticker.get("high", 0),
+                "low_24h": ticker.get("low", 0),
+                "volume_24h": ticker.get("quoteVolume", 0),
+            }
+        finally:
+            if hasattr(exc, 'close'):
+                exc.close()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/market/symbols")
+async def get_market_symbols(exchange: str = "mexc") -> dict:
+    """Get available trading symbols from exchange."""
+    try:
+        import ccxt
+        ex = getattr(ccxt, exchange, None)
+        if ex is None:
+            return {"ok": False, "error": f"Exchange '{exchange}' not found"}
+        exc = ex()
+        try:
+            markets = exc.load_markets()
+            usdt_pairs = sorted([
+                s for s in markets.keys()
+                if s.endswith("/USDT") and markets[s].get("active", True)
+            ])
+            # Return top 100 by default
+            return {"ok": True, "exchange": exchange, "symbols": usdt_pairs[:100]}
+        finally:
+            if hasattr(exc, 'close'):
+                exc.close()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+class IngestRequest(BaseModel):
+    symbol: str = "BTC/USDT"
+    timeframe: str = "1m"
+    exchange: str = "mexc"
+    days: int = 7
+
+
+@app.post("/api/ingest")
+async def ingest_data(req: IngestRequest) -> dict:
+    """Download historical OHLCV data and store it in the PPMT database."""
+    try:
+        storage = PPMTStorage()
+        collector = DataCollector(exchange=req.exchange, storage=storage)
+        df = collector.fetch_historical(req.symbol, req.timeframe, days=req.days)
+        if df is None or df.empty:
+            return {"ok": False, "error": "No data fetched"}
+        count = len(df)
+        collector.close()
+        storage.close()
+        return {"ok": True, "symbol": req.symbol, "timeframe": req.timeframe, "candles": count}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 

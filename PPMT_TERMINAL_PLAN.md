@@ -3,7 +3,7 @@
 > **MAXIMUM PRIORITY**: This is THE ONLY plan. No other plans or side-quests.
 > If you get lost, come back to this document. Everything we do must trace back here.
 
-**Version**: v0.26.0
+**Version**: v0.27.0
 **Date**: 2026-06-16
 **Status**: ACTIVE - IN PROGRESS
 
@@ -102,8 +102,25 @@ ppmt scan → ppmt ingest → ppmt build → ppmt run → ppmt backtest → ppmt
 - [x] Money Management panel with leverage, auto/manual, kill switch
 - [x] Child Nodes table with add/remove/leverage controls
 - [x] Quick Backtest runner from dashboard
-- [x] Dashboard launches on port 3000 (FastAPI, no Next.js dependency)
+- [x] Dashboard launches on port 8420 (FastAPI, no Next.js dependency)
 - [x] REST API endpoints for node management (add/remove/leverage/auto-mode/kill-switch)
+
+### Phase 7.5: Real Chart + Market Data + Paper Trading ✅ DONE (v0.27.0)
+**Files**: `src/ppmt/terminal/server.py`, `src/ppmt/terminal/static/index.html`, `src/ppmt/engine/realtime.py`, `pyproject.toml`
+
+- [x] Fix critical bug: NameError 'df' undefined in run_live()
+- [x] Move fastapi/uvicorn/pydantic to core dependencies
+- [x] Rebuild dashboard HTML with TradingView Lightweight Charts
+- [x] Real candlestick chart with OHLCV from MEXC via ccxt
+- [x] Entry/exit markers on chart (green ▲ long, red ▼ short)
+- [x] Volume histogram overlay
+- [x] Symbol selector (auto-populated from MEXC)
+- [x] Timeframe selector (1m, 5m, 15m, 1h, 4h, 1d)
+- [x] Paper trading button from dashboard UI
+- [x] Backtest runner with results display and trade markers
+- [x] API endpoints: /api/ohlcv, /api/market/price, /api/market/symbols, /api/ingest
+- [x] Auto-refresh chart every 30 seconds
+- [x] Fix port default back to 8420 (was 3000)
 
 ### Phase 8: Bug Fixes + Push to GitHub ⬜ IN PROGRESS
 **Files**: Various

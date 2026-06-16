@@ -47,7 +47,7 @@ def load_config() -> dict:
 
 
 @click.group()
-@click.version_option(version="0.26.0")
+@click.version_option(version="0.27.0")
 def cli():
     """PPMT Terminal - Autonomous Pattern-Based Trading Terminal"""
     pass
@@ -990,32 +990,27 @@ def validate(symbol: str, timeframe: str, pattern_length: int, output: str):
 
 @cli.command()
 @click.option("--host", "-h", default="localhost", help="Dashboard host")
-@click.option("--port", "-p", default=3000, type=int, help="Dashboard port")
+@click.option("--port", "-p", default=8420, type=int, help="Dashboard port (default 8420)")
 @click.option("--open-browser", is_flag=True, default=False, help="Open browser automatically")
-@click.option("--lite", is_flag=True, default=False, help="Use lightweight FastAPI dashboard instead of Next.js")
-def terminal(host: str, port: int, open_browser: bool, lite: bool):
+def terminal(host: str, port: int, open_browser: bool):
     """Launch the PPMT Terminal web dashboard.
 
-    v0.26.0: Launches FastAPI dashboard by default (port 3000) with full
-    Money Management, Node Management, Backtest, and real-time controls.
-    Use --lite for the old port 8420 behavior.
+    v0.27.0: FastAPI dashboard with real-time candlestick chart,
+    entry/exit markers, Money Management, Node Management, Backtest,
+    and live trading controls. Runs on port 8420 by default.
 
     Examples:
-      ppmt terminal                      # Start dashboard on port 3000
-      ppmt terminal --lite               # Start on port 8420
+      ppmt terminal                      # Start dashboard on port 8420
       ppmt terminal -p 9000             # Custom port
       ppmt terminal --open-browser      # Auto-open in browser
     """
-    console.print("[bold cyan]PPMT Terminal Dashboard v0.26.0[/bold cyan]")
+    console.print("[bold cyan]PPMT Terminal Dashboard v0.27.0[/bold cyan]")
 
     if open_browser:
         import webbrowser
         import threading
 
-    # v0.26.0: Default to FastAPI dashboard on port 3000 (no Next.js dependency)
-    # The FastAPI dashboard now has full Money Management, Node controls,
-    # Backtest runner, and real-time WebSocket updates.
-    fastapi_port = port if not lite else (8420 if port == 3000 else port)
+    fastapi_port = port
 
     # Kill any existing process on the target port
     try:
