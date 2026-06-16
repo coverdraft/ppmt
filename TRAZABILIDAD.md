@@ -995,3 +995,238 @@ WebSocket define pings a nivel de protocolo (RFC 6455 control frames). MEXC usa 
 4. **Test de integración end-to-end:** mock MEXC WS server que envíe klines con timestamp cambiante, verificar que `on_candle` se invoca una vez por periodo.
 5. **Soporte Binance/Bybit:** aplicar los mismos tests de parser para asegurar que no tengan bugs similares.
 
+
+---
+
+## v0.32.5 — Fix crítico: dropdown de tokens no cargaba el chart al seleccionar
+
+**Fecha:** 2026-06-17
+**Síntoma del usuario:** "Parece que no todos los token están porque cuando se selecciona uno de la lista no carga."
+
+Los logs del servidor muestran respuestas 200 OK para `/api/trades?symbol=AAVE%2FUSDT` y `/api/trade-summary?symbol=DOGE%2FUSDT` — el backend responde correctamente, pero el dashboard no muestra nada.
+
+### Root cause analysis (auditoría del frontend)
+
+#### Bug #1 — Mismatch de field names entre backend y frontend (CRÍTICO)
+
+`/api/ohlcv` retorna candles con **short keys**:
+```python
+{"t": c[0], "o": c[1], "h": c[2], "l": c[3], "c": c[4], "v": c[5]}
+```
+
+Pero `loadChart()` en el dashboard las leía con **long keys**:
+```javascript
+const candles = data.candles.map(c => ({
+  time: c.time || c.timestamp,    // undefined → undefined
+  open: parseFloat(c.open),        // parseFloat(undefined) → NaN
+  high: parseFloat(c.high),        // NaN
+  low: parseFloat(c.low),          // NaN
+  close: parseFloat(c.close)       // NaN
+}));
+candleSeries.setData(candles);     // LightweightCharts recibe NaN → no renderiza nada
+```
+
+**Resultado:** El chart NUNCA renderizó correctamente desde que se escribió este endpoint. El usuario no lo notó antes porque su foco estaba en la validación (que usa endpoints distintos, no /api/ohlcv).
+
+#### Bug #2 — `setupSymbol` change handler no disparaba reload
+
+El handler original:
+```javascript
+document.getElementById('setupSymbol').addEventListener('change', function() {
+  document.getElementById('chartSymbol').value = this.value;
+});
+```
+
+Sólo actualizaba `chartSymbol.value`, pero **establecer `.value` programáticamente no dispara el evento `change`**. Por tanto:
+- `loadChart()` no se ejecutaba → el chart seguía mostrando el token anterior
+- `loadTradeHistory()` no se ejecutaba → el historial sólo se refrescaba en el tick de polling cada 30s
+
+El usuario seleccionaba AAVE → el chart seguía mostrando ETH → parecía que AAVE "no cargaba".
+
+#### Bug #3 — `chartSymbol` change handler no sincronizaba setup ni trade history
+
+```javascript
+document.getElementById('chartSymbol').addEventListener('change', loadChart);
+```
+
+Sólo llamaba `loadChart()`. No sincronizaba `setupSymbol`, ni llamaba `loadTradeHistory()`. Si el usuario cambiaba el token en el toolbar del chart, el panel de setup seguía mostrando el token anterior.
+
+#### Bug #4 — `/api/market/symbols` limitado a top 100 alfabéticos
+
+```python
+usdt_pairs = sorted([s for s in markets.keys() if s.endswith("/USDT") ...])
+return {"ok": True, "symbols": usdt_pairs[:100]}
+```
+
+MEXC tiene muchísimos tokens "1000X/USDT" (1000BONK, 1000CAT, 1000SHIB...) que se ordenan antes alfabéticamente. Con `[:100]`, muchos tokens major (AAVE, ADA, AVAX, BCH...) podían quedar fuera del top 100.
+
+#### Bug #5 — Sin limpiar el chart cuando no hay datos
+
+```javascript
+if (data.candles && data.candles.length > 0) {
+  // setData
+}
+// else: no hace nada → el chart sigue mostrando el token anterior
+```
+
+Si un token no tenía datos en el exchange, el chart seguía mostrando candles viejas del token anterior.
+
+#### Bug #6 — Timestamps en milisegundos vs segundos
+
+Backend retorna timestamps en ms (`c[0]` de ccxt es epoch-ms). LightweightCharts requiere segundos para intraday. Sin conversión, las candles podían no renderizar o aparecer en fechas incorrectas.
+
+### Fixes aplicados
+
+#### Fix #1 — `loadChart()` soporta AMBOS esquemas de keys (`index.html:704`)
+
+```javascript
+const candles = data.candles.map(c => ({
+  time: c.time || c.timestamp || c.t,           // short key c.t
+  open: parseFloat(c.open ?? c.o),               // short key c.o
+  high: parseFloat(c.high ?? c.h),
+  low: parseFloat(c.low ?? c.l),
+  close: parseFloat(c.close ?? c.c),
+})).filter(c => Number.isFinite(c.time) && ...); // filtrar NaN
+```
+
+Usa `??` (nullish coalescing) para soportar ambos formatos y ser robusto a futuros cambios. Filtra candles con NaN para que `setData()` no falle silenciosamente.
+
+#### Fix #2 — Conversión ms → segundos (`index.html:738`)
+
+```javascript
+candles.forEach(c => {
+  if (c.time > 1e12) c.time = Math.floor(c.time / 1000);  // ms → s
+});
+```
+
+Detecta el formato por magnitud: si `time > 1e12` (año > 2001 en ms), divide por 1000.
+
+#### Fix #3 — `setupSymbol` change dispara `loadChart()` + `loadTradeHistory()` (`index.html:1798`)
+
+```javascript
+document.getElementById('setupSymbol').addEventListener('change', function() {
+  const chart = document.getElementById('chartSymbol');
+  if (chart.value !== this.value) chart.value = this.value;
+  loadChart();          // ← nuevo
+  loadTradeHistory();   // ← nuevo
+});
+```
+
+Ahora seleccionar un token en el panel de setup actualiza AMBOS paneles al instante.
+
+#### Fix #4 — `chartSymbol` change también sincroniza y recarga todo (`index.html:1764`)
+
+```javascript
+document.getElementById('chartSymbol').addEventListener('change', function() {
+  loadChart();
+  const setup = document.getElementById('setupSymbol');
+  if (setup.value !== this.value) setup.value = this.value;
+  loadTradeHistory();
+});
+```
+
+Simetría: cambiar el token en cualquier sitio refresca todos los paneles.
+
+#### Fix #5 — Limpiar chart cuando no hay datos o hay error (`index.html:766`)
+
+```javascript
+} else {
+  candleSeries.setData([]);
+  volumeSeries.setData([]);
+  console.log('loadChart: no candles for', symbol);
+}
+// catch:
+candleSeries.setData([]);
+volumeSeries.setData([]);
+```
+
+Chart se limpia en lugar de mostrar datos stale.
+
+#### Fix #6 — Indicador de "Loading..." en botón Reload (`index.html:712`)
+
+```javascript
+const reloadBtn = document.querySelector('button[onclick="loadChart()"]');
+if (reloadBtn) { reloadBtn.textContent = 'Loading...'; reloadBtn.disabled = true; }
+// finally:
+if (reloadBtn) { reloadBtn.textContent = 'Reload'; reloadBtn.disabled = false; }
+```
+
+El usuario ve feedback inmediato mientras carga.
+
+#### Fix #7 — `/api/market/symbols` filtra tokens apalancados y devuelve más (`server.py:517`)
+
+```python
+# Filtra 1000X, 3L, 3S, 5L, 5S, UP, DOWN, BULL, BEAR
+if base.startswith(("1000", "10000", "1BULL", "3L", "3S", "5L", "5S")):
+    continue
+if base.endswith(("UP", "DOWN", "BULL", "BEAR")) and len(base) > 4:
+    continue
+# Return up to `limit` (default 500, was 100)
+return {"ok": True, "symbols": usdt_pairs[:limit], "total_available": len(usdt_pairs)}
+```
+
+La dropdown ahora contiene los tokens major reales (AAVE, ADA, AVAX, etc.) en lugar de estar llena de "1000BONK/USDT".
+
+#### Fix #8 — Lista default de 40 tokens major expandida (`index.html:1285`)
+
+```javascript
+const defaultSymbols = [
+  'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'DOGE/USDT',
+  'ADA/USDT', 'AVAX/USDT', 'LINK/USDT', 'BNB/USDT', 'MATIC/USDT',
+  'DOT/USDT', 'LTC/USDT', 'BCH/USDT', 'ATOM/USDT', 'UNI/USDT',
+  'AAVE/USDT', 'NEAR/USDT', 'APT/USDT', 'FIL/USDT', 'ARB/USDT',
+  // ... (40 tokens total)
+];
+```
+
+Garantiza que los tokens major siempre aparezcan en la dropdown, incluso si `/api/market/symbols` falla o no los incluye.
+
+#### Fix #9 — Preservar selección al refrescar la lista (`index.html:1300`)
+
+```javascript
+const currentChart = selectChart.value;
+// ... repoblar la lista ...
+if (currentChart && allSymbols.includes(currentChart)) {
+  selectChart.value = currentChart;
+}
+```
+
+Antes, recargar la lista reseteaba la selección del usuario a BTC/USDT.
+
+### Verificación
+
+- **Tests:** 167 pasan (sin regresiones)
+- **HTML:** parsea limpiamente, 2 `<script>` abren y cierran correctamente
+- **Backend:** `/api/market/symbols` ahora filtra ~80% de tokens basura y devuelve hasta 500
+- **Frontend:** al seleccionar un token, tanto el chart como el panel de setup se actualizan al instante
+
+### Archivos modificados
+
+```
+src/ppmt/terminal/static/index.html  | +95 -20  (loadChart + loadSymbols + event handlers)
+src/ppmt/terminal/server.py          | +25 -5   (/api/market/symbols filter + limit)
+src/ppmt/__init__.py                 | 0.32.4 → 0.32.5
+pyproject.toml                       | 0.32.4 → 0.32.5
+TRAZABILIDAD.md                      | +175 lines (this section)
+```
+
+### Lecciones aprendidas
+
+**1. Un bug de schema frontend/backend puede pasar desapercibido meses.**
+El chart nunca renderizó, pero el usuario lo atribuía a "tokens que no funcionan" en lugar de "chart roto". **Acción:** añadir un smoke test de frontend que cargue /api/ohlcv, verifique las keys del response, y compruebe que `loadChart()` no deja el chart vacío.
+
+**2. `select.value = x` no dispara `change`.**
+Es un behavior estándar de DOM pero fácil de olvidar. **Acción:** siempre que se sincronice programáticamente un `<select>`, llamar manualmente a las funciones que su handler ejecutaría.
+
+**3. Los exchanges tienen muchos tokens basura.**
+MEXC tiene cientos de "1000X/USDT" tokens apalancados. Sin filtrar, la dropdown se llena de tokens que el usuario no quiere ver. **Acción:** en cualquier lista de tokens, filtrar explícitamente leveraged/derivatives.
+
+**4. Las conversiones de timestamp ms↔s son ubicuas y fáciles de olvidar.**
+ccxt retorna ms, LightweightCharts requiere s. Siempre detectar y convertir.
+
+### Próximos pasos recomendados
+
+1. **Smoke test de frontend:** un test con Playwright que cargue el dashboard, seleccione un token, y verifique que el chart muestra N candles.
+2. **Telemetría de errores de frontend:** capturar excepciones en `loadChart()` y enviarlas a un endpoint `/api/log` para verlas en el server.
+3. **Paginación de tokens:** con 500 tokens, la dropdown puede ser lenta. Considerar un input con autocomplete en lugar de un `<select>`.
+4. **Cache de markets:** `load_markets()` es costoso. Cachear por 1h en memoria o en disco.

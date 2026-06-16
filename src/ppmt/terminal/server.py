@@ -515,8 +515,16 @@ async def get_market_price(
 
 
 @app.get("/api/market/symbols")
-async def get_market_symbols(exchange: str = "mexc") -> dict:
-    """Get available trading symbols from exchange."""
+async def get_market_symbols(exchange: str = "mexc", limit: int = 500) -> dict:
+    """Get available trading symbols from exchange.
+
+    v0.32.5: Filters out leveraged/derivative tokens (1000X, 3L, 3S, 5L, 5S,
+    UP, DOWN, BULL, BEAR) that aren't suitable for the PPMT pattern engine.
+    Returns up to `limit` symbols (default 500, was 100). This makes the
+    dropdown actually contain the major tokens the user expects (AAVE, ADA,
+    AVAX, DOGE, etc.) instead of being filled with "1000BONK/USDT"-style
+    leveraged tokens that sort first alphabetically.
+    """
     try:
         import ccxt
         ex = getattr(ccxt, exchange, None)
@@ -525,12 +533,27 @@ async def get_market_symbols(exchange: str = "mexc") -> dict:
         exc = ex()
         try:
             markets = exc.load_markets()
-            usdt_pairs = sorted([
-                s for s in markets.keys()
-                if s.endswith("/USDT") and markets[s].get("active", True)
-            ])
-            # Return top 100 by default
-            return {"ok": True, "exchange": exchange, "symbols": usdt_pairs[:100]}
+            # v0.32.5: Filter out leveraged/derivative tokens
+            usdt_pairs = []
+            for s in markets.keys():
+                if not s.endswith("/USDT"):
+                    continue
+                if not markets[s].get("active", True):
+                    continue
+
+                base = s[:-5]  # strip "/USDT"
+                # Skip leveraged tokens (MEXC: 1000X, 3L/3S, 5L/5S; Binance: UP/DOWN, BULL/BEAR)
+                if base.startswith(("1000", "10000", "1BULL", "3L", "3S", "5L", "5S")):
+                    continue
+                if base.endswith(("UP", "DOWN", "BULL", "BEAR")) and len(base) > 4:
+                    continue
+                usdt_pairs.append(s)
+
+            usdt_pairs.sort()
+
+            # v0.32.5: Return up to `limit` symbols (was hard-coded 100)
+            return {"ok": True, "exchange": exchange, "symbols": usdt_pairs[:limit],
+                    "total_available": len(usdt_pairs)}
         finally:
             if hasattr(exc, 'close'):
                 exc.close()

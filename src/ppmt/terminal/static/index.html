@@ -708,32 +708,74 @@ async function loadChart() {
 
   if (!symbol) return;
 
+  // v0.32.5: Show loading state on chart toolbar
+  const reloadBtn = document.querySelector('button[onclick="loadChart()"]');
+  if (reloadBtn) { reloadBtn.textContent = 'Loading...'; reloadBtn.disabled = true; }
+
   try {
     const res = await fetch(`${API}/api/ohlcv?symbol=${encodeURIComponent(symbol)}&timeframe=${timeframe}&exchange=${exchange}&limit=200`);
-    if (!res.ok) throw new Error('Error cargando datos');
+    if (!res.ok) throw new Error('Error cargando datos (HTTP ' + res.status + ')');
     const data = await res.json();
 
+    // v0.32.5: Backend returns candles with short keys (t/o/h/l/c/v),
+    // NOT long keys (time/open/high/low/close/volume). Support BOTH so
+    // any future backend change doesn't silently break the chart again.
     if (data.candles && data.candles.length > 0) {
       const candles = data.candles.map(c => ({
-        time: c.time || c.timestamp,
-        open: parseFloat(c.open),
-        high: parseFloat(c.high),
-        low: parseFloat(c.low),
-        close: parseFloat(c.close)
-      }));
+        time: c.time || c.timestamp || c.t,                       // v0.32.5: c.t
+        open: parseFloat(c.open ?? c.o),                          // v0.32.5: c.o
+        high: parseFloat(c.high ?? c.h),                          // v0.32.5: c.h
+        low: parseFloat(c.low ?? c.l),                            // v0.32.5: c.l
+        close: parseFloat(c.close ?? c.c),                        // v0.32.5: c.c
+      })).filter(c => {
+        // Filter out invalid candles (NaN/undefined) — these would break
+        // LightweightCharts setData() silently, leaving the chart empty.
+        return Number.isFinite(c.time) && Number.isFinite(c.open)
+            && Number.isFinite(c.high) && Number.isFinite(c.low)
+            && Number.isFinite(c.close);
+      });
+
+      // v0.32.5: LightweightCharts requires timestamps in SECONDS for
+      // intraday timeframes, not milliseconds. Detect from the magnitude:
+      // if time > 1e12, it's in milliseconds; divide by 1000.
+      candles.forEach(c => {
+        if (c.time > 1e12) c.time = Math.floor(c.time / 1000);
+      });
+
+      if (candles.length === 0) {
+        console.warn('loadChart: all candles had invalid values for', symbol);
+        candleSeries.setData([]);
+        volumeSeries.setData([]);
+        return;
+      }
+
       candleSeries.setData(candles);
 
-      const volumes = data.candles.map(c => ({
-        time: c.time || c.timestamp,
-        value: parseFloat(c.volume || 0),
-        color: parseFloat(c.close) >= parseFloat(c.open) ? 'rgba(74,222,128,0.25)' : 'rgba(248,113,113,0.25)'
-      }));
+      const volumes = data.candles.map(c => {
+        const t = c.time || c.timestamp || c.t;
+        const time = t > 1e12 ? Math.floor(t / 1000) : t;
+        return {
+          time,
+          value: parseFloat(c.volume ?? c.v ?? 0),
+          color: parseFloat(c.close ?? c.c) >= parseFloat(c.open ?? c.o) ? 'rgba(74,222,128,0.25)' : 'rgba(248,113,113,0.25)'
+        };
+      }).filter(v => Number.isFinite(v.time) && Number.isFinite(v.value));
       volumeSeries.setData(volumes);
 
       chart.timeScale().fitContent();
+    } else {
+      // v0.32.5: Clear chart when no data — don't leave stale candles
+      candleSeries.setData([]);
+      volumeSeries.setData([]);
+      console.log('loadChart: no candles for', symbol, 'on', exchange);
     }
   } catch (e) {
     console.error('loadChart error:', e);
+    // v0.32.5: Clear chart on error too
+    candleSeries.setData([]);
+    volumeSeries.setData([]);
+  } finally {
+    if (reloadBtn) { reloadBtn.textContent = 'Reload'; reloadBtn.disabled = false; }
   }
 }
 
@@ -1237,19 +1279,42 @@ async function loadSymbols() {
     const data = await res.json();
 
     const symbols = data.symbols || data || [];
+    // v0.32.5: Expanded default list with all major tokens user expects
+    // to see, so they're guaranteed to be in the dropdown even if MEXC's
+    // alphabetical sort cuts them off.
+    const defaultSymbols = [
+      'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'DOGE/USDT',
+      'ADA/USDT', 'AVAX/USDT', 'LINK/USDT', 'BNB/USDT', 'MATIC/USDT',
+      'DOT/USDT', 'LTC/USDT', 'BCH/USDT', 'ATOM/USDT', 'UNI/USDT',
+      'AAVE/USDT', 'NEAR/USDT', 'APT/USDT', 'FIL/USDT', 'ARB/USDT',
+      'OP/USDT', 'INJ/USDT', 'SUI/USDT', 'TIA/USDT', 'SEI/USDT',
+      'TIA/USDT', 'RUNE/USDT', 'GRT/USDT', 'ALGO/USDT', 'FTM/USDT',
+      'SAND/USDT', 'MANA/USDT', 'AXS/USDT', 'MKR/USDT', 'SNX/USDT',
+      'CRV/USDT', 'LDO/USDT', 'STX/USDT', 'IMX/USDT', 'GALA/USDT',
+    ];
+    const allSymbols = [...new Set([...defaultSymbols, ...symbols.map(s => typeof s === 'string' ? s : s.symbol)])].sort();
+
     const selectChart = document.getElementById('chartSymbol');
     const selectSetup = document.getElementById('setupSymbol');
 
-    const defaultSymbols = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'DOGE/USDT', 'ADA/USDT', 'AVAX/USDT', 'LINK/USDT'];
-    const allSymbols = [...new Set([...defaultSymbols, ...symbols.map(s => typeof s === 'string' ? s : s.symbol)])].sort();
+    // v0.32.5: Preserve current selection if possible (so reloading the
+    // symbol list doesn't reset the user's pick).
+    const currentChart = selectChart.value;
+    const currentSetup = selectSetup.value;
 
     [selectChart, selectSetup].forEach(sel => {
       sel.innerHTML = allSymbols.map(s => `<option value="${s}">${s}</option>`).join('');
     });
 
-    // Set default
-    if (allSymbols.includes('BTC/USDT')) {
+    // Restore selection if still in list, otherwise default to BTC/USDT
+    if (currentChart && allSymbols.includes(currentChart)) {
+      selectChart.value = currentChart;
+    } else if (allSymbols.includes('BTC/USDT')) {
       selectChart.value = 'BTC/USDT';
+    }
+    if (currentSetup && allSymbols.includes(currentSetup)) {
+      selectSetup.value = currentSetup;
+    } else if (allSymbols.includes('BTC/USDT')) {
       selectSetup.value = 'BTC/USDT';
     }
 
@@ -1258,7 +1323,8 @@ async function loadSymbols() {
   } catch (e) {
     console.error('loadSymbols error:', e);
     // Set defaults
-    const defaultSyms = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT'];
+    const defaultSyms = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT',
+                         'DOGE/USDT', 'ADA/USDT', 'AVAX/USDT', 'LINK/USDT'];
     [document.getElementById('chartSymbol'), document.getElementById('setupSymbol')].forEach(sel => {
       sel.innerHTML = defaultSyms.map(s => `<option value="${s}">${s}</option>`).join('');
     });
@@ -1718,8 +1784,24 @@ function drawEquityCurve(canvasId, data) {
 }
 
 // Chart event listeners
-document.getElementById('chartSymbol').addEventListener('change', loadChart);
-document.getElementById('chartTimeframe').addEventListener('change', loadChart);
+// v0.32.5: When chart symbol changes, also sync setup panel + reload trade history
+document.getElementById('chartSymbol').addEventListener('change', function() {
+  loadChart();
+  // Sync setup panel to match chart
+  const setup = document.getElementById('setupSymbol');
+  if (setup.value !== this.value) {
+    setup.value = this.value;
+  }
+  loadTradeHistory();
+});
+document.getElementById('chartTimeframe').addEventListener('change', function() {
+  loadChart();
+  // Sync setup timeframe
+  const setupTf = document.getElementById('setupTimeframe');
+  if (setupTf.value !== this.value) {
+    setupTf.value = this.value;
+  }
+});
 document.getElementById('chartExchange').addEventListener('change', loadChart);
 document.getElementById('showVolume').addEventListener('change', () => {
   volumeSeries.applyOptions({
@@ -1732,12 +1814,25 @@ document.getElementById('showMarkers').addEventListener('change', () => {
   }
 });
 
-// Sync setup selectors with chart
+// v0.32.5: When setup symbol changes, sync chart + reload BOTH chart and
+// trade history immediately. Previously this only set chartSymbol.value
+// without triggering loadChart() (setting .value does not fire change
+// events), so the chart stayed showing the OLD symbol and the trade
+// history only refreshed on the 30-second polling tick.
 document.getElementById('setupSymbol').addEventListener('change', function() {
-  document.getElementById('chartSymbol').value = this.value;
+  const chart = document.getElementById('chartSymbol');
+  if (chart.value !== this.value) {
+    chart.value = this.value;
+  }
+  loadChart();
+  loadTradeHistory();
 });
 document.getElementById('setupTimeframe').addEventListener('change', function() {
-  document.getElementById('chartTimeframe').value = this.value;
+  const chartTf = document.getElementById('chartTimeframe');
+  if (chartTf.value !== this.value) {
+    chartTf.value = this.value;
+  }
+  loadChart();
 });
 </script>
 

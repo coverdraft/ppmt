@@ -204,3 +204,53 @@ Stage Summary:
   * Process every closed candle via on_candle
   * Generate SAX symbols → predictions → signals → trades
 - "Candles" counter should now climb past 49 as live candles arrive each hour
+
+---
+Task ID: 9
+Agent: main
+Task: Fix dashboard: selecting a token from dropdown didn't load chart or trade history
+
+Work Log:
+- Audited token selection flow: /api/market/symbols → loadSymbols() → setupSymbol/chartSymbol <select>
+- Discovered 6 distinct frontend/backend bugs causing "no carga" symptom:
+
+  Bug 1 (CRITICAL): loadChart() read c.time/c.open/c.high/c.low/c.close but backend returns c.t/c.o/c.h/c.l/c.c
+    → ALL candles had NaN values → chart NEVER rendered since endpoint was written
+  Bug 2: setupSymbol change handler only set chartSymbol.value = this.value, did NOT call loadChart() or loadTradeHistory()
+    → setting .value programmatically doesn't fire 'change' event
+    → chart stayed on old token, trade history only refreshed on 30s poll tick
+  Bug 3: chartSymbol change handler only called loadChart(), didn't sync setupSymbol or call loadTradeHistory()
+  Bug 4: /api/market/symbols returned top 100 alphabetically (lots of "1000X/USDT" leveraged tokens first)
+    → major tokens (AAVE, BCH, etc.) might not appear in dropdown
+  Bug 5: when /api/ohlcv returned 0 candles, chart kept showing STALE data from previous token
+  Bug 6: backend returned timestamps in milliseconds, LightweightCharts expects seconds
+
+Fixes applied (v0.32.5):
+- src/ppmt/terminal/static/index.html:
+  * loadChart() supports BOTH short keys (c.t) and long keys (c.time) via ?? operator
+  * Filter NaN candles before setData() so chart doesn't silently fail
+  * Convert ms timestamps to seconds if > 1e12
+  * Clear chart when no candles returned or on error
+  * "Loading..." indicator on Reload button during fetch
+  * setupSymbol change handler now calls loadChart() + loadTradeHistory() immediately
+  * chartSymbol change handler now syncs setupSymbol + calls loadTradeHistory()
+  * setupTimeframe/chartTimeframe now bidirectionally sync
+  * Expanded defaultSymbols list from 8 to 40 major tokens
+  * loadSymbols() preserves user's current selection when repopulating dropdown
+- src/ppmt/terminal/server.py:
+  * /api/market/symbols filters out leveraged tokens (1000X, 3L, 3S, 5L, 5S, UP, DOWN, BULL, BEAR)
+  * Default limit raised from 100 to 500
+  * Returns total_available count
+- src/ppmt/__init__.py: 0.32.4 → 0.32.5
+- pyproject.toml: 0.32.4 → 0.32.5
+- TRAZABILIDAD.md: +175 lines documenting 6 root causes, 9 fixes, lessons learned
+
+Stage Summary:
+- 167 tests pass (no regressions)
+- HTML parses cleanly (2 <script> open/close pairs match)
+- Now when user selects any token in dropdown:
+  * Chart immediately reloads with that token's candles
+  * Trade history immediately reloads
+  * Both dropdowns (chart + setup) stay in sync
+- Dropdown now shows real major tokens (AAVE, BCH, ADA, AVAX, etc.)
+  instead of being filled with "1000BONK/USDT"-style leveraged tokens
