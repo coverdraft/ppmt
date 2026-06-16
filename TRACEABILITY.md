@@ -3009,3 +3009,30 @@ Phase 1 (DONE) ──→ Phase 2 (Bridge API) ──→ Phase 3 (Intelligence Fu
                          │                          └─ Needs Phase 2 API client
                          └─ Needs Phase 1 PortfolioManager running
 ```
+
+## v0.23.0 — 2026-06-16
+
+### Bug Fixes (CRITICAL)
+1. **Version sync**: `__init__.py`, `pyproject.toml`, `cli/main.py` all now at 0.23.0
+2. **Dead import fix**: `engine/monte_carlo.py:run_rolling_backtest` → replaced with `RealtimeTrader` replay
+3. **Recalibrate attr fix**: `realtime.py:_zscore_stats` → `_running_paa_mean/_std/_values`
+4. **Position.asset_class**: Added `asset_class` field, fixed `can_open()` and `open_position()` correlation check
+5. **MEXC exchange**: Added `_fetch_ccxt_exchange()`, routed "mexc" to ccxt, unknown exchanges use ccxt fallback
+6. **WebSocket MEXC**: Already supported in `websocket_feed.py` with `_listen_mexc()` and `_mexc_subscribe_msg()`
+
+### Strategy Improvements
+- SL tightened: 1.5x → 1.2x expected move, cap 5% → 3%
+- TP lowered: 2.5x → 2.0x expected move
+- move_threshold raised: 0.15 → 0.30
+- prob_threshold raised: 0.10 → 0.15
+- Extra quality gate: reject if win_rate < 0.25 AND move < 0.5%
+
+### New Features (v0.23.0)
+- **ParentNodeManager**: Multi-strategy capital distribution with parent-child node architecture
+- **ChildNodeConfig**: Per-child leverage (1-125x), auto/manual mode, capital allocation %
+- **Kill switches**: Global and per-child emergency controls
+- **Capital redistribution**: Dynamic reallocation without affecting open positions
+- **`ppmt nodes` CLI**: --add, --remove, --leverage, --kill, --unkill, --redistribute
+- **State persistence**: YAML config for child node state across sessions
+
+### Commit: bc38d75 (2026-06-16)
