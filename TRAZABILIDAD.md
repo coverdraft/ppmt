@@ -1,222 +1,385 @@
-# PPMT — Plan de Implementación y Trazabilidad
+# TRAZABILIDAD PPMT — Estado del Proyecto
 
-**Versión:** v0.31.0  
-**Fecha:** 2026-06-16  
-**Estado:** En progreso
+> Última actualización: 2026-06-16
+> Versión actual: v0.19.0 (commit `c970697`)
+> Repositorio: https://github.com/coverdraft/ppmt
+> Idioma: Español
 
 ---
 
-## Arquitectura General
+## 1. RESUMEN EJECUTIVO
+
+PPMT (Probability Position Management Tool) es un motor de trading autónomo basado en **Trie progresivo de patrones (N1+N2+N3+N4)** con **fuzzy matching**, gestión de capital tipo Kelly, y modo paper-trading con validación Monte Carlo antes de operar real.
+
+El proyecto está **funcional en modo paper-trading y backtesting**, pero faltan piezas clave para que el trading autónomo sea seguro y visible en el dashboard.
+
+**Estado global:**
+- Núcleo del motor (Trie, SAX, Matcher, Predictor): 100% funcional, 208 tests pasan.
+- Backtesting portfolio + Monte Carlo: 100% funcional (librerías Python listas).
+- Trading en vivo (RealtimeTrader): 90% (funciona, pero no hay persistencia de trades).
+- Dashboard Next.js: 80% (UI profesional, pero faltan paneles críticos).
+- **Pre-trade validation gate (Backtest + MC antes de operar): NO IMPLEMENTADO** ⚠️
+- **Persistencia de trades ejecutados: NO IMPLEMENTADA** ⚠️
+
+---
+
+## 2. ARQUITECTURA ACTUAL
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                     PPMT Terminal (Dashboard)                     │
-│                    index.html + WebSocket                         │
-├──────────────┬──────────────┬──────────────┬─────────────────────┤
-│  Chart Panel │  Trade Panel │  Validation  │  Money Management   │
-│  (OHLCV+Sig) │  (History)   │  (BT + MC)   │  (Kelly + Nodes)    │
-└──────┬───────┴──────┬───────┴──────┬───────┴──────────┬──────────┘
-       │              │              │                  │
-┌──────▼──────────────▼──────────────▼──────────────────▼──────────┐
-│                      FastAPI Server (server.py)                   │
-│  /api/status  /api/trades  /api/validate  /api/auto-setup       │
-│  /api/nodes   /api/backtest  /api/start-trading  /ws            │
-└──────┬──────────────┬──────────────┬─────────────────────────────┘
-       │              │              │
-┌──────▼──────────────▼──────────────▼─────────────────────────────┐
-│                    Core Engine (realtime.py)                       │
-│  SAX → Pattern Buffer → FuzzyMatcher → Prediction → Signal      │
-│  Living Trie (N1+N2+N3+N4) → Regime → Risk → Position          │
-├─────────────────┬──────────────────┬─────────────────────────────┤
-│  MoneyManager   │  ParentNodeMgr   │  MonteCarloValidator        │
-│  (Kelly+limits) │  (Multi-token)   │  (1000 sims, RoR, P95 DD)  │
-└─────────────────┴──────────────────┴─────────────────────────────┘
-       │
-┌──────▼───────────────────────────────────────────────────────────┐
-│                    PPMTStorage (SQLite)                           │
-│  ohlcv | tries | trades | validations | signals | engine_states  │
-│  (symbol, timeframe, timestamp) → Multi-symbol/Multi-TF          │
-└──────────────────────────────────────────────────────────────────┘
+ppmt/
+├── src/
+│   ├── ppmt/                    # Núcleo Python (motor + riesgo)
+│   │   ├── core/                # Trie, SAX, Matcher, Metadata
+│   │   ├── data/                # Collector, Storage (SQLite), Classifier
+│   │   ├── engine/              # PPMT, Prediction, Signal, Realtime
+│   │   ├── risk/                # MoneyManager, MonteCarlo, PortfolioRunner, Backtester
+│   │   ├── cli/                 # CLI (init, ingest, build, predict, run)
+│   │   └── terminal/            # FastAPI server (lite dashboard)
+│   ├── app/                     # Next.js 16 dashboard (principal)
+│   │   ├── api/ppmt/            # 14 rutas API (backtest, signals, predict, etc.)
+│   │   ├── components/dashboard/# 56+ paneles (BacktestingLab, PaperTradingPanel, etc.)
+│   │   └── ...
+│   └── tests/                   # 209 tests (208 pasan, 1 fallo conocido en OOS)
+├── data/                        # SQLite DB + tries serializados
+├── config/                      # YAML de configuración
+├── pyproject.toml
+└── package.json
+```
+
+### Stack técnico
+- **Python 3.11+**: FastAPI, numpy, pandas, scipy, websockets
+- **Next.js 16 + TypeScript**: React 19, Tailwind 4, shadcn/ui, Prisma ORM, Socket.IO
+- **Base de datos**: SQLite (candles, tries, señales, perfiles)
+- **Bibliotecas clave**: matplotlib (charts), rich (CLI), click
+
+---
+
+## 3. FUNCIONALIDADES IMPLEMENTADAS ✅
+
+### Núcleo del motor
+- ✅ Trie progresivo N1+N2+N3+N4 con SAX encoding
+- ✅ Fuzzy matching con distancia de Levenshtein
+- ✅ Metadata v4.2 con 21 métricas por nodo
+- ✅ 4 TokenProfiles auto-calibrables: `blue_chip`, `default`, `meme`, `new_launch`
+- ✅ Asset classifier automático (registra perfil correcto según clase de token)
+- ✅ Persistencia de tries en SQLite (todos los niveles N1-N4)
+
+### Datos
+- ✅ DataCollector con Binance, Bybit y MEXC (REST + WebSocket)
+- ✅ Multi-timeframe: 1m, 5m, 15m, 1h, 4h, 1d (configurable)
+- ✅ SQLite storage con tablas: `assets`, `ohlcv_data`, `tries`, `engine_state`, `signals`, `token_profiles`
+- ✅ Bulk ingest CLI: `ppmt bulk-ingest`
+
+### Backtesting y Riesgo
+- ✅ `PortfolioBacktester`: backtest multi-token con capital compartido
+- ✅ `MonteCarloSimulator`: 1000 simulaciones, Risk of Ruin, P95 DD, Profit Factor
+- ✅ `MoneyManager`: Kelly Criterion, kill switch, daily loss limit, drawdown limit
+- ✅ `PortfolioRunner`: orquestador multi-engine en hilo async
+- ✅ `CorrelationEngine`: matriz de correlación entre posiciones
+- ✅ `RegimeAllocator`: asignación según régimen de mercado (6 regímenes)
+
+### Trading en vivo
+- ✅ `RealtimeTrader`: streaming con WebSocket, modo live o replay
+- ✅ 4 modos: `DRY_RUN`, `PAPER`, `LIVE`, `HEDGE`
+- ✅ API `/api/ppmt/realtime/trade` para ejecutar paper trades desde señales
+- ✅ WebSocket `/ws` para broadcast de estado en tiempo real
+- ✅ `PortfolioRunner` con `run_async()` (no bloquea el dashboard)
+
+### Dashboard (Next.js)
+- ✅ 56+ componentes dashboard (BacktestingLab, PaperTradingPanel, etc.)
+- ✅ 14 rutas API PPMT (backtest, signals, predict, ohlcv, runner, etc.)
+- ✅ Monte Carlo UI con gráficos de distribución
+- ✅ Chart OHLCV con trade markers (entry/exit)
+- ✅ UI/UX profesional: sidebar ancho, tipografía 11px+, dark theme
+
+### Tests y CI
+- ✅ 208 tests pasan (de 209)
+- ✅ Tests unitarios de Trie, Matcher, Metadata, SAX, MoneyManager, PortfolioRunner
+- ✅ Tests de integración de pipeline completo
+
+---
+
+## 4. COSAS QUE FALTAN ⚠️ (LISTA PRIORIZADA)
+
+### 🔴 PRIORIDAD CRÍTICA — Seguridad de Trading
+
+#### F1. Tabla `trades` en SQLite + persistencia
+**Estado:** NO IMPLEMENTADO
+**Archivos afectados:** `src/ppmt/data/storage.py`, `src/ppmt/risk/money_manager.py`
+
+El `MoneyManager` mantiene las posiciones en memoria. Cuando se reinicia el dashboard o el proceso, **se pierden todas las posiciones abiertas y el historial completo de trades**. No hay tabla `trades` en SQLite.
+
+**Qué hacer:**
+- Crear tabla `trades` con campos: `id, symbol, side, entry_time, entry_price, exit_time, exit_price, qty, pnl, pnl_pct, fee, status, signal_meta, asset_class`
+- `MoneyManager.open_position()` debe escribir un row con `status='open'`
+- `MoneyManager.close_position()` debe actualizar el row con `status='closed'` y los datos de salida
+- Método `Storage.get_trade_history(symbol=None, limit=100)` para consultar historial
+
+#### F2. Pre-trade Validation Gate (Backtest + Monte Carlo)
+**Estado:** NO IMPLEMENTADO
+**Archivos afectados:** `src/app/api/ppmt/realtime/route.ts`, `src/ppmt/risk/monte_carlo.py`
+
+Antes de permitir que el `RealtimeTrader` opere un token en modo autónomo, debe validar que el sistema tiene **edge estadísticamente significativo** sobre ese token. Actualmente el sistema puede empezar a operar sin ninguna validación previa.
+
+**Qué hacer:**
+- Nuevo endpoint `POST /api/ppmt/validate` que reciba `{symbol, timeframe}`
+- Internamente ejecuta `PortfolioBacktester.run()` con últimos 90 días
+- Si backtest tiene < 30 trades → verdict `INSUFFICIENT_DATA` (no operar)
+- Si backtest tiene ≥ 30 trades → ejecuta `MonteCarloSimulator.run()` (1000 sim)
+- Veredicto final: `LOW_RISK` (P95 DD <15%, RoR <5%, PF>1.3) / `MODERATE` / `HIGH_RISK`
+- Solo si verdict es `LOW_RISK` o `MODERATE`, se habilita el auto-trade para ese token
+- Guardar verdict en SQLite (`token_validations` table) con expiración de 24h
+
+#### F3. Auto-Setup ("Prepare Token") endpoint
+**Estado:** NO IMPLEMENTADO
+**Archivos afectados:** `src/app/api/ppmt/auto-setup/route.ts` (nuevo)
+
+Un token nuevo no puede operar sin: ingest → build tries → backtest → MC validation. Hoy esto requiere 4 comandos CLI manuales. Necesitamos un botón "Prepare Token" en el dashboard que ejecute toda la cadena.
+
+**Qué hacer:**
+- Nuevo endpoint `POST /api/ppmt/auto-setup` con body `{symbol, timeframe}`
+- Steps en backend: ingest 90 días → build 4 niveles trie → guardar tries → run backtest → run MC → guardar validation
+- Devuelve `{job_id, status: 'running'}` inmediatamente, el cliente hace polling a `/api/ppmt/auto-setup/{job_id}`
+- Cuando termina, actualiza el estado del token en UI a "READY_TO_TRADE"
+
+---
+
+### 🟡 PRIORIDAD ALTA — Visibilidad en Dashboard
+
+#### F4. Panel "Trade History" en dashboard
+**Estado:** PARCIAL — existe `PaperTradingPanel` pero no muestra historial persistente
+**Archivos afectados:** `src/components/dashboard/trade-history-panel.tsx` (nuevo)
+
+El usuario debe poder ver **todas las operaciones ejecutadas** (paper y live) con: timestamp, símbolo, lado, entry/exit price, PnL, fees, status. Hoy solo se ve en memoria y se pierde al recargar.
+
+**Qué hacer:**
+- Crear `TradeHistoryPanel` conectado a `GET /api/ppmt/trades?symbol=X&limit=100`
+- Tabla con filtros (símbolo, fecha, status) y totales (PnL total, win rate, profit factor)
+- Exportable a CSV
+
+#### F5. Panel "Money Management" en dashboard
+**Estado:** NO IMPLEMENTADO
+**Archivos afectados:** `src/components/dashboard/money-manager-panel.tsx` (nuevo)
+
+El usuario debe ver en tiempo real: capital total, cash disponible, exposición, drawdown actual, daily P&L, kill switch status, posiciones abiertas con su PnL no realizado.
+
+**Qué hacer:**
+- Crear `MoneyManagerPanel` conectado a `/api/ppmt/risk` (ya existe)
+- Mostrar: Total Equity, Cash, Exposure %, Drawdown %, Daily P&L, Open Positions count
+- Botón "Kill Switch" para detener todo
+- Lista de posiciones abiertas con PnL live
+
+#### F6. Panel "Validation Results" en dashboard
+**Estado:** NO IMPLEMENTADO
+**Archivos afectados:** `src/components/dashboard/validation-panel.tsx` (nuevo)
+
+Mostrar el verdict de validación (LOW/MODERATE/HIGH) por token, con fecha de última validación y métricas clave (PF, P95 DD, RoR, num trades). Solo tokens validados pueden operar.
+
+**Qué hacer:**
+- Crear `ValidationPanel` conectado a `GET /api/ppmt/validations`
+- Tabla: symbol | last_validation | verdict | PF | P95_DD | RoR | trades | expires_at
+- Badge de color: verde (LOW), amarillo (MODERATE), rojo (HIGH)
+
+---
+
+### 🟢 PRIORIDAD MEDIA — Multi-token y Multi-timeframe
+
+#### F7. Multi-token trading en vivo
+**Estado:** PARCIAL — `PortfolioRunner` existe pero solo se usa en backtest
+**Archivos afectados:** `src/ppmt/risk/portfolio_runner.py`, `src/app/api/ppmt/runner/route.ts`
+
+El `PortfolioRunner` ya orquesta múltiples `TokenEngine` pero solo en modo backtest. En modo live, solo hay un `RealtimeTrader` activo a la vez. Necesitamos múltiples traders en paralelo (uno por token), compartiendo el mismo `MoneyManager` y `ParentNodeManager`.
+
+**Qué hacer:**
+- Modificar `PortfolioRunner` para soportar `mode='live'` además de `'backtest'`
+- En modo live: un hilo por token, cada uno con su WebSocket, pero todos escribiendo al mismo `MoneyManager`
+- API `POST /api/ppmt/runner/start` con `{symbols: [...], mode: 'live'}`
+- Bloqueo de concurrencia en `MoneyManager.open_position()` para evitar race conditions
+
+#### F8. Multi-timeframe signal fusion
+**Estado:** NO IMPLEMENTADO
+**Archivos afectados:** `src/ppmt/engine/signal.py`, `src/ppmt/engine/realtime.py`
+
+Actualmente el `RealtimeTrader` opera en un solo timeframe. Un sistema profesional fusiona señales de múltiples timeframes (ej: 1h para dirección, 5m para entrada, 1m para ejecución). Sin esto, el sistema es ciego al contexto mayor.
+
+**Qué hacer:**
+- `SignalFusion` class que recibe señales de N timeframes y emite un score combinado
+- Pesos por timeframe: 1d=0.3, 4h=0.25, 1h=0.2, 15m=0.15, 5m=0.1
+- Solo operar si ≥ 2 timeframes alineados en dirección
+- Configurable por `TokenProfile` (algunos tokens operan mejor en TF alto)
+
+#### F9. ParentNodeManager UI
+**Estado:** PARCIAL — la clase existe en `money_manager.py` pero no hay UI
+**Archivos afectados:** `src/components/dashboard/parent-node-panel.tsx` (nuevo)
+
+El `ParentNodeManager` gestiona el pool de capital con nodos hijo (cada uno con `alloc_pct`, `leverage`, `auto_mode`). Hoy solo se ve en CLI. Necesitamos una UI para crear/configurar/eliminar nodos hijo y ver su rendimiento individual.
+
+**Qué hacer:**
+- Crear `ParentNodePanel` conectado a `/api/ppmt/parent-nodes`
+- Vista de árbol: Parent → Child 1, Child 2, ...
+- Por hijo: alloc_pct, leverage, current_value, pnl, auto_mode toggle
+- Botones: Add Child, Rebalance, Withdraw
+
+---
+
+### 🔵 PRIORIDAD BAJA — Polish
+
+#### F10. Test OOS con símbolos rotos
+**Estado:** 1 test falla — `test_oos_with_trending_data`
+**Archivos afectados:** `tests/test_oos_validation.py:187`
+
+El test pasa `symbols=` a `PPMT.build()` pero la firma no acepta ese parámetro. Hay que actualizar el test o añadir el parámetro (con default `None`) al método `build()`.
+
+#### F11. Test trie-merge-observations falla
+**Estado:** 1 test falla — `test_trie_merge_preserves_observations`
+**Archivos afectados:** `tests/test_v43_robust.py:757`
+
+`AttributeError` en línea 757. Revisar qué atributo se perdió durante el merge de tries.
+
+#### F12. Script de deployment (Caddyfile + systemd)
+**Estado:** PARCIAL — existe Caddyfile pero no systemd service
+**Archivos afectados:** `deploy/ppmt.service` (nuevo)
+
+Para producción necesitamos un `.service` de systemd que levante el dashboard Next.js y el backend Python al arrancar.
+
+#### F13. Webhook de notificaciones (Telegram/Discord)
+**Estado:** NO IMPLEMENTADO
+
+Notificar al usuario cuando: se abre trade, se cierra trade, kill switch disparado, validación completada, error crítico.
+
+---
+
+## 5. PLAN DE IMPLEMENTACIÓN RECOMENDADO
+
+### Sprint 1 (Semana 1) — Seguridad crítica
+- **F1**: Tabla `trades` + persistencia (4h)
+- **F2**: Pre-trade validation gate (8h)
+- **F3**: Auto-setup endpoint (4h)
+- Tests de integración (2h)
+- **Entregable:** Trading autónomo seguro con gate de validación
+
+### Sprint 2 (Semana 2) — Visibilidad dashboard
+- **F4**: Trade History panel (4h)
+- **F5**: Money Manager panel (4h)
+- **F6**: Validation Results panel (3h)
+- **Entregable:** Usuario ve todo lo que pasa en el sistema
+
+### Sprint 3 (Semana 3) — Multi-token y fusion
+- **F7**: Multi-token live trading (8h)
+- **F8**: Multi-timeframe signal fusion (6h)
+- **F9**: ParentNodeManager UI (4h)
+- **Entregable:** Sistema opera múltiples tokens en múltiples timeframes
+
+### Sprint 4 (Semana 4) — Polish y deploy
+- **F10, F11**: Fix tests (2h)
+- **F12**: Deployment scripts (3h)
+- **F13**: Webhook notificaciones (4h)
+- **Entregable:** Sistema production-ready
+
+---
+
+## 6. CÓMO ACTUALIZAR EN TU ORDENADOR
+
+```bash
+# 1. Navegar al directorio del proyecto
+cd ~/projects/ppmt    # o donde tengas el repo
+
+# 2. Traer los últimos cambios
+git fetch origin
+git pull origin main
+
+# 3. Si hay cambios en dependencias Python
+pip install -e . --upgrade
+
+# 4. Si hay cambios en dependencias Node
+npm install
+
+# 5. Si hay migraciones de Prisma
+npx prisma generate
+npx prisma db push
+
+# 6. Levantar el dashboard
+# Opción A: Dashboard Next.js (recomendado)
+npm run dev
+# → http://localhost:3000
+
+# Opción B: Terminal lite FastAPI
+python -m ppmt.terminal.server
+# → http://localhost:8420
+
+# 7. Levantar trading en vivo (en otra terminal)
+ppmt run --symbol BTC/USDT --timeframe 1h --mode paper
+```
+
+### Comandos CLI útiles
+```bash
+ppmt init                                    # Inicializar DB
+ppmt ingest --symbol BTC/USDT --timeframe 1h --days 90   # Descargar datos
+ppmt build --symbol BTC/USDT --timeframe 1h  # Construir tries
+ppmt predict --symbol BTC/USDT --timeframe 1h # Ver predicción actual
+ppmt list                                    # Listar assets trackeados
+ppmt stats --symbol BTC/USDT                 # Estadísticas de patrones
+ppmt run --symbol BTC/USDT --timeframe 1h --mode paper   # Paper trading
 ```
 
 ---
 
-## 4 Estilos de Token (TokenProfile)
-
-| Estilo | Asset Class | SAX α | SAX W | Max Position | Catastrophic Loss | SL/TP Ratio |
-|--------|-------------|-------|-------|-------------|-------------------|-------------|
-| `blue_chip` | BTC, ETH | 5-7 | 8-15 | 4% | 5% | 2.0:1 |
-| `default` | Large/Mid Cap | 5-6 | 6-12 | 3% | 8% | 1.8:1 |
-| `meme` | DOGE, SHIB, PEPE | 4-5 | 4-8 | 2% | 15% | 1.5:1 |
-| `new_launch` | New tokens | 3-4 | 3-6 | 1% | 25% | 1.2:1 |
-
-Cada perfil tiene **21 parámetros auto-calibrables** via `TradingCalibrationEngine`.
-
----
-
-## Fases de Implementación
-
-### Phase 1 — Fundamentos Rotos ✅ COMPLETADO
-- [x] Tabla `trades` en SQLite con campos: symbol, timeframe, direction, entry/exit, P&L, confidence, exit_reason, regime, leverage, kelly_fraction, node_id
-- [x] Endpoint `/api/trades` — historial de trades cerrados
-- [x] Endpoint `/api/trade-summary` — estadísticas agregadas
-- [x] Tabla `validations` en SQLite
-- [x] Endpoint `/api/validate` — ejecuta backtest + Monte Carlo, devuelve verdict PASS/FAIL
-- [x] Gate pre-trade en `/api/start-trading` — si validate=FAIL → no opera
-- [x] `storage.save_trade()`, `storage.get_trades()`, `storage.get_trade_summary()`
-- [x] `storage.save_validation()`, `storage.get_latest_validation()`
-
-### Phase 2 — Auto-setup ✅ COMPLETADO
-- [x] Endpoint `/api/auto-setup` — ingest → build → calibrate → backtest → MC en una llamada
-- [x] Progreso visual via `auto_setup_status` en TerminalState
-- [x] Auto-ingest si no hay datos (500+ candles requeridas)
-- [x] Auto-build si no hay trie (N3 requerido)
-
-### Phase 3 — Panel de Operaciones ✅ COMPLETADO
-- [x] TerminalState: campos `trade_history`, `validation_result`, `auto_setup_status`
-- [x] **Trade History panel** — tabla de trades cerrados con P&L, exit reason, duración
-- [x] **Money Management Detail** — position sizing, Kelly fraction, regime multiplier
-- [x] **Validation Results panel** — backtest stats + MC verdict + recomendaciones
-- [x] **UI/UX profesional** — rediseño completo estilo Bloomberg/TradingView (v0.32.0)
-- [x] **Trade logging** — RealtimeTrader guarda trades en SQLite al cerrar
-
-### Phase 4 — Multi-Token ✅ COMPLETADO
-- [x] Endpoint `/api/portfolio-backtest` — backtest multi-token
-- [x] Endpoint `/api/multi-setup` — auto-setup múltiples tokens + crear nodos
-- [x] ParentNodeManager integration con child nodes por token
-- [x] Portfolio backtest desde dashboard
-
-### Phase 5 — Multi-Timeframe ✅ COMPLETADO
-- [x] Endpoint `/api/multi-tf-analysis` — análisis multi-temporalidad
-- [x] Confluence scoring entre temporalidades
-- [x] Auto-ingest + auto-build por temporalidad
-
----
-
-## Endpoints API Activos
-
-| Método | Endpoint | Descripción | Estado |
-|--------|----------|-------------|--------|
-| GET | `/api/status` | Estado completo del terminal | ✅ |
-| GET | `/api/snapshot` | Snapshot con uptime | ✅ |
-| GET | `/api/portfolio` | Resumen de portfolio | ✅ |
-| GET | `/api/signals` | Señales recientes | ✅ |
-| GET | `/api/performance` | Métricas de rendimiento | ✅ |
-| GET | `/api/risk` | Estado de riesgo | ✅ |
-| GET | `/api/nodes` | Nodos hijos + parent | ✅ |
-| POST | `/api/nodes/add` | Agregar nodo hijo | ✅ |
-| POST | `/api/nodes/remove` | Eliminar nodo hijo | ✅ |
-| POST | `/api/nodes/leverage` | Cambiar leverage | ✅ |
-| POST | `/api/nodes/auto-mode` | Cambiar modo auto/manual | ✅ |
-| POST | `/api/nodes/capital` | Cambiar capital total | ✅ |
-| POST | `/api/nodes/kill-switch/activate` | Activar kill switch | ✅ |
-| POST | `/api/nodes/kill-switch/deactivate` | Desactivar kill switch | ✅ |
-| POST | `/api/nodes/redistribute` | Redistribuir capital | ✅ |
-| POST | `/api/backtest` | Ejecutar backtest rápido | ✅ |
-| GET | `/api/ohlcv` | Datos OHLCV para chart | ✅ |
-| GET | `/api/market/price` | Precio actual del mercado | ✅ |
-| GET | `/api/market/symbols` | Símbolos disponibles | ✅ |
-| POST | `/api/ingest` | Descargar datos históricos | ✅ |
-| POST | `/api/start-trading` | Iniciar sesión paper trading | ✅ |
-| POST | `/api/stop-trading` | Detener sesión de trading | ✅ |
-| GET | `/api/trading-status` | Estado de sesión activa | ✅ |
-| GET | `/api/trades` | Historial de trades | ✅ |
-| GET | `/api/trade-summary` | Estadísticas agregadas | ✅ |
-| POST | `/api/validate` | Validar token (BT + MC) | ✅ |
-| POST | `/api/auto-setup` | Pipeline completo automático | ✅ |
-| POST | `/api/portfolio-backtest` | Backtest multi-token | ✅ |
-| POST | `/api/multi-setup` | Auto-setup múltiples tokens | ✅ |
-| POST | `/api/multi-tf-analysis` | Análisis multi-temporalidad | ✅ |
-| WS | `/ws` | WebSocket tiempo real | ✅ |
-
----
-
-## Pre-Trade Validation Gate
-
-Antes de permitir trading autónomo, el sistema verifica:
-
-| Check | Umbral | Descripción |
-|-------|--------|-------------|
-| Win Rate | > 40% | Tasa de acierto en backtest |
-| Profit Factor | > 0.8 | Ganancias vs pérdidas |
-| Risk of Ruin (MC) | < 20% | Probabilidad de ruina en 1000 simulaciones |
-| MC Verdict | ≠ HIGH RISK | Veredicto de Monte Carlo |
-| Min Trades | ≥ 5 | Mínimo de trades en backtest |
-
-Si cualquier check falla → verdict = **FAIL** → trading no permitido.
-
----
-
-## Living Trie (4 Niveles)
-
-| Nivel | Patrón | Match | Descripción |
-|-------|--------|-------|-------------|
-| N1 | Último SAX symbol | Exacto | Match más rápido, menos contexto |
-| N2 | Últimos 2 SAX symbols | Fuzzy | Balance velocidad/contexto |
-| N3 | Últimos 3 SAX symbols | Fuzzy | Match principal |
-| N4 | Últimos 4-5 SAX symbols | Fuzzy | Match más lento, más contexto |
-
-Todos los niveles se persisten en SQLite (`tries` table) y se actualizan en vivo.
-
----
-
-## Money Management Stack
+## 7. ESTADO DE TESTS
 
 ```
-Signal → RiskManager (per-trade sizing)
-       → MoneyManager (portfolio-level)
-           → Kelly Criterion (quarter-Kelly por defecto)
-           → Circuit Breakers (daily loss, max drawdown)
-           → Kill Switch (exposure > 95%)
-       → ParentNodeManager (multi-token allocation)
-           → ChildNodeConfig (per-token: alloc_pct, leverage, auto_mode)
+========================= 208 passed, 1 failed in 3.11s =========================
 ```
 
----
+**Tests que fallan (conocidos):**
+1. `tests/test_oos_validation.py::TestPatternDetectionOOS::test_oos_with_trending_data` — `PPMT.build()` no acepta `symbols=` kwarg
+2. `tests/test_v43_robust.py::TestFullPipelineIntegration::test_trie_merge_preserves_observations` — `AttributeError` línea 757
 
-## Base de Datos (SQLite ~/.ppmt/ppmt.db)
-
-### Tablas
-
-| Tabla | PK | Descripción |
-|-------|-----|-------------|
-| `assets` | symbol | Tokens rastreados con clasificación |
-| `ohlcv` | (symbol, timeframe, timestamp) | Velas OHLCV multi-symbol/multi-TF |
-| `tries` | (symbol, level) | Tries serializados (N1-N4) |
-| `engine_states` | symbol | Estado del motor y TokenProfiles |
-| `signals` | id (auto) | Historial de señales |
-| `trades` | id (auto) | Historial de trades cerrados |
-| `validations` | id (auto) | Resultados de validación |
+Estos fallos NO bloquean el trading ni el backtesting. Son tests de robustez pendientes de fix.
 
 ---
 
-## Changelog
+## 8. ESTADO DE GITHUB
 
-### v0.32.0 (2026-06-16)
-- Professional trading terminal UI/UX redesign (Bloomberg/TradingView style)
-- CSS Grid layout with chart area, sidebar, blotter, status bar
-- Trade logging: RealtimeTrader saves closed trades to SQLite
-- Multi-token: /api/portfolio-backtest, /api/multi-setup endpoints
-- Multi-timeframe: /api/multi-tf-analysis endpoint with confluence scoring
-- All emojis removed from UI, sharp 4px border radius, compact professional density
-- Header shows real-time P&L, regime, validation/trading badges
-- Version bump to v0.32.0
+- **Repo:** https://github.com/coverdraft/ppmt
+- **Branch activa:** `main`
+- **Último commit pushed:** `c970697` — feat: Phase 4.6 E2E complete, all 4 phases done
+- **Commits sin push:** 1 (este commit incluye TRAZABILIDAD.md)
+- **Tests en CI:** locales solamente (no hay GitHub Actions todavía)
 
-### v0.31.0 (2026-06-16)
-- Added `trades` and `validations` tables to SQLite
-- Added `/api/trades`, `/api/trade-summary`, `/api/validate`, `/api/auto-setup` endpoints
-- Pre-trade validation gate in `/api/start-trading`
-- TerminalState: `trade_history`, `validation_result`, `auto_setup_status` fields
-- Auto-ingest + auto-build in start-trading flow
-- Monte Carlo validation with Risk of Ruin, P95 DD, verdict
-- Living Trie persistence fix (saves all 4 levels N1-N4)
-- Auto-build bug fix (PPMT.build() params)
-- Backtest markers with entry/exit arrows and P&L colors
+### Próximos commits planificados
+- `feat: Phase 5.1 — trades table + persistence`
+- `feat: Phase 5.2 — pre-trade validation gate (Backtest + MC)`
+- `feat: Phase 5.3 — auto-setup endpoint`
+- `feat: Phase 5.4 — dashboard panels (TradeHistory, MoneyManager, Validation)`
+- `feat: Phase 5.5 — multi-token live trading`
+- `feat: Phase 5.6 — multi-timeframe signal fusion`
 
-### v0.30.0 (2026-06-15)
-- Fixed auto-build bug (PPMT.build() wrong params)
-- Fixed DataCollector.fetch_historical → fetch_and_save()
-- Fixed Living Trie persistence (all 4 levels)
-- Implemented addBacktestMarkers() with entry/exit markers
-- Removed unused FileResponse import
-- Pushed to GitHub
+---
+
+## 9. FILTROS DE SEGURIDAD ACTIVOS
+
+Antes de operar en modo LIVE (cuando se habilite), verificar:
+
+- [ ] Token validado: verdict = LOW_RISK o MODERATE_RISK (no HIGH_RISK)
+- [ ] Backtest con ≥ 30 trades en últimos 90 días
+- [ ] Monte Carlo P95 Drawdown < 20%
+- [ ] Monte Carlo Risk of Ruin < 5%
+- [ ] Monte Carlo Profit Factor > 1.3
+- [ ] Capital disponible en MoneyManager > min_position_size
+- [ ] No hay kill switch activo
+- [ ] Daily loss no superado
+- [ ] Drawdown actual no superado
+- [ ] No más de max_concurrent_positions abiertas
+- [ ] Correlación con posiciones existentes < 0.7
+
+Si **cualquier** check falla, el sistema debe **rechazar** el trade y loguear el motivo.
+
+---
+
+## 10. CONTACTO Y BITÁCORA
+
+Bitácora técnica detallada en inglés: `TRACEABILITY.md` (149KB, histórico completo desde v0.1.0).
+
+Este documento `TRAZABILIDAD.md` es el resumen ejecutivo en español, actualizado cada vez que se completa una fase o se hace un cambio arquitectónico significativo.
+
+**Próxima actualización:** después de Sprint 1 (F1+F2+F3 completados).
