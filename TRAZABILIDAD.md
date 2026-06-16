@@ -1230,3 +1230,226 @@ ccxt retorna ms, LightweightCharts requiere s. Siempre detectar y convertir.
 2. **Telemetría de errores de frontend:** capturar excepciones en `loadChart()` y enviarlas a un endpoint `/api/log` para verlas en el server.
 3. **Paginación de tokens:** con 500 tokens, la dropdown puede ser lenta. Considerar un input con autocomplete en lugar de un `<select>`.
 4. **Cache de markets:** `load_markets()` es costoso. Cachear por 1h en memoria o en disco.
+
+---
+
+## v0.32.6 — State pollution entre tokens + Sweep All Tokens + UI robustez
+
+**Fecha:** 2026-06-17
+**Commit:** próximo
+**Bug reportado por el usuario:** "cuando pasas de uno a otro y vuelves a hacer un test si pasa o no para operar en el grafico se ven las operaciones que hizo en otro token y da como un error Step 0/5: error... VALIDATION RESULT asi debajo del boton"
+
+### Síntomas
+
+1. **Polución de estado entre tokens.** El usuario valida el token A (PASS o FAIL), luego selecciona el token B y vuelve a validar. En el gráfico del token B se ven los marcadores (entry/exit) del token A. Bajo el botón "Prepare Token" aparece la validación del token A ("VALIDATION RESULT" + badge PASS/FAIL del token anterior).
+2. **"Step 0/5: error..." persistente.** Si una validación previa terminó en excepción, el servidor dejaba `auto_setup_status = {"step": "error", ...}` en el estado global. El frontend recibía esto por WebSocket cada segundo y lo renderizaba literalmente como `Step 0/5: error...` (porque `'error'` no está en el array `['ingesting','building','backtesting','montecarlo','done']` y `indexOf` devuelve -1, entonces `currentIdx+1 = 0`).
+3. **Falta de barrido masivo.** El usuario quiere un botón que valide todos los tokens en segundo plano para descubrir cuáles son operables sin tener que hacerlo uno por uno.
+4. **Historial limitado.** MEXC a veces trae menos historial del necesario; el usuario pregunta si cambiar a Binance tendría más datos.
+
+### Causa raíz
+
+**El `terminal_state` es un singleton GLOBAL compartido por todos los tokens.** Solo hay un `validation_result`, un `auto_setup_status`, un `signals_history` y un `positions` para todo el servidor. El WebSocket broadcastea este estado cada segundo a todos los dashboards conectados. Cuando el usuario cambia de token en el dashboard, el servidor NO sabe que cambió — sigue enviando el estado del token anterior.
+
+El frontend hacía:
+```js
+if (s.validation_result) updateValidationResult(s.validation_result);
+if (s.auto_setup_status) updateSetupProgress(s.auto_setup_status);
+if (s.signals_history) syncChartMarkers(s.signals_history);
+```
+
+Sin ningún filtro por token. Entonces cualquier estado global se renderizaba encima del token actual sin importar a qué token pertenecía.
+
+### Fix #1 — Etiquetar `auto_setup_status` y `validation_result` con `symbol`+`timeframe`
+
+**`server.py` `validate_token()`:**
+
+```python
+_status_token = {"symbol": req.symbol, "timeframe": req.timeframe, "exchange": req.exchange}
+
+terminal_state.update_sync(
+    auto_setup_status={**_status_token,
+                       "step": "backtesting", "status": "running",
+                       "message": f"Running backtest for {req.symbol}...",
+                       "percent": 60}
+)
+# ... y lo mismo en cada uno de los 7 update_sync() a lo largo de la función
+```
+
+Y al final:
+```python
+val_result["symbol"] = req.symbol
+val_result["timeframe"] = req.timeframe
+terminal_state.update_sync(validation_result=val_result, ...)
+```
+
+Ahora cada estado lleva la firma del token que lo produjo.
+
+### Fix #2 — Frontend filtra estado WS por token activo
+
+**`index.html` `updateDashboard(s)`:**
+
+```js
+// v0.32.6: filter by symbol+timeframe so stale state from a previous token
+// doesn't get re-rendered on top of the new token.
+if (s.validation_result) {
+  const vr = s.validation_result;
+  if (vr.symbol === activeValidationSymbol && vr.timeframe === activeValidationTF) {
+    updateValidationResult(vr);
+  }
+}
+if (s.auto_setup_status) {
+  const st = s.auto_setup_status;
+  if (st.symbol === activeValidationSymbol && st.timeframe === activeValidationTF) {
+    updateSetupProgress(st);
+  }
+}
+
+// Chart markers — only show when chart is showing the SAME symbol as the trader
+const chartSym = document.getElementById('chartSymbol').value;
+if (s.signals_history && s.symbol === chartSym) {
+  syncChartMarkers(s.signals_history);
+} else if (s.signals_history && s.symbol && s.symbol !== chartSym) {
+  // Different symbol: clear stale markers
+  candleSeries.setMarkers([]);
+}
+```
+
+Y `autoSetup()` ahora fija `activeValidationSymbol` / `activeValidationTF` antes de hacer el POST:
+
+```js
+activeValidationSymbol = symbol;
+activeValidationTF = timeframe;
+validationPassed = false;
+```
+
+### Fix #3 — `resetValidationUI()` al cambiar de token
+
+Cuando el usuario cambia el token en el dropdown (chart o setup), el frontend ahora llama a `resetValidationUI()` que:
+
+- Limpia `activeValidationSymbol` / `activeValidationTF` (para que el filtro WS no acepte nada hasta que se haga una nueva validación)
+- Esconde `validationResult` y resetea el badge a `--`
+- Deshabilita `Start Paper` (no se puede operar sin validar primero)
+- Esconde `setupProgress` y limpia las step classes
+- Limpia los chart markers del token anterior
+
+### Fix #4 — `updateSetupProgress` robusto a step names desconocidos
+
+Antes:
+```js
+const currentIdx = steps.indexOf(current);  // -1 si 'error'
+textEl.textContent = `Step ${currentIdx + 1}/5: ${current}...`;  // "Step 0/5: error..."
+```
+
+Ahora:
+```js
+const isUnknownStep = current && !steps.includes(current);
+const isError = status.status === 'error' || status.step === 'error' || isUnknownStep;
+
+if (isError) {
+  textEl.textContent = 'ERROR: ' + (error || 'Unexpected step: ' + current);
+  textEl.style.color = 'var(--red)';
+} else if (current === 'done') {
+  const verdict = status.verdict ? ` (${status.verdict})` : '';
+  textEl.textContent = '\u2713 Setup complete' + verdict;
+  textEl.style.color = 'var(--green)';
+} else if (currentIdx >= 0) {
+  textEl.textContent = `Step ${currentIdx + 1}/5: ${current}...`;
+} else {
+  textEl.textContent = status.message || 'Working...';
+}
+```
+
+Nunca más aparecerá "Step 0/5: error...".
+
+### Fix #5 — Sweep All Tokens (3 nuevos endpoints + UI)
+
+**Backend (`server.py`):**
+
+```python
+class SweepRequest(BaseModel):
+    symbols: list[str] = []  # vacío = usar lista curada de 25 majors
+    timeframe: str = "1h"
+    exchange: str = "mexc"
+    capital: float = 1_000.0
+    skip_if_pass: bool = True  # saltar tokens que ya tienen PASS en DB
+
+@app.post("/api/sweep")           # arranca barrido en background
+@app.get("/api/sweep-status")     # progreso en vivo
+@app.post("/api/sweep-cancel")    # cancelar después del token actual
+
+async def _sweep_runner(symbols, timeframe, exchange, capital):
+    """Corre validate_token() para cada símbolo secuencialmente.
+    PASS → auto-crea ChildNode al 10% alloc.
+    INSUFFICIENT_DATA → cuenta como skipped.
+    FAIL/ERROR → cuenta como failed."""
+```
+
+**Frontend (`index.html`):**
+
+- Botón **"Sweep All Tokens"** debajo de "Prepare Token"
+- Botón **"Cancel Sweep"** aparece mientras corre
+- Panel de progreso con barra, contador (X/Y), PASS/FAIL/skip counts
+- Tabla de resultados en vivo, ordenada PASS primero, luego por win_rate desc
+- Polling cada 2s a `/api/sweep-status`
+- Los tokens que ya tenían PASS en DB se saltan y muestran con tag `(cached)`
+
+### Fix #6 — `_days_for_tf()`: ingestión TF-aware
+
+Antes: `days=90` hard-coded para todos los TFs. Para 1h daba 2160 candles, suficiente para backtest pero no óptimo.
+
+Ahora:
+```python
+def _days_for_tf(timeframe: str, default: int = 180) -> int:
+    return {
+        "1m": 1, "5m": 3, "15m": 7, "30m": 14,
+        "1h": 180, "4h": 365, "1d": 730,
+    }.get(timeframe, default)
+```
+
+- 1h ahora trae 180 días (4320 candles) — el doble de historia para mejor calibración del trie
+- 1d trae 730 días (2 años) — suficiente para detectar patrones en timeframe diario
+- 1m trae solo 1 día (1440 candles) — más que suficiente para TF corto
+
+### Sobre MEXC vs Binance
+
+El usuario preguntó si Binance tendría más historial. **Respuesta técnica:** Sí, Binance tiene típicamente más historia (desde 2017-2018 para majors como BTC, ETH, BNB), mientras MEXC a menudo solo ofrece 1-2 años. La dropdown ya permite seleccionar Binance/Bybit/MEXC. **No se forzó un fallback automático MEXC→Binance** porque eso rompería la consistencia de datos (un token validado en MEXC podría operar distinto en Binance por diferencias de liquidez). En su lugar, se aumentó el default de días a 180 (1h) / 730 (1d) que es el máximo que MEXC típicamente permite. Si el usuario ve `INSUFFICIENT_DATA` en un token específico, puede cambiar manualmente el exchange a Binance y re-validar.
+
+### Verificación
+
+- **Tests:** 215 pasan + 9 nuevos (test_v0326_state_tagging.py) = 224 pass, 1 pre-existing fail (trie merge)
+- **Server smoke:** `TestClient` carga 37 rutas (3 nuevas: `/api/sweep`, `/api/sweep-status`, `/api/sweep-cancel`)
+- **HTML sanity:** 220/220 div balanceados, 347/347 llaves JS balanceadas, 891/891 paréntesis balanceados
+- **Runtime check:** `auto_setup_status` dict incluye `symbol`+`timeframe`+`exchange`+`step`+`status`+`message`+`percent` (verificado con spread `{**_status_token, ...}`)
+- **Endpoint check:** `GET /api/sweep-status` devuelve 200 con estado inicial correcto
+
+### Archivos modificados
+
+```
+src/ppmt/terminal/server.py            | +180 -25  (state tagging + 3 sweep endpoints + _days_for_tf + time import)
+src/ppmt/terminal/static/index.html    | +220 -30  (resetValidationUI + sweep UI + WS filter + step robustness + v0.32.6 bump)
+src/ppmt/__init__.py                   | 0.32.5 → 0.32.6
+pyproject.toml                         | 0.32.5 → 0.32.6
+tests/test_v0326_state_tagging.py      | +120 NEW  (9 tests covering _days_for_tf, state tagging, sweep routes)
+TRAZABILIDAD.md                        | +190 lines (this section)
+```
+
+### Lecciones aprendidas
+
+**1. Un singleton global de estado + WebSocket broadcast = polución cruzada garantizada.**
+El `TerminalState` fue diseñado para un solo trader activo. Pero el dashboard permite cambiar de token sin parar el trader anterior. Esto hace que el estado del token A "contamine" la vista del token B. **Acción:** cualquier campo que pertenezca a un token específico (`validation_result`, `auto_setup_status`, `signals_history`) debe estar etiquetado con `symbol`+`timeframe` y el frontend debe filtrar por token activo antes de renderizar.
+
+**2. `indexOf` devuelve -1, no undefined.**
+`['a','b'].indexOf('c') === -1` → `(-1)+1 = 0` → "Step 0/5: error..." en lugar de "ERROR". **Acción:** siempre verificar `currentIdx >= 0` antes de hacer aritmética con él, y manejar el caso `step === 'error'` explícitamente.
+
+**3. Los enums de pasos deben incluir 'error' o ser tratados como error.**
+El servidor tenía 7 lugares que escribían `step: "..."` pero solo 5 valores eran esperados por el frontend. Cualquier valor fuera del enum se renderizaba como "Step 0/5". **Acción:** mantener un enum centralizado de steps válidos Y un valor `error` explícito, nunca dejar que el servidor envíe un step no reconocido.
+
+**4. El "Sweep All" resuelve dos problemas a la vez.**
+El usuario quería descubrir qué tokens son operables sin tener que validar uno por uno. El sweep corre en background, salta los que ya tienen PASS (cached), y auto-registra como ChildNode los nuevos PASS — listo para operar. **Acción:** cualquier feature de "descubrimiento" debe ser batcheable y correr en background con polling liviano.
+
+### Próximos pasos recomendados
+
+1. **Cache de validation_result por token en el frontend.** Cuando el usuario vuelve a un token ya validado, mostrar el último resultado guardado en lugar de requerir re-validar. Necesita un endpoint `GET /api/validation/latest?symbol=X&tf=Y` que lea de la DB sin re-calcular.
+2. **Auto-fallback MEXC→Binance.** Si MEXC trae <500 candles, re-intentar con Binance automáticamente. Mostrar un tag "data from Binance" en el chart.
+3. **Persistir sweep results.** Guardar el resultado del último sweep en DB para que el usuario pueda cerrar y reabrir el dashboard sin perder el barrido.
+4. **Sweep con timeframe múltiple.** Permitir barrer 1h Y 4h a la vez para encontrar el mejor TF por token.

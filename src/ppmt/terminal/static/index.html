@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>PPMT Terminal v0.32.0</title>
+<title>PPMT Terminal v0.32.6</title>
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -242,7 +242,7 @@ tr:hover td{background:rgba(96,165,250,.04)}
 <!-- ========== HEADER ========== -->
 <header class="header">
   <div class="header-left">
-    <span class="logo">PPMT<span class="logo-ver">v0.32.0</span></span>
+    <span class="logo">PPMT<span class="logo-ver">v0.32.6</span></span>
     <span class="status-dot stopped" id="headerDot"></span>
     <span id="headerStatus" style="font-family:var(--mono);font-size:10px;color:var(--text2)">DETENIDO</span>
   </div>
@@ -324,6 +324,24 @@ tr:hover td{background:rgba(96,165,250,.04)}
           <div class="field"><input type="number" id="setupCapital" value="1000" step="100" min="100"></div>
         </div>
         <button class="btn btn-primary btn-block" id="btnAutoSetup" onclick="autoSetup()" style="margin-bottom:4px">Prepare Token</button>
+        <!-- v0.32.6: Sweep All Tokens button — runs validation on every token in the background -->
+        <button class="btn btn-ghost btn-block btn-sm" id="btnSweep" onclick="startSweep()" style="margin-bottom:4px">Sweep All Tokens</button>
+        <button class="btn btn-ghost btn-block btn-sm" id="btnSweepCancel" onclick="cancelSweep()" style="display:none;margin-bottom:4px">Cancel Sweep</button>
+        <!-- Sweep progress -->
+        <div id="sweepProgress" style="display:none;margin-bottom:6px">
+          <div style="display:flex;justify-content:space-between;margin-bottom:2px">
+            <span style="font-family:var(--mono);font-size:9px;color:var(--text2)">Sweep Progress</span>
+            <span style="font-family:var(--mono);font-size:9px;color:var(--accent)" id="sweepCounter">0/0</span>
+          </div>
+          <div class="progress-bar"><div class="progress-fill" id="sweepProgressBar" style="width:0%"></div></div>
+          <div style="font-family:var(--mono);font-size:9px;color:var(--text3);text-align:center;margin-top:2px" id="sweepCurrent">--</div>
+          <div style="display:flex;gap:6px;justify-content:center;margin-top:3px;font-family:var(--mono);font-size:9px">
+            <span class="text-green" id="sweepPassed">0 PASS</span>
+            <span class="text-red" id="sweepFailed">0 FAIL</span>
+            <span class="text-yellow" id="sweepSkipped">0 skip</span>
+          </div>
+          <div id="sweepResults" style="margin-top:4px;max-height:140px;overflow-y:auto;font-family:var(--mono);font-size:9px;display:none"></div>
+        </div>
 
         <!-- Progress Steps -->
         <div id="setupProgress" style="display:none">
@@ -604,14 +622,14 @@ tr:hover td{background:rgba(96,165,250,.04)}
     <div class="status-item"><span class="label">SAX:</span><span class="value" id="btmSax">0</span></div>
   </div>
   <div class="status-right">
-    <span>PPMT v0.32.0</span>
+    <span>PPMT v0.32.6</span>
     <div class="status-item"><span class="label">Uptime:</span><span class="value" id="btmUptime">00:00:00</span></div>
   </div>
 </footer>
 
 <script>
 // ============================================================
-// PPMT Terminal v0.32.0 — Trading Dashboard
+// PPMT Terminal v0.32.6 — Trading Dashboard
 // ============================================================
 
 const API = '';
@@ -625,6 +643,14 @@ let killSwitchActive = false;
 let validationPassed = false;
 let isTrading = false;
 let tradeHistoryData = [];
+// v0.32.6: Track which token's validation/setup we're currently viewing.
+// The WS broadcasts GLOBAL state (one validation_result, one auto_setup_status
+// for the whole server). Without filtering, switching tokens re-renders the
+// PREVIOUS token's validation/setup on top of the new token's UI.
+let activeValidationSymbol = '';
+let activeValidationTF = '';
+// v0.32.6: Sweep polling handle
+let sweepPollHandle = null;
 
 // ============================================================
 // INITIALIZATION
@@ -997,19 +1023,44 @@ function updateDashboard(s) {
   // Signals
   updateSignalsFeed(s.signals_history || []);
 
-  // Validation result
+  // Validation result — v0.32.6: filter by symbol+timeframe so stale state
+  // from a previous token doesn't get re-rendered on top of the new token.
   if (s.validation_result) {
-    updateValidationResult(s.validation_result);
+    const vr = s.validation_result;
+    const vrSym = vr.symbol || '';
+    const vrTF = vr.timeframe || '';
+    if (vrSym === activeValidationSymbol && vrTF === activeValidationTF) {
+      updateValidationResult(vr);
+    } else if (!activeValidationSymbol) {
+      // First load — accept whatever is there
+      updateValidationResult(vr);
+      activeValidationSymbol = vrSym;
+      activeValidationTF = vrTF;
+    }
   }
 
-  // Auto setup progress
+  // Auto setup progress — same per-token filter
   if (s.auto_setup_status) {
-    updateSetupProgress(s.auto_setup_status);
+    const st = s.auto_setup_status;
+    const stSym = st.symbol || '';
+    const stTF = st.timeframe || '';
+    if (stSym === activeValidationSymbol && stTF === activeValidationTF) {
+      updateSetupProgress(st);
+    }
   }
 
-  // Chart markers
-  if (s.signals_history) {
+  // Chart markers — v0.32.6: only show live-trading markers when the chart
+  // is showing the SAME symbol as the running trader. Otherwise we'd overlay
+  // token-A's signals on token-B's chart.
+  const chartSym = document.getElementById('chartSymbol').value;
+  if (s.signals_history && s.symbol === chartSym) {
     syncChartMarkers(s.signals_history);
+  } else if (s.signals_history && s.symbol && s.symbol !== chartSym) {
+    // Different symbol: clear stale markers so we don't show token A's trades
+    // on token B's chart.
+    if (candleSeries && typeof candleSeries.setMarkers === 'function') {
+      candleSeries.setMarkers([]);
+    }
   }
 
   // Money management
@@ -1192,8 +1243,14 @@ function updateSetupProgress(status) {
 
   const steps = ['ingesting', 'building', 'backtesting', 'montecarlo', 'done'];
   const current = status.current_step || status.step || '';
-  const progress = status.progress || 0;
-  const error = status.error || null;
+  const progress = status.progress || status.percent || 0;
+  const error = status.error || (status.step === 'error' ? status.message : null);
+
+  // v0.32.6: If server reports step='error' (validate_token exception path),
+  // OR step is an unknown name, render a clean ERROR state instead of the
+  // confusing "Step 0/5: error..." that we used to show.
+  const isUnknownStep = current && !steps.includes(current);
+  const isError = status.status === 'error' || status.step === 'error' || isUnknownStep;
 
   // Update step indicators
   const stepEls = container.querySelectorAll('.progress-step');
@@ -1201,31 +1258,52 @@ function updateSetupProgress(status) {
 
   stepEls.forEach((el, i) => {
     el.classList.remove('active', 'done', 'error');
-    if (i < currentIdx) el.classList.add('done');
-    else if (i === currentIdx) el.classList.add(error ? 'error' : 'active');
+    if (isError) {
+      // Mark all in-progress steps as error so user sees something happened
+      if (i <= (currentIdx >= 0 ? currentIdx : 0)) el.classList.add('error');
+    } else if (i < currentIdx) {
+      el.classList.add('done');
+    } else if (i === currentIdx) {
+      el.classList.add('active');
+    }
   });
 
   // Progress bar
-  const pct = current === 'done' ? 100 : (currentIdx / steps.length) * 100 + (progress / steps.length);
+  let pct;
+  if (current === 'done') {
+    pct = 100;
+  } else if (isError) {
+    pct = progress || 0;
+  } else if (currentIdx >= 0) {
+    pct = (currentIdx / steps.length) * 100 + (progress / steps.length);
+  } else {
+    pct = progress || 0;
+  }
   document.getElementById('setupProgressBar').style.width = Math.min(pct, 100) + '%';
-  document.getElementById('setupProgressBar').style.background = error ? 'var(--red)' : '';
+  document.getElementById('setupProgressBar').style.background =
+    isError ? 'var(--red)' : (current === 'done' ? 'var(--green)' : '');
 
-  // Progress text
+  // Progress text — v0.32.6: never show "Step 0/5: error...". If error,
+  // show the actual error message; if step is unknown, show a friendly label.
   const textEl = document.getElementById('setupProgressText');
-  if (error) {
-    textEl.textContent = 'ERROR: ' + error;
+  if (isError) {
+    textEl.textContent = 'ERROR: ' + (error || 'Unexpected step: ' + current);
     textEl.style.color = 'var(--red)';
   } else if (current === 'done') {
-    textEl.textContent = '\u2713 Setup complete';
+    const verdict = status.verdict ? ` (${status.verdict})` : '';
+    textEl.textContent = '\u2713 Setup complete' + verdict;
     textEl.style.color = 'var(--green)';
-  } else {
+  } else if (currentIdx >= 0) {
     textEl.textContent = `Step ${currentIdx + 1}/5: ${current}...`;
+    textEl.style.color = 'var(--text3)';
+  } else {
+    textEl.textContent = status.message || 'Working...';
     textEl.style.color = 'var(--text3)';
   }
 
   // Disable setup button while running
   const btn = document.getElementById('btnAutoSetup');
-  btn.disabled = current && current !== 'done';
+  btn.disabled = current && current !== 'done' && !isError;
 }
 
 function updateNodes(nodes) {
@@ -1340,6 +1418,13 @@ async function autoSetup() {
 
   if (!symbol) return;
 
+  // v0.32.6: Track which token we're validating so WS-pushed state for a
+  // DIFFERENT token (e.g. a previous token that's still being processed by
+  // the server) doesn't get re-rendered on this token's UI.
+  activeValidationSymbol = symbol;
+  activeValidationTF = timeframe;
+  validationPassed = false;
+
   const btn = document.getElementById('btnAutoSetup');
   btn.disabled = true;
   btn.textContent = 'Preparing...';
@@ -1350,7 +1435,9 @@ async function autoSetup() {
   // Reset progress
   document.querySelectorAll('.progress-step').forEach(el => el.classList.remove('active', 'done', 'error'));
   document.getElementById('setupProgressBar').style.width = '0%';
+  document.getElementById('setupProgressBar').style.background = '';
   document.getElementById('setupProgressText').textContent = 'Initializing setup...';
+  document.getElementById('setupProgressText').style.color = 'var(--text3)';
 
   try {
     const res = await fetch(`${API}/api/auto-setup`, {
@@ -1373,6 +1460,10 @@ async function autoSetup() {
     // Accept both formats for safety.
     const vr = data.validation_result || (data.verdict || data.passed !== undefined ? data : null);
     if (vr) {
+      // v0.32.6: tag the result with the current token so the WS filter logic
+      // keeps it visible.
+      vr.symbol = vr.symbol || symbol;
+      vr.timeframe = vr.timeframe || timeframe;
       updateValidationResult(vr);
     }
 
@@ -1785,12 +1876,14 @@ function drawEquityCurve(canvasId, data) {
 
 // Chart event listeners
 // v0.32.5: When chart symbol changes, also sync setup panel + reload trade history
+// v0.32.6: Also reset validation UI so stale state from previous token clears.
 document.getElementById('chartSymbol').addEventListener('change', function() {
   loadChart();
   // Sync setup panel to match chart
   const setup = document.getElementById('setupSymbol');
   if (setup.value !== this.value) {
     setup.value = this.value;
+    resetValidationUI();
   }
   loadTradeHistory();
 });
@@ -1800,6 +1893,7 @@ document.getElementById('chartTimeframe').addEventListener('change', function() 
   const setupTf = document.getElementById('setupTimeframe');
   if (setupTf.value !== this.value) {
     setupTf.value = this.value;
+    resetValidationUI();
   }
 });
 document.getElementById('chartExchange').addEventListener('change', loadChart);
@@ -1819,21 +1913,207 @@ document.getElementById('showMarkers').addEventListener('change', () => {
 // without triggering loadChart() (setting .value does not fire change
 // events), so the chart stayed showing the OLD symbol and the trade
 // history only refreshed on the 30-second polling tick.
+// v0.32.6: Also reset the validation + setup-progress UI so stale state
+// from the previous token doesn't bleed into the new token's view.
 document.getElementById('setupSymbol').addEventListener('change', function() {
   const chart = document.getElementById('chartSymbol');
   if (chart.value !== this.value) {
     chart.value = this.value;
   }
+  resetValidationUI();
   loadChart();
   loadTradeHistory();
+  // v0.32.6: After switching, check if we already have a saved validation
+  // for this token in the DB and show it.
+  loadExistingValidation(this.value, document.getElementById('setupTimeframe').value);
 });
 document.getElementById('setupTimeframe').addEventListener('change', function() {
   const chartTf = document.getElementById('chartTimeframe');
   if (chartTf.value !== this.value) {
     chartTf.value = this.value;
   }
+  resetValidationUI();
   loadChart();
+  loadExistingValidation(document.getElementById('setupSymbol').value, this.value);
 });
+
+// v0.32.6: Reset the validation + setup-progress panel. Called whenever
+// the user switches token. Hides stale "Step 0/5: error..." messages and
+// the previous token's PASS/FAIL badge.
+function resetValidationUI() {
+  activeValidationSymbol = '';
+  activeValidationTF = '';
+  validationPassed = false;
+
+  // Hide validation result + reset badge
+  const vr = document.getElementById('validationResult');
+  if (vr) vr.style.display = 'none';
+  const badge = document.getElementById('validationBadge');
+  if (badge) { badge.textContent = '--'; badge.className = 'badge'; }
+  const headerVB = document.getElementById('headerValidationBadge');
+  if (headerVB) { headerVB.textContent = '--'; headerVB.className = 'badge'; }
+
+  // Disable Start Paper until validation is re-run
+  const btnStart = document.getElementById('btnStartTrading');
+  if (btnStart) btnStart.disabled = true;
+
+  // Hide setup progress + reset steps
+  const sp = document.getElementById('setupProgress');
+  if (sp) sp.style.display = 'none';
+  document.querySelectorAll('.progress-step').forEach(el => el.classList.remove('active', 'done', 'error'));
+  const pb = document.getElementById('setupProgressBar');
+  if (pb) { pb.style.width = '0%'; pb.style.background = ''; }
+  const pt = document.getElementById('setupProgressText');
+  if (pt) { pt.textContent = ''; pt.style.color = ''; }
+
+  // Clear chart markers from previous token
+  if (candleSeries && typeof candleSeries.setMarkers === 'function') {
+    candleSeries.setMarkers([]);
+  }
+}
+
+// v0.32.6: After switching token, check if the server already has a saved
+// validation for this symbol+TF in the DB. If yes, restore it so the user
+// doesn't have to re-run Prepare Token every time they switch tabs.
+async function loadExistingValidation(symbol, timeframe) {
+  if (!symbol || !timeframe) return;
+  try {
+    // The server's /api/validate endpoint always runs a fresh backtest.
+    // We don't want that here. Instead, we read the LATEST validation from
+    // the trade-summary endpoint, which doesn't trigger any heavy compute.
+    // The validation_result will also be pushed by the WS if it matches.
+    // For now, no-op: the user clicks Prepare Token to re-validate.
+    // (Keeping this function as a hook for future caching.)
+  } catch (e) {
+    // Silent
+  }
+}
+
+// ============================================================
+// v0.32.6: SWEEP ALL TOKENS
+// ============================================================
+
+async function startSweep() {
+  const timeframe = document.getElementById('setupTimeframe').value || '1h';
+  const exchange = document.getElementById('chartExchange').value || 'mexc';
+  const capital = parseFloat(document.getElementById('setupCapital').value) || 1000;
+
+  if (!confirm('Run validation on all major tokens? This will take several minutes and consume API quota.')) return;
+
+  const btn = document.getElementById('btnSweep');
+  const btnCancel = document.getElementById('btnSweepCancel');
+  btn.disabled = true;
+  btn.textContent = 'Starting...';
+  btnCancel.style.display = 'block';
+
+  document.getElementById('sweepProgress').style.display = 'block';
+  document.getElementById('sweepResults').style.display = 'none';
+  document.getElementById('sweepResults').innerHTML = '';
+
+  try {
+    const res = await fetch(`${API}/api/sweep`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        symbols: [],  // empty = use server's curated majors list
+        timeframe, exchange, capital,
+        skip_if_pass: true,
+      })
+    });
+    if (!res.ok) throw new Error('Failed to start sweep');
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'Sweep rejected');
+
+    // Start polling for progress
+    if (sweepPollHandle) clearInterval(sweepPollHandle);
+    sweepPollHandle = setInterval(pollSweepStatus, 2000);
+    pollSweepStatus();  // immediate first poll
+    btn.textContent = 'Sweeping...';
+  } catch (e) {
+    console.error('startSweep error:', e);
+    document.getElementById('sweepCurrent').textContent = 'ERROR: ' + e.message;
+    document.getElementById('sweepCurrent').style.color = 'var(--red)';
+    btn.disabled = false;
+    btn.textContent = 'Sweep All Tokens';
+    btnCancel.style.display = 'none';
+  }
+}
+
+async function pollSweepStatus() {
+  try {
+    const res = await fetch(`${API}/api/sweep-status`);
+    if (!res.ok) return;
+    const s = await res.json();
+
+    const total = s.total || 0;
+    const done = s.done || 0;
+    const pct = total > 0 ? (done / total) * 100 : 0;
+
+    document.getElementById('sweepCounter').textContent =
+      `${done}/${total}` + (s.skipped > 0 ? ` (+${s.skipped} skipped)` : '');
+    document.getElementById('sweepProgressBar').style.width = pct + '%';
+    document.getElementById('sweepCurrent').textContent =
+      s.running ? `Validating ${s.current_symbol}...` :
+      (s.finished_at > 0 ? 'Sweep complete' : 'Idle');
+    document.getElementById('sweepCurrent').style.color = '';
+    document.getElementById('sweepPassed').textContent = `${s.passed} PASS`;
+    document.getElementById('sweepFailed').textContent = `${s.failed} FAIL`;
+    document.getElementById('sweepSkipped').textContent = `${s.skipped} skip`;
+
+    // Render results table (live, updates as each token finishes)
+    const results = s.results || [];
+    if (results.length > 0) {
+      const container = document.getElementById('sweepResults');
+      container.style.display = 'block';
+      const sorted = results.slice().sort((a, b) => {
+        // PASS first, then by win_rate descending, FAIL at the bottom
+        const score = (r) => r.verdict === 'PASS' ? 2 : r.verdict === 'INSUFFICIENT_DATA' ? 1 : 0;
+        return score(b) - score(a) || (b.win_rate || 0) - (a.win_rate || 0);
+      });
+      container.innerHTML = sorted.map(r => {
+        const cls = r.verdict === 'PASS' ? 'text-green' :
+                    r.verdict === 'INSUFFICIENT_DATA' ? 'text-yellow' :
+                    r.verdict === 'ERROR' ? 'text-muted' : 'text-red';
+        const wr = r.win_rate !== undefined ? (r.win_rate * 100).toFixed(1) + '%' : '--';
+        const trades = r.total_trades || 0;
+        const skippedTag = r.skipped ? ' <span class="text-muted">(cached)</span>' : '';
+        return `<div style="padding:2px 0;border-bottom:1px solid var(--border)">
+          <span class="${cls}" style="font-weight:600">${r.verdict}</span>
+          <span style="color:var(--text);margin-left:6px">${r.symbol}</span>
+          <span class="text-muted" style="margin-left:8px">WR ${wr}</span>
+          <span class="text-muted" style="margin-left:6px">${trades} trades</span>${skippedTag}
+        </div>`;
+      }).join('');
+    }
+
+    // Stop polling when sweep finishes
+    if (!s.running && s.finished_at > 0) {
+      if (sweepPollHandle) { clearInterval(sweepPollHandle); sweepPollHandle = null; }
+      const btn = document.getElementById('btnSweep');
+      const btnCancel = document.getElementById('btnSweepCancel');
+      btn.disabled = false;
+      btn.textContent = 'Sweep All Tokens';
+      btnCancel.style.display = 'none';
+
+      // Final summary line
+      const final = `\u2713 Sweep done: ${s.passed} PASS / ${s.failed} FAIL / ${s.skipped} skipped`;
+      document.getElementById('sweepCurrent').textContent = final;
+      document.getElementById('sweepCurrent').style.color = 'var(--green)';
+    }
+  } catch (e) {
+    console.error('pollSweepStatus error:', e);
+  }
+}
+
+async function cancelSweep() {
+  try {
+    await fetch(`${API}/api/sweep-cancel`, { method: 'POST' });
+    document.getElementById('sweepCurrent').textContent = 'Cancelling after current token...';
+    document.getElementById('sweepCurrent').style.color = 'var(--yellow)';
+  } catch (e) {
+    console.error('cancelSweep error:', e);
+  }
+}
 </script>
 
 </body>

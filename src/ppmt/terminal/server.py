@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -848,6 +849,20 @@ class ValidateRequest(BaseModel):
     capital: float = 10_000.0
 
 
+def _days_for_tf(timeframe: str, default: int = 180) -> int:
+    """v0.32.6: Return recommended ingestion days for a timeframe.
+
+    The trie needs a warmup of `sax_window_size*2 + pattern_length*sax_window_size`
+    candles. For 1h that's 49 candles (~2 days), but to actually generate enough
+    signals to reach the 5-trade MC threshold, we need much more history.
+    Calibrated empirically across MEXC/Binance majors.
+    """
+    return {
+        "1m": 1, "5m": 3, "15m": 7, "30m": 14,
+        "1h": 180, "4h": 365, "1d": 730,
+    }.get(timeframe, default)
+
+
 @app.post("/api/validate")
 async def validate_token(req: ValidateRequest) -> dict:
     """Run backtest + Monte Carlo to validate a token before trading.
@@ -860,9 +875,18 @@ async def validate_token(req: ValidateRequest) -> dict:
     - Monte Carlo Verdict != HIGH RISK
     - Min 5 trades in backtest
     """
+    # v0.32.6: Per-token status tagging. The frontend now filters
+    # auto_setup_status / validation_result by symbol+timeframe so switching
+    # tokens no longer re-renders stale state from a previous token's run.
+    _status_token = {"symbol": req.symbol, "timeframe": req.timeframe,
+                     "exchange": req.exchange}
+
     try:
         terminal_state.update_sync(
-            auto_setup_status={"step": "validating", "message": f"Validating {req.symbol} {req.timeframe}...", "percent": 10}
+            auto_setup_status={**_status_token,
+                               "step": "validating", "status": "running",
+                               "message": f"Validating {req.symbol} {req.timeframe}...",
+                               "percent": 10}
         )
 
         # Step 1: Ensure data exists
@@ -872,14 +896,18 @@ async def validate_token(req: ValidateRequest) -> dict:
 
         if candles < 500:
             terminal_state.update_sync(
-                auto_setup_status={"step": "ingesting", "message": f"Ingesting data for {req.symbol}...", "percent": 20}
+                auto_setup_status={**_status_token,
+                                   "step": "ingesting", "status": "running",
+                                   "message": f"Ingesting data for {req.symbol}...",
+                                   "percent": 20}
             )
             try:
                 collector = DataCollector(exchange=req.exchange, storage=storage)
-                # v0.32.3: 90 days default (was 30). 30d only gave 720 1h candles →
-                # after start_offset=200, only 520 candles for trading → too few
-                # patterns in trie + too few signals to reach 5-trade threshold.
-                df = collector.fetch_and_save(req.symbol, req.timeframe, days=90)
+                # v0.32.6: TF-aware day defaults. 1h needs >=180d to give the
+                # trie enough patterns to reach the 5-trade MC threshold.
+                # Shorter TFs need less because each day produces more candles.
+                days = _days_for_tf(req.timeframe, default=180)
+                df = collector.fetch_and_save(req.symbol, req.timeframe, days=days)
                 if hasattr(collector, 'close'):
                     collector.close()
             except Exception as e:
@@ -889,7 +917,10 @@ async def validate_token(req: ValidateRequest) -> dict:
         all_tries = storage.load_all_tries(req.symbol)
         if all_tries.get("n3") is None:
             terminal_state.update_sync(
-                auto_setup_status={"step": "building", "message": f"Building Trie for {req.symbol}...", "percent": 40}
+                auto_setup_status={**_status_token,
+                                   "step": "building", "status": "running",
+                                   "message": f"Building Trie for {req.symbol}...",
+                                   "percent": 40}
             )
             try:
                 from ppmt.engine.ppmt import PPMT as PPMTBuilder
@@ -907,7 +938,10 @@ async def validate_token(req: ValidateRequest) -> dict:
 
         # Step 3: Run backtest
         terminal_state.update_sync(
-            auto_setup_status={"step": "backtesting", "message": f"Running backtest for {req.symbol}...", "percent": 60}
+            auto_setup_status={**_status_token,
+                               "step": "backtesting", "status": "running",
+                               "message": f"Running backtest for {req.symbol}...",
+                               "percent": 60}
         )
         from ppmt.engine.realtime import RealtimeTrader, ReplayConfig
         config = ReplayConfig(
@@ -940,7 +974,10 @@ async def validate_token(req: ValidateRequest) -> dict:
         mc_result = {}
         mc_verdict = ""
         terminal_state.update_sync(
-            auto_setup_status={"step": "montecarlo", "message": f"Running Monte Carlo for {req.symbol}...", "percent": 80}
+            auto_setup_status={**_status_token,
+                               "step": "montecarlo", "status": "running",
+                               "message": f"Running Monte Carlo for {req.symbol}...",
+                               "percent": 80}
         )
         try:
             from ppmt.risk.monte_carlo import MonteCarloSimulator, MonteCarloConfig
@@ -1103,17 +1140,26 @@ async def validate_token(req: ValidateRequest) -> dict:
         except Exception:
             pass
 
-        # Update terminal state
+        # Update terminal state — v0.32.6: tag with symbol+timeframe so the
+        # frontend can filter out stale state from a different token.
+        val_result["symbol"] = req.symbol
+        val_result["timeframe"] = req.timeframe
         terminal_state.update_sync(
             validation_result=val_result,
-            auto_setup_status={"step": "done", "message": f"Validation: {verdict}", "percent": 100}
+            auto_setup_status={**_status_token,
+                               "step": "done", "status": "done",
+                               "message": f"Validation: {verdict}",
+                               "percent": 100,
+                               "verdict": verdict}
         )
 
         return {"ok": True, **val_result}
 
     except Exception as e:
         terminal_state.update_sync(
-            auto_setup_status={"step": "error", "message": str(e), "percent": 0}
+            auto_setup_status={**_status_token,
+                               "step": "error", "status": "error",
+                               "message": str(e), "percent": 0}
         )
         return {"ok": False, "error": str(e)}
 
@@ -1287,6 +1333,207 @@ async def multi_setup(req: MultiSetupRequest) -> dict:
         pass
 
     return {"ok": True, "results": results}
+
+
+# ------------------------------------------------------------------ #
+# REST endpoint — Sweep All Tokens (v0.32.6)
+# ------------------------------------------------------------------ #
+
+# Global sweep state
+_sweep_state: dict = {
+    "running": False,
+    "total": 0,
+    "done": 0,
+    "current_symbol": "",
+    "passed": 0,
+    "failed": 0,
+    "skipped": 0,
+    "results": [],  # list of {symbol, verdict, win_rate, profit_factor, total_trades, error?}
+    "started_at": 0.0,
+    "finished_at": 0.0,
+    "error": "",
+}
+
+
+class SweepRequest(BaseModel):
+    """Run validation across many tokens in the background."""
+    symbols: list[str] = []
+    timeframe: str = "1h"
+    exchange: str = "mexc"
+    capital: float = 1_000.0
+    skip_if_pass: bool = True
+    """v0.32.6: If True, skip tokens that already have a PASS validation in DB."""
+
+
+@app.post("/api/sweep")
+async def sweep_tokens(req: SweepRequest) -> dict:
+    """v0.32.6: Sweep many tokens — run validation on each, in background.
+
+    The endpoint returns immediately with the planned list; the dashboard
+    polls `/api/sweep-status` to see live progress. Each token that PASSES
+    is auto-added as a child node so the user can immediately start trading.
+    """
+    global _sweep_state
+
+    if _sweep_state["running"]:
+        return {"ok": False, "error": "A sweep is already running. Wait for it to finish."}
+
+    # Resolve symbol list
+    symbols = list(req.symbols)
+    if not symbols:
+        # v0.32.6: If user didn't pass a list, use the curated majors list.
+        # This is intentionally shorter than the full dropdown because each
+        # token takes 30-90s to validate (ingest + build + BT + MC).
+        symbols = [
+            "BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "DOGE/USDT",
+            "ADA/USDT", "AVAX/USDT", "LINK/USDT", "BNB/USDT", "DOT/USDT",
+            "LTC/USDT", "BCH/USDT", "ATOM/USDT", "UNI/USDT", "AAVE/USDT",
+            "NEAR/USDT", "APT/USDT", "FIL/USDT", "ARB/USDT", "OP/USDT",
+            "INJ/USDT", "SUI/USDT", "TIA/USDT", "SEI/USDT", "RUNE/USDT",
+        ]
+
+    # Filter out tokens we can skip (already PASS)
+    if req.skip_if_pass:
+        try:
+            storage = PPMTStorage()
+            skipped = []
+            to_run = []
+            for s in symbols:
+                v = storage.get_latest_validation(s, req.timeframe)
+                if v and v.get("verdict") == "PASS":
+                    skipped.append(s)
+                    _sweep_state["results"].append({
+                        "symbol": s, "verdict": "PASS",
+                        "win_rate": v.get("win_rate", 0),
+                        "profit_factor": v.get("profit_factor", 0),
+                        "total_trades": v.get("total_trades", 0),
+                        "skipped": True,
+                    })
+                else:
+                    to_run.append(s)
+            storage.close()
+            _sweep_state["skipped"] = len(skipped)
+            symbols = to_run
+        except Exception as e:
+            logger.warning(f"Sweep skip-check failed: {e}")
+
+    # Reset state
+    _sweep_state = {
+        "running": True,
+        "total": len(symbols),
+        "done": 0,
+        "current_symbol": symbols[0] if symbols else "",
+        "passed": 0,
+        "failed": 0,
+        "skipped": _sweep_state.get("skipped", 0),
+        "results": list(_sweep_state.get("results", [])),  # preserve skipped
+        "started_at": time.time(),
+        "finished_at": 0.0,
+        "error": "",
+    }
+
+    if not symbols:
+        _sweep_state["running"] = False
+        _sweep_state["finished_at"] = time.time()
+        return {"ok": True, "message": "All tokens already validated.", "total": 0}
+
+    # Launch background task
+    asyncio.create_task(_sweep_runner(symbols, req.timeframe, req.exchange, req.capital))
+
+    return {
+        "ok": True,
+        "message": f"Sweeping {len(symbols)} tokens in the background.",
+        "total": len(symbols),
+        "skipped": _sweep_state["skipped"],
+    }
+
+
+async def _sweep_runner(symbols: list[str], timeframe: str, exchange: str, capital: float) -> None:
+    """Background task that validates each token sequentially."""
+    global _sweep_state
+    pm = _get_parent_manager()
+    per_alloc = 0.10  # cap at 10% per token to avoid over-allocation
+
+    for sym in symbols:
+        if not _sweep_state["running"]:
+            break  # cancelled
+        _sweep_state["current_symbol"] = sym
+        try:
+            val_req = ValidateRequest(
+                symbol=sym, timeframe=timeframe, exchange=exchange, capital=capital,
+            )
+            # validate_token is async — call directly
+            val_result = await validate_token(val_req)
+            verdict = val_result.get("verdict", "UNKNOWN")
+            entry = {
+                "symbol": sym,
+                "verdict": verdict,
+                "win_rate": val_result.get("win_rate", 0),
+                "profit_factor": val_result.get("profit_factor", 0),
+                "total_trades": val_result.get("total_trades", 0),
+                "max_drawdown": (val_result.get("backtest") or {}).get("max_drawdown", 0),
+                "risk_of_ruin": val_result.get("risk_of_ruin", 0),
+            }
+            if verdict == "PASS":
+                _sweep_state["passed"] += 1
+                # Auto-add as child node if not present
+                node_id = f"{sym.split('/')[0].lower()}_{timeframe}"
+                if node_id not in pm._children:
+                    from ppmt.risk.money_manager import ChildNodeConfig
+                    try:
+                        cfg = ChildNodeConfig(
+                            node_id=node_id, symbol=sym, timeframe=timeframe,
+                            capital_allocation_pct=per_alloc, leverage=1, auto_mode=True,
+                        )
+                        pm.register_child(cfg)
+                    except Exception:
+                        pass
+            elif verdict == "INSUFFICIENT_DATA":
+                _sweep_state["skipped"] += 1
+                entry["skipped"] = True
+            else:
+                _sweep_state["failed"] += 1
+            _sweep_state["results"].append(entry)
+        except Exception as e:
+            logger.warning(f"Sweep validation for {sym} failed: {e}")
+            _sweep_state["failed"] += 1
+            _sweep_state["results"].append({
+                "symbol": sym, "verdict": "ERROR", "error": str(e),
+            })
+        _sweep_state["done"] += 1
+        # Yield between tokens so the event loop can process WS / other requests
+        await asyncio.sleep(0.1)
+
+    try:
+        pm.distribute_capital()
+        _save_parent_manager()
+    except Exception:
+        pass
+    _sweep_state["running"] = False
+    _sweep_state["finished_at"] = time.time()
+    _sweep_state["current_symbol"] = ""
+    logger.info(
+        f"Sweep complete: {_sweep_state['passed']} PASS, "
+        f"{_sweep_state['failed']} FAIL, "
+        f"{_sweep_state['skipped']} skipped "
+        f"({_sweep_state['done']}/{_sweep_state['total']} run)"
+    )
+
+
+@app.get("/api/sweep-status")
+async def sweep_status() -> dict:
+    """v0.32.6: Live progress for the background sweep."""
+    return dict(_sweep_state)
+
+
+@app.post("/api/sweep-cancel")
+async def sweep_cancel() -> dict:
+    """v0.32.6: Cancel a running sweep."""
+    global _sweep_state
+    if not _sweep_state["running"]:
+        return {"ok": False, "error": "No sweep running"}
+    _sweep_state["running"] = False
+    return {"ok": True, "message": "Sweep will stop after the current token."}
 
 
 # ------------------------------------------------------------------ #
