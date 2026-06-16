@@ -1,9 +1,37 @@
 # TRAZABILIDAD PPMT — Estado del Proyecto
 
 > Última actualización: 2026-06-16
-> Versión actual: v0.19.0 (commit `c970697`)
+> Versión actual: v0.32.0 (commit `fd88a91` + decisión dashboard)
 > Repositorio: https://github.com/coverdraft/ppmt
 > Idioma: Español
+
+---
+
+## ⚠️ DECISIÓN ARQUITECTÓNICA — Dashboard Oficial (16 jun 2026)
+
+**El dashboard oficial de PPMT es el FastAPI en `http://localhost:8420` (PPMT v0.32.0).**
+
+**El dashboard Next.js en `http://localhost:3000` (que muestra "PPMT v0.12.0") está OBSOLETO y DESACTIVADO.**
+
+### Razones
+1. El Next.js `package.json` dice `name: cryptoquant-terminal v0.3.0` — es código heredado de otro proyecto, no es PPMT real.
+2. El "v0.12.0" en la esquina superior está **hardcodeado** en `src/app/page.tsx:54` (un string pegado, no se calcula).
+3. Las "5 estrategias" que muestra el Next.js (BTC +2450, ETH +1230, SOL -320, etc.) son **DEMO_DATA falsa** sembrada por `src/app/api/strategies/route.ts` (constante `DEMO_STRATEGIES`). **No son trades reales.**
+4. El Next.js **no llama al motor PPMT Python**. Lee/escribe solo en una tabla Prisma `PPMTStrategy` con metadata inventada.
+5. El proceso `next-server` consumía 121% CPU colgado y no respondía a peticiones.
+6. El FastAPI `:8420` tiene **32 endpoints reales**: `/api/trades`, `/api/validate`, `/api/auto-setup`, `/api/start-trading`, `/api/portfolio-backtest`, `/api/multi-tf-analysis`, WebSocket `/ws`. Conecta directo al motor PPMT.
+
+### Acción tomada
+- Proceso `next-server` y `next dev` eliminados (libera CPU).
+- FastAPI lanzado en `0.0.0.0:8420` con `run_server()`.
+- Cualquier referencia a "dashboard" en este documento se refiere al FastAPI `:8420`.
+
+### Limpieza pendiente (no bloquea uso)
+- Eliminar `src/components/ppmt/` (panel obsoleto)
+- Eliminar `src/app/api/strategies/` (demo data)
+- Eliminar modelo `PPMTStrategy` y `PPMTStrategyRun` de `prisma/schema.prisma`
+- Eliminar `src/app/page.tsx` actual o redirigirlo a `:8420`
+- Borrar `src/store/ppmt-strategy-store.ts`
 
 ---
 
@@ -11,15 +39,16 @@
 
 PPMT (Probability Position Management Tool) es un motor de trading autónomo basado en **Trie progresivo de patrones (N1+N2+N3+N4)** con **fuzzy matching**, gestión de capital tipo Kelly, y modo paper-trading con validación Monte Carlo antes de operar real.
 
-El proyecto está **funcional en modo paper-trading y backtesting**, pero faltan piezas clave para que el trading autónomo sea seguro y visible en el dashboard.
-
-**Estado global:**
-- Núcleo del motor (Trie, SAX, Matcher, Predictor): 100% funcional, 208 tests pasan.
-- Backtesting portfolio + Monte Carlo: 100% funcional (librerías Python listas).
-- Trading en vivo (RealtimeTrader): 90% (funciona, pero no hay persistencia de trades).
-- Dashboard Next.js: 80% (UI profesional, pero faltan paneles críticos).
-- **Pre-trade validation gate (Backtest + MC antes de operar): NO IMPLEMENTADO** ⚠️
-- **Persistencia de trades ejecutados: NO IMPLEMENTADA** ⚠️
+**Estado global (verificado 16 jun 2026):**
+- Núcleo del motor (Trie, SAX, Matcher, Predictor): 100% funcional, 160 tests pasan (2 fallos conocidos no bloqueantes).
+- Backtesting portfolio + Monte Carlo: 100% funcional.
+- Trading en vivo (RealtimeTrader): 90% — paper trading funcional, persistencia de trades implementada (`storage.save_trade()`).
+- Dashboard FastAPI `:8420`: 100% funcional con 32 endpoints.
+- Pre-trade validation gate: **IMPLEMENTADO** ✅ (en `/api/start-trading`, requiere verdict=PASS).
+- Auto-setup endpoint: **IMPLEMENTADO** ✅ (`/api/auto-setup`).
+- Multi-token: **IMPLEMENTADO** en backtest (`/api/portfolio-backtest`, `/api/multi-setup`).
+- Multi-timeframe: **IMPLEMENTADO** como análisis (`/api/multi-tf-analysis`).
+- Next.js `:3000`: **OBSOLETO** — ver sección de decisión arriba.
 
 ---
 
