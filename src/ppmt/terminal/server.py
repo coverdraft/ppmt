@@ -41,7 +41,7 @@ CONFIG_DIR = os.path.expanduser("~/.ppmt")
 # ------------------------------------------------------------------ #
 # FastAPI application
 # ------------------------------------------------------------------ #
-app = FastAPI(title="PPMT Terminal", version="0.27.0")
+app = FastAPI(title="PPMT Terminal", version="0.28.0")
 
 # Global terminal state (shared with engine)
 terminal_state: TerminalState = get_terminal_state()
@@ -540,6 +540,180 @@ async def ingest_data(req: IngestRequest) -> dict:
         return {"ok": True, "symbol": req.symbol, "timeframe": req.timeframe, "candles": count}
     except Exception as e:
         return {"ok": False, "error": str(e)}
+
+
+# ------------------------------------------------------------------ #
+# Background Trading Session Management (v0.28.0)
+# ------------------------------------------------------------------ #
+
+# Active trading task
+_trading_task: Optional[asyncio.Task] = None
+_trading_stop_event = asyncio.Event()
+
+
+class StartTradingRequest(BaseModel):
+    symbol: str = "BTC/USDT"
+    timeframe: str = "5m"
+    exchange: str = "mexc"
+    capital: float = 10_000.0
+    leverage: int = 1
+    auto_mode: bool = True
+    max_positions: int = 5
+    max_exposure: float = 0.80
+    kill_switch_pct: float = 0.95
+    daily_loss_pct: float = 0.05
+    days_ingest: int = 30
+    """How many days of data to ingest before starting."""
+
+
+@app.post("/api/start-trading")
+async def start_trading(req: StartTradingRequest) -> dict:
+    """Start a paper trading session in the background.
+
+    This endpoint performs the full workflow:
+    1. Ingests historical data (if not already present)
+    2. Auto-builds Trie (if not already present)
+    3. Starts the RealtimeTrader in live/paper mode as a background asyncio task
+
+    The dashboard WebSocket will receive real-time updates automatically.
+    """
+    global _trading_task
+
+    if _trading_task is not None and not _trading_task.done():
+        return {"ok": False, "error": "Trading session already running. Stop it first."}
+
+    try:
+        # Step 1: Auto-ingest data if needed
+        storage = PPMTStorage()
+        df = storage.load_ohlcv(req.symbol, req.timeframe)
+        candles_count = len(df) if df is not None and not df.empty else 0
+
+        if candles_count < 500:
+            logger.info(f"Auto-ingesting {req.days_ingest} days of {req.symbol} {req.timeframe} data...")
+            try:
+                collector = DataCollector(exchange=req.exchange, storage=storage)
+                df = collector.fetch_historical(req.symbol, req.timeframe, days=req.days_ingest)
+                candles_count = len(df) if df is not None and not df.empty else 0
+                logger.info(f"Ingested {candles_count} candles")
+                if hasattr(collector, 'close'):
+                    collector.close()
+            except Exception as e:
+                logger.warning(f"Auto-ingest failed: {e} — continuing with existing data")
+
+        # Step 2: Auto-build Trie if needed
+        all_tries = storage.load_all_tries(req.symbol)
+        if all_tries.get("n3") is None:
+            logger.info(f"Auto-building Trie for {req.symbol} {req.timeframe}...")
+            try:
+                from ppmt.engine.ppmt import PPMT as PPMTBuilder
+                df = storage.load_ohlcv(req.symbol, req.timeframe)
+                if df is not None and not df.empty:
+                    builder = PPMTBuilder(
+                        symbol=req.symbol,
+                        sax_strategy="ohlcv",
+                    )
+                    # Build all 4 levels
+                    for level_name, n in [("n1", 1), ("n2", 2), ("n3", 3), ("n4", 4)]:
+                        trie = builder.build(df, pattern_length=n, level_name=level_name)
+                        storage.save_trie(req.symbol, level_name, trie)
+                        logger.info(f"Built {level_name} trie: {trie.pattern_count} patterns")
+                    all_tries = storage.load_all_tries(req.symbol)
+                else:
+                    storage.close()
+                    return {"ok": False, "error": f"No data available for {req.symbol} {req.timeframe}. Ingest failed."}
+            except Exception as e:
+                logger.warning(f"Auto-build failed: {e}")
+                storage.close()
+                return {"ok": False, "error": f"Auto-build failed: {str(e)}"}
+
+        storage.close()
+
+        # Step 3: Start trading as background task
+        _trading_stop_event.clear()
+
+        async def _run_trading():
+            """Background trading task."""
+            from ppmt.engine.realtime import RealtimeTrader, LiveConfig
+
+            config = LiveConfig(
+                symbol=req.symbol,
+                timeframe=req.timeframe,
+                initial_capital=req.capital,
+                exchange=req.exchange,
+                dry_run=True,  # Always paper trading from dashboard
+                testnet=True,
+                leverage=req.leverage,
+                auto_mode=req.auto_mode,
+                max_open_positions=req.max_positions,
+                max_portfolio_exposure_pct=req.max_exposure,
+                kill_switch_pct=req.kill_switch_pct,
+                daily_loss_limit_pct=req.daily_loss_pct,
+                use_kelly_sizing=True,
+                kelly_fraction=0.25,
+                use_token_profile=True,
+                auto_calibrate=True,
+                regime_aware=True,
+                use_multi_level=True,
+                living_trie=True,
+            )
+
+            trader = RealtimeTrader(config=config)
+            try:
+                result = await trader.run_live()
+                logger.info(f"Trading session ended: {result.total_trades} trades, P&L: {result.total_pnl_pct:.2f}%")
+            except Exception as e:
+                logger.error(f"Trading session error: {e}")
+            finally:
+                terminal_state.update_sync(is_running=False, websocket_status="stopped")
+
+        _trading_task = asyncio.create_task(_run_trading())
+
+        return {
+            "ok": True,
+            "message": f"Paper trading started for {req.symbol} {req.timeframe} on {req.exchange}",
+            "symbol": req.symbol,
+            "timeframe": req.timeframe,
+            "candles_available": candles_count,
+            "trie_patterns": all_tries.get("n3").pattern_count if all_tries.get("n3") else 0,
+        }
+
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/stop-trading")
+async def stop_trading() -> dict:
+    """Stop the active trading session."""
+    global _trading_task
+
+    if _trading_task is None or _trading_task.done():
+        return {"ok": False, "error": "No active trading session"}
+
+    _trading_stop_event.set()
+    _trading_task.cancel()
+    try:
+        await asyncio.wait_for(_trading_task, timeout=5.0)
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        pass
+
+    _trading_task = None
+    terminal_state.update_sync(is_running=False, websocket_status="stopped")
+    return {"ok": True, "message": "Trading session stopped"}
+
+
+@app.get("/api/trading-status")
+async def get_trading_status() -> dict:
+    """Check if a trading session is active."""
+    is_active = _trading_task is not None and not _trading_task.done()
+    return {
+        "is_running": is_active,
+        "symbol": terminal_state.symbol,
+        "timeframe": terminal_state.timeframe,
+        "exchange": terminal_state.exchange,
+        "candles_processed": terminal_state.candles_processed,
+        "total_trades": terminal_state.total_trades,
+        "pnl_pct": terminal_state.total_pnl_pct,
+    }
 
 
 # ------------------------------------------------------------------ #
