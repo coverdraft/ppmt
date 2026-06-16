@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from ppmt.terminal.state import TerminalState, get_terminal_state
@@ -404,10 +404,29 @@ async def run_backtest(req: BacktestRequest) -> dict:
 
         trades = []
         for t in result.trades:
+            # Parse timestamps for chart markers
+            entry_ts = None
+            exit_ts = None
+            try:
+                if t.entry_time:
+                    import pandas as pd
+                    dt = pd.Timestamp(t.entry_time)
+                    entry_ts = int(dt.timestamp())
+                if t.exit_time:
+                    import pandas as pd
+                    dt = pd.Timestamp(t.exit_time)
+                    exit_ts = int(dt.timestamp())
+            except Exception:
+                pass
+
             trades.append({
                 "direction": t.direction,
                 "entry_price": t.entry_price,
                 "exit_price": t.exit_price,
+                "entry_time": t.entry_time,
+                "exit_time": t.exit_time,
+                "entry_ts": entry_ts,
+                "exit_ts": exit_ts,
                 "pnl_pct": t.pnl_pct,
                 "exit_reason": t.exit_reason,
                 "regime": t.regime,
@@ -420,6 +439,7 @@ async def run_backtest(req: BacktestRequest) -> dict:
             "total_pnl_pct": result.total_pnl_pct,
             "max_drawdown": result.max_drawdown,
             "trades": trades,
+            "equity_curve": result.equity_curve[-200:] if result.equity_curve else [],
         }
     except Exception as e:
         return {"ok": False, "error": str(e)}
@@ -531,11 +551,12 @@ async def ingest_data(req: IngestRequest) -> dict:
     try:
         storage = PPMTStorage()
         collector = DataCollector(exchange=req.exchange, storage=storage)
-        df = collector.fetch_historical(req.symbol, req.timeframe, days=req.days)
+        df = collector.fetch_and_save(req.symbol, req.timeframe, days=req.days)
         if df is None or df.empty:
             return {"ok": False, "error": "No data fetched"}
         count = len(df)
-        collector.close()
+        if hasattr(collector, 'close'):
+            collector.close()
         storage.close()
         return {"ok": True, "symbol": req.symbol, "timeframe": req.timeframe, "candles": count}
     except Exception as e:
@@ -592,7 +613,7 @@ async def start_trading(req: StartTradingRequest) -> dict:
             logger.info(f"Auto-ingesting {req.days_ingest} days of {req.symbol} {req.timeframe} data...")
             try:
                 collector = DataCollector(exchange=req.exchange, storage=storage)
-                df = collector.fetch_historical(req.symbol, req.timeframe, days=req.days_ingest)
+                df = collector.fetch_and_save(req.symbol, req.timeframe, days=req.days_ingest)
                 candles_count = len(df) if df is not None and not df.empty else 0
                 logger.info(f"Ingested {candles_count} candles")
                 if hasattr(collector, 'close'):
@@ -612,11 +633,13 @@ async def start_trading(req: StartTradingRequest) -> dict:
                         symbol=req.symbol,
                         sax_strategy="ohlcv",
                     )
-                    # Build all 4 levels
-                    for level_name, n in [("n1", 1), ("n2", 2), ("n3", 3), ("n4", 4)]:
-                        trie = builder.build(df, pattern_length=n, level_name=level_name)
-                        storage.save_trie(req.symbol, level_name, trie)
-                        logger.info(f"Built {level_name} trie: {trie.pattern_count} patterns")
+                    # Build all 4 levels in one call
+                    count = builder.build(df, pattern_length=5)
+                    logger.info(f"Built {count} patterns across all 4 trie levels")
+                    # Save each trie level individually
+                    for level_name, trie_obj in [("n1", builder.trie_n1), ("n2", builder.trie_n2), ("n3", builder.trie_n3), ("n4", builder.trie_n4)]:
+                        storage.save_trie(req.symbol, level_name, trie_obj)
+                        logger.info(f"Saved {level_name} trie: {trie_obj.pattern_count} patterns")
                     all_tries = storage.load_all_tries(req.symbol)
                 else:
                     storage.close()

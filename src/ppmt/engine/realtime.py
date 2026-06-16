@@ -1916,11 +1916,14 @@ class RealtimeTrader:
                             _recalibrate(sax_encoder, cfg, storage, info)
                             candles_since_calibration = 0
 
-                        # v0.20.0: Periodic Living Trie persistence
+                        # v0.20.0: Periodic Living Trie persistence (v0.30.0: all 4 levels)
                         trie_persist_interval = getattr(cfg, 'trie_persist_interval', 100)
                         if trie_persist_interval > 0 and result.candles_processed % trie_persist_interval == 0:
                             try:
-                                for level_name, level_trie in [("n3", trie)]:
+                                for level_name, level_trie in [
+                                    ("n1", trie_n1), ("n2", trie_n2),
+                                    ("n3", trie), ("n4", trie_n4),
+                                ]:
                                     if level_trie is not None:
                                         storage.save_trie(cfg.symbol, level_name, level_trie)
                             except Exception:

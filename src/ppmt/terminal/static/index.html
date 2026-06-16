@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>PPMT Terminal v0.29.0</title>
+<title>PPMT Terminal v0.30.0</title>
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -311,6 +311,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--sans);line-height:
           <input type="number" id="nodeAlloc" placeholder="Alloc %" value="10" min="1" max="100">
           <input type="number" id="nodeLev" placeholder="Leverage" value="1" min="1" max="125">
           <button class="btn btn-accent full" onclick="addNode()" style="margin-top:4px">+ Add Node</button>
+          <button class="btn full" onclick="redistributeCapital()" style="margin-top:4px;font-size:11px">↻ Redistribute Capital</button>
         </div>
       </div>
     </div>
@@ -338,7 +339,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--sans);line-height:
       <span>SAX Symbols: <b id="btSAX">0</b></span>
     </div>
     <div class="bottom-right">
-      <span>PPMT Terminal v0.29.0</span>
+      <span>PPMT Terminal v0.30.0</span>
       <span id="btUptime">Uptime: --</span>
     </div>
   </div>
@@ -347,7 +348,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--sans);line-height:
 
 <script>
 // ============================================================
-// PPMT Terminal Dashboard v0.27.0
+// PPMT Terminal Dashboard v0.30.0
 // Real-time candlestick chart + entry/exit markers
 // ============================================================
 
@@ -936,23 +937,38 @@ async function runBacktest() {
     }
 
     const pnlColor = data.total_pnl_pct >= 0 ? 'var(--green)' : 'var(--red)';
+    const profitFactor = data.total_trades > 0
+      ? (data.trades || []).filter(t => t.pnl_pct > 0).reduce((s, t) => s + t.pnl_pct, 0) /
+        Math.max(0.01, Math.abs((data.trades || []).filter(t => t.pnl_pct < 0).reduce((s, t) => s + t.pnl_pct, 0)))
+      : 0;
+    const wins = (data.trades || []).filter(t => t.pnl_pct >= 0).length;
+    const losses = (data.trades || []).filter(t => t.pnl_pct < 0).length;
+
     resultDiv.innerHTML = `<div class="backtest-result">
       <h4>Backtest: ${symbol} ${tf}</h4>
       <div class="stats-grid" style="margin-top:4px">
         <div class="stat"><div class="stat-label">Trades</div><div class="stat-value">${data.total_trades}</div></div>
-        <div class="stat"><div class="stat-label">Win Rate</div><div class="stat-value">${(data.win_rate * 100).toFixed(1)}%</div></div>
+        <div class="stat"><div class="stat-label">Win Rate</div><div class="stat-value" style="color:${data.win_rate >= 0.5 ? 'var(--green)' : 'var(--red)'}">${(data.win_rate * 100).toFixed(1)}%</div></div>
         <div class="stat"><div class="stat-label">P&L</div><div class="stat-value" style="color:${pnlColor}">${data.total_pnl_pct >= 0 ? '+' : ''}${data.total_pnl_pct.toFixed(2)}%</div></div>
         <div class="stat"><div class="stat-label">Max DD</div><div class="stat-value" style="color:var(--red)">${(data.max_drawdown * 100).toFixed(2)}%</div></div>
+        <div class="stat"><div class="stat-label">Profit Factor</div><div class="stat-value" style="color:${profitFactor >= 1 ? 'var(--green)' : 'var(--red)'}">${profitFactor.toFixed(2)}</div></div>
+        <div class="stat"><div class="stat-label">W / L</div><div class="stat-value"><span style="color:var(--green)">${wins}</span> / <span style="color:var(--red)">${losses}</span></div></div>
       </div>
+      ${data.equity_curve && data.equity_curve.length > 1 ? `<canvas id="btEquityCanvas" width="340" height="80" style="width:100%;height:80px;margin-top:8px;border-radius:var(--radius-sm);background:var(--bg2)"></canvas>` : ''}
       ${data.trades && data.trades.length > 0 ? `<div style="margin-top:6px;max-height:120px;overflow-y:auto;font-size:10px">
-        ${data.trades.slice(-5).map(t => `<div style="padding:2px 0;border-bottom:1px solid var(--border)">
-          <span style="color:${t.direction === 'LONG' ? 'var(--green)' : 'var(--red)'}">${t.direction}</span>
+        ${data.trades.slice(-8).map(t => `<div style="padding:2px 0;border-bottom:1px solid var(--border)">
+          <span style="color:${t.direction === 'LONG' ? 'var(--green)' : 'var(--red)'};font-weight:600">${t.direction}</span>
           ${t.entry_price?.toFixed(2)} → ${t.exit_price?.toFixed(2)}
-          <span style="color:${t.pnl_pct >= 0 ? 'var(--green)' : 'var(--red)'}">${t.pnl_pct?.toFixed(2)}%</span>
+          <span style="color:${t.pnl_pct >= 0 ? 'var(--green)' : 'var(--red)'};font-weight:600">${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct?.toFixed(2)}%</span>
           <span style="color:var(--text3)">${t.exit_reason}</span>
         </div>`).join('')}
       </div>` : ''}
     </div>`;
+
+    // Draw equity curve mini-chart
+    if (data.equity_curve && data.equity_curve.length > 1) {
+      setTimeout(() => drawEquityCurve('btEquityCanvas', data.equity_curve), 50);
+    }
 
     // Add trade markers to chart if we have the chart loaded
     if (data.trades && data.trades.length > 0) {
@@ -963,10 +979,101 @@ async function runBacktest() {
   }
 }
 
+// ============================================================
+// EQUITY CURVE MINI-CHART (Canvas)
+// ============================================================
+function drawEquityCurve(canvasId, equityData) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas || !equityData || equityData.length < 2) return;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width = canvas.offsetWidth * 2;  // retina
+  const H = canvas.height = canvas.offsetHeight * 2;
+  ctx.scale(2, 2);
+  const w = canvas.offsetWidth, h = canvas.offsetHeight;
+  ctx.clearRect(0, 0, w, h);
+
+  const min = Math.min(...equityData);
+  const max = Math.max(...equityData);
+  const range = max - min || 1;
+  const pad = 4;
+
+  // Draw line
+  ctx.beginPath();
+  const isProfit = equityData[equityData.length - 1] >= equityData[0];
+  ctx.strokeStyle = isProfit ? '#4ade80' : '#f87171';
+  ctx.lineWidth = 1.5;
+  for (let i = 0; i < equityData.length; i++) {
+    const x = pad + (i / (equityData.length - 1)) * (w - pad * 2);
+    const y = h - pad - ((equityData[i] - min) / range) * (h - pad * 2);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  // Fill gradient
+  const lastX = pad + (w - pad * 2);
+  ctx.lineTo(lastX, h);
+  ctx.lineTo(pad, h);
+  ctx.closePath();
+  const grad = ctx.createLinearGradient(0, 0, 0, h);
+  if (isProfit) {
+    grad.addColorStop(0, 'rgba(74,222,128,0.25)');
+    grad.addColorStop(1, 'rgba(74,222,128,0.0)');
+  } else {
+    grad.addColorStop(0, 'rgba(248,113,113,0.25)');
+    grad.addColorStop(1, 'rgba(248,113,113,0.0)');
+  }
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // Start value line
+  const startY = h - pad - ((equityData[0] - min) / range) * (h - pad * 2);
+  ctx.setLineDash([3, 3]);
+  ctx.strokeStyle = 'rgba(148,163,184,0.3)';
+  ctx.lineWidth = 0.5;
+  ctx.beginPath();
+  ctx.moveTo(0, startY);
+  ctx.lineTo(w, startY);
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
 function addBacktestMarkers(trades) {
-  // For backtest trades, we add markers based on candle data from chart
-  // Since we don't have exact timestamps from backtest, we skip this
-  // In a live session, markers are added in real-time via WebSocket
+  if (!candleSeries || !trades || trades.length === 0) return;
+  const newMarkers = [];
+  for (const t of trades) {
+    // Entry marker
+    if (t.entry_ts) {
+      newMarkers.push({
+        time: t.entry_ts,
+        position: t.direction === 'LONG' ? 'belowBar' : 'aboveBar',
+        color: t.direction === 'LONG' ? '#4ade80' : '#f87171',
+        shape: t.direction === 'LONG' ? 'arrowUp' : 'arrowDown',
+        text: `${t.direction} @ ${t.entry_price?.toFixed(2)}`,
+      });
+    }
+    // Exit marker
+    if (t.exit_ts) {
+      const profitable = (t.pnl_pct || 0) >= 0;
+      newMarkers.push({
+        time: t.exit_ts,
+        position: t.direction === 'LONG' ? 'aboveBar' : 'belowBar',
+        color: profitable ? '#4ade80' : '#f87171',
+        shape: profitable ? 'circle' : 'square',
+        text: `Exit ${t.exit_reason || ''} ${t.pnl_pct?.toFixed(2)}%`,
+      });
+    }
+  }
+  if (newMarkers.length > 0) {
+    markers = [...markers, ...newMarkers];
+    const seen = new Set();
+    markers = markers.filter(m => {
+      if (seen.has(m.time)) return false;
+      seen.add(m.time);
+      return true;
+    });
+    markers.sort((a, b) => a.time - b.time);
+    try { candleSeries.setMarkers(markers); } catch(e) {}
+  }
 }
 
 // ============================================================
@@ -1025,6 +1132,32 @@ async function toggleKillSwitch() {
     await fetch(`${API}${endpoint}`, { method: 'POST' });
   } catch (e) {
     console.error('Kill switch error:', e);
+  }
+}
+
+async function redistributeCapital() {
+  try {
+    const resp = await fetch(`${API}/api/nodes/redistribute`, { method: 'POST' });
+    const data = await resp.json();
+    if (data.ok) {
+      console.log('Capital redistributed successfully');
+    } else {
+      alert('Error: ' + (data.error || 'Unknown error'));
+    }
+  } catch (e) {
+    console.error('Redistribute error:', e);
+  }
+}
+
+async function setNodeLeverage(nodeId, leverage) {
+  try {
+    await fetch(`${API}/api/nodes/leverage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ node_id: nodeId, leverage: parseInt(leverage) }),
+    });
+  } catch (e) {
+    console.error('Set leverage error:', e);
   }
 }
 
