@@ -47,7 +47,7 @@ def load_config() -> dict:
 
 
 @click.group()
-@click.version_option(version="0.20.0")
+@click.version_option(version="0.21.0")
 def cli():
     """PPMT Terminal - Autonomous Pattern-Based Trading Terminal"""
     pass
@@ -395,7 +395,7 @@ def predict(symbol: str, timeframe: str, depth: int, price: float):
 @click.option("--replay", is_flag=True, help="Replay historical data instead of live")
 @click.option("--speed", default=0.0, type=float, help="Replay speed (0=max, 1=realtime, 10=10x)")
 @click.option("--pattern-length", "-p", default=5, type=int, help="SAX blocks per pattern")
-@click.option("--min-confidence", default=0.20, type=float, help="Minimum signal confidence")
+@click.option("--min-confidence", default=0.08, type=float, help="Minimum signal confidence (v0.21.0: lowered for Bayesian shrinkage)")
 @click.option("--auto-calibrate", is_flag=True, default=True, help="Auto-calibrate SAX parameters")
 @click.option("--no-calibrate", "no_calibrate", is_flag=True, help="Skip auto-calibration")
 @click.option("--regime-aware", is_flag=True, default=True, help="Enable regime detection")
@@ -526,7 +526,7 @@ if __name__ == "__main__":
 @click.option("--timeframe", "-t", default="1h", help="Candle timeframe")
 @click.option("--capital", "-c", default=10000.0, type=float, help="Initial capital")
 @click.option("--pattern-length", "-p", default=5, type=int, help="SAX blocks per pattern")
-@click.option("--min-confidence", default=0.20, type=float, help="Minimum signal confidence")
+@click.option("--min-confidence", default=0.08, type=float, help="Minimum signal confidence (v0.21.0: lowered for Bayesian shrinkage)")
 @click.option("--start-offset", default=200, type=int, help="Candles to skip (warm-up)")
 @click.option("--auto-calibrate", is_flag=True, default=True, help="Auto-calibrate SAX parameters")
 @click.option("--no-calibrate", "no_calibrate", is_flag=True, help="Skip auto-calibration")
@@ -666,7 +666,7 @@ def backtest(
 @click.option("--capital", "-c", default=10000.0, type=float, help="Initial capital")
 @click.option("--simulations", "-n", default=1000, type=int, help="Number of simulations")
 @click.option("--pattern-length", "-p", default=5, type=int, help="SAX blocks per pattern")
-@click.option("--min-confidence", default=0.20, type=float, help="Minimum signal confidence")
+@click.option("--min-confidence", default=0.08, type=float, help="Minimum signal confidence (v0.21.0: lowered for Bayesian shrinkage)")
 @click.option("--auto-calibrate", is_flag=True, default=True, help="Auto-calibrate SAX parameters")
 @click.option("--regime-aware", is_flag=True, default=True, help="Enable regime detection")
 @click.option("--confidence-level", default=0.95, type=float, help="Confidence level (0-1)")

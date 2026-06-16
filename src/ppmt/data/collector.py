@@ -692,7 +692,8 @@ class DataCollector:
         Uses ccxt to fetch market info. Returns a list of symbol strings
         in CCXT format (e.g., 'BTC/USDT', 'ETH/USDT').
 
-        v0.20.0: New method — required by `ppmt scan`.
+        v0.21.0: Filters out derivatives (symbols with ':') to return
+        only spot pairs, which are what PPMT uses for pattern matching.
         """
         if not self._init_ccxt():
             raise RuntimeError(
@@ -702,9 +703,11 @@ class DataCollector:
 
         try:
             markets = self._ccxt_exchange.load_markets()
-            symbols = list(markets.keys())
-            logger.info(f"Loaded {len(symbols)} markets from {self.exchange}")
-            return symbols
+            # v0.21.0: Filter out derivatives (symbols with ':SETTLE' suffix)
+            # and only return spot pairs
+            spot_symbols = [s for s in markets.keys() if ':' not in s]
+            logger.info(f"Loaded {len(spot_symbols)} spot markets from {self.exchange} (total: {len(markets)})")
+            return spot_symbols
         except Exception as e:
             raise RuntimeError(f"Failed to load markets from {self.exchange}: {e}") from e
 
@@ -715,7 +718,7 @@ class DataCollector:
         Returns a dict mapping symbol → ticker dict with keys:
           quoteVolume, percentage, high, low, last, bid, ask, etc.
 
-        v0.20.0: New method — required by `ppmt scan`.
+        v0.21.0: Fixed to convert ccxt Ticker objects to plain dicts.
         """
         if not self._init_ccxt():
             raise RuntimeError(
@@ -723,14 +726,51 @@ class DataCollector:
                 f"Install with: pip install ccxt>=4.0.0"
             )
 
+        def _ticker_to_dict(t):
+            """Convert ccxt Ticker object to plain dict."""
+            if isinstance(t, dict):
+                return t
+            # ccxt Ticker objects have a .to_dict() method or we extract attrs
+            try:
+                return t.to_dict()
+            except AttributeError:
+                pass
+            # Fallback: extract common attributes
+            return {
+                "symbol": getattr(t, "symbol", ""),
+                "last": getattr(t, "last", 0),
+                "bid": getattr(t, "bid", 0),
+                "ask": getattr(t, "ask", 0),
+                "high": getattr(t, "high", 0),
+                "low": getattr(t, "low", 0),
+                "quoteVolume": getattr(t, "quoteVolume", 0) or 0,
+                "percentage": getattr(t, "percentage", 0) or 0,
+                "change": getattr(t, "change", 0) or 0,
+                "baseVolume": getattr(t, "baseVolume", 0) or 0,
+                "vwap": getattr(t, "vwap", 0),
+                "open": getattr(t, "open", 0),
+                "close": getattr(t, "close", 0) or getattr(t, "last", 0),
+                "previousClose": getattr(t, "previousClose", 0),
+                "info": getattr(t, "info", {}),
+            }
+
         try:
             # ccxt fetch_tickers() returns ALL tickers at once (1 API call)
             # Then we filter to requested symbols
             all_tickers = self._ccxt_exchange.fetch_tickers()
+
+            # v0.21.0: Build a lookup that strips the :SETTLE suffix
+            # Bybit returns keys like 'BTC/USDT:USDT' but we search for 'BTC/USDT'
+            ticker_lookup = {}
+            for k, v in all_tickers.items():
+                base_key = k.split(':')[0]  # 'BTC/USDT:USDT' → 'BTC/USDT'
+                ticker_lookup[base_key] = v
+                ticker_lookup[k] = v  # Also keep full key
+
             result = {}
             for sym in symbols:
-                if sym in all_tickers:
-                    result[sym] = all_tickers[sym]
+                if sym in ticker_lookup:
+                    result[sym] = _ticker_to_dict(ticker_lookup[sym])
             logger.info(f"Fetched tickers for {len(result)}/{len(symbols)} symbols from {self.exchange}")
             return result
         except Exception as e:
@@ -740,7 +780,7 @@ class DataCollector:
             for sym in symbols:
                 try:
                     ticker = self._ccxt_exchange.fetch_ticker(sym)
-                    result[sym] = ticker
+                    result[sym] = _ticker_to_dict(ticker)
                     time.sleep(self._ccxt_exchange.rateLimit / 1000.0)
                 except Exception:
                     pass  # Skip symbols that fail

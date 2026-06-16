@@ -105,7 +105,10 @@ class ReplayConfig:
     sax_window_size: int = 0
     """SAX window size. 0 = auto from TokenProfile (timeframe-adaptive)."""
     sax_strategy: str = "ohlcv"
-    min_confidence: float = 0.20
+    min_confidence: float = 0.08
+    """Minimum signal confidence. v0.21.0: Lowered from 0.20 to 0.08 because
+    Bayesian shrinkage with low historical_count produces confidences in
+    the 0.08-0.22 range. Use --min-confidence to override."""
     start_offset: int = 200
     """Number of initial candles to skip (warm-up)."""
     catastrophic_loss_pct: float = 0.0
@@ -148,7 +151,10 @@ class LiveConfig:
     sax_window_size: int = 0
     """SAX window size. 0 = auto from TokenProfile."""
     sax_strategy: str = "ohlcv"
-    min_confidence: float = 0.20
+    min_confidence: float = 0.08
+    """Minimum signal confidence. v0.21.0: Lowered from 0.20 to 0.08 because
+    Bayesian shrinkage with low historical_count produces confidences in
+    the 0.08-0.22 range. Use --min-confidence to override."""
     catastrophic_loss_pct: float = 0.0
     """Catastrophic loss threshold. 0.0 = use TokenProfile value."""
     regime_aware: bool = True
@@ -525,6 +531,26 @@ class RealtimeTrader:
             strategy=cfg.sax_strategy,
         )
 
+        # v0.21.0: Compute training PAA statistics for consistent incremental encoding
+        # Without these stats, encode_incremental() falls back to per-window z-scoring
+        # which always produces the middle symbol (e.g., 'c' with alpha=5), resulting
+        # in zero pattern diversity and zero signal generation.
+        _paa_mean = None
+        _paa_std = None
+        warmup_df = df.iloc[:cfg.start_offset]
+        if len(warmup_df) >= cfg.sax_window_size * 2:
+            try:
+                _, _paa_mean, _paa_std = sax_encoder.encode_with_normalization(warmup_df)
+                if _paa_std < 1e-10:
+                    _paa_mean = None
+                    _paa_std = None
+                else:
+                    console.print(f"  [green]Training PAA stats: mean={_paa_mean:.6f}, std={_paa_std:.6f}[/green]")
+            except Exception as e:
+                console.print(f"  [yellow]Warning: Could not compute PAA stats: {e}[/yellow]")
+                _paa_mean = None
+                _paa_std = None
+
         # v0.11.0: FuzzyMatcher for pattern breaks
         fuzzy_matcher = FuzzyMatcher(
             sax_encoder=sax_encoder,
@@ -650,7 +676,10 @@ class RealtimeTrader:
 
                 # Incremental SAX encoding: feed one candle at a time
                 single_candle = df.iloc[candle_idx:candle_idx + 1]
-                new_symbols, sax_buffer = sax_encoder.encode_incremental(single_candle, sax_buffer)
+                new_symbols, sax_buffer = sax_encoder.encode_incremental(
+                    single_candle, sax_buffer,
+                    paa_mean=_paa_mean, paa_std=_paa_std,  # v0.21.0: training stats
+                )
 
                 if new_symbols:
                     # New SAX symbol(s) produced
@@ -821,12 +850,30 @@ class RealtimeTrader:
                             except Exception:
                                 pass
 
-                        # v0.11.0: Lower move threshold for alpha=3 (same as PaperTrader)
+                        # v0.21.0: Adaptive signal gating
+                        # Confidence from Bayesian shrinkage is typically 0.08-0.22,
+                        # so we also check overall_probability and expected_move as
+                        # alternative quality indicators. A pattern with confidence=0.10
+                        # but probability=0.80 and move=1.5% is a valid signal.
+                        move_threshold = 0.15  # v0.21.0: lowered from 0.3 (alpha=5 patterns have smaller moves)
+                        prob_threshold = 0.10  # v0.21.0: lowered from 0.20
+
+                        # Confidence boost: if overall_probability is strong and move is
+                        # significant, boost confidence up to min_confidence level
+                        boosted_confidence = weighted_confidence
+                        if (prediction.overall_probability >= 0.40
+                                and abs(prediction.expected_total_move_pct) >= 0.5):
+                            # Strong pattern match — boost confidence by probability
+                            boosted_confidence = max(
+                                weighted_confidence,
+                                weighted_confidence * (1 + prediction.overall_probability),
+                            )
+
                         if (position_state == PositionState.FLAT
                                 and prediction.direction != "FLAT"
-                                and weighted_confidence >= effective_min_conf
-                                and abs(prediction.expected_total_move_pct) > 0.3
-                                and prediction.overall_probability > 0.20):
+                                and boosted_confidence >= effective_min_conf
+                                and abs(prediction.expected_total_move_pct) > move_threshold
+                                and prediction.overall_probability > prob_threshold):
 
                             result.signals_generated += 1
 
@@ -871,7 +918,7 @@ class RealtimeTrader:
 
                             signal = Signal(
                                 signal_type=signal_type,
-                                confidence=weighted_confidence,
+                                confidence=boosted_confidence,  # v0.21.0: use boosted confidence
                                 symbol=cfg.symbol,
                                 entry_price=current_price,
                                 sl_price=sl_price,
@@ -1149,6 +1196,8 @@ class RealtimeTrader:
         peak_capital: float,
         last_losing_trade_idx: int = -999,
         exchange=None,
+        paa_mean: float = None,  # v0.21.0: training stats for consistent SAX
+        paa_std: float = None,
     ) -> tuple:
         """
         Process a single closed candle through the full PPMT pipeline.
@@ -1205,7 +1254,10 @@ class RealtimeTrader:
 
         # Incremental SAX encoding: feed one candle at a time
         single_df = candle.to_dataframe_row()
-        new_symbols, sax_buffer = sax_encoder.encode_incremental(single_df, sax_buffer)
+        new_symbols, sax_buffer = sax_encoder.encode_incremental(
+            single_df, sax_buffer,
+            paa_mean=paa_mean, paa_std=paa_std,  # v0.21.0: training stats
+        )
 
         if new_symbols:
             for new_sym in new_symbols:
@@ -1562,6 +1614,21 @@ class RealtimeTrader:
             window_size=cfg.sax_window_size,
             strategy=cfg.sax_strategy,
         )
+
+        # v0.21.0: Compute training PAA statistics for consistent incremental encoding
+        _paa_mean = None
+        _paa_std = None
+        if not df.empty and len(df) >= cfg.sax_window_size * 2:
+            try:
+                _, _paa_mean, _paa_std = sax_encoder.encode_with_normalization(df)
+                if _paa_std < 1e-10:
+                    _paa_mean = None
+                    _paa_std = None
+                else:
+                    console.print(f"  [green]Training PAA stats: mean={_paa_mean:.6f}, std={_paa_std:.6f}[/green]")
+            except Exception as e:
+                console.print(f"  [yellow]Warning: Could not compute PAA stats: {e}[/yellow]")
+
         pred_engine = PredictionEngine(trie, prediction_depth=cfg.pattern_length)
 
         # v0.20.0: MoneyManager replaces basic RiskManager for live mode
@@ -1773,6 +1840,8 @@ class RealtimeTrader:
                             peak_capital=peak_capital,
                             last_losing_trade_idx=last_losing_trade_idx,
                             exchange=exchange,
+                            paa_mean=_paa_mean,
+                            paa_std=_paa_std,
                         )
 
                         # v0.13.0: Sync buffer state back to StreamingPatternBuffer
@@ -1928,6 +1997,7 @@ class RealtimeTrader:
                                 recent_prices=recent_prices, recent_highs=recent_highs,
                                 recent_lows=recent_lows, peak_capital=peak_capital,
                                 last_losing_trade_idx=last_losing_trade_idx,
+                                paa_mean=_paa_mean, paa_std=_paa_std,
                             )
                         console.print(f"[green]Warmup: processed {len(warmup_ohlcv)} historical candles[/green]")
                     except Exception as e:
@@ -1969,6 +2039,7 @@ class RealtimeTrader:
                                         recent_lows=recent_lows, peak_capital=peak_capital,
                                         last_losing_trade_idx=last_losing_trade_idx,
                                         exchange=exchange if not cfg.dry_run else poll_exchange,
+                                        paa_mean=_paa_mean, paa_std=_paa_std,
                                     )
 
                                     _update_live_display(live_display, cfg, result, position_state,
