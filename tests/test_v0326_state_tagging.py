@@ -23,10 +23,12 @@ from ppmt.terminal.state import TerminalState
 # ---------------------------------------------------------------- #
 
 def test_days_for_tf_short_timeframes():
-    """Short TFs get short ingestion windows (each day produces many candles)."""
-    assert _days_for_tf("1m") == 1
-    assert _days_for_tf("5m") == 3
-    assert _days_for_tf("15m") == 7
+    """v0.33.0: Short TFs now use deeper samples so backtests are reliable.
+    See TRAZABILIDAD.md v0.33.0 section for the full table.
+    """
+    assert _days_for_tf("1m") == 7    # 1 week -> 10,080 candles
+    assert _days_for_tf("5m") == 30   # 1 month -> 8,640 candles
+    assert _days_for_tf("15m") == 90  # 3 months -> 8,640 candles
 
 
 def test_days_for_tf_long_timeframes():

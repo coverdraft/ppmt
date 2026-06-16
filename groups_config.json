@@ -1,0 +1,23 @@
+{
+  "_comment": "PPMT Custom Token Groups — Editable by user. Keys are group IDs (lowercase, underscores). Values must have 'bases' (array of tickers like 'BTC' or 'BTC/USDT'). Optional: 'label', 'description'.",
+  "mi_cartera": {
+    "label": "Mi Cartera",
+    "description": "Tokens que estoy siguiendo de cerca",
+    "bases": ["BTC", "ETH", "SOL"]
+  },
+  "memes_seguimiento": {
+    "label": "Memes Seguimiento",
+    "description": "Memes con potencial especulativo",
+    "bases": ["DOGE", "PEPE", "WIF", "SHIB"]
+  },
+  "layer2_prueba": {
+    "label": "Layer2 Prueba",
+    "description": "Escalabilidad Ethereum para pruebas",
+    "bases": ["ARB", "OP", "MATIC", "IMX"]
+  },
+  "experimentales": {
+    "label": "Experimentales",
+    "description": "Tokens en fase experimental — alta incertidumbre",
+    "bases": ["FET", "RNDR", "TAO", "WLD"]
+  }
+}

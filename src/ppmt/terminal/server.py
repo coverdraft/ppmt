@@ -850,17 +850,46 @@ class ValidateRequest(BaseModel):
 
 
 def _days_for_tf(timeframe: str, default: int = 180) -> int:
-    """v0.32.6: Return recommended ingestion days for a timeframe.
+    """v0.33.0: Crypto 24/7 needs more data than forex. Calibrated so each TF
+    produces >=500 candles (the warning threshold) AND captures enough market
+    regimes (weekends, macro events, halving cycles) for robust backtests.
 
-    The trie needs a warmup of `sax_window_size*2 + pattern_length*sax_window_size`
-    candles. For 1h that's 49 candles (~2 days), but to actually generate enough
-    signals to reach the 5-trade MC threshold, we need much more history.
-    Calibrated empirically across MEXC/Binance majors.
+    TF   | Days | Candles (approx)  | Justification
+    -----|------|--------------------|----------------------------------------
+    1m   |  7   | 10,080             | 1 semana captura fines de semana
+    5m   | 30   |  8,640             | 1 mes para capturar ciclos
+    10m  | 45   |  6,480             | 6 semanas
+    15m  | 90   |  8,640             | 3 meses para tendencias medias
+    30m  | 120  |  5,760             | 4 meses
+    1h   | 180  |  4,320             | 6 meses, captura macro + halving
+    4h   | 365  |  2,190             | 1 año, fiable para swing
+    1d   | 730  |    730             | 2 años, ciclos crypto
     """
     return {
-        "1m": 1, "5m": 3, "15m": 7, "30m": 14,
-        "1h": 180, "4h": 365, "1d": 730,
+        "1m": 7, "3m": 14, "5m": 30, "10m": 45, "15m": 90, "30m": 120,
+        "1h": 180, "2h": 240, "4h": 365, "6h": 540, "12h": 730,
+        "1d": 730, "1w": 1825,
     }.get(timeframe, default)
+
+
+def _min_candles_for_tf(timeframe: str) -> int:
+    """v0.33.0: Minimum candle count for a 'reliable' backtest on this TF.
+
+    Below this threshold, the dashboard shows a warning:
+    '⚠️ Muestra insuficiente. Resultados poco fiables.'
+    """
+    return 500
+
+
+def _candle_count_warning(candles: int, timeframe: str) -> Optional[str]:
+    """Return a warning string if candle count is below the reliability threshold."""
+    threshold = _min_candles_for_tf(timeframe)
+    if candles < threshold:
+        return (
+            f"⚠️ Muestra insuficiente ({candles} < {threshold} velas). "
+            f"Resultados poco fiables para TF={timeframe}."
+        )
+    return None
 
 
 @app.post("/api/validate")
@@ -1120,6 +1149,9 @@ async def validate_token(req: ValidateRequest) -> dict:
             "p95_drawdown": mc_result.get("p95_max_drawdown", 1.0) if result.total_trades >= 5 else 1.0,
             "total_trades": result.total_trades,
             "backtest_pnl_pct": result.total_pnl_pct,
+            # v0.33.0: Candle-count warning for low-TF samples
+            "candles_processed": result.candles_processed,
+            "candle_warning": _candle_count_warning(result.candles_processed, req.timeframe),
             "mc_probability_profit": mc_result.get("probability_of_profit", 0),
             "mc_verdict": mc_verdict,
             "checks": checks,
@@ -1352,12 +1384,121 @@ _sweep_state: dict = {
     "started_at": 0.0,
     "finished_at": 0.0,
     "error": "",
+    "group_id": "",
+    "filters": {},
 }
 
 
+# ------------------------------------------------------------------ #
+# REST endpoints — Token Groups (v0.33.0)
+# ------------------------------------------------------------------ #
+
+
+@app.get("/api/groups")
+async def list_token_groups() -> dict:
+    """v0.33.0: List all available token groups (predefined + dynamic + custom).
+
+    Returns:
+      { "groups": { group_id: { label, category, description, bases? }, ... } }
+    """
+    try:
+        from ppmt.data.groups import list_groups
+        return {"ok": True, "groups": list_groups()}
+    except Exception as e:
+        logger.warning(f"list_token_groups failed: {e}", exc_info=True)
+        return {"ok": False, "error": str(e), "groups": {}}
+
+
+@app.get("/api/groups/resolve")
+async def resolve_token_group(
+    group_id: str = "top25_mcap",
+    exchange: str = "mexc",
+    exclude_stablecoins: bool = True,
+    only_usdt_pairs: bool = True,
+    min_volume_24h_usd: float = 0,
+    min_volatility_pct: float = 0,
+    min_listed_days: int = 0,
+    limit: int = 50,
+) -> dict:
+    """v0.33.0: Resolve a group ID to the actual list of symbols.
+
+    Returns:
+      { "ok": True, "group_id": str, "symbols": [...], "count": int }
+    """
+    try:
+        from ppmt.data.groups import resolve_group
+        filters = {
+            "exclude_stablecoins": exclude_stablecoins,
+            "only_usdt_pairs": only_usdt_pairs,
+            "min_volume_24h_usd": min_volume_24h_usd,
+            "min_volatility_pct": min_volatility_pct,
+            "min_listed_days": min_listed_days,
+            "limit": limit,
+        }
+        symbols = resolve_group(group_id, exchange=exchange, filters=filters)
+        return {
+            "ok": True,
+            "group_id": group_id,
+            "exchange": exchange,
+            "symbols": symbols,
+            "count": len(symbols),
+            "filters_applied": filters,
+        }
+    except Exception as e:
+        logger.warning(f"resolve_token_group failed: {e}", exc_info=True)
+        return {"ok": False, "error": str(e), "symbols": [], "count": 0}
+
+
+class SaveCustomGroupRequest(BaseModel):
+    name: str
+    symbols: list[str]
+    description: str = ""
+
+
+@app.post("/api/groups/custom")
+async def save_custom_group_endpoint(req: SaveCustomGroupRequest) -> dict:
+    """v0.33.0: Save a custom group to ~/.ppmt/groups_config.json."""
+    try:
+        from ppmt.data.groups import save_custom_group
+        ok = save_custom_group(req.name, req.symbols, req.description)
+        if not ok:
+            return {"ok": False, "error": "Invalid name or symbols (or reserved name)"}
+        return {"ok": True, "name": req.name, "count": len(req.symbols)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.delete("/api/groups/custom")
+async def delete_custom_group_endpoint(name: str) -> dict:
+    """v0.33.0: Delete a custom group."""
+    try:
+        from ppmt.data.groups import delete_custom_group
+        ok = delete_custom_group(name)
+        if not ok:
+            return {"ok": False, "error": f"Group '{name}' not found"}
+        return {"ok": True, "name": name}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+# ------------------------------------------------------------------ #
+# REST endpoint — Sweep All Tokens (v0.32.6)
+# ------------------------------------------------------------------ #
+
+# (Sweep state above)
+
+
 class SweepRequest(BaseModel):
-    """Run validation across many tokens in the background."""
+    """Run validation across many tokens in the background.
+
+    v0.33.0: Now accepts ``group_id`` and ``filters`` so the dashboard can
+    sweep a dynamic group (e.g. Top 25 by Volume) instead of the hard-coded
+    25-majors list. If both ``symbols`` and ``group_id`` are provided,
+    ``symbols`` wins (caller already resolved the group).
+    """
     symbols: list[str] = []
+    group_id: str = ""  # e.g. "top25_mcap", "memes", "top_volume_24h", or a custom group name
+    filters: dict = {}  # optional: {min_volume_24h_usd, exclude_stablecoins, limit, ...}
     timeframe: str = "1h"
     exchange: str = "mexc"
     capital: float = 1_000.0
@@ -1367,23 +1508,39 @@ class SweepRequest(BaseModel):
 
 @app.post("/api/sweep")
 async def sweep_tokens(req: SweepRequest) -> dict:
-    """v0.32.6: Sweep many tokens — run validation on each, in background.
+    """v0.32.6 / v0.33.0: Sweep many tokens — run validation on each, in background.
 
     The endpoint returns immediately with the planned list; the dashboard
     polls `/api/sweep-status` to see live progress. Each token that PASSES
     is auto-added as a child node so the user can immediately start trading.
+
+    v0.33.0: Resolution priority for the symbol list:
+      1. req.symbols (caller already resolved)
+      2. req.group_id (resolve now via groups.resolve_group, applying req.filters)
+      3. Fall back to curated 25 majors (legacy behaviour)
     """
     global _sweep_state
 
     if _sweep_state["running"]:
         return {"ok": False, "error": "A sweep is already running. Wait for it to finish."}
 
-    # Resolve symbol list
+    # Resolve symbol list (priority: explicit symbols > group_id > fallback)
     symbols = list(req.symbols)
+    resolved_group = ""
+    if not symbols and req.group_id:
+        try:
+            from ppmt.data.groups import resolve_group
+            symbols = resolve_group(
+                req.group_id, exchange=req.exchange, filters=req.filters or None,
+            )
+            resolved_group = req.group_id
+            logger.info(f"Sweep: resolved group '{req.group_id}' -> {len(symbols)} symbols")
+        except Exception as e:
+            logger.warning(f"Sweep: group resolution failed: {e}")
+            symbols = []
+
     if not symbols:
         # v0.32.6: If user didn't pass a list, use the curated majors list.
-        # This is intentionally shorter than the full dropdown because each
-        # token takes 30-90s to validate (ingest + build + BT + MC).
         symbols = [
             "BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "DOGE/USDT",
             "ADA/USDT", "AVAX/USDT", "LINK/USDT", "BNB/USDT", "DOT/USDT",
@@ -1430,6 +1587,8 @@ async def sweep_tokens(req: SweepRequest) -> dict:
         "started_at": time.time(),
         "finished_at": 0.0,
         "error": "",
+        "group_id": resolved_group,
+        "filters": req.filters or {},
     }
 
     if not symbols:

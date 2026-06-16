@@ -1453,3 +1453,251 @@ El usuario quería descubrir qué tokens son operables sin tener que validar uno
 2. **Auto-fallback MEXC→Binance.** Si MEXC trae <500 candles, re-intentar con Binance automáticamente. Mostrar un tag "data from Binance" en el chart.
 3. **Persistir sweep results.** Guardar el resultado del último sweep en DB para que el usuario pueda cerrar y reabrir el dashboard sin perder el barrido.
 4. **Sweep con timeframe múltiple.** Permitir barrer 1h Y 4h a la vez para encontrar el mejor TF por token.
+
+---
+
+## v0.33.0 — Sistema Dinámico de Agrupación de Tokens + Muestra Mejorada para TF Bajas
+
+> Fecha: 2026-06-17
+> Versión: v0.32.6 → v0.33.0
+> Motivación: El usuario reportó que 25 pares fijos es muy poco. Pidió grupos dinámicos (Top 10/25/50/100 Market Cap, por categoría: Blue Chips, Altcoins, Memes, Layer1/2, DeFi, AI, Gaming; por métricas 24h: Volumen, Volatilidad, Ganadores, Perdedores; grupos personalizados). También pidió más historia para TF bajas (1m, 5m, 10m, 15m, 1h) porque "el test me gustaria que sea mas profundo en esas para que podamos tener mejor calidad de la muestra".
+
+### Problema 1 — 25 pares fijos es insuficiente
+
+Antes: el endpoint `/api/sweep` tenía una lista hard-coded de 25 majors:
+```python
+symbols = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "XRP/USDT", "DOGE/USDT", ...]
+```
+- No permitía descubrir altcoins con potencial.
+- No permitía agrupar por categoría (memes, Layer2, DeFi, AI, gaming...).
+- No permitía barrer los "Top 25 por volumen de hoy" (que cambia cada día).
+- El usuario tenía que validar token por token manualmente.
+
+### Problema 2 — Muestra insuficiente para TF bajas
+
+Antes: `_days_for_tf("1m") == 1` (1 día = 1440 candles). El usuario explícitamente pidió:
+> "el test me gustaria que sea mas profundo en esas [TF bajas] para que podamos tener mejor calidad de la muestra"
+
+Y proporcionó esta tabla:
+```
+TF    | Días | Velas aprox | Justificación
+1m    |   7  |   10,080    | 1 semana captura fines de semana
+5m    |  30  |    8,640    | 1 mes para capturar ciclos
+10m   |  45  |    6,480    | 6 semanas
+15m   |  90  |    8,640    | 3 meses, suficiente para tendencias medias
+30m   | 120  |    5,760    | 4 meses
+1h    | 180  |    4,320    | 6 meses, captura eventos macro y halving
+4h    | 365  |    2,190    | 1 año, muy fiable para swing
+1d    | 730  |      730    | 2 años, necesario para ciclos crypto
+```
+
+### Solución 1 — Módulo `src/ppmt/data/groups.py` (nuevo)
+
+Sistema completo de agrupación dinámica con 4 categorías:
+
+#### Categoría 1: Market Cap (curado, 4 grupos)
+- `top10_mcap`, `top25_mcap`, `top50_mcap`, `top100_mcap`
+- Bases hard-coded (BTC, ETH, BNB, SOL, ...) → se normalizan a `BTC/USDT`
+- Tokens no listados en el exchange se filtran automáticamente vía `apply_filters()`
+
+#### Categoría 2: Por categoría (10 grupos)
+- `blue_chips` (BTC, ETH, BNB, SOL, XRP)
+- `altcoins_large` ($5B+ market cap)
+- `altcoins_mid` ($1B–$10B)
+- `altcoins_small` (< $1B)
+- `memes` (DOGE, SHIB, PEPE, WIF, BONK, FLOKI, MEME)
+- `layer1` (ETH, SOL, AVAX, ADA, NEAR, ...)
+- `layer2` (ARB, OP, MATIC, IMX, ...)
+- `defi` (UNI, AAVE, MKR, CRV, SNX, COMP, ...)
+- `ai` (FET, RNDR, AGIX, OCEAN, NMR, WLD, TAO, GPC)
+- `gaming` (SAND, MANA, AXS, GALA, ENJ, CHZ, ILLV, APE)
+
+#### Categoría 3: Dinámicos (calculados en vivo, 4 grupos)
+- `top_volume_24h` — Top 25 por volumen en USDT
+- `top_volatility_24h` — Top 25 por rango (high-low)/low (24h)
+- `top_gainers_24h` — Top 25 rendimiento positivo
+- `top_losers_24h` — Top 25 peor rendimiento
+- Usa `ccxt.fetch_tickers()` (1 sola llamada HTTP) y cachea 60s
+- Filtros: `min_volume_usd=10M` para volatilidad/gainers/losers (evitar ruido de tokens ilíquidos)
+
+#### Categoría 4: Custom (persistente, ilimitados)
+- Guardados en `~/.ppmt/groups_config.json` (sobrevive reinstalaciones)
+- Template en `groups_config.json` (raíz del proyecto) se copia a `~/.ppmt/` en el primer uso
+- Acepta bases en 3 formatos: `"BTC"`, `"BTC/USDT"`, `"BTCUSDT"` — se normalizan internamente
+- Nombres reservados: no se pueden sobreescribir grupos predefinidos
+
+### Solución 2 — Filtros combinables
+
+```python
+DEFAULT_FILTERS = {
+    "exclude_stablecoins": True,    # ON por defecto (USDT, USDC, DAI, BUSD, ...)
+    "only_usdt_pairs": True,        # ON por defecto
+    "min_volume_24h_usd": 0,        # 0 = no filter
+    "min_volatility_pct": 0,        # 0 = no filter
+    "min_listed_days": 0,           # 0 = no filter
+    "limit": 50,                    # cap final
+}
+```
+
+`apply_filters(symbols, filters, exchange)`:
+1. Normaliza a `"BTC/USDT"`
+2. Drop stablecoins si `exclude_stablecoins=True`
+3. Drop non-USDT pairs si `only_usdt_pairs=True`
+4. Si hay filtro de volumen/volatility → fetch tickers (cacheado 60s) y aplica
+5. Aplica `limit` al final
+
+### Solución 3 — `_days_for_tf()` actualizado
+
+```python
+def _days_for_tf(timeframe: str, default: int = 180) -> int:
+    return {
+        "1m": 7, "3m": 14, "5m": 30, "10m": 45, "15m": 90, "30m": 120,
+        "1h": 180, "2h": 240, "4h": 365, "6h": 540, "12h": 730,
+        "1d": 730, "1w": 1825,
+    }.get(timeframe, default)
+```
+
+Cambios vs v0.32.6:
+| TF  | v0.32.6 (días) | v0.33.0 (días) | Multiplicador |
+|-----|----------------|----------------|---------------|
+| 1m  | 1              | 7              | 7x            |
+| 5m  | 3              | 30             | 10x           |
+| 15m | 7              | 90             | 13x           |
+| 30m | 14             | 120            | 9x            |
+| 1h  | 180            | 180            | (igual)       |
+| 4h  | 365            | 365            | (igual)       |
+| 1d  | 730            | 730            | (igual)       |
+
+Nuevos TFs soportados: `3m`, `10m`, `2h`, `6h`, `12h`, `1w`.
+
+### Solución 4 — Warning de muestra insuficiente
+
+```python
+def _candle_count_warning(candles: int, timeframe: str) -> Optional[str]:
+    threshold = 500
+    if candles < threshold:
+        return f"⚠️ Muestra insuficiente ({candles} < {threshold} velas). Resultados poco fiables para TF={timeframe}."
+    return None
+```
+
+- Añadido al `val_result` devuelto por `/api/validate`
+- Frontend muestra un banner amarillo arriba del `VALIDATION RESULT` cuando `candle_warning` está presente
+- User puede decidir: re-ingest con más días, cambiar exchange a Binance, o aceptar el riesgo
+
+### Nuevos endpoints (5)
+
+```
+GET    /api/groups                  → lista todos los grupos (predefined + dynamic + custom)
+GET    /api/groups/resolve          → resuelve group_id → lista de symbols (con filtros aplicados)
+POST   /api/groups/custom           → guarda un custom group en ~/.ppmt/groups_config.json
+DELETE /api/groups/custom?name=X    → borra un custom group
+```
+
+`/api/sweep` extendido:
+```python
+class SweepRequest(BaseModel):
+    symbols: list[str] = []        # prioridad 1: lista explícita
+    group_id: str = ""             # prioridad 2: resolver grupo
+    filters: dict = {}             # se aplica al resolver group_id
+    timeframe: str = "1h"
+    exchange: str = "mexc"
+    capital: float = 1_000.0
+    skip_if_pass: bool = True      # prioridad 3: fallback a 25 majors curados
+```
+
+### Frontend — Nuevo panel "Token Groups"
+
+Insertado encima del panel "Setup & Validation":
+- **Dropdown agrupado por categoría** (Market Cap / Categorías / Dinámicos / Mis Grupos) usando `<optgroup>`
+- **Campo descripción** que muestra `description` + count de bases
+- **Inputs**: Límite (default 50), VolMin (USDT), checkbox "No stable" (ON), checkbox "VolatMin" + input `%`
+- **3 botones**:
+  - **Load** → resuelve el grupo y popula `setupSymbol` con la lista resultante (también sincroniza `chartSymbol`)
+  - **Save Custom** → guarda los tokens actuales del dropdown como grupo custom (prompt pide nombre + descripción)
+  - **Del** → borra el grupo custom seleccionado (confirm prompt)
+- **Info box** debajo muestra estado ("✓ 25 tokens cargados", "ERROR: ...", etc.)
+
+El botón **"Sweep All Tokens"** se renombró a **"Sweep Selected Group"** y ahora envía `group_id` + `filters` al backend. El backend resuelve el grupo y barrido en background. Si no hay grupo seleccionado, cae al fallback de 25 majors.
+
+### Timeframes añadidos
+
+Añadido `10m` y `30m` a ambos dropdowns (`chartTimeframe` y `setupTimeframe`), según petición explícita:
+> "voy a hacer operar mas en 1, 5 o 10 o 15 o 1h en temporalidaes bajas"
+
+### Tests (19 nuevos)
+
+`tests/test_v0330_groups.py`:
+- `_days_for_tf` tabla completa
+- `_candle_count_warning` below/above threshold
+- `list_groups()` returns 4 categorías
+- `resolve_group()` static group formato CCXT
+- `resolve_group()` unknown id → empty
+- `apply_filters()` drops stablecoins
+- `apply_filters()` keeps stablecoins when disabled
+- `apply_filters()` limit aplicado al final
+- `apply_filters()` normaliza bases ("BTC" → "BTC/USDT")
+- `save_custom_group()` + `delete_custom_group()` persistencia
+- `save_custom_group()` rechaza nombres reservados
+- `save_custom_group()` normaliza 3 formatos de símbolo
+- 5 smoke tests de endpoints vía `TestClient`
+
+### Verificación
+
+- **Tests:** 256 pass (de 266 totales; 10 pre-existing failures en `test_oos_validation.py` por API `PPMT.build(symbols=...)` obsoleta — no relacionados con v0.33.0)
+- **Server smoke:** `TestClient` carga 43 rutas (5 nuevas: `/api/groups`, `/api/groups/resolve`, `/api/groups/custom` POST+DELETE, `/api/sweep` extendido)
+- **HTML sanity:** 235/235 div balanceados, 406/406 llaves JS balanceadas, 1025/1025 paréntesis balanceados
+- **Module import:** `from ppmt.data.groups import list_groups` OK, 22 grupos cargados (4 + 10 + 4 + 4 custom del template)
+- **End-to-end:** `GET /api/groups/resolve?group_id=blue_chips&exchange=mexc` → `["BTC/USDT","ETH/USDT","BNB/USDT","SOL/USDT","XRP/USDT"]` ✓
+
+### Archivos modificados / creados
+
+```
+src/ppmt/data/groups.py                | +440 NEW  (módulo completo de grupos + filtros)
+groups_config.json                     | +20 NEW   (template con 4 grupos custom de ejemplo)
+src/ppmt/terminal/server.py            | +170 -10  (5 endpoints grupos + _days_for_tf + warning + sweep extendido)
+src/ppmt/terminal/static/index.html    | +220 -15  (panel Token Groups + 10m/30m TFs + warning banner + sweep usa grupo)
+src/ppmt/__init__.py                   | 0.32.6 → 0.33.0
+pyproject.toml                         | 0.32.6 → 0.33.0
+tests/test_v0330_groups.py             | +200 NEW  (19 tests)
+tests/test_v0326_state_tagging.py      | +5 -3     (ajustar expected values de _days_for_tf)
+TRAZABILIDAD.md                        | +170 lines (esta sección)
+```
+
+### Decisiones de diseño
+
+**1. ¿Por qué `~/.ppmt/groups_config.json` en lugar de el proyecto?**
+Los custom groups del usuario deben sobrevivir `git pull` y reinstalaciones. Si estuvieran en `ppmt/groups_config.json`, un `git pull` los sobreescribiría. Por eso:
+- `ppmt/groups_config.json` = template (se versiona, solo lectura para el usuario)
+- `~/.ppmt/groups_config.json` = estado real del usuario (no se versionan)
+
+En el primer uso, si `~/.ppmt/groups_config.json` no existe, se copia desde el template.
+
+**2. ¿Por qué cache 60s para tickers?**
+`ccxt.fetch_tickers()` hace 1 llamada HTTP y devuelve todos los tickers del exchange (cientos). Para MEXC esto son ~600 tickers en 1 request. Cacheamos 60s para que el usuario pueda hacer click en varios grupos dinámicos sin que cada click genere una nueva llamada HTTP.
+
+**3. ¿Por qué `min_volume_usd=10M` para volatilidad/gainers/losers?**
+Sin esto, los "Top 25 más volátiles" estarían llenos de memecoins con $1000 de volumen que hicieron +5000% en un dump. El filtro de $10M asegura que solo tokens realmente líquidos aparezcan. El usuario puede subir el filtro a $50M si quiere ser más restrictivo.
+
+**4. ¿Por qué no se implementó "excluir correlación > 0.8"?**
+Calcular la matriz de correlación entre 50 tokens requiere:
+- Cargar 50 series de precios (50 llamadas API adicionales)
+- Calcular 50×50/2 = 1225 correlaciones
+- Cada click en "Load group" tardaría 30+ segundos
+
+Para v0.33.0 se priorizó velocidad y simplicidad. Si el usuario lo pide, se puede añadir en v0.34.0 con una cache diaria.
+
+**5. ¿Por qué no se implementó "excluir tokens con < X días de antigüedad"?**
+MEXC no expone la fecha de listing vía ccxt. Habría que llamar a `/api/v3/exchangeInfo` y parsear `onboardDate` de cada símbolo — una llamada extra. Se dejó el campo en el modelo `DEFAULT_FILTERS` (`min_listed_days`) para que el frontend lo pueda mostrar, pero el backend por ahora lo ignora (TODO v0.34.0).
+
+**6. ¿Por qué se mantiene el fallback a 25 majors en `/api/sweep`?**
+Si el usuario hace click en "Sweep" sin seleccionar grupo (o si el endpoint `groups.resolve_group` falla por API caída), el sweep aún funciona con la lista curada. Esto es defensa en profundidad: la feature nueva nunca rompe la feature vieja.
+
+### Próximos pasos recomendados
+
+1. **Auto-fallback MEXC → Binance.** Si `resolve_group()` devuelve 0 símbolos para un grupo (porque MEXC no lista todos), re-intentar con Binance y mostrar un tag "data from Binance".
+2. **Cache de validation_result por token en el frontend.** Cuando el usuario vuelve a un token ya validado, mostrar el último resultado guardado en lugar de requerir re-validar.
+3. **Persistir sweep results en DB.** Tabla `sweep_results` con timestamp, group_id, symbols, verdicts — para historial.
+4. **Sweep con timeframe múltiple.** Permitir barrer `1h + 5m + 15m` a la vez para encontrar el mejor TF por token.
+5. **Endpoint `/api/validation/latest?symbol=X&tf=Y`.** Lee de la DB sin re-calcular, para que el dashboard muestre el último verdict instantáneamente al cambiar de token.
+6. **Soporte real para `min_listed_days`.** Implementar fetch de `onboardDate` desde `exchangeInfo` y filtrar.
+7. **Modo "descubrimiento".** Botón "Find New Tokens" que busca tokens listados en los últimos 7 días y los añade automáticamente a un grupo custom "recien_listados".

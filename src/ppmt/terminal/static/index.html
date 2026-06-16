@@ -242,7 +242,7 @@ tr:hover td{background:rgba(96,165,250,.04)}
 <!-- ========== HEADER ========== -->
 <header class="header">
   <div class="header-left">
-    <span class="logo">PPMT<span class="logo-ver">v0.32.6</span></span>
+    <span class="logo">PPMT<span class="logo-ver">v0.33.0</span></span>
     <span class="status-dot stopped" id="headerDot"></span>
     <span id="headerStatus" style="font-family:var(--mono);font-size:10px;color:var(--text2)">DETENIDO</span>
   </div>
@@ -271,7 +271,9 @@ tr:hover td{background:rgba(96,165,250,.04)}
       <select id="chartTimeframe" style="width:60px">
         <option value="1m">1m</option>
         <option value="5m">5m</option>
+        <option value="10m">10m</option>
         <option value="15m">15m</option>
+        <option value="30m">30m</option>
         <option value="1h" selected>1h</option>
         <option value="4h">4h</option>
         <option value="1d">1d</option>
@@ -295,6 +297,43 @@ tr:hover td{background:rgba(96,165,250,.04)}
   <!-- ===== SIDEBAR ===== -->
   <div class="sidebar-section">
 
+    <!-- PANEL: TOKEN GROUPS (v0.33.0) -->
+    <div class="panel" id="panelGroups">
+      <div class="panel-header">
+        <div class="panel-title">Token Groups</div>
+        <button class="panel-collapse" onclick="togglePanel('panelGroups')">-</button>
+      </div>
+      <div class="panel-body">
+        <div class="form-row">
+          <label>Grupo</label>
+          <div class="field">
+            <select id="groupSelect" onchange="onGroupChange()" style="width:100%"></select>
+          </div>
+        </div>
+        <div class="form-row">
+          <label>Desc</label>
+          <div class="field" id="groupDescription" style="font-size:9px;color:var(--text3);padding-top:3px">--</div>
+        </div>
+        <div class="form-row">
+          <label>Límite</label>
+          <div class="field"><input type="number" id="groupLimit" value="50" step="5" min="1" max="500" style="width:60px"></div>
+          <label style="margin-left:6px">VolMin</label>
+          <div class="field"><input type="number" id="filterMinVolume" value="0" step="1000000" min="0" placeholder="USDT" style="width:90px"></div>
+        </div>
+        <div class="form-row" style="display:flex;flex-wrap:wrap;gap:6px;font-size:9px;color:var(--text2)">
+          <label><input type="checkbox" id="filterStablecoins" checked style="margin-right:2px;accent-color:var(--accent)"> No stable</label>
+          <label><input type="checkbox" id="filterVolatility" style="margin-right:2px;accent-color:var(--accent)"> VolatMin</label>
+          <input type="number" id="filterMinVolatility" value="2" step="0.5" min="0" style="width:40px;font-size:9px">%
+        </div>
+        <div style="display:flex;gap:4px;margin-top:4px">
+          <button class="btn btn-primary btn-sm" style="flex:1" onclick="loadGroupIntoDropdown()">Load</button>
+          <button class="btn btn-ghost btn-sm" style="flex:1" onclick="saveCurrentAsCustomGroup()">Save Custom</button>
+          <button class="btn btn-ghost btn-sm" onclick="deleteCustomGroup()" title="Borrar grupo custom seleccionado">Del</button>
+        </div>
+        <div id="groupInfo" style="margin-top:4px;font-family:var(--mono);font-size:9px;color:var(--text3);display:none"></div>
+      </div>
+    </div>
+
     <!-- PANEL: SETUP & VALIDATION -->
     <div class="panel" id="panelSetup">
       <div class="panel-header">
@@ -312,7 +351,9 @@ tr:hover td{background:rgba(96,165,250,.04)}
             <select id="setupTimeframe">
               <option value="1m">1m</option>
               <option value="5m">5m</option>
+              <option value="10m">10m</option>
               <option value="15m">15m</option>
+              <option value="30m">30m</option>
               <option value="1h" selected>1h</option>
               <option value="4h">4h</option>
               <option value="1d">1d</option>
@@ -325,7 +366,7 @@ tr:hover td{background:rgba(96,165,250,.04)}
         </div>
         <button class="btn btn-primary btn-block" id="btnAutoSetup" onclick="autoSetup()" style="margin-bottom:4px">Prepare Token</button>
         <!-- v0.32.6: Sweep All Tokens button — runs validation on every token in the background -->
-        <button class="btn btn-ghost btn-block btn-sm" id="btnSweep" onclick="startSweep()" style="margin-bottom:4px">Sweep All Tokens</button>
+        <button class="btn btn-ghost btn-block btn-sm" id="btnSweep" onclick="startSweep()" style="margin-bottom:4px">Sweep Selected Group</button>
         <button class="btn btn-ghost btn-block btn-sm" id="btnSweepCancel" onclick="cancelSweep()" style="display:none;margin-bottom:4px">Cancel Sweep</button>
         <!-- Sweep progress -->
         <div id="sweepProgress" style="display:none;margin-bottom:6px">
@@ -362,6 +403,9 @@ tr:hover td{background:rgba(96,165,250,.04)}
             <span style="font-family:var(--mono);font-size:10px;font-weight:600;color:var(--text2)">VALIDATION RESULT</span>
             <span class="badge" id="validationBadge">--</span>
           </div>
+
+          <!-- v0.33.0: Candle-count warning for low-TF samples -->
+          <div id="candleWarning" style="display:none;font-family:var(--mono);font-size:9px;color:var(--yellow);background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.3);padding:4px 6px;margin-bottom:4px;border-radius:3px"></div>
 
           <div class="checks" id="validationChecks">
             <div class="check-item pending"><span class="check-icon">o</span> Win Rate</div>
@@ -629,7 +673,7 @@ tr:hover td{background:rgba(96,165,250,.04)}
 
 <script>
 // ============================================================
-// PPMT Terminal v0.32.6 — Trading Dashboard
+// PPMT Terminal v0.33.0 — Trading Dashboard
 // ============================================================
 
 const API = '';
@@ -659,6 +703,7 @@ let sweepPollHandle = null;
 document.addEventListener('DOMContentLoaded', () => {
   initChart();
   loadSymbols();
+  loadGroups();  // v0.33.0: load token groups dropdown
   connectWS();
   loadTradeHistory();
   checkTradingStatus();
@@ -1179,6 +1224,17 @@ function updateSignalsFeed(signals) {
 function updateValidationResult(vr) {
   const container = document.getElementById('validationResult');
   container.style.display = 'block';
+
+  // v0.33.0: Candle-count warning (yellow banner if < 500 candles for TF)
+  const warnEl = document.getElementById('candleWarning');
+  if (warnEl) {
+    if (vr.candle_warning) {
+      warnEl.textContent = vr.candle_warning;
+      warnEl.style.display = 'block';
+    } else {
+      warnEl.style.display = 'none';
+    }
+  }
 
   const badge = document.getElementById('validationBadge');
   // v0.32.3: accept `passed`, `valid`, OR `verdict === 'PASS'` (server returns verdict).
@@ -1990,6 +2046,201 @@ async function loadExistingValidation(symbol, timeframe) {
 }
 
 // ============================================================
+// v0.33.0: TOKEN GROUPS
+// ============================================================
+
+let _groupsCache = null;  // {group_id: {label, category, description, bases?}}
+
+async function loadGroups() {
+  try {
+    const res = await fetch(`${API}/api/groups`);
+    if (!res.ok) throw new Error('Error cargando grupos');
+    const data = await res.json();
+    _groupsCache = data.groups || {};
+    renderGroupSelect();
+  } catch (e) {
+    console.error('loadGroups error:', e);
+    // Fall back to a minimal predefined set so UI doesn't break
+    _groupsCache = {
+      top25_mcap: {label: 'Top 25 Market Cap', category: 'market_cap', description: ''},
+      blue_chips: {label: 'Blue Chips', category: 'category', description: ''},
+    };
+    renderGroupSelect();
+  }
+}
+
+function renderGroupSelect() {
+  const sel = document.getElementById('groupSelect');
+  if (!sel || !_groupsCache) return;
+  // Group by category in a logical order
+  const order = ['market_cap', 'category', 'dynamic', 'custom'];
+  const catLabels = {
+    market_cap: 'Market Cap',
+    category: 'Categorías',
+    dynamic: 'Dinámicos (24h)',
+    custom: 'Mis Grupos',
+  };
+  let html = '';
+  for (const cat of order) {
+    const items = Object.entries(_groupsCache)
+      .filter(([_, g]) => g.category === cat)
+      .sort((a, b) => a[1].label.localeCompare(b[1].label));
+    if (!items.length) continue;
+    html += `<optgroup label="${catLabels[cat] || cat}">`;
+    for (const [gid, g] of items) {
+      html += `<option value="${gid}">${g.label}</option>`;
+    }
+    html += '</optgroup>';
+  }
+  sel.innerHTML = html;
+  // Default to top25_mcap if available, else first option
+  if (_groupsCache['top25_mcap']) sel.value = 'top25_mcap';
+  onGroupChange();
+}
+
+function onGroupChange() {
+  const sel = document.getElementById('groupSelect');
+  const desc = document.getElementById('groupDescription');
+  if (!sel || !_groupsCache) return;
+  const g = _groupsCache[sel.value];
+  if (!g) {
+    desc.textContent = '--';
+    return;
+  }
+  const baseCount = g.bases ? ` (${g.bases.length} tokens)` : '';
+  desc.textContent = (g.description || '') + baseCount;
+}
+
+function _collectFilters() {
+  const limit = parseInt(document.getElementById('groupLimit').value) || 50;
+  const minVol = parseFloat(document.getElementById('filterMinVolume').value) || 0;
+  const noStable = document.getElementById('filterStablecoins').checked;
+  const volatChecked = document.getElementById('filterVolatility').checked;
+  const minVolat = volatChecked ? (parseFloat(document.getElementById('filterMinVolatility').value) || 0) : 0;
+  return {
+    exclude_stablecoins: noStable,
+    only_usdt_pairs: true,
+    min_volume_24h_usd: minVol,
+    min_volatility_pct: minVolat,
+    limit,
+  };
+}
+
+async function loadGroupIntoDropdown() {
+  const groupId = document.getElementById('groupSelect').value;
+  const exchange = document.getElementById('chartExchange').value || 'mexc';
+  const filters = _collectFilters();
+  const info = document.getElementById('groupInfo');
+  info.style.display = 'block';
+  info.style.color = 'var(--text3)';
+  info.textContent = `Resolviendo grupo '${groupId}'...`;
+
+  try {
+    const params = new URLSearchParams({
+      group_id: groupId,
+      exchange,
+      exclude_stablecoins: filters.exclude_stablecoins,
+      only_usdt_pairs: filters.only_usdt_pairs,
+      min_volume_24h_usd: filters.min_volume_24h_usd,
+      min_volatility_pct: filters.min_volatility_pct,
+      limit: filters.limit,
+    });
+    const res = await fetch(`${API}/api/groups/resolve?${params}`);
+    if (!res.ok) throw new Error('Error resolviendo grupo');
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'resolve failed');
+    const syms = data.symbols || [];
+    if (!syms.length) {
+      info.textContent = 'Grupo vacío después de filtros';
+      info.style.color = 'var(--yellow)';
+      return;
+    }
+    // Populate setupSymbol dropdown with the resolved list
+    const sel = document.getElementById('setupSymbol');
+    const prev = sel.value;
+    sel.innerHTML = syms.map(s => `<option value="${s}">${s}</option>`).join('');
+    if (syms.includes(prev)) sel.value = prev; else sel.value = syms[0];
+    // Also sync chartSymbol
+    const chartSel = document.getElementById('chartSymbol');
+    const prevChart = chartSel.value;
+    const allSyms = [...new Set([...syms, ...(Array.from(chartSel.options).map(o => o.value))])].sort();
+    chartSel.innerHTML = allSyms.map(s => `<option value="${s}">${s}</option>`).join('');
+    if (allSyms.includes(prevChart)) chartSel.value = prevChart; else chartSel.value = syms[0];
+
+    info.style.color = 'var(--green)';
+    info.textContent = `✓ ${syms.length} tokens cargados en dropdown`;
+    // Trigger chart load
+    if (typeof loadChart === 'function') loadChart();
+  } catch (e) {
+    console.error('loadGroupIntoDropdown error:', e);
+    info.style.color = 'var(--red)';
+    info.textContent = 'ERROR: ' + e.message;
+  }
+}
+
+async function saveCurrentAsCustomGroup() {
+  const sel = document.getElementById('setupSymbol');
+  const syms = Array.from(sel.options).map(o => o.value);
+  if (!syms.length) {
+    alert('No hay tokens en el dropdown. Carga un grupo primero o añade tokens manualmente.');
+    return;
+  }
+  const name = prompt('Nombre del grupo custom (letras, números, _):');
+  if (!name) return;
+  const desc = prompt('Descripción (opcional):') || '';
+  try {
+    const res = await fetch(`${API}/api/groups/custom`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name, symbols: syms, description: desc}),
+    });
+    if (!res.ok) throw new Error('Error guardando grupo');
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'save failed');
+    // Reload groups dropdown
+    await loadGroups();
+    // Select the newly created group
+    const gsel = document.getElementById('groupSelect');
+    gsel.value = name.toLowerCase().replace(/\s+/g, '_');
+    onGroupChange();
+    const info = document.getElementById('groupInfo');
+    info.style.display = 'block';
+    info.style.color = 'var(--green)';
+    info.textContent = `✓ Grupo '${name}' guardado (${data.count} tokens)`;
+  } catch (e) {
+    console.error('saveCurrentAsCustomGroup error:', e);
+    alert('Error: ' + e.message);
+  }
+}
+
+async function deleteCustomGroup() {
+  const sel = document.getElementById('groupSelect');
+  const gid = sel.value;
+  const g = _groupsCache && _groupsCache[gid];
+  if (!g || g.category !== 'custom') {
+    alert('Selecciona un grupo custom (no se pueden borrar los predefinidos).');
+    return;
+  }
+  if (!confirm(`¿Borrar grupo custom '${g.label}'?`)) return;
+  try {
+    const res = await fetch(`${API}/api/groups/custom?name=${encodeURIComponent(gid)}`, {
+      method: 'DELETE',
+    });
+    if (!res.ok) throw new Error('Error borrando grupo');
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'delete failed');
+    await loadGroups();
+    const info = document.getElementById('groupInfo');
+    info.style.display = 'block';
+    info.style.color = 'var(--green)';
+    info.textContent = `✓ Grupo '${gid}' borrado`;
+  } catch (e) {
+    console.error('deleteCustomGroup error:', e);
+    alert('Error: ' + e.message);
+  }
+}
+
+// ============================================================
 // v0.32.6: SWEEP ALL TOKENS
 // ============================================================
 
@@ -1997,8 +2248,15 @@ async function startSweep() {
   const timeframe = document.getElementById('setupTimeframe').value || '1h';
   const exchange = document.getElementById('chartExchange').value || 'mexc';
   const capital = parseFloat(document.getElementById('setupCapital').value) || 1000;
+  // v0.33.0: Use the selected group + filters; fall back to legacy 25-majors
+  // list if no group is selected or 'none' is chosen.
+  const groupSel = document.getElementById('groupSelect');
+  const groupId = groupSel && groupSel.value ? groupSel.value : '';
+  const filters = (typeof _collectFilters === 'function') ? _collectFilters() : {};
 
-  if (!confirm('Run validation on all major tokens? This will take several minutes and consume API quota.')) return;
+  const groupLabel = groupId && _groupsCache && _groupsCache[groupId]
+    ? _groupsCache[groupId].label : 'default 25 majors';
+  if (!confirm(`Run validation on group '${groupLabel}'?\nThis will take several minutes and consume API quota.`)) return;
 
   const btn = document.getElementById('btnSweep');
   const btnCancel = document.getElementById('btnSweepCancel');
@@ -2015,7 +2273,9 @@ async function startSweep() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        symbols: [],  // empty = use server's curated majors list
+        symbols: [],       // let the server resolve the group
+        group_id: groupId, // '' = fall back to curated majors list
+        filters,
         timeframe, exchange, capital,
         skip_if_pass: true,
       })
@@ -2034,7 +2294,7 @@ async function startSweep() {
     document.getElementById('sweepCurrent').textContent = 'ERROR: ' + e.message;
     document.getElementById('sweepCurrent').style.color = 'var(--red)';
     btn.disabled = false;
-    btn.textContent = 'Sweep All Tokens';
+    btn.textContent = 'Sweep Selected Group';
     btnCancel.style.display = 'none';
   }
 }
@@ -2092,7 +2352,7 @@ async function pollSweepStatus() {
       const btn = document.getElementById('btnSweep');
       const btnCancel = document.getElementById('btnSweepCancel');
       btn.disabled = false;
-      btn.textContent = 'Sweep All Tokens';
+      btn.textContent = 'Sweep Selected Group';
       btnCancel.style.display = 'none';
 
       // Final summary line
