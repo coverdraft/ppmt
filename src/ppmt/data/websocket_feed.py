@@ -277,7 +277,11 @@ class WebSocketFeed:
     ):
         self.symbol = symbol
         self.timeframe = timeframe
-        self.exchange = exchange.lower()
+        # v0.21.0: Handle both str and ExchangeWS enum
+        if isinstance(exchange, ExchangeWS):
+            self.exchange = exchange.value.lower()
+        else:
+            self.exchange = exchange.lower()
         self.on_candle = on_candle
         self.on_tick = on_tick
         self.on_error = on_error
