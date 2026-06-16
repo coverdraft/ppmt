@@ -41,7 +41,7 @@ CONFIG_DIR = os.path.expanduser("~/.ppmt")
 # ------------------------------------------------------------------ #
 # FastAPI application
 # ------------------------------------------------------------------ #
-app = FastAPI(title="PPMT Terminal", version="0.29.0")
+app = FastAPI(title="PPMT Terminal", version="0.31.0")
 
 # Global terminal state (shared with engine)
 terminal_state: TerminalState = get_terminal_state()
@@ -591,10 +591,14 @@ class StartTradingRequest(BaseModel):
 async def start_trading(req: StartTradingRequest) -> dict:
     """Start a paper trading session in the background.
 
+    v0.31.0: Pre-trade gate — checks validation before allowing trading.
+    If no recent validation exists, runs auto-setup first.
+
     This endpoint performs the full workflow:
-    1. Ingests historical data (if not already present)
-    2. Auto-builds Trie (if not already present)
-    3. Starts the RealtimeTrader in live/paper mode as a background asyncio task
+    1. Checks pre-trade validation (backtest + MC)
+    2. Ingests historical data (if not already present)
+    3. Auto-builds Trie (if not already present)
+    4. Starts the RealtimeTrader in live/paper mode as a background asyncio task
 
     The dashboard WebSocket will receive real-time updates automatically.
     """
@@ -602,6 +606,30 @@ async def start_trading(req: StartTradingRequest) -> dict:
 
     if _trading_task is not None and not _trading_task.done():
         return {"ok": False, "error": "Trading session already running. Stop it first."}
+
+    # v0.31.0: Pre-trade validation gate
+    try:
+        storage = PPMTStorage()
+        latest_val = storage.get_latest_validation(req.symbol, req.timeframe)
+        storage.close()
+
+        if latest_val is None or latest_val.get("verdict") != "PASS":
+            # Auto-validate if no recent validation
+            val_result = await validate_token(ValidateRequest(
+                symbol=req.symbol,
+                timeframe=req.timeframe,
+                exchange=req.exchange,
+                capital=req.capital,
+            ))
+            if val_result.get("verdict") != "PASS":
+                return {
+                    "ok": False,
+                    "error": f"Pre-trade validation FAILED for {req.symbol} {req.timeframe}",
+                    "validation": val_result,
+                    "checks": val_result.get("checks", {}),
+                }
+    except Exception as e:
+        logger.warning(f"Pre-trade gate check failed: {e} — proceeding anyway")
 
     try:
         # Step 1: Auto-ingest data if needed
@@ -737,6 +765,251 @@ async def get_trading_status() -> dict:
         "total_trades": terminal_state.total_trades,
         "pnl_pct": terminal_state.total_pnl_pct,
     }
+
+
+# ------------------------------------------------------------------ #
+# REST endpoint — Trade History (v0.31.0)
+# ------------------------------------------------------------------ #
+
+
+@app.get("/api/trades")
+async def get_trades(
+    symbol: Optional[str] = None,
+    timeframe: Optional[str] = None,
+    limit: int = 50,
+) -> dict:
+    """Get closed trade history from persistent storage."""
+    try:
+        storage = PPMTStorage()
+        trades = storage.get_trades(symbol=symbol, timeframe=timeframe, limit=limit)
+        summary = storage.get_trade_summary(symbol=symbol)
+        storage.close()
+        return {"ok": True, "trades": trades, "summary": summary}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/trade-summary")
+async def get_trade_summary(symbol: Optional[str] = None) -> dict:
+    """Get aggregate trade statistics."""
+    try:
+        storage = PPMTStorage()
+        summary = storage.get_trade_summary(symbol=symbol)
+        storage.close()
+        return {"ok": True, "summary": summary}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+# ------------------------------------------------------------------ #
+# REST endpoint — Validate Token (v0.31.0)
+# ------------------------------------------------------------------ #
+
+
+class ValidateRequest(BaseModel):
+    symbol: str = "BTC/USDT"
+    timeframe: str = "1h"
+    exchange: str = "mexc"
+    capital: float = 10_000.0
+
+
+@app.post("/api/validate")
+async def validate_token(req: ValidateRequest) -> dict:
+    """Run backtest + Monte Carlo to validate a token before trading.
+
+    Returns a verdict (PASS/FAIL) with detailed metrics.
+    The pre-trade gate checks:
+    - Win Rate > 40%
+    - Profit Factor > 0.8
+    - Monte Carlo Risk of Ruin < 20%
+    - Monte Carlo Verdict != HIGH RISK
+    - Min 5 trades in backtest
+    """
+    try:
+        terminal_state.update_sync(
+            auto_setup_status={"step": "validating", "message": f"Validating {req.symbol} {req.timeframe}...", "percent": 10}
+        )
+
+        # Step 1: Ensure data exists
+        storage = PPMTStorage()
+        df = storage.load_ohlcv(req.symbol, req.timeframe)
+        candles = len(df) if df is not None and not df.empty else 0
+
+        if candles < 500:
+            terminal_state.update_sync(
+                auto_setup_status={"step": "ingesting", "message": f"Ingesting data for {req.symbol}...", "percent": 20}
+            )
+            try:
+                collector = DataCollector(exchange=req.exchange, storage=storage)
+                df = collector.fetch_and_save(req.symbol, req.timeframe, days=30)
+                if hasattr(collector, 'close'):
+                    collector.close()
+            except Exception as e:
+                logger.warning(f"Auto-ingest for validation failed: {e}")
+
+        # Step 2: Ensure trie exists
+        all_tries = storage.load_all_tries(req.symbol)
+        if all_tries.get("n3") is None:
+            terminal_state.update_sync(
+                auto_setup_status={"step": "building", "message": f"Building Trie for {req.symbol}...", "percent": 40}
+            )
+            try:
+                from ppmt.engine.ppmt import PPMT as PPMTBuilder
+                df = storage.load_ohlcv(req.symbol, req.timeframe)
+                if df is not None and not df.empty:
+                    builder = PPMTBuilder(symbol=req.symbol, sax_strategy="ohlcv")
+                    count = builder.build(df, pattern_length=5)
+                    for level_name, trie_obj in [("n1", builder.trie_n1), ("n2", builder.trie_n2), ("n3", builder.trie_n3), ("n4", builder.trie_n4)]:
+                        storage.save_trie(req.symbol, level_name, trie_obj)
+            except Exception as e:
+                storage.close()
+                return {"ok": False, "error": f"Build failed: {str(e)}"}
+
+        storage.close()
+
+        # Step 3: Run backtest
+        terminal_state.update_sync(
+            auto_setup_status={"step": "backtesting", "message": f"Running backtest for {req.symbol}...", "percent": 60}
+        )
+        from ppmt.engine.realtime import RealtimeTrader, ReplayConfig
+        config = ReplayConfig(
+            symbol=req.symbol,
+            timeframe=req.timeframe,
+            initial_capital=req.capital,
+            speed=0,
+            verbose=False,
+        )
+        trader = RealtimeTrader(config=config)
+        result = trader.run_replay()
+
+        # Compute profit factor
+        gross_profit = sum(t.pnl_pct for t in result.trades if t.pnl_pct > 0)
+        gross_loss = abs(sum(t.pnl_pct for t in result.trades if t.pnl_pct < 0))
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0
+
+        # Step 4: Run Monte Carlo
+        mc_result = {}
+        mc_verdict = ""
+        terminal_state.update_sync(
+            auto_setup_status={"step": "montecarlo", "message": f"Running Monte Carlo for {req.symbol}...", "percent": 80}
+        )
+        try:
+            from ppmt.risk.monte_carlo import MonteCarloSimulator, MonteCarloConfig
+            mc_config = MonteCarloConfig(initial_capital=req.capital)
+            mc_sim = MonteCarloSimulator(config=mc_config)
+            trades_pnl = [t.pnl_pct / 100.0 for t in result.trades]  # Convert to fraction
+            if len(trades_pnl) >= 5:
+                mc_out = mc_sim.simulate(trades_pnl)
+                # Compute simple verdict from risk_of_ruin
+                if mc_out.risk_of_ruin < 0.05:
+                    mc_verdict = "LOW RISK"
+                elif mc_out.risk_of_ruin < 0.15:
+                    mc_verdict = "MODERATE RISK"
+                else:
+                    mc_verdict = "HIGH RISK"
+                mc_result = {
+                    "risk_of_ruin": mc_out.risk_of_ruin,
+                    "probability_of_profit": mc_out.probability_of_profit,
+                    "p95_max_drawdown": mc_out.p95_max_drawdown,
+                    "mean_final_equity": mc_out.mean_final_equity,
+                    "median_final_equity": mc_out.median_final_equity,
+                    "verdict": mc_verdict,
+                    "risk_score": mc_out.risk_of_ruin * 100,
+                }
+        except Exception as e:
+            logger.warning(f"Monte Carlo failed: {e}")
+
+        # Step 5: Compute verdict
+        checks = {
+            "win_rate_pass": result.win_rate > 0.40,
+            "profit_factor_pass": profit_factor > 0.8,
+            "risk_of_ruin_pass": mc_result.get("risk_of_ruin", 1.0) < 0.20,
+            "mc_verdict_pass": mc_verdict not in ("HIGH RISK",),
+            "min_trades_pass": result.total_trades >= 5,
+        }
+        all_pass = all(checks.values())
+        verdict = "PASS" if all_pass else "FAIL"
+
+        val_result = {
+            "symbol": req.symbol,
+            "timeframe": req.timeframe,
+            "verdict": verdict,
+            "win_rate": result.win_rate,
+            "profit_factor": profit_factor,
+            "risk_of_ruin": mc_result.get("risk_of_ruin", 1.0),
+            "p95_drawdown": mc_result.get("p95_max_drawdown", 1.0),
+            "total_trades": result.total_trades,
+            "backtest_pnl_pct": result.total_pnl_pct,
+            "mc_probability_profit": mc_result.get("probability_of_profit", 0),
+            "mc_verdict": mc_verdict,
+            "checks": checks,
+            "details": {
+                "backtest": {
+                    "total_trades": result.total_trades,
+                    "win_rate": result.win_rate,
+                    "total_pnl_pct": result.total_pnl_pct,
+                    "max_drawdown": result.max_drawdown,
+                },
+                "monte_carlo": mc_result,
+            },
+        }
+
+        # Save to DB
+        try:
+            storage = PPMTStorage()
+            storage.save_validation(val_result)
+            storage.close()
+        except Exception:
+            pass
+
+        # Update terminal state
+        terminal_state.update_sync(
+            validation_result=val_result,
+            auto_setup_status={"step": "done", "message": f"Validation: {verdict}", "percent": 100}
+        )
+
+        return {"ok": True, **val_result}
+
+    except Exception as e:
+        terminal_state.update_sync(
+            auto_setup_status={"step": "error", "message": str(e), "percent": 0}
+        )
+        return {"ok": False, "error": str(e)}
+
+
+# ------------------------------------------------------------------ #
+# REST endpoint — Auto-Setup (v0.31.0)
+# ------------------------------------------------------------------ #
+
+
+class AutoSetupRequest(BaseModel):
+    symbol: str = "BTC/USDT"
+    timeframe: str = "1h"
+    exchange: str = "mexc"
+    capital: float = 10_000.0
+    days_ingest: int = 30
+
+
+@app.post("/api/auto-setup")
+async def auto_setup(req: AutoSetupRequest) -> dict:
+    """Full auto-setup pipeline: ingest → build → calibrate → validate.
+
+    This is the 1-click "Prepare Token" button.
+    Runs the complete pipeline and returns validation results.
+    """
+    # Simply delegate to validate, which already does the full pipeline
+    val_req = ValidateRequest(
+        symbol=req.symbol,
+        timeframe=req.timeframe,
+        exchange=req.exchange,
+        capital=req.capital,
+    )
+    return await validate_token(val_req)
+
+
+# ------------------------------------------------------------------ #
+# Pre-trade gate (v0.31.0) — integrated into start_trading
+# ------------------------------------------------------------------ #
 
 
 # ------------------------------------------------------------------ #

@@ -103,6 +103,16 @@ class TerminalState:
     """Living Trie stats: pattern_count, total_observations, last_update."""
 
     # ------------------------------------------------------------------ #
+    # Trade History (v0.31.0)
+    # ------------------------------------------------------------------ #
+    trade_history: list[dict] = field(default_factory=list)
+    """Recent closed trades (last 100)."""
+    validation_result: dict = field(default_factory=dict)
+    """Latest validation result: verdict, win_rate, profit_factor, etc."""
+    auto_setup_status: dict = field(default_factory=dict)
+    """Auto-setup progress: step, message, percent."""
+
+    # ------------------------------------------------------------------ #
     # Feed stats
     # ------------------------------------------------------------------ #
     candles_processed: int = 0
@@ -129,6 +139,9 @@ class TerminalState:
         self.equity_timestamps = []
         self.monte_carlo = {}
         self.living_trie_stats = {}
+        self.trade_history = []
+        self.validation_result = {}
+        self.auto_setup_status = {}
         self._lock = asyncio.Lock()
 
     # ------------------------------------------------------------------ #
@@ -258,6 +271,9 @@ class TerminalState:
             "equity_timestamps": self.equity_timestamps,
             "monte_carlo": self.monte_carlo,
             "living_trie_stats": self.living_trie_stats,
+            "trade_history": self.trade_history[-50:],
+            "validation_result": self.validation_result,
+            "auto_setup_status": self.auto_setup_status,
             "candles_processed": self.candles_processed,
             "websocket_status": self.websocket_status,
             "reconnect_count": self.reconnect_count,
@@ -315,6 +331,9 @@ class TerminalState:
         self.equity_timestamps = []
         self.monte_carlo = {}
         self.living_trie_stats = {}
+        self.trade_history = []
+        self.validation_result = {}
+        self.auto_setup_status = {}
 
 
 # ------------------------------------------------------------------ #
