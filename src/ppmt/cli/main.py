@@ -47,7 +47,7 @@ def load_config() -> dict:
 
 
 @click.group()
-@click.version_option(version="0.24.0")
+@click.version_option(version="0.25.0")
 def cli():
     """PPMT Terminal - Autonomous Pattern-Based Trading Terminal"""
     pass
@@ -1365,7 +1365,7 @@ def portfolio(symbol: str, capital: float, tokens: str, method: str, correlation
 @click.option("--capital", "-c", default=10000.0, type=float, help="Total capital for parent node")
 @click.option("--add", "-a", default=None, help="Add child node: SYMBOL:TIMEFRAME:ALLOC_PCT:LEVERAGE (e.g. BTC/USDT:1h:30:1)")
 @click.option("--remove", "-r", default=None, help="Remove child node by node_id")
-@click.option("--leverage", "-l", default=None, type=int, help="Set leverage for a child node: NODE_ID:LEVERAGE")
+@click.option("--leverage", "-l", default=None, help="Set leverage for a child node: NODE_ID:LEVERAGE (e.g. btc_5m:5)")
 @click.option("--auto/--manual", default=None, help="Set child node to auto or manual mode: NODE_ID")
 @click.option("--kill", is_flag=True, help="Activate global kill switch (close all positions)")
 @click.option("--unkill", is_flag=True, help="Deactivate global kill switch")

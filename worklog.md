@@ -117,3 +117,35 @@ Stage Summary:
 - MEXC REST: works via ccxt (requires ccxt installed)
 - MEXC WebSocket: implemented with proper subscribe/parse/listen
 - User needs to test with: ppmt ingest -s BTC/USDT -e mexc
+
+---
+Task ID: 6
+Agent: main
+Task: Fix nodes leverage bug + aggressive strategy improvement + dashboard setup
+
+Work Log:
+- Fixed ppmt nodes -l bug: changed type=int to str to accept NODE_ID:LEVERAGE format
+- v0.25.0: Aggressive strategy improvement based on trade analysis:
+  - Raised move_threshold: 0.50 → 0.80 (only meaningful moves)
+  - Raised prob_threshold: 0.20 → 0.30 (need strong patterns)
+  - Hard quality gate: reject if overall_probability < 0.35 or move < 0.5%
+  - Strict regime filtering:
+    * Ranging: require prob >= 0.55 and move >= 1.0%
+    * Volatile: require 2x normal thresholds
+    * Counter-trend: require prob >= 0.60
+  - Wider SL/TP:
+    * Trending: SL=1.5x, TP=4.0x
+    * Ranging: SL=2.0x, TP=2.5x
+    * Volatile: SL=1.8x, TP=3.0x
+  - SL bounds: max 5.0%, min 1.0%
+  - Minimum R:R ratio enforced at 2:1
+- Dashboard verification:
+  * Next.js dashboard exists at project root (needs npm install + node_modules)
+  * FastAPI lite dashboard available via ppmt terminal --lite (port 8420)
+  * ppmt terminal (default) tries Next.js on port 3000, falls back to FastAPI
+
+Stage Summary:
+- Version bumped to 0.25.0
+- Leverage CLI bug fixed
+- Strategy should produce fewer but much higher quality trades
+- Dashboard available via: ppmt terminal --lite (FastAPI) or ppmt terminal (Next.js)

@@ -853,44 +853,54 @@ class RealtimeTrader:
                             except Exception:
                                 pass
 
-                        # v0.24.0: Improved adaptive signal gating
-                        # Raised thresholds to filter noise and improve win rate.
-                        # The old 0.30 move / 0.15 prob let too many weak signals through.
-                        move_threshold = 0.50   # v0.24.0: raised from 0.30 — skip tiny moves
-                        prob_threshold = 0.20   # v0.24.0: raised from 0.15 — need stronger patterns
+                        # v0.25.0: Aggressive signal quality filtering
+                        # Backtest analysis: 24 trades, 8W/16L, PF=0.53
+                        # Root cause: too many weak signals in ranging/volatile regimes.
+                        # Strategy: Only trade high-conviction setups in favorable regimes.
+                        move_threshold = 0.80   # v0.25.0: raised from 0.50 — only meaningful moves
+                        prob_threshold = 0.30   # v0.25.0: raised from 0.20 — need strong patterns
 
                         # Confidence boost: if overall_probability is strong and move is
                         # significant, boost confidence up to min_confidence level
                         boosted_confidence = weighted_confidence
-                        if (prediction.overall_probability >= 0.40  # v0.24.0: raised from 0.35
-                                and abs(prediction.expected_total_move_pct) >= 0.8):  # v0.24.0: raised from 0.5
+                        if (prediction.overall_probability >= 0.45  # v0.25.0: raised from 0.40
+                                and abs(prediction.expected_total_move_pct) >= 1.0):  # v0.25.0: raised from 0.8
                             # Strong pattern match — boost confidence by probability
                             boosted_confidence = max(
                                 weighted_confidence,
                                 weighted_confidence * (1 + prediction.overall_probability),
                             )
 
-                        # v0.24.0: Stricter quality gate — reject weak signals early
-                        # Old gate: prob < 0.25 and move < 0.5 was too lenient
-                        if prediction.overall_probability < 0.30 and abs(prediction.expected_total_move_pct) < 0.8:
+                        # v0.25.0: Hard quality gate — reject weak signals
+                        if prediction.overall_probability < 0.35:
+                            continue
+                        if abs(prediction.expected_total_move_pct) < 0.5:
                             continue
 
-                        # v0.24.0: Regime-aware signal filtering
-                        # Skip LONG signals in trending_down, skip SHORT in trending_up
-                        # In volatile regime, require much stronger signals
-                        if current_regime == "volatile":
-                            # In volatile markets, require 2x the normal thresholds
-                            if prediction.overall_probability < prob_threshold * 1.5:
+                        # v0.25.0: Strict regime-aware signal filtering
+                        # KEY INSIGHT from trade analysis:
+                        #   - Ranging regime: 8 losses, 2 wins → AVOID
+                        #   - Volatile regime: mixed but catastrophic losses possible
+                        #   - Trending: best win rate, should be primary focus
+                        if current_regime == "ranging":
+                            # Ranging markets are choppy — skip unless very high confidence
+                            if prediction.overall_probability < 0.55:
                                 continue
-                            if abs(prediction.expected_total_move_pct) < move_threshold * 1.5:
+                            if abs(prediction.expected_total_move_pct) < 1.0:
+                                continue
+                        elif current_regime == "volatile":
+                            # In volatile markets, only trade with the strongest signals
+                            if prediction.overall_probability < prob_threshold * 2.0:
+                                continue
+                            if abs(prediction.expected_total_move_pct) < move_threshold * 2.0:
                                 continue
                         elif current_regime == "trending_down" and prediction.direction == "LONG":
-                            # Counter-trend LONG in downtrend — very risky
-                            if prediction.overall_probability < 0.50:
+                            # Counter-trend LONG in downtrend — extremely risky
+                            if prediction.overall_probability < 0.60:
                                 continue
                         elif current_regime == "trending_up" and prediction.direction == "SHORT":
-                            # Counter-trend SHORT in uptrend — very risky
-                            if prediction.overall_probability < 0.50:
+                            # Counter-trend SHORT in uptrend — extremely risky
+                            if prediction.overall_probability < 0.60:
                                 continue
 
                         if (position_state == PositionState.FLAT
@@ -901,28 +911,29 @@ class RealtimeTrader:
 
                             result.signals_generated += 1
 
-                            # v0.24.0: Improved SL/TP calculation
-                            # Key insight from backtest analysis: 1.2x SL was too tight,
-                            # causing premature stop-outs before the move develops.
-                            # New: 1.5x SL gives room to breathe, 2.5x TP targets real moves.
-                            # Regime-adaptive: tighter in ranging, wider in trending.
+                            # v0.25.0: Aggressive SL/TP with trend-following bias
+                            # Key insight: PF=0.53 means losses > gains. Need to:
+                            #   1. Use wider SL to avoid premature stops
+                            #   2. Use ambitious TP to let winners run
+                            #   3. Ensure R:R >= 2:1 minimum for every trade
                             expected_move_abs = abs(prediction.expected_total_move_pct)
 
-                            # v0.24.0: Regime-adaptive SL/TP multipliers
+                            # v0.25.0: Regime-adaptive SL/TP with minimum R:R enforcement
                             if current_regime in ("trending_up", "trending_down"):
-                                sl_mult = 1.3   # Tighter SL in trends (follows direction)
-                                tp_mult = 3.0   # Let profits run in trends
+                                sl_mult = 1.5   # Wider SL in trends to survive pullbacks
+                                tp_mult = 4.0   # Let profits run in trends
                             elif current_regime == "ranging":
-                                sl_mult = 1.8   # Wider SL in ranges (noise is high)
-                                tp_mult = 1.8   # Smaller TP in ranges (moves are limited)
+                                sl_mult = 2.0   # Very wide SL in ranges (noise is extreme)
+                                tp_mult = 2.5   # Moderate TP in ranges
                             else:  # volatile or unknown
-                                sl_mult = 1.5   # Moderate SL in volatile
-                                tp_mult = 2.5   # Decent TP in volatile
+                                sl_mult = 1.8   # Wide SL in volatile (whipsaws)
+                                tp_mult = 3.0   # Good TP in volatile (big swings)
 
-                            sl_distance_pct = max(min(expected_move_abs * sl_mult, 4.0), 0.8)
+                            sl_distance_pct = max(min(expected_move_abs * sl_mult, 5.0), 1.0)
                             tp_distance_pct = expected_move_abs * tp_mult
-                            if tp_distance_pct < sl_distance_pct * 1.5:
-                                tp_distance_pct = sl_distance_pct * 1.5
+                            # v0.25.0: Enforce minimum 2:1 R:R ratio
+                            if tp_distance_pct < sl_distance_pct * 2.0:
+                                tp_distance_pct = sl_distance_pct * 2.0
 
                             if prediction.direction == "LONG":
                                 sl_price = current_price * (1 - sl_distance_pct / 100)
