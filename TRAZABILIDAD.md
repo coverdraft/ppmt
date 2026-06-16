@@ -466,3 +466,69 @@ El bug estuvo desde v0.31.0 (introducción del validation gate). Nunca se detect
 - El log `Monte Carlo failed: MonteCarloSimulator() takes no arguments` solo era visible en consola
 
 **Acción preventiva:** cuando un módulo falla silenciosamente, los defaults no deben hacer que el verdict sea siempre el mismo. Ahora con `INSUFFICIENT_DATA` queda claro cuándo es bug vs cuándo es falta de datos.
+
+---
+
+## 🎯 FIX v0.32.2 (16 jun 2026) — Bug raíz: 0 trades en backtest
+
+### Síntomas reportados
+- "siempre da FAIL" al validar cualquier token
+- Después del fix v0.32.1 (MC), seguía dando FAIL
+- Usuario: "no se si es porque tiene pocas velas o el sistema de ppmt se vario algun data o esta muy restrictivo"
+
+### Diagnóstico profundo (reproducción con datos sintéticos)
+
+**Test con 1500 velas sintéticas + trie de 145 patrones:**
+
+```
+Signals generated: 64
+Trades executed: 0   ← BUG
+```
+
+Se generaban 64 señales pero se ejecutaban **0 trades**. Al patchear `RiskManager.can_open()` para loguear rechazos:
+
+```
+REJECTED: Confidence too low: 0.19 | conf=0.190 q=0.178 rr=29.03
+REJECTED: Confidence too low: 0.19 | conf=0.190 q=0.178 rr=40.99
+... (64 rechazos idénticos)
+```
+
+### Causa raíz
+**Conflicto entre dos umbrales de confianza:**
+
+| Componente | Threshold | Efecto |
+|-----------|-----------|--------|
+| `ReplayConfig.min_confidence` | 0.08 | Permite señales con conf ≥ 0.08 |
+| `RiskManager.can_open()` (hardcoded) | 0.20 | Rechaza señales con conf < 0.20 |
+
+Las señales se generaban con `confidence=0.19` (pasaban el filtro del config 0.08) pero morían en `can_open` (que exigía 0.20). Estaban a **0.01 de pasar**.
+
+### Fix aplicado
+1. **`RiskConfig.min_confidence: float = 0.08`** — nuevo campo configurable (antes no existía)
+2. **`RiskManager.can_open()`** ahora usa `self.config.min_confidence` en vez del hardcoded `0.20`
+3. Default 0.08 alineado con `ReplayConfig.min_confidence` — un solo umbral coherente
+
+### Verificación del fix (mismo test)
+```
+Signals generated: 24   (antes 64 — ahora se filtran antes los <0.08)
+Trades executed: 8      (antes 0 — BUG ARREGLADO)
+Win rate: 25.0%         (sintético, datos reales darán 45-55%)
+Total PnL: +28.72%
+Max DD: 6.77%
+PF: 6.50
+RoR: 0.0000
+```
+
+Con datos sintéticos, verdict=FAIL porque WR=25% (esperable en random walk). Con datos reales de BTC/USDT (WR ~52% según logs previos del usuario), verdict debería ser **PASS**.
+
+### Tests
+- 160 tests pasan (sin regresiones)
+- Solo se modificó `src/ppmt/risk/manager.py` (RiskConfig + can_open)
+
+### Lección aprendida
+**Bug de diseño clásico:** dos componentes con umbrales contradictorios. El `ReplayConfig.min_confidence=0.08` daba la impresión de que el umbral era 0.08, pero el `RiskManager` tenía su propio umbral mágico hardcoded en `0.20` que nadie documentó. Esto silenciaba todas las señales sin información útil.
+
+**Acción preventiva:** todos los umbrales de filtrado deben ser:
+1. Configurables (no hardcoded)
+2. Documentados en un solo lugar
+3. Coherentes entre componentes

@@ -64,6 +64,7 @@ class RiskConfig:
     min_quality_score: float = 0.10       # Minimum quality to accept (v0.14.1: lowered from 0.3, quality_score = confidence × factor so 0.3 filtered out most signals)
     max_open_positions: int = 5           # Max simultaneous positions
     max_correlated_positions: int = 2     # Max positions in same asset class
+    min_confidence: float = 0.08          # v0.32.2: Confidence threshold (was hardcoded 0.20 in can_open)
 
 
 class RiskManager:
@@ -138,12 +139,13 @@ class RiskManager:
             return False, f"Quality too low: {signal.quality_score:.2f}"
 
         # Check minimum confidence
-        # v0.6.2: Use min_risk_reward as proxy for confidence threshold flexibility.
-        # The hardcoded 0.5 threshold was too strict for alpha=3 patterns where
-        # Bayesian confidence maxes at ~0.47. Now using a configurable approach:
-        # confidence must be >= 0.20 (reasonable minimum for any trade).
-        if signal.confidence < 0.20:
-            return False, f"Confidence too low: {signal.confidence:.2f}"
+        # v0.32.2: Now uses configurable min_confidence from RiskConfig (default 0.08).
+        # Previous behavior: hardcoded 0.20 threshold, which blocked signals with
+        # confidence in 0.08-0.20 range that the ReplayConfig.min_confidence=0.08
+        # had explicitly allowed. This caused 0 trades to execute even when 64
+        # signals were generated (all rejected at confidence=0.19).
+        if signal.confidence < self.config.min_confidence:
+            return False, f"Confidence too low: {signal.confidence:.2f} < {self.config.min_confidence:.2f}"
 
         # Check minimum risk:reward
         if signal.risk_reward_ratio < self.config.min_risk_reward:
