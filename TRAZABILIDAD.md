@@ -412,3 +412,57 @@ Bitácora técnica detallada en inglés: `TRACEABILITY.md` (149KB, histórico co
 Este documento `TRAZABILIDAD.md` es el resumen ejecutivo en español, actualizado cada vez que se completa una fase o se hace un cambio arquitectónico significativo.
 
 **Próxima actualización:** después de Sprint 1 (F1+F2+F3 completados).
+
+---
+
+## 🔧 FIX v0.32.1 (16 jun 2026) — Monte Carlo + Validation Gate
+
+### Bug crítico encontrado
+El usuario reportó: **"siempre da FAIL"** al validar cualquier token (BTC, DOGE, LINK, SOL).
+
+### Diagnóstico
+1. **Bug principal:** `MonteCarloSimulator(config=mc_config)` en `server.py:899` — el constructor de `MonteCarloSimulator` **no acepta argumentos**. El config se pasa al método `.simulate()`.
+2. Como MC fallaba con `TypeError: MonteCarloSimulator() takes no arguments`, `mc_result` quedaba vacío `{}`.
+3. El check `risk_of_ruin_pass` usaba `mc_result.get("risk_of_ruin", 1.0)` → default 1.0 (100%) → check SIEMPRE fallaba.
+4. Resultado: verdict siempre FAIL, sin importar cuán bueno fuera el backtest.
+
+### Fixes aplicados
+1. **`MonteCarloSimulator()` sin args** + `mc_sim.simulate(trades_pnl, config=mc_config)` (server.py:899-902)
+2. **Log de backtest** añadido: ahora imprime `trades=X, WR=Y%, PnL=Z%, DD=W%` para diagnóstico
+3. **Verdict `INSUFFICIENT_DATA`** cuando backtest produce 0 trades (antes era FAIL confuso)
+4. **Mensajes diferenciados en pre-trade gate:**
+   - `INSUFFICIENT_DATA`: "backtest produced 0 trades — ingest more data"
+   - `FAIL`: "did not pass safety checks (WR/PF/RoR)"
+5. **Log de MC con traceback** (`exc_info=True`) para futuros diagnósticos
+
+### Verificación del fix
+Test directo con 10 trades sintéticos:
+```
+Risk of Ruin: 0.0000
+P95 Max DD: 0.0637
+Prob Profit: 1.0000
+Verdict: LOW RISK
+Checks: ALL PASS → verdict: PASS
+```
+
+### Cómo probar en tu Mac
+```bash
+git pull origin main
+pip install -e . --force-reinstall
+ppmt terminal
+# → abrir http://localhost:8420
+# → elegir token + TF + botón "PREPARAR Y VALIDAR"
+# → ahora MC correrá y verdict será PASS/FAIL real (no siempre FAIL)
+```
+
+### Estado de tests
+- 160 tests pasan (sin cambios — fix solo afecta `server.py`)
+- 2 tests conocidos con fallo no relacionado (OOS validation + trie merge)
+
+### Lección aprendida
+El bug estuvo desde v0.31.0 (introducción del validation gate). Nunca se detectó porque:
+- El `try/except` silenciaba el error de MC
+- El default `risk_of_ruin=1.0` hacía que el check fallara sin información útil
+- El log `Monte Carlo failed: MonteCarloSimulator() takes no arguments` solo era visible en consola
+
+**Acción preventiva:** cuando un módulo falla silenciosamente, los defaults no deben hacer que el verdict sea siempre el mismo. Ahora con `INSUFFICIENT_DATA` queda claro cuándo es bug vs cuándo es falta de datos.

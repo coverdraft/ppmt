@@ -621,13 +621,24 @@ async def start_trading(req: StartTradingRequest) -> dict:
                 exchange=req.exchange,
                 capital=req.capital,
             ))
-            if val_result.get("verdict") != "PASS":
-                return {
-                    "ok": False,
-                    "error": f"Pre-trade validation FAILED for {req.symbol} {req.timeframe}",
-                    "validation": val_result,
-                    "checks": val_result.get("checks", {}),
-                }
+            v = val_result.get("verdict")
+            if v != "PASS":
+                if v == "INSUFFICIENT_DATA":
+                    return {
+                        "ok": False,
+                        "error": f"Cannot trade {req.symbol} {req.timeframe}: backtest produced 0 trades. "
+                                 f"Ingest more historical data or try a different timeframe.",
+                        "validation": val_result,
+                        "checks": val_result.get("checks", {}),
+                    }
+                else:
+                    return {
+                        "ok": False,
+                        "error": f"Pre-trade validation FAILED for {req.symbol} {req.timeframe}. "
+                                 f"Token did not pass safety checks (WR/PF/RoR).",
+                        "validation": val_result,
+                        "checks": val_result.get("checks", {}),
+                    }
     except Exception as e:
         logger.warning(f"Pre-trade gate check failed: {e} — proceeding anyway")
 
@@ -882,6 +893,12 @@ async def validate_token(req: ValidateRequest) -> dict:
         trader = RealtimeTrader(config=config)
         result = trader.run_replay()
 
+        logger.info(
+            f"Backtest {req.symbol} {req.timeframe}: "
+            f"trades={result.total_trades}, WR={result.win_rate:.1%}, "
+            f"PnL={result.total_pnl_pct:+.2f}%, DD={result.max_drawdown:.2%}"
+        )
+
         # Compute profit factor
         gross_profit = sum(t.pnl_pct for t in result.trades if t.pnl_pct > 0)
         gross_loss = abs(sum(t.pnl_pct for t in result.trades if t.pnl_pct < 0))
@@ -896,10 +913,10 @@ async def validate_token(req: ValidateRequest) -> dict:
         try:
             from ppmt.risk.monte_carlo import MonteCarloSimulator, MonteCarloConfig
             mc_config = MonteCarloConfig(initial_capital=req.capital)
-            mc_sim = MonteCarloSimulator(config=mc_config)
+            mc_sim = MonteCarloSimulator()  # No args in constructor (v0.32.0 fix)
             trades_pnl = [t.pnl_pct / 100.0 for t in result.trades]  # Convert to fraction
             if len(trades_pnl) >= 5:
-                mc_out = mc_sim.simulate(trades_pnl)
+                mc_out = mc_sim.simulate(trades_pnl, config=mc_config)  # config passed here
                 # Compute simple verdict from risk_of_ruin
                 if mc_out.risk_of_ruin < 0.05:
                     mc_verdict = "LOW RISK"
@@ -917,18 +934,30 @@ async def validate_token(req: ValidateRequest) -> dict:
                     "risk_score": mc_out.risk_of_ruin * 100,
                 }
         except Exception as e:
-            logger.warning(f"Monte Carlo failed: {e}")
+            logger.warning(f"Monte Carlo failed: {e}", exc_info=True)
 
         # Step 5: Compute verdict
-        checks = {
-            "win_rate_pass": result.win_rate > 0.40,
-            "profit_factor_pass": profit_factor > 0.8,
-            "risk_of_ruin_pass": mc_result.get("risk_of_ruin", 1.0) < 0.20,
-            "mc_verdict_pass": mc_verdict not in ("HIGH RISK",),
-            "min_trades_pass": result.total_trades >= 5,
-        }
-        all_pass = all(checks.values())
-        verdict = "PASS" if all_pass else "FAIL"
+        # If backtest produced 0 trades, mark as INSUFFICIENT_DATA (not FAIL)
+        if result.total_trades == 0:
+            verdict = "INSUFFICIENT_DATA"
+            checks = {
+                "win_rate_pass": False,
+                "profit_factor_pass": False,
+                "risk_of_ruin_pass": False,
+                "mc_verdict_pass": False,
+                "min_trades_pass": False,
+                "reason": "Backtest produced 0 trades — needs more historical data or different timeframe",
+            }
+        else:
+            checks = {
+                "win_rate_pass": result.win_rate > 0.40,
+                "profit_factor_pass": profit_factor > 0.8,
+                "risk_of_ruin_pass": mc_result.get("risk_of_ruin", 1.0) < 0.20,
+                "mc_verdict_pass": mc_verdict not in ("HIGH RISK",),
+                "min_trades_pass": result.total_trades >= 5,
+            }
+            all_pass = all(v for k, v in checks.items() if not k.startswith("reason"))
+            verdict = "PASS" if all_pass else "FAIL"
 
         val_result = {
             "symbol": req.symbol,
