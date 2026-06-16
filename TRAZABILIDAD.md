@@ -1,7 +1,7 @@
 # TRAZABILIDAD PPMT — Estado del Proyecto
 
 > Última actualización: 2026-06-17
-> Versión actual: v0.32.3 (commit pendiente de push — auditoría profunda "siempre FAIL")
+> Versión actual: v0.33.1 — grupos "Recién Listados" + "Alta Liquidez/Spread" + Sweep All Groups + sort por PF
 > Repositorio: https://github.com/coverdraft/ppmt
 > Idioma: Español
 
@@ -1701,3 +1701,164 @@ Si el usuario hace click en "Sweep" sin seleccionar grupo (o si el endpoint `gro
 5. **Endpoint `/api/validation/latest?symbol=X&tf=Y`.** Lee de la DB sin re-calcular, para que el dashboard muestre el último verdict instantáneamente al cambiar de token.
 6. **Soporte real para `min_listed_days`.** Implementar fetch de `onboardDate` desde `exchangeInfo` y filtrar.
 7. **Modo "descubrimiento".** Botón "Find New Tokens" que busca tokens listados en los últimos 7 días y los añade automáticamente a un grupo custom "recien_listados".
+
+---
+
+## v0.33.1 — Mejoras de UX + grupos "Recién Listados" y "Alta Liquidez / Spread" + Sweep All Groups
+
+> Fecha: 17 jun 2026
+> Versión: 0.33.0 → 0.33.1
+> Archivos: `src/ppmt/data/groups.py`, `src/ppmt/terminal/server.py`, `src/ppmt/terminal/static/index.html`, `src/ppmt/__init__.py`, `pyproject.toml`, `tests/test_v0331_groups.py`
+
+### Problema reportado por el usuario
+
+> "y continua haciendo pasos sugeridos pero ten en cuenta que si mal no recuerdo ppmt tenia un sistema que se adaptaba segun tipo de token si era blue chips o altocoins, meme, meme de reciente creacion... etc y rechequeaba con los nodos si se tenia que readapatar cada cierto tiempo.. chequea en trazabilidad y si ya esta funcionando que ejecute bien todo eso.. y funcione bien las n1 n2 n3 n4"
+
+> Ajustes opcionales pedidos:
+> 1. Grupo "Recién Listados (30d)"
+> 2. Grupo "Alta Liquidez / Spread < 0.05%"
+> 3. Botón "Sweep All Groups" (opcional)
+> 4. Orden de resultados en tabla: PASS-primero + Profit Factor descendente
+
+### Verificación del sistema adaptativo existente
+
+Tras auditar `src/ppmt/data/classifier.py`, `src/ppmt/core/profiles.py` y `src/ppmt/engine/realtime.py`, **el sistema adaptativo ya está completamente funcional**:
+
+1. **`AssetClassifier`** (`classifier.py:77`) clasifica cada símbolo en 6 clases:
+   `blue_chip`, `large_cap`, `mid_cap`, `defi`, `meme`, `new_launch`. Para símbolos desconocidos usa heurística (patrones meme como DOGE/SHIB/PEPE → meme; par USDT existente → mid_cap; resto → new_launch).
+
+2. **`TokenProfile.from_timeframe(symbol, asset_class, timeframe)`** (`profiles.py:192`) genera el perfil combinando:
+   - Parámetros de riesgo por clase (`catastrophic_loss_pct`, `max_position_pct`, `short_allowed`, `fuzzy_threshold`, `min_observations_for_trade`).
+   - Parámetros SAX adaptativos por timeframe (`TIMEFRAME_ALPHA_DEFAULTS` — p.ej. 1h: α=3 W=7, 1m: α=5 W=7).
+
+3. **`TradingCalibrationEngine`** (`profiles.py:666`) recalibra α/W desde los datos reales (mini-backtest con SL/TP adaptativos por asset_class).
+
+4. **Recalibración periódica** (`realtime.py:1967-1973`): cada `recalibration_interval` candles (default 2000), `_recalibrate()` re-calibra el SAX encoder desde la data viva y actualiza el `TokenProfile`.
+
+5. **Niveles N1/N2/N3/N4** (`realtime.py:487-589`): `run_replay()` y `run_live()` cargan los 4 niveles del trie desde storage, los construyen si faltan, y los inyectan en `ppmt_engine.set_tries(trie_n1, trie_n2, trie_n3, trie_n4)`. La predicción retorna `n1_confidence`, `n2_confidence`, `n3_confidence`, `n4_confidence` que alimentan el motor de pesos.
+
+**Conclusión**: El usuario puede usar el sistema con confianza — la adaptación por tipo de token + recalibración periódica + trie 4-niveles está activa en ambos modos (replay y live).
+
+### Mejoras implementadas en v0.33.1
+
+#### 1. Grupo dinámico "Recién Listados (30d)"
+
+`groups.py` — nueva entrada en `DYNAMIC_GROUPS`:
+```python
+"recently_listed_30d": {
+    "label": "Recién Listados (30d)",
+    "category": "dynamic",
+    "description": "Tokens listados en los últimos 30 días (volumen > $1M)",
+    "sort_key": "quoteVolume",
+    "descending": True,
+    "limit": 25,
+    "min_volume_usd": 1_000_000,
+    "listing_days_max": 30,
+}
+```
+
+Para soportarlo se enriqueció `fetch_market_snapshot()`:
+- Lee `markets[sym]['listing']` / `listedAt` / `info.listingDate` (CCXT lo expone en Binance/Bybit; MEXC no, ahí el filtro degrada y dropea el símbolo conservadoramente).
+- Lo parsea como ISO 8601 o epoch ms → `listing_ts` (segundos desde epoch).
+- Cada ticker trae ahora `listing_ts` cacheado junto con `spread_pct` y `volatility_pct`.
+
+`_resolve_dynamic_group()` aplica `listing_days_max`:
+- Si `listing_ts` es None o < cutoff → se descarta el token.
+- Cutoff = `now - listing_days_max * 86400`.
+
+#### 2. Grupo dinámico "Alta Liquidez / Spread < 0.05%"
+
+```python
+"high_liquidity_low_spread": {
+    "label": "Alta Liquidez / Spread < 0.05%",
+    "category": "dynamic",
+    "description": "Top 25 por volumen con spread < 0.05% (scalper-friendly)",
+    "sort_key": "quoteVolume",
+    "descending": True,
+    "limit": 25,
+    "min_volume_usd": 5_000_000,
+    "max_spread_pct": 0.05,
+}
+```
+
+Enriquecimiento de ticker:
+- `spread_pct = ((ask - bid) / mid) * 100`
+- Si `bid` o `ask` son 0 o ausentes → `spread_pct = None` (el filtro lo descarta).
+
+**Diferencia clave vs `top_volume_24h`**: Volumen mide cuánto se ha negociado, spread mide la liquidez real del order book. Un token puede tener volumen alto por unos pocos trades grandes pero un spread ancho que hace inviable el scalping (slippage > beneficio esperado).
+
+#### 3. Botón "Sweep All Groups"
+
+Backend (`server.py`): `SweepRequest` gana dos campos:
+- `sweep_all_groups: bool = False` — si True, ignora `group_id`/`symbols` y resuelve TODOS los grupos.
+- `all_groups_categories: list[str] = []` — filtro opcional por categoría (`market_cap`, `category`, `dynamic`, `custom`).
+
+Lógica en `sweep_tokens()`:
+- Itera sobre `list_groups()` (filtrando por categoría si se pidió).
+- Deduplica símbolos (un token que aparezca en `blue_chips` y `top10_mcap` solo se valida una vez).
+- Marca `resolved_group = "ALL (N groups, M unique symbols)"` para el log.
+
+Frontend (`index.html`):
+- Nuevo botón `btnSweepAll` junto al `btnSweep` existente.
+- `startSweep(sweepAll)` ahora acepta un booleano y manda `sweep_all_groups` en el POST.
+- Confirm dialog explica que tardará varios minutos y consume API quota.
+- Reset de ambos botones al terminar/cancelar.
+
+#### 4. Sort de la tabla de resultados: PASS-primero + Profit Factor descendente
+
+`pollSweepStatus()` (frontend):
+```js
+const sorted = results.slice().sort((a, b) => {
+  const score = (r) => r.verdict === 'PASS' ? 2 : r.verdict === 'INSUFFICIENT_DATA' ? 1 : 0;
+  const tier = score(b) - score(a);
+  if (tier !== 0) return tier;
+  // Within the same tier: PF descending (treat undefined/NaN as 0)
+  const pfA = Number.isFinite(a.profit_factor) ? a.profit_factor : 0;
+  const pfB = Number.isFinite(b.profit_factor) ? b.profit_factor : 0;
+  return pfB - pfA;
+});
+```
+
+**Justificación del cambio WR → PF**: WR mide "cuántas veces ganaste", PF mide "cuánto ganas vs pierdes". Una estrategia con WR=80% pero PF=0.7 (gana 4 trades de $1, pierde 1 de $10) pierde dinero neto. Una con WR=40% pero PF=2.5 (gana 2 trades de $5, pierde 3 de $1) es rentable. Para priorizar qué tokens operar, PF es la métrica correcta. La UI ahora muestra `PF` antes que `WR` para reforzar visualmente el cambio.
+
+### Tests
+
+Nuevo archivo `tests/test_v0331_groups.py` — 12 tests:
+- Existencia de `recently_listed_30d` y `high_liquidity_low_spread` en `DYNAMIC_GROUPS`.
+- `list_groups()` expone los 2 grupos nuevos.
+- `_resolve_dynamic_group` filtra correctamente por `listing_days_max` (tokens >30d dropeados, tokens con `listing_ts=None` dropeados conservadoramente).
+- `_resolve_dynamic_group` filtra correctamente por `max_spread_pct` (spread >0.05% dropeado, spread desconocido dropeado).
+- `SweepRequest` acepta `sweep_all_groups` y `all_groups_categories`.
+- Sort: PASS-primero + PF-descendente (casos: PASS/FAIL mix, missing PF, ERROR treated as FAIL tier).
+
+**Resultados**: 12 tests nuevos pasan, 28 tests existentes (`test_v0330_groups.py` + `test_v0326_state_tagging.py`) siguen pasando — sin regresiones.
+
+### HTML/JS sanity
+
+- `<div>` balanceados: 235/235 ✓
+- Llaves JS balanceadas: 562/562 ✓
+- Paréntesis balanceados: 1325/1325 ✓
+- Version string `v0.33.1` presente en header ✓
+- `btnSweepAll` presente en DOM ✓
+- Sort por `profit_factor` (variables `pfA`, `pfB`) presente ✓
+
+### Cómo ejecutar localmente (Mac)
+
+Tras `git pull` e instalar:
+
+```bash
+cd ~/projects/ppmt
+source .venv/bin/activate  # o el entorno que uses
+pip install -e .
+# Si python no existe en tu Mac (solo python3):
+python3 -m ppmt.terminal.server
+# Dashboard: http://localhost:8420
+```
+
+### Próximos pasos sugeridos (post-v0.33.1)
+
+1. **Persistir sweep results en DB** — tabla `sweep_results` con timestamp, group_id, symbols, verdicts. Hoy se pierden al refrescar la página.
+2. **Auto-fallback MEXC → Binance** para grupos dinámicos si MEXC no lista un token (e.g. `recently_listed_30d` no funciona bien en MEXC porque no expone `listing` — mover a Binance para ese grupo).
+3. **Endpoint `/api/validation/latest?symbol=X&tf=Y`** para cargar el último verdict instantáneamente al cambiar de token.
+4. **Sweep multi-timeframe** — barrer `1h + 5m + 15m` y recomendar el mejor TF por token.
+5. **Visualización de listing_ts en la UI** — mostrar badge "Recién listado: hace N días" en el dropdown de tokens.

@@ -229,6 +229,34 @@ DYNAMIC_GROUPS = {
         "limit": 25,
         "min_volume_usd": 5_000_000,
     },
+    # v0.33.1: Recently listed tokens (last 30 days) — uses ticker's listing
+    # date when available, otherwise inferred from market metadata (listings
+    # at/after the cutoff). Useful for catching early opportunities but
+    # inherently noisy — pair with min_volume filter to drop dead listings.
+    "recently_listed_30d": {
+        "label": "Recién Listados (30d)",
+        "category": "dynamic",
+        "description": "Tokens listados en los últimos 30 días (volumen > $1M)",
+        "sort_key": "quoteVolume",
+        "descending": True,
+        "limit": 25,
+        "min_volume_usd": 1_000_000,
+        "listing_days_max": 30,
+    },
+    # v0.33.1: High liquidity / tight spread group — for scalpers.
+    # Spread = (ask - bid) / mid. Tokens with spread < 0.05% are the most
+    # liquid (lowest slippage). Independent of raw volume: a token can have
+    # volume but a wide spread (illiquid order book).
+    "high_liquidity_low_spread": {
+        "label": "Alta Liquidez / Spread < 0.05%",
+        "category": "dynamic",
+        "description": "Top 25 por volumen con spread < 0.05% (scalper-friendly)",
+        "sort_key": "quoteVolume",
+        "descending": True,
+        "limit": 25,
+        "min_volume_usd": 5_000_000,
+        "max_spread_pct": 0.05,
+    },
 }
 
 
@@ -390,6 +418,29 @@ def fetch_market_snapshot(exchange: str = "mexc") -> Dict[str, dict]:
 
         # Filter to active USDT spot pairs
         result: Dict[str, dict] = {}
+        # v0.33.1: Track markets' listing dates so recently_listed_30d works.
+        # CCXT exposes `markets[sym]['listing']` (ISO date string) on some
+        # exchanges (Binance, Bybit); MEXC doesn't, so we fall back to None
+        # and the recently_listed filter degrades gracefully (drops the symbol).
+        markets_listing: Dict[str, Optional[float]] = {}
+        for sym, mdef in markets.items():
+            if not sym.endswith("/USDT"):
+                continue
+            listing_iso = mdef.get("listing") or mdef.get("listedAt") or mdef.get("info", {}).get("listingDate")
+            if listing_iso:
+                try:
+                    # CCXT returns ms epoch (int) or ISO string depending on exchange
+                    if isinstance(listing_iso, (int, float)):
+                        markets_listing[sym] = float(listing_iso) / 1000.0
+                    else:
+                        # Parse ISO 8601 (e.g. "2024-12-15T08:30:00Z")
+                        import datetime as _dt
+                        markets_listing[sym] = _dt.datetime.fromisoformat(
+                            str(listing_iso).replace("Z", "+00:00")
+                        ).timestamp()
+                except Exception:
+                    markets_listing[sym] = None
+
         for sym, t in all_tickers.items():
             if not sym.endswith("/USDT"):
                 continue
@@ -412,6 +463,16 @@ def fetch_market_snapshot(exchange: str = "mexc") -> Dict[str, dict]:
                 tdict["volatility_pct"] = ((high - low) / low) * 100.0
             else:
                 tdict["volatility_pct"] = 0.0
+            # v0.33.1: Compute spread_pct from bid/ask (for high_liquidity_low_spread group)
+            bid = float(tdict.get("bid") or 0)
+            ask = float(tdict.get("ask") or 0)
+            mid = (bid + ask) / 2.0 if (bid > 0 and ask > 0) else 0
+            if mid > 0:
+                tdict["spread_pct"] = ((ask - bid) / mid) * 100.0
+            else:
+                tdict["spread_pct"] = None  # unknown — filter will skip
+            # v0.33.1: Listing timestamp (seconds since epoch) or None
+            tdict["listing_ts"] = markets_listing.get(sym)
             result[sym] = tdict
 
         _TICKER_CACHE[exchange] = (now, result)
@@ -551,6 +612,12 @@ def _resolve_dynamic_group(
     # Pre-filter stablecoins + leveraged BEFORE sorting
     f = {**DEFAULT_FILTERS, **(filters or {})}
     candidates: List[tuple] = []  # (sort_value, symbol)
+    # v0.33.1: Time cutoffs for recently_listed group
+    listing_days_max = gdef.get("listing_days_max", 0)
+    listing_cutoff_ts = (time.time() - listing_days_max * 86400) if listing_days_max > 0 else 0
+    # v0.33.1: Max spread filter for high_liquidity_low_spread group
+    max_spread_pct = gdef.get("max_spread_pct", 0)
+
     for sym, t in tickers.items():
         base = sym.split("/")[0].upper()
         if f.get("exclude_stablecoins", True) and base in STABLECOIN_BASES:
@@ -560,6 +627,18 @@ def _resolve_dynamic_group(
         min_vol = gdef.get("min_volume_usd", 0)
         if min_vol and vol < min_vol:
             continue
+
+        # v0.33.1: Recently-listed filter — skip if listing date unknown or too old
+        if listing_days_max > 0:
+            listing_ts = t.get("listing_ts")
+            if listing_ts is None or listing_ts < listing_cutoff_ts:
+                continue
+
+        # v0.33.1: Max-spread filter — skip if spread unknown or too wide
+        if max_spread_pct > 0:
+            spread_pct = t.get("spread_pct")
+            if spread_pct is None or spread_pct > max_spread_pct:
+                continue
 
         sort_key = gdef["sort_key"]
         if sort_key == "quoteVolume":

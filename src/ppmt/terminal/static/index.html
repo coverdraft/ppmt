@@ -242,7 +242,7 @@ tr:hover td{background:rgba(96,165,250,.04)}
 <!-- ========== HEADER ========== -->
 <header class="header">
   <div class="header-left">
-    <span class="logo">PPMT<span class="logo-ver">v0.33.0</span></span>
+    <span class="logo">PPMT<span class="logo-ver">v0.33.1</span></span>
     <span class="status-dot stopped" id="headerDot"></span>
     <span id="headerStatus" style="font-family:var(--mono);font-size:10px;color:var(--text2)">DETENIDO</span>
   </div>
@@ -365,8 +365,10 @@ tr:hover td{background:rgba(96,165,250,.04)}
           <div class="field"><input type="number" id="setupCapital" value="1000" step="100" min="100"></div>
         </div>
         <button class="btn btn-primary btn-block" id="btnAutoSetup" onclick="autoSetup()" style="margin-bottom:4px">Prepare Token</button>
-        <!-- v0.32.6: Sweep All Tokens button — runs validation on every token in the background -->
-        <button class="btn btn-ghost btn-block btn-sm" id="btnSweep" onclick="startSweep()" style="margin-bottom:4px">Sweep Selected Group</button>
+        <!-- v0.32.6: Sweep buttons — runs validation on every token in the background -->
+        <button class="btn btn-ghost btn-block btn-sm" id="btnSweep" onclick="startSweep(false)" style="margin-bottom:4px">Sweep Selected Group</button>
+        <!-- v0.33.1: Sweep All Groups — iterates over every group sequentially (weekly reports) -->
+        <button class="btn btn-ghost btn-block btn-sm" id="btnSweepAll" onclick="startSweep(true)" style="margin-bottom:4px">Sweep All Groups</button>
         <button class="btn btn-ghost btn-block btn-sm" id="btnSweepCancel" onclick="cancelSweep()" style="display:none;margin-bottom:4px">Cancel Sweep</button>
         <!-- Sweep progress -->
         <div id="sweepProgress" style="display:none;margin-bottom:6px">
@@ -673,7 +675,7 @@ tr:hover td{background:rgba(96,165,250,.04)}
 
 <script>
 // ============================================================
-// PPMT Terminal v0.33.0 — Trading Dashboard
+// PPMT Terminal v0.33.1 — Trading Dashboard
 // ============================================================
 
 const API = '';
@@ -2244,24 +2246,26 @@ async function deleteCustomGroup() {
 // v0.32.6: SWEEP ALL TOKENS
 // ============================================================
 
-async function startSweep() {
+async function startSweep(sweepAll) {
   const timeframe = document.getElementById('setupTimeframe').value || '1h';
   const exchange = document.getElementById('chartExchange').value || 'mexc';
   const capital = parseFloat(document.getElementById('setupCapital').value) || 1000;
   // v0.33.0: Use the selected group + filters; fall back to legacy 25-majors
   // list if no group is selected or 'none' is chosen.
+  // v0.33.1: When sweepAll=true, ignore the selected group and request ALL groups.
   const groupSel = document.getElementById('groupSelect');
-  const groupId = groupSel && groupSel.value ? groupSel.value : '';
+  const groupId = (!sweepAll && groupSel && groupSel.value) ? groupSel.value : '';
   const filters = (typeof _collectFilters === 'function') ? _collectFilters() : {};
 
-  const groupLabel = groupId && _groupsCache && _groupsCache[groupId]
-    ? _groupsCache[groupId].label : 'default 25 majors';
-  if (!confirm(`Run validation on group '${groupLabel}'?\nThis will take several minutes and consume API quota.`)) return;
+  const groupLabel = sweepAll ? 'ALL GROUPS (deduplicated)'
+    : (groupId && _groupsCache && _groupsCache[groupId] ? _groupsCache[groupId].label : 'default 25 majors');
+  if (!confirm(`Run validation on ${sweepAll ? 'ALL groups' : ('group ' + groupLabel)}?\nThis will take several minutes and consume API quota.`)) return;
 
   const btn = document.getElementById('btnSweep');
+  const btnAll = document.getElementById('btnSweepAll');
   const btnCancel = document.getElementById('btnSweepCancel');
-  btn.disabled = true;
-  btn.textContent = 'Starting...';
+  if (sweepAll) { btnAll.disabled = true; btnAll.textContent = 'Starting...'; }
+  else { btn.disabled = true; btn.textContent = 'Starting...'; }
   btnCancel.style.display = 'block';
 
   document.getElementById('sweepProgress').style.display = 'block';
@@ -2273,8 +2277,9 @@ async function startSweep() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        symbols: [],       // let the server resolve the group
+        symbols: [],       // let the server resolve the group(s)
         group_id: groupId, // '' = fall back to curated majors list
+        sweep_all_groups: !!sweepAll,  // v0.33.1: if true, server ignores group_id and resolves ALL groups
         filters,
         timeframe, exchange, capital,
         skip_if_pass: true,
@@ -2288,13 +2293,14 @@ async function startSweep() {
     if (sweepPollHandle) clearInterval(sweepPollHandle);
     sweepPollHandle = setInterval(pollSweepStatus, 2000);
     pollSweepStatus();  // immediate first poll
-    btn.textContent = 'Sweeping...';
+    if (sweepAll) btnAll.textContent = 'Sweeping...';
+    else btn.textContent = 'Sweeping...';
   } catch (e) {
     console.error('startSweep error:', e);
     document.getElementById('sweepCurrent').textContent = 'ERROR: ' + e.message;
     document.getElementById('sweepCurrent').style.color = 'var(--red)';
-    btn.disabled = false;
-    btn.textContent = 'Sweep Selected Group';
+    btn.disabled = false; btn.textContent = 'Sweep Selected Group';
+    if (btnAll) { btnAll.disabled = false; btnAll.textContent = 'Sweep All Groups'; }
     btnCancel.style.display = 'none';
   }
 }
@@ -2321,26 +2327,36 @@ async function pollSweepStatus() {
     document.getElementById('sweepSkipped').textContent = `${s.skipped} skip`;
 
     // Render results table (live, updates as each token finishes)
+    // v0.33.1: PASS first, then by Profit Factor descending (was win_rate),
+    // then INSUFFICIENT_DATA, then FAIL/ERROR at the bottom. Within the same
+    // verdict tier, sort by PF (win_rate is a weaker metric — high WR with
+    // PF<1 still loses money net).
     const results = s.results || [];
     if (results.length > 0) {
       const container = document.getElementById('sweepResults');
       container.style.display = 'block';
       const sorted = results.slice().sort((a, b) => {
-        // PASS first, then by win_rate descending, FAIL at the bottom
         const score = (r) => r.verdict === 'PASS' ? 2 : r.verdict === 'INSUFFICIENT_DATA' ? 1 : 0;
-        return score(b) - score(a) || (b.win_rate || 0) - (a.win_rate || 0);
+        const tier = score(b) - score(a);
+        if (tier !== 0) return tier;
+        // Within the same tier: PF descending (treat undefined/NaN as 0)
+        const pfA = Number.isFinite(a.profit_factor) ? a.profit_factor : 0;
+        const pfB = Number.isFinite(b.profit_factor) ? b.profit_factor : 0;
+        return pfB - pfA;
       });
       container.innerHTML = sorted.map(r => {
         const cls = r.verdict === 'PASS' ? 'text-green' :
                     r.verdict === 'INSUFFICIENT_DATA' ? 'text-yellow' :
                     r.verdict === 'ERROR' ? 'text-muted' : 'text-red';
         const wr = r.win_rate !== undefined ? (r.win_rate * 100).toFixed(1) + '%' : '--';
+        const pf = r.profit_factor !== undefined ? Number(r.profit_factor).toFixed(2) : '--';
         const trades = r.total_trades || 0;
         const skippedTag = r.skipped ? ' <span class="text-muted">(cached)</span>' : '';
         return `<div style="padding:2px 0;border-bottom:1px solid var(--border)">
           <span class="${cls}" style="font-weight:600">${r.verdict}</span>
           <span style="color:var(--text);margin-left:6px">${r.symbol}</span>
-          <span class="text-muted" style="margin-left:8px">WR ${wr}</span>
+          <span class="text-muted" style="margin-left:8px">PF ${pf}</span>
+          <span class="text-muted" style="margin-left:6px">WR ${wr}</span>
           <span class="text-muted" style="margin-left:6px">${trades} trades</span>${skippedTag}
         </div>`;
       }).join('');
@@ -2350,9 +2366,10 @@ async function pollSweepStatus() {
     if (!s.running && s.finished_at > 0) {
       if (sweepPollHandle) { clearInterval(sweepPollHandle); sweepPollHandle = null; }
       const btn = document.getElementById('btnSweep');
+      const btnAll = document.getElementById('btnSweepAll');
       const btnCancel = document.getElementById('btnSweepCancel');
-      btn.disabled = false;
-      btn.textContent = 'Sweep Selected Group';
+      btn.disabled = false; btn.textContent = 'Sweep Selected Group';
+      if (btnAll) { btnAll.disabled = false; btnAll.textContent = 'Sweep All Groups'; }
       btnCancel.style.display = 'none';
 
       // Final summary line

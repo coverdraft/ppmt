@@ -1495,6 +1495,11 @@ class SweepRequest(BaseModel):
     sweep a dynamic group (e.g. Top 25 by Volume) instead of the hard-coded
     25-majors list. If both ``symbols`` and ``group_id`` are provided,
     ``symbols`` wins (caller already resolved the group).
+
+    v0.33.1: ``sweep_all_groups`` triggers a sequential sweep across EVERY
+    group returned by ``list_groups()``. Useful for weekly reports: lets you
+    run a full inventory of the entire universe overnight and collect every
+    PASS token in one consolidated results table.
     """
     symbols: list[str] = []
     group_id: str = ""  # e.g. "top25_mcap", "memes", "top_volume_24h", or a custom group name
@@ -1504,6 +1509,13 @@ class SweepRequest(BaseModel):
     capital: float = 1_000.0
     skip_if_pass: bool = True
     """v0.32.6: If True, skip tokens that already have a PASS validation in DB."""
+    sweep_all_groups: bool = False
+    """v0.33.1: If True, ignore symbols/group_id and iterate over ALL groups
+    returned by list_groups(). Each token is validated once (deduplicated).
+    Useful for weekly consolidation reports."""
+    all_groups_categories: list[str] = []
+    """v0.33.1: Optional filter — only sweep groups whose `category` is in
+    this list. Empty = all categories (market_cap, category, dynamic, custom)."""
 
 
 @app.post("/api/sweep")
@@ -1524,10 +1536,37 @@ async def sweep_tokens(req: SweepRequest) -> dict:
     if _sweep_state["running"]:
         return {"ok": False, "error": "A sweep is already running. Wait for it to finish."}
 
-    # Resolve symbol list (priority: explicit symbols > group_id > fallback)
-    symbols = list(req.symbols)
+    # Resolve symbol list
+    # v0.33.1: sweep_all_groups → union of all groups' symbols (deduplicated)
+    symbols = list(req.symbols) if req.symbols else []
     resolved_group = ""
-    if not symbols and req.group_id:
+
+    if req.sweep_all_groups:
+        try:
+            from ppmt.data.groups import list_groups as _lg, resolve_group as _rg
+            all_groups = _lg()
+            cat_filter = set(req.all_groups_categories) if req.all_groups_categories else None
+            seen = set(symbols)  # don't drop user-supplied symbols
+            resolved_groups_list = []
+            for gid, gdef in all_groups.items():
+                if cat_filter and gdef.get("category") not in cat_filter:
+                    continue
+                try:
+                    syms = _rg(gid, exchange=req.exchange, filters=req.filters or None)
+                except Exception as e:
+                    logger.warning(f"Sweep-all: group '{gid}' failed: {e}")
+                    syms = []
+                resolved_groups_list.append(gid)
+                for s in syms:
+                    if s not in seen:
+                        seen.add(s)
+                        symbols.append(s)
+            resolved_group = f"ALL ({len(resolved_groups_list)} groups, {len(symbols)} unique symbols)"
+            logger.info(f"Sweep-all: {len(resolved_groups_list)} groups → {len(symbols)} unique symbols")
+        except Exception as e:
+            logger.warning(f"Sweep-all-groups failed: {e}")
+
+    elif not symbols and req.group_id:
         try:
             from ppmt.data.groups import resolve_group
             symbols = resolve_group(
