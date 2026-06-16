@@ -1862,3 +1862,286 @@ python3 -m ppmt.terminal.server
 3. **Endpoint `/api/validation/latest?symbol=X&tf=Y`** para cargar el último verdict instantáneamente al cambiar de token.
 4. **Sweep multi-timeframe** — barrer `1h + 5m + 15m` y recomendar el mejor TF por token.
 5. **Visualización de listing_ts en la UI** — mostrar badge "Recién listado: hace N días" en el dropdown de tokens.
+
+---
+
+## v0.34.0 — Análisis crítico de propuesta + 5 mejoras seguras + History Module (17 jun 2026)
+
+### Contexto
+
+El usuario envió una propuesta extensa de mejoras (Zonas 2–7) cubriendo:
+recalibración dinámica, filtros para Recién Listados, Sweep con caché,
+módulo History SQLite, Portfolio Manager, Smart Selector, y ejecución
+real con CCXT.
+
+**Filosofía aplicada:** profesional, simple, funcional. No duplicar
+código existente. No poner capital real en riesgo sin validación previa.
+
+### Análisis crítico de la propuesta
+
+| Zona | Veredicto | Razón |
+|------|-----------|-------|
+| 2.1 Recalibración TF-aware | ✅ Implementar | Real mejora, era fijo 2000 sin contexto TF |
+| 2.2 `min_dias=3` Recién Listados | ✅ Implementar | Filtro de seguridad, 1 línea |
+| 2.3 Sweep con caché por símbolo | ✅ Implementar | Evita validar BTC 4× si aparece en 4 grupos |
+| 2.4 Columna "Fecha del test" | ✅ Implementar | Trazabilidad, tweak UI |
+| 3.1 History SQLite (3 tablas) | ⚠️ Simplificar | `real_trades` ya existe en `storage.save_trade()`. Solo 2 tablas nuevas |
+| 3.2 CLI `ppmt history` | ⚠️ Versión mínima | `--latest`, `--symbol`, `--today`. NO `--export` todavía |
+| 3.3 Insights automáticos | ❌ Posponer v0.35 | Requiere 50+ escaneos acumulados para ser útil |
+| 3.4 Auto-save de escaneos | ✅ Implementar | Imprescindible, transparente al usuario |
+| 4 Portfolio Manager | 🛑 YA EXISTE | `risk/portfolio_manager.py` (1543 líneas) + 7 archivos más. NO duplicar |
+| 5.1 Smart Selector scoring | ⚠️ Solo función utility | 30 líneas en `history_manager.py`, no módulo aparte |
+| 5.2–5.4 Ejecución CCXT real | 🛑 NO IMPLEMENTAR | Peligroso sin paper trading previo. Posponer a v1.0 |
+
+### Cambios aplicados en v0.34.0
+
+#### 1. Recalibración dinámica por TF — `engine/realtime.py`
+
+**Antes:** `recalibration_interval: int = 2000` (fijo, sin contexto TF).
+
+**Después:**
+
+```python
+# Techo: en TFs altos el cálculo da valores absurdos (526 años para 1d).
+# Cap a 50k velas para mantener Living Trie vivo sin recalibrar en exceso.
+_RECALIBRATION_CEILING = 50_000
+_RECALIBRATION_BASE = 2_000
+_RECALIBRATION_REF_TF_MIN = 15  # 15m es la referencia
+
+def get_recalibration_interval(tf_minutes: int) -> int:
+    if tf_minutes <= 0:
+        return _RECALIBRATION_BASE
+    factor = max(1.0, tf_minutes / _RECALIBRATION_REF_TF_MIN)
+    interval = int(_RECALIBRATION_BASE * factor)
+    return min(interval, _RECALIBRATION_CEILING)
+```
+
+Tabla resultante:
+
+| TF  | factor | intervalo (velas) | tiempo real |
+|-----|--------|-------------------|-------------|
+| 1m  | 1.0    | 2,000             | 33h         |
+| 5m  | 1.0    | 2,000             | 7d          |
+| 15m | 1.0    | 2,000             | 21d         |
+| 1h  | 4.0    | 8,000             | 333d        |
+| 4h  | 16.0   | 32,000            | 1333d       |
+| 1d  | 96.0   | 50,000*           | 526d (*techo) |
+
+El campo `RealtimeConfig.recalibration_interval` pasa a default `0`
+(auto, TF-aware). Si el usuario pone un valor `>0` manualmente, se usa
+como override.
+
+#### 2. Filtro `min_dias=3` para Recién Listados — `data/groups.py`
+
+```python
+"recently_listed_30d": {
+    "label": "Recién Listados (30d)",
+    "category": "dynamic",
+    "description": "Tokens listados entre 3 y 30 días (volumen > $1M, min 72h de data)",
+    "sort_key": "quoteVolume",
+    "descending": True,
+    "limit": 25,
+    "min_volume_usd": 1_000_000,
+    "listing_days_max": 30,
+    "listing_days_min": 3,  # NUEVO v0.34.0
+},
+```
+
+**Razón:** en las primeras 72h tras el listing, los precios suelen ser
+inestables (market makers ajustando, poca liquidez). Evitar operar
+esos tokens hasta que tengan data consolidada.
+
+#### 3. Caché por símbolo en Sweep All Groups — `terminal/sweep_cache.py` (nuevo)
+
+```python
+class SweepResultCache:
+    """Caché de resultados por (symbol, tf) durante un sweep."""
+
+    def __init__(self, ttl_sec: int = 300):  # 5 min
+        self._cache: Dict[str, Tuple[float, dict]] = {}
+        self._ttl = ttl_sec
+
+    @staticmethod
+    def make_key(symbol: str, tf: str) -> str:
+        return f"{symbol}|{tf}"
+
+    def get(self, key): ...
+    def set(self, key, result): ...
+    def clear(self): ...
+```
+
+**Integración en `server.py`:** durante un Sweep All Groups, antes de
+llamar a `_run_validation(symbol, tf)`, se comprueba la caché. Si el
+símbolo ya se validó en los últimos 5 min para ese TF, se reutiliza el
+resultado. Cada resultado cacheado se marca con `cached: True` para
+transparencia en la UI.
+
+**Ahorro estimado:** en un sweep típico de 10 grupos × 25 tokens con
+30% de overlap → ~75 validaciones ahorradas × 3s = ~4 min ahorrados.
+
+#### 4. Columna "Fecha del test" en tabla de resultados — UI
+
+En el template HTML/JS del dashboard (`terminal/static/`), la tabla de
+resultados de validación ahora muestra:
+
+```
+| Token | Grupo | TF | Resultado | PF | Sharpe | WR | DD | Trades | Score | Fecha test |
+|-------|-------|----|-----------|----|--------|----|----|--------|-------|------------|
+| BTC   | blue  | 15m| PASS      | 1.8| 1.5    | 65%| 12%| 80     | 78.3  | 17/06 14:32|
+```
+
+Orden: `PASS → INSUFFICIENT_DATA → FAIL`, ordenado por `profit_factor`
+descendente dentro de cada bloque. **El `Score` (de `score_signal()`)
+es el sort secundario** para desempatar PFs iguales.
+
+#### 5. History Module — `terminal/history_manager.py` (nuevo)
+
+**Tablas SQLite nuevas** (en `~/.ppmt/ppmt.db`):
+
+```sql
+CREATE TABLE historical_scan (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scan_timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+    grupo_utilizado TEXT,
+    filtros_aplicados TEXT,      -- JSON
+    tf_utilizado TEXT,
+    dias_data INTEGER,
+    total_tokens INTEGER,
+    tokens_pasaron INTEGER,
+    tokens_fallaron INTEGER,
+    tokens_insuficientes INTEGER,
+    tiempo_ejecucion REAL,
+    score_avg REAL,
+    resultado_resumen TEXT       -- JSON compacto
+);
+
+CREATE TABLE scan_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    scan_id INTEGER,
+    symbol TEXT,
+    grupo TEXT,
+    resultado TEXT,              -- PASS/FAIL/INSUFFICIENT_DATA
+    score REAL,
+    win_rate REAL,
+    profit_factor REAL,
+    sharpe REAL,
+    max_drawdown REAL,
+    total_trades INTEGER,
+    config_usada TEXT,           -- JSON
+    cached INTEGER DEFAULT 0,    -- 1 si vino de SweepResultCache
+    test_timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (scan_id) REFERENCES historical_scan(id)
+);
+```
+
+**API pública:**
+
+```python
+save_scan(grupo, tf, resultados, filtros, dias_data, tiempo) -> scan_id
+list_scans(limit=10) -> list[dict]
+get_scan(scan_id) -> dict | None
+list_by_symbol(symbol) -> list[dict]   # acepta 'BTC', 'BTCUSDT', 'BTC/USDT'
+list_today() -> list[dict]
+score_signal(metrics, weights=None) -> float  # 0–100
+```
+
+**Auto-save hook:** en `server.py`, después de cada `_run_validation()`
+(individual o dentro de sweep), se llama automáticamente a
+`history_manager.save_scan(...)`. El usuario no hace nada, es
+transparente.
+
+**CLI** (en `cli/main.py`):
+
+```bash
+ppmt history --latest 10            # últimos 10 escaneos
+ppmt history --symbol DOGEUSDT      # historial de un token
+ppmt history --today                # escaneos de hoy
+```
+
+(`--export` y `ppmt insights` pospuestos a v0.35 — requieren data
+acumulada para ser útiles.)
+
+### Tests ejecutados
+
+`scripts/test_v0340_standalone.py` — 37 tests, todos pasan:
+
+```
+[1] Recalibración TF-aware           12 ✓
+[2] SweepResultCache                  7 ✓
+[3] History manager (save/list/get)  11 ✓
+[4] Score signal (determinismo)       7 ✓
+─────────────────────────────────────────
+RESULTADO: 37 pasaron, 0 fallaron
+```
+
+### Archivos nuevos
+
+```
+ppmt/src/ppmt/terminal/sweep_cache.py       (~80 líneas)  NUEVO
+ppmt/src/ppmt/terminal/history_manager.py   (~300 líneas) NUEVO
+ppmt/src/tests/test_v0340.py                (~150 líneas) NUEVO
+```
+
+### Archivos modificados
+
+```
+ppmt/src/ppmt/engine/realtime.py            +get_recalibration_interval, +_tf_to_minutes
+                                            default recalibration_interval: 0 (auto)
+                                            _run_loop(): auto-calcular si interval==0
+
+ppmt/src/ppmt/data/groups.py                +listing_days_min: 3 en recently_listed_30d
+                                            resolve_group(): respeta min/max days
+
+ppmt/src/ppmt/terminal/server.py            importa SweepResultCache
+                                            sweep loop usa cache
+                                            después de cada validación: history_manager.save_scan()
+
+ppmt/src/ppmt/terminal/static/index.html    columna "Fecha test" en tabla de resultados
+                                            sort secundario por score
+
+ppmt/src/ppmt/cli/main.py                   subcomando `ppmt history`
+```
+
+### Plan de implementación por fases (hacia v1.0)
+
+| Versión | Contenido |
+|---------|-----------|
+| **v0.34.0** (esta) | Recalibración TF + min_dias + sweep cache + history module + scoring + tests |
+| **v0.35.0** | Persistencia SQLite de PortfolioManager + CLI `ppmt portfolio` + CLI `ppmt selector` (display) + paper trading bridge al selector + `ppmt insights` + `--export CSV` |
+| **v0.36.0** | Insights visuales en dashboard FastAPI + multi-TF sweep (recomienda mejor TF por token) |
+| **v1.0.0** | Integración opcional CCXT (OFF por defecto). Requiere gate: 30+ días de paper trading válido |
+
+### Cómo actualizar en tu Mac
+
+```bash
+cd ~/projects/ppmt
+git pull origin main
+source .venv/bin/activate    # o el entorno que uses
+pip install -e .
+
+# Verificar versión
+python3 -c "import ppmt; print(ppmt.__version__)"  # debe mostrar 0.34.0
+
+# Tests de regresión
+python3 -m pytest src/tests/test_v0340.py -v
+# o sin pytest:
+python3 src/tests/test_v0340.py
+
+# Arrancar dashboard
+python3 -m ppmt.terminal.server
+# Abrir http://localhost:8420
+```
+
+**Solución de problemas comunes en Mac:**
+
+- `python: command not found` → usar `python3` (Mac no trae `python` por defecto).
+- `ModuleNotFoundError: ppmt` → `pip install -e .` desde el directorio del repo.
+- Versión incorrecta mostrada → `pip uninstall ppmt-terminal -y && pip install -e .`
+- DB locked → `lsof ~/.ppmt/ppmt.db | awk 'NR>1 {print $2}' | xargs kill` (mata procesos que la tienen abierta).
+
+### Próximos pasos sugeridos (post-v0.34.0)
+
+1. **Acumular data de escaneos** — usar el dashboard 1 semana para llenar `historical_scan` con 30+ escaneos reales. Sin esto, `ppmt insights` sería inútil.
+2. **Validar el ahorro del sweep cache** — hacer un Sweep All Groups antes y después del update, medir tiempo. Log esperado: `Sweep cache: X hits, Y misses, ahorro ~Zs`.
+3. **Monitorizar estabilidad de Recién Listados** — con `min_dias=3`, comparar win_rate de los tokens listados <3d vs ≥3d. Debería mejorar.
+4. **Probar recalibración en TF=4h** — abrir dashboard, seleccionar BTC/USDT 4h, dejar correr 24h. El log debería mostrar `recalibration_interval=32000` en lugar de `2000`.
