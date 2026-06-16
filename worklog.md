@@ -163,3 +163,44 @@ Stage Summary:
 - Phase 7 COMPLETE - Dashboard has full Money Management, Node Control, Backtest
 - ppmt terminal -> http://localhost:3000 (FastAPI dashboard)
 
+
+---
+Task ID: 8
+Agent: main
+Task: Fix MEXC WebSocket — live trading stuck at 49 candles / 0 signals / 0 trades
+
+Work Log:
+- Audited full /api/start-trading → RealtimeTrader.run_live() → WebSocketFeed pipeline
+- Discovered: "Candles: 49" exactly matches warmup_candles = sax_window_size*2 + pattern_length*sax_window_size = 7*2 + 5*7 = 49
+  → meaning ZERO live candles were processed despite WS connection appearing active
+- Root cause #1: MEXC v3 kline messages do NOT include "x" (is_closed) field
+  → _parse_mexc_kline() used k.get("x", False) → candle.closed always False
+  → on_candle never invoked → no SAX symbols, no signals, no trades
+- Root cause #2: MEXC requires CLIENT-initiated pings ({"method":"ping","id":N}) every ≤10s
+  → old code only handled SERVER pings → MEXC closed connection at ~30s → reconnect loop
+- Root cause #3: websockets library ping_interval=15 sent protocol-level pings MEXC ignores
+  → websockets closed connection at ping_timeout=10s expecting pong control frame
+- Root cause #4: SUBSCRIPTION message lacked "id" field → some environments get "Blocked!"
+
+Fixes applied (v0.32.4):
+- src/ppmt/data/websocket_feed.py:
+  * _mexc_subscribe_msg() now includes "id" parameter (required by MEXC v3)
+  * _parse_mexc_kline() infers closed from wall-clock vs k["T"] (end time), with fallback to k["x"] if present
+  * _listen_mexc() uses BUFFERED candle strategy: emits previous candle as closed when new timestamp arrives
+  * Added background _mexc_ping_loop() sending {"method":"ping","id":N} every 10s
+  * Disabled websockets protocol-level pings (ping_interval=None, ping_timeout=None)
+  * Robust control-message handling: PONG, SUBSCRIPTION confirmation, server-ping, subscription-echo
+  * on_error fires when MEXC rejects subscription (was silent before)
+  * Flushes buffered candle on shutdown so last period isn't lost
+- tests/test_mexc_ws_parser.py: 7 new tests covering subscribe msg, parser variants, nesting
+- src/ppmt/__init__.py: version 0.29.0 → 0.32.4
+- pyproject.toml: version 0.32.0 → 0.32.4
+- TRAZABILIDAD.md: +240 lines documenting the 5 root causes, 7 fixes, lessons learned
+
+Stage Summary:
+- 167 tests pass (160 existing + 7 new MEXC parser tests)
+- After user reinstalls, live trading should now:
+  * Maintain stable WS connection (no more 30s reconnect loop)
+  * Process every closed candle via on_candle
+  * Generate SAX symbols → predictions → signals → trades
+- "Candles" counter should now climb past 49 as live candles arrive each hour

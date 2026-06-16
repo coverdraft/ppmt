@@ -153,34 +153,67 @@ MEXC_WS_INTERVALS = {
 }
 
 
-def _mexc_subscribe_msg(symbol: str, timeframe: str) -> dict:
-    """Build MEXC spot WebSocket subscription message."""
+def _mexc_subscribe_msg(symbol: str, timeframe: str, msg_id: int = 1) -> dict:
+    """Build MEXC spot WebSocket subscription message.
+
+    v0.32.4: MEXC v3 API REQUIRES an `id` field on the SUBSCRIPTION request.
+    Without it, MEXC responds with:
+      {"id":0,"code":0,"msg":"Not Subscribed successfully! ... Reason: Blocked!"}
+    and silently refuses to send any kline data.
+    """
     interval = MEXC_WS_INTERVALS.get(timeframe, "Min5")
-    # MEXC uses lowercase symbol without slash for spot WS
     mexc_symbol = symbol.replace("/", "").lower()
     return {
         "method": "SUBSCRIPTION",
         "params": [f"spot@public.kline.v3.api+{interval}+{mexc_symbol}"],
+        "id": msg_id,
     }
 
 
 def _parse_mexc_kline(data: dict, symbol: str, timeframe: str) -> Optional[Candle]:
-    """Parse a MEXC spot kline WebSocket message into a Candle."""
+    """Parse a MEXC spot kline WebSocket message into a Candle.
+
+    v0.32.4: MEXC v3 kline messages do NOT include an `x` (is_closed) field.
+    The kline object structure is:
+        {"t": <start_ms>, "T": <end_ms>, "s": <SYM>, "i": <interval>,
+         "o": <open>, "c": <close>, "h": <high>, "l": <low>,
+         "v": <volume>, "a": <quote_volume>}
+
+    MEXC sends continuous updates throughout the candle period. To get a
+    "closed" candle, we compare the current wall-clock time to k["T"]
+    (the candle's scheduled end time). If current_time >= end_time, the
+    candle is closed.
+
+    Additionally, the caller (WebSocketFeed._listen_mexc) uses a buffering
+    strategy: when a new timestamp arrives, the PREVIOUS buffered candle is
+    emitted as closed. This avoids depending on the wall-clock check alone,
+    which can be flaky near the candle boundary.
+    """
     try:
-        # MEXC v3 kline format: {"d": {"e": "spot@public.kline.v3.api", "k": {...}}}
-        # Or directly: {"k": {...}}
         k = data.get("k", data.get("d", {}).get("k", {}))
         if not k:
             return None
 
+        ts = int(k.get("t", 0))
+        end_ts = int(k.get("T", 0))
+        now_ms = int(time.time() * 1000)
+        # If MEXC ever DOES include an `x`, trust it. Otherwise infer from T.
+        explicit_closed = k.get("x")
+        if explicit_closed is not None:
+            closed = bool(explicit_closed)
+        elif end_ts > 0:
+            closed = now_ms >= end_ts
+        else:
+            closed = False
+
         return Candle(
-            timestamp=int(k.get("t", 0)),
+            timestamp=ts,
             open=float(k.get("o", 0)),
             high=float(k.get("h", 0)),
             low=float(k.get("l", 0)),
             close=float(k.get("c", 0)),
             volume=float(k.get("v", 0)),
-            closed=k.get("x", False),
+            closed=closed,
             exchange="mexc",
             symbol=symbol,
             timeframe=timeframe,
@@ -569,16 +602,23 @@ class WebSocketFeed:
         if self.on_status:
             self.on_status("connected", f"Connecting to MEXC ({self.symbol})")
 
+        # v0.32.4: Disable websockets protocol-level pings — MEXC uses
+        # APPLICATION-level pings ({"method": "ping"}). If both are enabled,
+        # websockets expects a pong control frame that MEXC never sends, and
+        # closes the connection after ping_timeout seconds. This was the #1
+        # cause of "Connecting to MEXC..." repeating every ~30s in the
+        # terminal: the WS dropped, the feed reconnected, warmup did NOT
+        # re-run (it's once-only in start()), and the cycle repeated.
         async with websockets.connect(
             url,
-            ping_interval=15,
-            ping_timeout=10,
+            ping_interval=None,        # v0.32.4: MEXC uses app-level pings
+            ping_timeout=None,
             close_timeout=5,
         ) as ws:
             self._ws = ws
 
-            # Subscribe to kline channel
-            sub_msg = _mexc_subscribe_msg(self.symbol, self.timeframe)
+            # Subscribe to kline channel (v0.32.4: must include `id`)
+            sub_msg = _mexc_subscribe_msg(self.symbol, self.timeframe, msg_id=1)
             await ws.send(json.dumps(sub_msg))
             logger.info(f"Subscribed to MEXC kline: {sub_msg}")
 
@@ -587,55 +627,150 @@ class WebSocketFeed:
 
             self._reconnect_count = 0
 
-            async for raw_msg in ws:
-                if not self._running:
-                    break
+            # v0.32.4: Background task to send client-side application pings
+            # every 10 seconds. MEXC REQUIRES the client to initiate pings;
+            # if no ping is sent within ~30s, the server closes the connection.
+            # Server responds with {"id":0,"code":0,"msg":"PONG"}.
+            async def _mexc_ping_loop():
+                ping_id = 1000
+                while self._running:
+                    try:
+                        await ws.send(json.dumps({"method": "ping", "id": ping_id}))
+                        ping_id += 1
+                    except Exception as e:
+                        logger.debug(f"MEXC ping send error: {e}")
+                        return
+                    await asyncio.sleep(10)
 
-                try:
-                    msg = json.loads(raw_msg)
+            ping_task = asyncio.create_task(_mexc_ping_loop())
 
-                    # MEXC subscription confirmation
-                    if msg.get("method") == "SUBSCRIPTION" or "id" in msg:
-                        logger.info(f"MEXC subscription confirmed: {msg}")
-                        continue
+            # v0.32.4: Buffered candle strategy.
+            # MEXC v3 kline messages do NOT include a reliable "is_closed"
+            # flag, so we cannot rely on `candle.closed` alone. Instead, we
+            # buffer the latest kline for the current timestamp, and when a
+            # new timestamp arrives we emit the PREVIOUS buffered candle as
+            # a fully-closed candle. This guarantees:
+            #   1. Each candle period fires on_candle exactly once.
+            #   2. The emitted candle has the FINAL ohlcv values for that
+            #      period (because MEXC sends continuous updates).
+            #   3. We don't miss candles or fire duplicates.
+            buffered_candle: Optional[Candle] = None
 
-                    # MEXC ping — respond with pong
-                    if msg.get("method") == "ping" or msg.get("ping"):
-                        pong = msg.get("id", 0)
-                        await ws.send(json.dumps({"method": "pong", "id": pong}))
-                        continue
+            try:
+                async for raw_msg in ws:
+                    if not self._running:
+                        break
 
-                    # MEXC kline data
-                    # MEXC format: {"c": "spot@public.kline.v3.api+Min5+btcusdt", "d": {...}, "s": "BTCUSDT", "t": 1234567890}
-                    if "d" in msg or "k" in msg:
-                        candle = _parse_mexc_kline(msg, self.symbol, self.timeframe)
-                        if candle is None:
+                    try:
+                        msg = json.loads(raw_msg)
+
+                        # v0.32.4: MEXC subscription confirmation.
+                        # Format: {"id": <sub_id>, "code": 0, "msg": "..."}
+                        # A failed subscription also has this shape but
+                        # msg contains "Not Subscribed successfully".
+                        if "code" in msg and "msg" in msg and "d" not in msg and "k" not in msg:
+                            if "Not Subscribed" in str(msg.get("msg", "")):
+                                logger.error(
+                                    f"MEXC subscription REJECTED: {msg}. "
+                                    f"Check symbol/timeframe/exchange reachability."
+                                )
+                                if self.on_error:
+                                    self.on_error(
+                                        RuntimeError(f"MEXC subscription rejected: {msg.get('msg')}")
+                                    )
+                            else:
+                                logger.info(f"MEXC subscription confirmed: {msg}")
                             continue
 
-                        self._ticks_received += 1
+                        # v0.32.4: PONG response to our client ping.
+                        # Format: {"id": <pong_id>, "code": 0, "msg": "PONG"}
+                        # Note: MEXC returns id=0 regardless of what we sent.
+                        if msg.get("msg") == "PONG":
+                            continue
 
-                        if self.on_tick:
+                        # v0.32.4: Server-initiated ping (rare in MEXC v3,
+                        # but handle it for robustness). Respond with pong.
+                        if msg.get("method") == "ping":
                             try:
-                                self.on_tick(candle)
+                                await ws.send(json.dumps({"method": "pong"}))
                             except Exception:
                                 pass
+                            continue
 
-                        if candle.closed and candle.timestamp != self._last_candle_ts:
-                            self._last_candle_ts = candle.timestamp
-                            self._candles_received += 1
+                        # MEXC subscription response echo (no body)
+                        if msg.get("method") == "SUBSCRIPTION":
+                            continue
 
-                            if self.on_candle:
+                        # MEXC kline data
+                        # Format: {"c": "spot@public.kline.v3.api+Min60+ethusdt",
+                        #          "d": {"e": "...", "k": {...}}},
+                        #          "s": "ETHUSDT", "t": 1234567890}
+                        if "d" in msg or "k" in msg:
+                            candle = _parse_mexc_kline(msg, self.symbol, self.timeframe)
+                            if candle is None:
+                                continue
+
+                            self._ticks_received += 1
+
+                            if self.on_tick:
                                 try:
-                                    result = self.on_candle(candle)
-                                    if asyncio.iscoroutine(result):
-                                        await result
-                                except Exception as e:
-                                    logger.error(f"on_candle callback error: {e}")
+                                    self.on_tick(candle)
+                                except Exception:
+                                    pass
 
-                except json.JSONDecodeError:
-                    logger.warning("Invalid JSON from MEXC WS")
-                except Exception as e:
-                    logger.error(f"Error processing MEXC message: {e}")
+                            # v0.32.4: Buffered candle approach.
+                            if buffered_candle is None:
+                                # First ever kline — just buffer it.
+                                buffered_candle = candle
+                            elif candle.timestamp != buffered_candle.timestamp:
+                                # New candle period → previous one is closed.
+                                # Emit the buffered (previous) candle.
+                                prev = buffered_candle
+                                # Mark as closed — we have its final values.
+                                prev.closed = True
+                                self._last_candle_ts = prev.timestamp
+                                self._candles_received += 1
+
+                                if self.on_candle:
+                                    try:
+                                        result = self.on_candle(prev)
+                                        if asyncio.iscoroutine(result):
+                                            await result
+                                    except Exception as e:
+                                        logger.error(f"on_candle callback error: {e}")
+
+                                # Buffer the new (just-started) candle.
+                                buffered_candle = candle
+                            else:
+                                # Same candle period — update buffer with
+                                # the latest ohlcv values (especially close,
+                                # high, low, volume which keep changing).
+                                buffered_candle = candle
+
+                    except json.JSONDecodeError:
+                        logger.warning("Invalid JSON from MEXC WS")
+                    except Exception as e:
+                        logger.error(f"Error processing MEXC message: {e}")
+            finally:
+                # v0.32.4: Cancel the ping task when we exit the loop.
+                ping_task.cancel()
+                try:
+                    await ping_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+                # Flush the final buffered candle so the last period isn't lost.
+                if buffered_candle is not None and self.on_candle is not None:
+                    buffered_candle.closed = True
+                    if buffered_candle.timestamp != self._last_candle_ts:
+                        self._last_candle_ts = buffered_candle.timestamp
+                        self._candles_received += 1
+                        try:
+                            result = self.on_candle(buffered_candle)
+                            if asyncio.iscoroutine(result):
+                                await result
+                        except Exception as e:
+                            logger.error(f"on_candle flush error: {e}")
 
     # ============================================================
     # WARMUP: Fetch recent candles via REST before streaming

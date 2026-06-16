@@ -771,3 +771,227 @@ Los filtros v0.25.0 tenían sentido para evitar losses en vivo, pero al aplicarl
 3. **Test OOS:** arreglar el `PPMT.build(symbols=...)` para que los 11 tests OOS vuelvan a pasar
 4. **Relajar más umbrales si persiste FAIL:** si tras v0.32.3 el usuario aún ve FAIL, el siguiente sospechoso es el `confidence` que sale del `PredictionEngine` — puede necesitar su propio ajuste
 
+
+---
+
+## v0.32.4 — Fix crítico: MEXC WebSocket nunca entregaba candles cerradas
+
+**Fecha:** 2026-06-17
+**Síntoma del usuario:** Tras PASS exitoso (12 trades, 41.7% WR, MC LOW RISK), al pulsar **START PAPER** el dashboard se queda parado. El terminal repite infinitamente:
+
+```
+Connecting to MEXC (ETH/USDT)
+Streaming ETH/USDT 1h
+Price: $1,777.07 | Position: FLAT
+P&L: +0.00% | Regime: ranging | Candles: 49 | Signals: 0 | Trades: 0 |
+Pattern: [...] | Entropy: 0.0b
+```
+
+`Candles: 49` **nunca** sube. `Signals: 0` **siempre**. La conexión se reinicia cada 30-60s.
+
+### Root cause analysis (auditoría profunda)
+
+#### Pista #1 — 49 candles = exactamente el warmup
+
+`run_live()` calcula:
+```python
+warmup_candles = cfg.sax_window_size * 2 + cfg.pattern_length * cfg.sax_window_size
+              = 7 * 2 + 5 * 7
+              = 14 + 35
+              = 49
+```
+
+Para ETH/USDT 1h: `sax_window_size=7` (de `TIMEFRAME_ALPHA_DEFAULTS["1h"]`), `pattern_length=5` (default de `LiveConfig`). El usuario ve exactamente 49 → **0 candles vivas procesadas**. El WS está conectado (precio actualiza) pero `on_candle` nunca se invoca.
+
+#### Pista #2 — MEXC v3 kline NO tiene campo `x`
+
+`_parse_mexc_kline()` hacía:
+```python
+closed=k.get("x", False)
+```
+
+Pero MEXC v3 kline (`spot@public.kline.v3.api`) retorna:
+```json
+{"c": "...", "d": {"e": "...", "k": {
+    "t": 1700000000000, "T": 1700003600000,
+    "s": "ETHUSDT", "i": "Min60",
+    "o": "1777.0", "c": "1778.5", "h": "1780.0", "l": "1776.0",
+    "v": "1234.5", "a": "2193000.0"
+}}, "s": "ETHUSDT", "t": 1700000000000}
+```
+
+**No hay `x`.** `closed` siempre es `False`. La condición `if candle.closed and candle.timestamp != self._last_candle_ts:` NUNCA se cumple → `on_candle` jamás se invoca → 0 señales, 0 trades, 0 SAX symbols, entropy 0.0b, Pattern: `[]`.
+
+#### Pista #3 — MEXC requiere pings iniciados por el CLIENTE
+
+El código sólo respondía a pings del servidor:
+```python
+if msg.get("method") == "ping" or msg.get("ping"):
+    await ws.send(json.dumps({"method": "pong", "id": pong}))
+    continue
+```
+
+Pero MEXC v3 **no envía** pings del servidor. El protocolo es:
+- Cliente envía `{"method": "ping", "id": <id>}` cada ≤10s
+- Servidor responde `{"id": 0, "code": 0, "msg": "PONG"}` (siempre `id: 0`)
+
+Sin client pings, MEXC cierra la conexión a los ~30s. El feed reconecta, pero el warmup **no** se re-ejecuta (es una sola vez en `start()`), así que el ciclo se repite para siempre — explicando los mensajes repetidos "Connecting to MEXC".
+
+#### Pista #4 — websockets library pings empeoran el problema
+
+```python
+async with websockets.connect(
+    url,
+    ping_interval=15,    # ← envía WebSocket control-frame pings
+    ping_timeout=10,     # ← espera pong control-frame en 10s
+    ...
+)
+```
+
+`ping_interval=15` envía pings a nivel de protocolo WebSocket (RFC 6455 control frames). MEXC no responde a esos (sólo entiende pings a nivel aplicación). Tras `ping_timeout=10` sin pong, websockets cierra la conexión → reconexión → bucle.
+
+#### Pista #5 — SUBSCRIPTION sin `id` es rechazado silenciosamente
+
+Mi test de verificación contra MEXC real (`scripts/test_mexc_ws.py`) confirmó:
+```
+{'id': 0, 'code': 0, 'msg': 'Not Subscribed successfully! [spot@public.kline.v3.api+Min60+ethusdt]. Reason: Blocked!'}
+```
+
+El mensaje de subscripción original no incluía `id`. MEXC v3 lo requiere. Sin `id`, la subscripción se rechaza (en algunos entornos — el usuario en su Mac sí recibió ticks de precio, así que su subscripción funcionaba, pero la lógica sigue siendo frágil).
+
+### Fixes aplicados
+
+#### Fix #1 — `_mexc_subscribe_msg()` ahora incluye `id` (`websocket_feed.py:156`)
+
+```python
+def _mexc_subscribe_msg(symbol: str, timeframe: str, msg_id: int = 1) -> dict:
+    ...
+    return {
+        "method": "SUBSCRIPTION",
+        "params": [...],
+        "id": msg_id,  # v0.32.4: REQUERIDO por MEXC v3
+    }
+```
+
+#### Fix #2 — `_parse_mexc_kline()` infiere `closed` del wall-clock vs `k["T"]` (`websocket_feed.py:173`)
+
+```python
+explicit_closed = k.get("x")
+if explicit_closed is not None:
+    closed = bool(explicit_closed)         # Si MEXC algún día añade x, confiar en él
+elif end_ts > 0:
+    closed = now_ms >= end_ts              # Inferir de T (end time)
+else:
+    closed = False
+```
+
+Esto permite que el parser funcione hoy (sin x) y sea robusto si MEXC añade x en el futuro.
+
+#### Fix #3 — `_listen_mexc()` usa **buffered candle** strategy (`websocket_feed.py:564`)
+
+El parser por sí solo no basta: la inferencia por wall-clock es frágil cerca del límite de candle. Así que `_listen_mexc()` ahora:
+
+1. Mantiene `buffered_candle: Optional[Candle]` — el último kline del periodo actual.
+2. Cuando llega un kline con **timestamp distinto** al del buffer, el anterior se considera cerrado:
+   - Se marca `prev.closed = True`
+   - Se invoca `on_candle(prev)` con los valores finales (ohlcv completo)
+   - Se reemplaza el buffer con el nuevo kline (que abre el siguiente periodo)
+3. Si el timestamp es el mismo, se actualiza el buffer con los últimos valores (para tener el close/high/low/volume finales cuando llegue el cambio de timestamp).
+4. Al cerrar la conexión (finally), se hace flush del último buffer para no perder la última vela.
+
+Esto garantiza exactamente **una invocación de `on_candle` por periodo de vela**, con los valores finales.
+
+#### Fix #4 — Background ping task cada 10s (`websocket_feed.py:634`)
+
+```python
+async def _mexc_ping_loop():
+    ping_id = 1000
+    while self._running:
+        try:
+            await ws.send(json.dumps({"method": "ping", "id": ping_id}))
+            ping_id += 1
+        except Exception as e:
+            return
+        await asyncio.sleep(10)
+ping_task = asyncio.create_task(_mexc_ping_loop())
+```
+
+Mantiene la conexión viva indefinidamente. Se cancela limpiamente al cerrar.
+
+#### Fix #5 — Desactivar websockets protocol pings (`websocket_feed.py:612`)
+
+```python
+async with websockets.connect(
+    url,
+    ping_interval=None,    # v0.32.4: MEXC usa app-level pings, no protocol pings
+    ping_timeout=None,
+    close_timeout=5,
+)
+```
+
+Sin esto, websockets cierra la conexión a los 10s esperando un pong control-frame que MEXC nunca envía.
+
+#### Fix #6 — Manejo robusto de mensajes de control (`websocket_feed.py:667-702`)
+
+- `{"id":..., "code":0, "msg":"ok"}` → confirmación de subscripción (log info)
+- `{"id":0, "code":0, "msg":"PONG"}` → respuesta a nuestro ping (skip)
+- `{"id":0, "code":0, "msg":"Not Subscribed successfully! ...Blocked!"}` → **error explícito** al `on_error` callback (antes era silencioso)
+- `{"method":"ping"}` → server-initiated ping (raro en v3, pero manejado)
+- `{"method":"SUBSCRIPTION"}` → echo de subscripción (skip)
+
+#### Fix #7 — Tests exhaustivos (`tests/test_mexc_ws_parser.py`)
+
+7 tests cubren:
+- Subscripción incluye `id`
+- Parser infiere `closed=False` cuando T es futuro
+- Parser infiere `closed=True` cuando T es pasado
+- Parser confía en `x` explícito si está presente
+- Parser retorna `None` para mensajes de control (no-kline)
+- Parser soporta ambos nestings: `msg.k` y `msg.d.k`
+
+### Verificación
+
+#### Tests
+```
+tests/test_mexc_ws_parser.py: 7 passed
+Total suite (excluyendo OOS pre-existente): 167 passed
+```
+
+#### Test real contra MEXC
+`scripts/test_mexc_ws.py` confirmó empíricamente:
+1. Sin `id` en SUBSCRIPTION → "Not Subscribed successfully! Blocked!"
+2. MEXC responde pings con `{"id":0,"code":0,"msg":"PONG"}`
+3. MEXC nunca envía server-pings → el código viejo nunca respondía nada → server cerraba conexión
+
+### Archivos modificados
+
+```
+src/ppmt/data/websocket_feed.py        | 145 ++++++++++++++++++++++++++++++---
+src/ppmt/__init__.py                   |   2 +-
+pyproject.toml                         |   2 +-
+tests/test_mexc_ws_parser.py           | 154 +++++++++++++++++++++++++++++++++ (new)
+4 files changed, 285 insertions(+), 22 deletions(-)
+```
+
+### Lecciones aprendidas
+
+**1. Un bug silencioso puede enmascarar otro.**
+El usuario llevaba horas creyendo que el motor PPMT "no generaba señales" o "estaba muy restrictivo". En realidad, **jamás llegó ninguna vela viva al motor**. El motor veía sólo 49 velas de warmup, no tenía nada con qué generar señales. Sin telemetría de "candles vivas recibidas", fue imposible diagnosticar sin auditar el código.
+
+**2. Asumir el formato de un exchange basándote en OTRO exchange es peligroso.**
+El parser MEXC copiaba el campo `x` de Binance. MEXC v3 no lo tiene. Acción: cada exchange debe tener tests de parser independientes que verifiquen el formato REAL de sus mensajes.
+
+**3. Las reconexiones silenciosas ocultan el problema.**
+El feed se reconectaba cada 30s sin log visible de "conexión cerrada". El usuario sólo veía "Connecting to MEXC" repetido, sin entender que eran reconexiones. Acción: loguear explícitamente cada close/reconnect con la razón.
+
+**4. Hay que distinguir protocol-level pings de application-level pings.**
+WebSocket define pings a nivel de protocolo (RFC 6455 control frames). MEXC usa pings a nivel de aplicación (JSON `{"method":"ping"}`). Mezclar ambos causa desconexiones. Acción: por exchange, decidir explícitamente cuál usar y desactivar el otro.
+
+### Próximos pasos recomendados
+
+1. **Telemetría de WS feed:** exponer `_candles_received`, `_ticks_received`, `_reconnects` vía el dashboard para que el usuario vea si el feed está vivo.
+2. **Log explícito de desconexión:** cuando `_listen_mexc` salga del `async for`, loguear la razón (ClosedOK, error, timeout).
+3. **Heartbeat en dashboard:** si `_candles_received` no sube en 5 min, mostrar warning visible en el dashboard.
+4. **Test de integración end-to-end:** mock MEXC WS server que envíe klines con timestamp cambiante, verificar que `on_candle` se invoca una vez por periodo.
+5. **Soporte Binance/Bybit:** aplicar los mismos tests de parser para asegurar que no tengan bugs similares.
+
