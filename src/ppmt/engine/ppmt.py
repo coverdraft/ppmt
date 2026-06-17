@@ -51,6 +51,7 @@ from ppmt.core.sax import SAXEncoder
 from ppmt.core.trie import PPMTTrie, TrieNode
 from ppmt.core.matcher import FuzzyMatcher, MatchResult
 from ppmt.core.metadata import BlockLifecycleMetadata
+from ppmt.core.regime import RegimeDetector
 from ppmt.engine.weights import AdaptiveWeights, LevelStats, WEIGHT_PROFILES
 from ppmt.engine.signal import SignalGenerator, Signal, SignalType
 
@@ -156,6 +157,13 @@ class PPMT:
         # Current regime
         self._current_regime: Optional[str] = None
 
+        # v0.38.8: RegimeDetector instance (used for detect_simple during
+        # trie build). Auto-calibrated for crypto (vol=0.15, trend=0.001).
+        # The detect_simple method uses RegimeThresholds.simple_vol_cutoff
+        # (0.08) and simple_move_cutoff (0.02) — preserved verbatim from
+        # the previous _detect_simple_regime static method.
+        self.regime_detector = RegimeDetector()
+
         # Statistics
         self._total_patterns_built = 0
 
@@ -177,42 +185,24 @@ class PPMT:
         """
         Detect simple market regime from a window of OHLCV data.
 
-        Uses price direction and volatility to classify the window:
-        - trending_up: Strong upward move with low relative volatility
-        - trending_down: Strong downward move with low relative volatility
-        - volatile: High volatility regardless of direction
-        - ranging: Low volatility, no clear direction
+        v0.38.8: DEPRECATED — delegates to RegimeDetector.detect_simple().
+        Kept as a thin static wrapper for backwards compatibility with
+        any external callers. The thresholds (0.08 vol, 0.02 move) now
+        live in RegimeThresholds (core/thresholds.py) and are preserved
+        verbatim, so behaviour is identical to v0.38.7.
 
-        This is intentionally simple — the full RegimeDetector is available
-        for production use. This gives the trie enough regime info to
-        make V4 regime-aware features work.
+        New code should use:
+            engine.regime_detector.detect_simple(window_df)
+        instead of:
+            PPMT._detect_simple_regime(window_df)
+
+        Classification:
+        - trending_up:   move > 0.02 (2%+ up)
+        - trending_down: move < -0.02 (2%+ down)
+        - volatile:      range/entry > 0.08 (8%+ range)
+        - ranging:       none of the above
         """
-        if len(window_df) < 2:
-            return "ranging"
-
-        entry = window_df["close"].iloc[0]
-        exit_price = window_df["close"].iloc[-1]
-        high = window_df["high"].max()
-        low = window_df["low"].min()
-
-        # Direction
-        move_pct = (exit_price - entry) / entry if entry > 0 else 0.0
-
-        # Volatility: range as % of entry
-        if entry > 0:
-            volatility = (high - low) / entry
-        else:
-            volatility = 0.0
-
-        # Classify
-        if volatility > 0.08:  # 8%+ range = volatile
-            return "volatile"
-        elif move_pct > 0.02:  # 2%+ up = trending up
-            return "trending_up"
-        elif move_pct < -0.02:  # 2%+ down = trending down
-            return "trending_down"
-        else:
-            return "ranging"
+        return RegimeDetector().detect_simple(window_df)
 
     def set_tries(
         self,
@@ -294,7 +284,9 @@ class PPMT:
 
             # V4 FIX: Detect simple regime from price action for this window
             # This pipes regime into insert_with_observations (was dead code before)
-            regime = self._detect_simple_regime(window_df)
+            # v0.38.8: Now uses self.regime_detector.detect_simple() (delegates
+            # to RegimeDetector with RegimeThresholds.simple_*_cutoff).
+            regime = self.regime_detector.detect_simple(window_df)
 
             # Insert into all 4 levels
             for trie in [self.trie_n1, self.trie_n2, self.trie_n3, self.trie_n4]:

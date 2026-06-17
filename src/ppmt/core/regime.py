@@ -136,3 +136,63 @@ class RegimeDetector:
             else:
                 regimes.append(self.detect(prices[:i + 1]))
         return regimes
+
+    # ---------------------------------------------------------------- #
+    # Simple regime detection (v0.38.8)
+    # ---------------------------------------------------------------- #
+    # Used by PPMT engine during trie build (ppmt.py:_detect_simple_regime
+    # was a static method with hardcoded 0.08 vol and 0.02 move cutoffs).
+    # Now unified: detect_simple takes a window DataFrame and uses
+    # RegimeThresholds.simple_vol_cutoff / simple_move_cutoff (same values,
+    # 0.08 and 0.02, preserved verbatim). This keeps the trie-tagging
+    # logic lightweight while sharing the threshold source-of-truth with
+    # the full RegimeDetector.
+    # ---------------------------------------------------------------- #
+
+    def detect_simple(self, window_df) -> str:
+        """
+        Lightweight regime detection from a window of OHLCV data.
+
+        Uses price direction and intra-window volatility to classify:
+        - trending_up:   move > simple_move_cutoff
+        - trending_down: move < -simple_move_cutoff
+        - volatile:      range/entry > simple_vol_cutoff
+        - ranging:       none of the above
+
+        Cutoffs come from RegimeThresholds (default 0.08 / 0.02, matching
+        the historical hardcoded values in ppmt.py v0.38.7).
+
+        Args:
+            window_df: pd.DataFrame with columns 'close', 'high', 'low'
+                       (any length >= 2; the caller picks the window size).
+
+        Returns:
+            One of: 'trending_up', 'trending_down', 'volatile', 'ranging'.
+        """
+        if len(window_df) < 2:
+            return "ranging"
+
+        # Lazy import to avoid hard coupling at module load time.
+        from ppmt.core.thresholds import RegimeThresholds
+        rt = RegimeThresholds.default()
+
+        entry = window_df["close"].iloc[0]
+        exit_price = window_df["close"].iloc[-1]
+        high = window_df["high"].max()
+        low = window_df["low"].min()
+
+        # Direction
+        move_pct = (exit_price - entry) / entry if entry > 0 else 0.0
+
+        # Volatility: range as % of entry
+        volatility = (high - low) / entry if entry > 0 else 0.0
+
+        # Classify (matches ppmt.py v0.38.7 logic exactly, same cutoff order)
+        if volatility > rt.simple_vol_cutoff:
+            return "volatile"
+        elif move_pct > rt.simple_move_cutoff:
+            return "trending_up"
+        elif move_pct < -rt.simple_move_cutoff:
+            return "trending_down"
+        else:
+            return "ranging"
