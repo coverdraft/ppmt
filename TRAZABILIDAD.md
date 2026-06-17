@@ -1,7 +1,7 @@
 # TRAZABILIDAD PPMT — Estado del Proyecto
 
 > Última actualización: 2026-06-17
-> Versión actual: **v0.38.6** — REST polling por defecto (fix Binance WS rate limit)
+> Versión actual: **v0.38.7** — Fase 0: higiene del repo (archive, no delete)
 > Repositorio: https://github.com/coverdraft/ppmt
 > Idioma: Español
 
@@ -4168,4 +4168,104 @@ ppmt terminal
 # En el dashboard: Start All
 # Después de 1-2 min, todos los tokens deben pasar a RUNNING (no STALE)
 # Los logs deben decir: "Connected to binance (REST polling)"
+```
+
+---
+
+## v0.38.7 — 2026-06-18 — Fase 0: higiene del repo (archive, no delete)
+
+### Problema
+El repo acumulaba dos identidades: el motor PPMT (Python, vivo) y un Next.js
+obsoleto (desde v0.32.0 junio-16 el dashboard oficial es FastAPI en :8420).
+Además había scripts duplicados, JSONs sueltos de debug, y 8 docs redundantes.
+Esto dificultaba onboarding y commit hygiene.
+
+### Verificación previa (antes de mover nada)
+4 comandos `rg` confirmaron que `src/ppmt/` vivía 100% aislado del Next.js:
+1. `localhost:3000|next dev|next start` → solo en `package.json` y dentro del
+   propio `src/app/` + `src/components/` (auto-referencia).
+2. `from.*src/lib/services|from.*src/components` en `src/app/` → vacío.
+3. `npm|node|supervisor` en `src/ppmt/ scripts/` → solo "node" como "child_node"
+   del MoneyManager / trie, no Node.js.
+4. `src/lib|src/components|src/hooks|src/core|src/app` en `src/ppmt/` → vacío.
+
+### Decisión del usuario
+**Mover (NO borrar)** todo lo obsoleto a `_archive/v0.38.6_pre_cleanup/` con
+subcarpetas, como safety net reversible por ~7 días. Si no se necesita, se hace
+`git rm -r _archive/` en un único commit final.
+
+### Estructura del archive
+```
+_archive/v0.38.6_pre_cleanup/
+├── README.md           ← explicación completa + cómo revertir
+├── nextjs_code/        ← src/app, src/components, src/hooks, src/core,
+│                         src/lib, src/store, src/tests, src/index.ts,
+│                         src/proxy.ts
+├── nextjs_configs/     ← package.json, tsconfig.json, tailwind.config.ts,
+│                         postcss.config.mjs, eslint.config.mjs,
+│                         vitest.config.ts, components.json,
+│                         package-lock.json, bun.lock, supervisor.js,
+│                         tsconfig.tsbuildinfo, next.config.ts
+├── obsolete_root_scripts/ ← predict_live.py, run_papertrader.py,
+│                         signal_daemon.py, signal_loop.sh, start.sh
+├── debug_artifacts/    ← signals/, public/, examples/
+├── ts_tests/           ← tests/*.test.ts (duplican los .py)
+└── redundant_docs/     ← ANALISIS_CRITICO_v0.34.0.md, ARCHITECTURE.md,
+                          CHANGELOG.md, PPMT_TERMINAL_PLAN.md,
+                          TRACEABILITY.md, TRACEABILITY_v0.31.md,
+                          worklog-new.md, worklogs/
+```
+
+### Procedimiento
+7 commits (1 scaffold + 6 etapas, un commit por grupo):
+
+| Commit | Grupo | Archivos movidos |
+|--------|-------|-------------------|
+| `5155503` | scaffold | `_archive/v0.38.6_pre_cleanup/` + README |
+| `3bacb8a` | Etapa 1/6 | Next.js code (`src/app`, `src/components`, etc.) |
+| `e34ab98` | Etapa 2/6 | TS/JS configs |
+| `def15ef` | Etapa 3/6 | scripts raíz obsoletos |
+| `fc60480` | Etapa 4/6 | `signals/`, `public/`, `examples/` |
+| `1bc024e` | Etapa 5/6 | TS tests (`*.test.ts`) |
+| `c9fb7d2` | Etapa 6/6 | docs redundantes |
+
+Después de cada etapa se verificó: `import ppmt`, `RealtimeTrader` y `FastAPI app`
+importan OK. `pytest --collect-only` encuentra 280 tests Python.
+
+### Conservado en raíz (vivo)
+- `src/ppmt/` — motor completo.
+- `config/` (`default.env`, `default.yaml`), `docs/` (2 PDFs).
+- `scripts/`, `tests/*.py` (15 archivos).
+- `prisma/`, `skills/`, `mini-services/`, `agent-ctx/` (decisión usuario).
+- `groups_config.json`, `oos_validation_results.json` (referenciados vivos).
+- `setup_fresh.sh`, `pyproject.toml`, `HANDOFF.md`, `TRAZABILIDAD.md`,
+  `README.md`, `worklog.md`, `Caddyfile`, `.zscripts/`.
+
+### Cómo revertir
+Cada grupo se movió en su propio commit. Para restaurar uno:
+```bash
+git revert <commit-hash-del-movimiento>
+```
+
+### Próximo paso (en ~7 días)
+Si nada del archive fue necesario:
+```bash
+git rm -r _archive/
+git commit -m "chore: drop _archive/ — v0.38.6 pre-cleanup confirmed unused"
+```
+
+### Archivos modificados (bump versión)
+- `pyproject.toml`, `src/ppmt/cli/main.py`, `src/ppmt/terminal/server.py`,
+  `src/ppmt/terminal/static/index.html` — bump 0.38.6 → 0.38.7
+- `HANDOFF.md`, `TRAZABILIDAD.md` — actualizada "versión actual"
+
+### Cómo verificar
+```bash
+cd ~/ppmt
+git pull origin main
+pip install -e . --quiet
+ppmt --version          # debe decir 0.38.7
+ppmt terminal           # dashboard debe arrancar en :8420
+ls src/                 # debe mostrar solo: ppmt/
+ls _archive/v0.38.6_pre_cleanup/   # safety net intacto
 ```
