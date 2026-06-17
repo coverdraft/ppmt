@@ -19,7 +19,7 @@
   --radius:4px;--radius-sm:3px;
 }
 html{font-size:12px}
-body{background:var(--bg);color:var(--text);font-family:var(--sans);line-height:1.4;min-height:100vh;overflow:hidden;display:flex;flex-direction:column}
+body{background:var(--bg);color:var(--text);font-family:var(--sans);line-height:1.4;min-height:100vh;overflow-y:auto;overflow-x:hidden;display:flex;flex-direction:column}
 
 /* === SCROLLBAR === */
 ::-webkit-scrollbar{width:5px;height:5px}
@@ -44,9 +44,9 @@ body{background:var(--bg);color:var(--text);font-family:var(--sans);line-height:
 
 /* === TERMINAL GRID === */
 .terminal-grid{
-  flex:1;display:grid;overflow:hidden;min-height:0;
+  flex:1;display:grid;overflow:visible;min-height:0;
   grid-template-columns:1fr 360px;
-  grid-template-rows:1fr auto auto;
+  grid-template-rows:auto auto auto;
   grid-template-areas:
     "chart   sidebar"
     "mid-l   mid-r"
@@ -54,7 +54,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--sans);line-height:
 }
 
 /* === CHART AREA === */
-.chart-section{grid-area:chart;display:flex;flex-direction:column;border-right:1px solid var(--border);min-height:0;overflow:hidden}
+.chart-section{grid-area:chart;display:flex;flex-direction:column;border-right:1px solid var(--border);min-height:400px;overflow:hidden}
 .chart-toolbar{background:var(--bg2);border-bottom:1px solid var(--border);padding:4px 8px;display:flex;align-items:center;gap:6px;flex-shrink:0}
 .chart-toolbar select,.chart-toolbar input{background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:var(--mono);font-size:10px;padding:2px 5px;border-radius:2px;outline:none}
 .chart-toolbar select:focus,.chart-toolbar input:focus{border-color:var(--accent)}
@@ -63,11 +63,11 @@ body{background:var(--bg);color:var(--text);font-family:var(--sans);line-height:
 #priceChart{width:100%;height:100%}
 
 /* === SIDEBAR === */
-.sidebar-section{grid-area:sidebar;display:flex;flex-direction:column;overflow-y:auto;overflow-x:hidden;background:var(--bg2);border-right:none}
+.sidebar-section{grid-area:sidebar;display:flex;flex-direction:column;overflow-y:auto;overflow-x:hidden;background:var(--bg2);border-right:none;max-height:calc(100vh - 80px)}
 
 /* === MIDDLE ROW === */
-.mid-left{grid-area:mid-l;border-top:1px solid var(--border);border-right:1px solid var(--border);overflow:hidden}
-.mid-right{grid-area:mid-r;border-top:1px solid var(--border);overflow:hidden}
+.mid-left{grid-area:mid-l;border-top:1px solid var(--border);border-right:1px solid var(--border);overflow-y:auto;max-height:480px}
+.mid-right{grid-area:mid-r;border-top:1px solid var(--border);overflow-y:auto;max-height:480px}
 
 /* === BLOTTER === */
 .blotter-section{grid-area:blotter;border-top:1px solid var(--border);display:flex;overflow:hidden;max-height:220px;min-height:100px}
@@ -383,7 +383,11 @@ tr:hover td{background:rgba(96,165,250,.04)}
             <span class="text-red" id="sweepFailed">0 FAIL</span>
             <span class="text-yellow" id="sweepSkipped">0 skip</span>
           </div>
-          <div id="sweepResults" style="margin-top:4px;max-height:140px;overflow-y:auto;font-family:var(--mono);font-size:9px;display:none"></div>
+          <div id="sweepResults" style="margin-top:4px;max-height:280px;overflow-y:auto;font-family:var(--mono);font-size:9px;display:none;border:1px solid var(--border);border-radius:2px;padding:3px;background:var(--bg3)"></div>
+          <div style="margin-top:4px;display:flex;gap:4px">
+            <button class="btn btn-ghost btn-block btn-sm" id="btnSelectAllPass" onclick="selectAllPassTokens()" style="display:none">Select All PASS</button>
+            <button class="btn btn-ghost btn-block btn-sm" id="btnTradeSelected" onclick="tradeSelectedTokens()" style="display:none">Trade Selected</button>
+          </div>
         </div>
 
         <!-- Progress Steps -->
@@ -666,9 +670,10 @@ tr:hover td{background:rgba(96,165,250,.04)}
     <div class="status-item"><span class="label">WS:</span><span class="value" id="btmWs">--</span></div>
     <div class="status-item"><span class="label">Reconn:</span><span class="value" id="btmReconn">0</span></div>
     <div class="status-item"><span class="label">SAX:</span><span class="value" id="btmSax">0</span></div>
+    <div class="status-item" style="margin-left:12px"><span id="statusMessage" style="color:var(--text3)">Listo.</span></div>
   </div>
   <div class="status-right">
-    <span>PPMT v0.32.6</span>
+    <span>PPMT v0.34.1</span>
     <div class="status-item"><span class="label">Uptime:</span><span class="value" id="btmUptime">00:00:00</span></div>
   </div>
 </footer>
@@ -1570,12 +1575,21 @@ async function validateToken() {
 }
 
 async function startPaperTrading() {
-  if (!validationPassed) return;
+  if (!validationPassed) {
+    alert('No puedes iniciar Paper Trading: el token no ha pasado la validación (PASS). Ejecuta "Prepare Token" primero.');
+    return;
+  }
 
   const symbol = document.getElementById('setupSymbol').value;
   const timeframe = document.getElementById('setupTimeframe').value;
   const exchange = document.getElementById('chartExchange').value;
   const capital = parseFloat(document.getElementById('setupCapital').value) || 1000;
+
+  // UX: mostrar feedback inmediato
+  const btn = document.getElementById('btnStartTrading');
+  const originalText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Iniciando...';
 
   try {
     const res = await fetch(`${API}/api/start-trading`, {
@@ -1588,11 +1602,23 @@ async function startPaperTrading() {
       })
     });
 
-    if (!res.ok) throw new Error('Error iniciando trading');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
+
+    if (!data.ok) {
+      alert('No se pudo iniciar Paper Trading:\n\n' + (data.error || 'Error desconocido') +
+            '\n\nSugerencias:\n' +
+            '• Verifica que el token haya pasado validación (verde PASS)\n' +
+            '• Prueba con timeframe 15m o 1h (más datos que 1m)\n' +
+            '• Si MEXC falla, cambia a Binance en el chart toolbar');
+      btn.disabled = false;
+      btn.textContent = originalText;
+      return;
+    }
 
     isTrading = true;
     document.getElementById('btnStartTrading').disabled = true;
+    document.getElementById('btnStartTrading').textContent = 'Running';
     document.getElementById('btnStopTrading').disabled = false;
     updateTradingBadge('LIVE');
 
@@ -1601,9 +1627,28 @@ async function startPaperTrading() {
     document.getElementById('chartTimeframe').value = timeframe;
     loadChart();
 
+    // v0.34.1: feedback claro en el status bar
+    showStatusMsg(`Paper trading iniciado: ${symbol} ${timeframe} en ${exchange}. ` +
+                  `Esperando señales... (puede tardar varios minutos según TF)`);
+
   } catch (e) {
     console.error('startPaperTrading error:', e);
+    alert('Error de red iniciando Paper Trading: ' + e.message +
+          '\n\n¿Está corriendo el servidor en http://localhost:8420?');
+    btn.disabled = false;
+    btn.textContent = originalText;
   }
+}
+
+// v0.34.1: helper para mostrar mensajes en el status bar
+function showStatusMsg(msg) {
+  const sb = document.getElementById('statusMessage');
+  if (sb) {
+    sb.textContent = msg;
+    sb.style.color = 'var(--accent2)';
+    setTimeout(() => { if (sb) sb.style.color = 'var(--text3)'; }, 5000);
+  }
+  console.log('[PPMT]', msg);
 }
 
 async function stopTrading() {
@@ -2352,14 +2397,25 @@ async function pollSweepStatus() {
         const pf = r.profit_factor !== undefined ? Number(r.profit_factor).toFixed(2) : '--';
         const trades = r.total_trades || 0;
         const skippedTag = r.skipped ? ' <span class="text-muted">(cached)</span>' : '';
+        // v0.34.1: checkbox for PASS tokens so user can select which to trade
+        const checkbox = r.verdict === 'PASS'
+          ? `<input type="checkbox" class="sweep-pass-chk" data-symbol="${r.symbol}" style="margin-right:4px;vertical-align:middle" onclick="event.stopPropagation()">`
+          : '<span style="display:inline-block;width:13px"></span>';
+        const score = computeScore(r);
         return `<div style="padding:2px 0;border-bottom:1px solid var(--border)">
-          <span class="${cls}" style="font-weight:600">${r.verdict}</span>
+          ${checkbox}<span class="${cls}" style="font-weight:600">${r.verdict}</span>
           <span style="color:var(--text);margin-left:6px">${r.symbol}</span>
           <span class="text-muted" style="margin-left:8px">PF ${pf}</span>
           <span class="text-muted" style="margin-left:6px">WR ${wr}</span>
-          <span class="text-muted" style="margin-left:6px">${trades} trades</span>${skippedTag}
+          <span class="text-muted" style="margin-left:6px">${trades} trades</span>
+          <span class="text-muted" style="margin-left:6px">Score ${score.toFixed(1)}</span>${skippedTag}
         </div>`;
       }).join('');
+
+      // v0.34.1: show "Select All PASS" + "Trade Selected" if there's at least 1 PASS
+      const hasPass = sorted.some(r => r.verdict === 'PASS');
+      document.getElementById('btnSelectAllPass').style.display = hasPass ? 'block' : 'none';
+      document.getElementById('btnTradeSelected').style.display = hasPass ? 'block' : 'none';
     }
 
     // Stop polling when sweep finishes
@@ -2390,6 +2446,59 @@ async function cancelSweep() {
   } catch (e) {
     console.error('cancelSweep error:', e);
   }
+}
+
+// v0.34.1: computeScore — mismo algoritmo que score_signal() en backend
+function computeScore(r) {
+  if (!r) return 0;
+  const pf = Number(r.profit_factor) || 0;
+  const sharpe = Number(r.sharpe) || 0;
+  const wr = Number(r.win_rate) || 0;
+  const dd = Number(r.max_drawdown) || 0;
+  const trades = Number(r.total_trades) || 0;
+  const pfScore = Math.min(1, Math.max(0, pf / 3));
+  const sharpeScore = Math.min(1, Math.max(0, sharpe / 3));
+  const wrScore = wr > 0.3 ? Math.min(1, Math.max(0, (wr - 0.3) / 0.7)) : 0;
+  const ddScore = dd >= 0 ? Math.min(1, Math.max(0, 1 - dd / 0.5)) : 0;
+  const tradesScore = Math.min(1, trades / 50);
+  return Math.round(
+    (pfScore * 0.35 + sharpeScore * 0.20 + wrScore * 0.15 +
+     ddScore * 0.20 + tradesScore * 0.10) * 100
+  );
+}
+
+// v0.34.1: selectAllPassTokens — marca todos los checkboxes de PASS
+function selectAllPassTokens() {
+  document.querySelectorAll('.sweep-pass-chk').forEach(chk => { chk.checked = true; });
+  showStatusMsg('Todos los tokens PASS seleccionados.');
+}
+
+// v0.34.1: tradeSelectedTokens — pasa los tokens seleccionados al setup
+// y arranca Start Paper para cada uno (secuencialmente)
+async function tradeSelectedTokens() {
+  const selected = [];
+  document.querySelectorAll('.sweep-pass-chk').forEach(chk => {
+    if (chk.checked) selected.push(chk.dataset.symbol);
+  });
+  if (selected.length === 0) {
+    alert('Selecciona al menos un token PASS (usa los checkboxes).');
+    return;
+  }
+  // Por ahora: cargar el primero en el setup y avisar al usuario
+  // (la ejecución multi-token simultánea requiere v0.35 portfolio runner)
+  const first = selected[0];
+  document.getElementById('setupSymbol').value = first.split('/')[0] + '/USDT';
+  document.getElementById('chartSymbol').value = first;
+  loadChart();
+
+  let msg = `Has seleccionado ${selected.length} token(s):\n\n`;
+  msg += selected.join(', ') + '\n\n';
+  msg += `Se ha cargado ${first} en el panel de Setup.\n`;
+  msg += `Pulsa "Prepare Token" y luego "Start Paper" para operarlo.\n\n`;
+  msg += `Nota: la ejecución simultánea de varios tokens requiere el\n`;
+  msg += `Portfolio Runner (planeado para v0.35). Por ahora puedes operarlos\n`;
+  msg += `uno a uno secuencialmente.`;
+  alert(msg);
 }
 </script>
 

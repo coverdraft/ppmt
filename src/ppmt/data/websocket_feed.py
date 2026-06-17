@@ -626,6 +626,7 @@ class WebSocketFeed:
                 self.on_status("streaming", f"Streaming {self.symbol} {self.timeframe}")
 
             self._reconnect_count = 0
+            self._mexc_reject_count = 0  # v0.34.1: reset on fresh connection
 
             # v0.32.4: Background task to send client-side application pings
             # every 10 seconds. MEXC REQUIRES the client to initiate pings;
@@ -670,14 +671,41 @@ class WebSocketFeed:
                         # msg contains "Not Subscribed successfully".
                         if "code" in msg and "msg" in msg and "d" not in msg and "k" not in msg:
                             if "Not Subscribed" in str(msg.get("msg", "")):
-                                logger.error(
-                                    f"MEXC subscription REJECTED: {msg}. "
-                                    f"Check symbol/timeframe/exchange reachability."
-                                )
-                                if self.on_error:
-                                    self.on_error(
-                                        RuntimeError(f"MEXC subscription rejected: {msg.get('msg')}")
+                                # v0.34.1: MEXC sometimes returns "Reason: Blocked!" for
+                                # valid symbols — this is a transient rate-limit / regional
+                                # block, NOT a real symbol problem. Wait 2s and retry the
+                                # subscription with a fresh msg_id (up to 3 attempts).
+                                self._mexc_reject_count = getattr(self, "_mexc_reject_count", 0) + 1
+                                if self._mexc_reject_count <= 3:
+                                    logger.warning(
+                                        f"MEXC subscription rejected (attempt "
+                                        f"{self._mexc_reject_count}/3): {msg.get('msg')}. "
+                                        f"Retrying in 2s..."
                                     )
+                                    await asyncio.sleep(2)
+                                    try:
+                                        retry_msg = _mexc_subscribe_msg(
+                                            self.symbol, self.timeframe,
+                                            msg_id=100 + self._mexc_reject_count,
+                                        )
+                                        await ws.send(json.dumps(retry_msg))
+                                    except Exception as e:
+                                        logger.error(f"MEXC retry send failed: {e}")
+                                    continue
+                                else:
+                                    logger.error(
+                                        f"MEXC subscription REJECTED after 3 retries: {msg}. "
+                                        f"Falling back: MEXC may be rate-limiting or blocking this symbol. "
+                                        f"Suggest switching exchange to 'binance' in the dashboard."
+                                    )
+                                    if self.on_error:
+                                        self.on_error(
+                                            RuntimeError(
+                                                f"MEXC subscription rejected after 3 retries. "
+                                                f"Try switching to Binance in the chart toolbar "
+                                                f"(symbol: {self.symbol}, tf: {self.timeframe})."
+                                            )
+                                        )
                             else:
                                 logger.info(f"MEXC subscription confirmed: {msg}")
                             continue

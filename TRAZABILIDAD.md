@@ -2145,3 +2145,155 @@ python3 -m ppmt.terminal.server
 2. **Validar el ahorro del sweep cache** — hacer un Sweep All Groups antes y después del update, medir tiempo. Log esperado: `Sweep cache: X hits, Y misses, ahorro ~Zs`.
 3. **Monitorizar estabilidad de Recién Listados** — con `min_dias=3`, comparar win_rate de los tokens listados <3d vs ≥3d. Debería mejorar.
 4. **Probar recalibración en TF=4h** — abrir dashboard, seleccionar BTC/USDT 4h, dejar correr 24h. El log debería mostrar `recalibration_interval=32000` en lugar de `2000`.
+
+---
+
+## v0.34.1 — Fixes UI + MEXC retry + Sweep selectivo (17 jun 2026)
+
+### Contexto
+
+El usuario reportó 4 bugs al usar v0.34.0 en su Mac:
+
+1. **Setup Validation daba mismo resultado para todas las del Top 10** — parecía que el Ingest no funcionaba
+2. **Start Paper Trading no buscaba operaciones** — el WS se desconectaba y no llegaban señales
+3. **UI no era responsive** — desde la zona del chart para abajo no se podía ver nada (no scroll)
+4. **MEXC subscription REJECTED: "Reason: Blocked!"** para ETH/USDT 1h
+5. **Portfolio Manager no se encontraba** en el dashboard
+
+### Diagnóstico
+
+| Bug | Causa raíz |
+|-----|------------|
+| 1 | Era síntoma del bug #4: MEXC reject → 0 candles → 0 trades → "todas FAIL igual". El Ingest sí funciona (validado en código). |
+| 2 | Era síntoma del bug #4: sin candles del WS, el RealtimeTrader no generaba señales. |
+| 3 | `body{overflow:hidden}` + `.terminal-grid{overflow:hidden}` + `grid-template-rows:1fr auto auto` cortaba el contenido bajo el chart. |
+| 4 | MEXC a veces devuelve "Reason: Blocked!" para símbolos válidos — es un rate-limit / bloqueo regional temporal. El código abortaba al primer reject. |
+| 5 | El Portfolio Manager SÍ existe — es el panel `Portfolio & Positions` en la columna central izquierda del dashboard. |
+
+### Fixes aplicados
+
+#### Fix 1: UI scroll (CRÍTICO)
+
+**Archivos:** `src/ppmt/terminal/static/index.html`
+
+Cambios CSS:
+- `body`: cambiado `overflow:hidden` → `overflow-y:auto; overflow-x:hidden`
+- `.terminal-grid`: cambiado `overflow:hidden` → `overflow:visible`, rows `1fr auto auto` → `auto auto auto`
+- `.chart-section`: añadido `min-height:400px` (no se colapsa)
+- `.sidebar-section`: añadido `max-height:calc(100vh - 80px)` (no se hace infinita)
+- `.mid-left` / `.mid-right`: cambiado `overflow:hidden` → `overflow-y:auto; max-height:480px`
+
+**Resultado:** ahora toda la página se puede scroll verticalmente y cada panel tiene su propio scroll interno.
+
+#### Fix 2: MEXC WebSocket retry con backoff
+
+**Archivo:** `src/ppmt/data/websocket_feed.py`
+
+Cuando MEXC devuelve `"Not Subscribed successfully! Reason: Blocked!"`:
+- v0.34.0: abortaba al primer reject → `RuntimeError` → WS muerto → 0 candles
+- v0.34.1: reintenta hasta 3 veces con 2s de espera entre intentos, usando msg_id incremental
+  (100, 101, 102). Si después de 3 intentos sigue rechazando, recién entonces lanza error
+  con sugerencia clara: "Try switching to Binance in the chart toolbar".
+
+El contador `_mexc_reject_count` se resetea en cada reconexión fresca.
+
+#### Fix 3: Start Paper con feedback claro
+
+**Archivo:** `src/ppmt/terminal/static/index.html` (`startPaperTrading()`)
+
+- Antes: si fallaba el `fetch`, no mostraba nada (solo `console.error`)
+- Después:
+  - Alert con causas probables y sugerencias concretas
+  - Botón cambia a "Iniciando..." durante el request
+  - Botón cambia a "Running" cuando arranca OK
+  - Mensaje en status bar: `"Paper trading iniciado: ETH/USDT 15m en mexc. Esperando señales..."`
+  - Si no hay PASS validation, alert temprano: `"ejecuta Prepare Token primero"`
+
+#### Fix 4: Sweep con checkboxes + selección
+
+**Archivo:** `src/ppmt/terminal/static/index.html`
+
+Mejoras al panel de Sweep Results:
+- Cada token PASS ahora tiene un checkbox
+- Nuevos botones: `Select All PASS` y `Trade Selected`
+- Columna `Score` (cálculo idéntico a `score_signal()` del backend)
+- Contenedor del sweep con max-height 280px y borde visible
+
+Flujo nuevo:
+1. Usuario hace Sweep → ve todos los tokens con su verdict + métricas + score
+2. Marca los checkboxes de los tokens PASS que quiere operar
+3. (Atajo) `Select All PASS` marca todos
+4. `Trade Selected` carga el primer token en el panel de Setup y muestra un mensaje
+   explicando que la ejecución simultánea multi-token requiere v0.35 (Portfolio Runner)
+
+#### Fix 5: Status bar con mensajes
+
+- Añadido `<span id="statusMessage">` en el footer del status bar
+- Función JS `showStatusMsg(msg)` para mostrar mensajes temporales (5s en azul, vuelve a gris)
+- Versión actualizada a `v0.34.1` en el status bar
+
+### Tests ejecutados
+
+- `scripts/test_v0340_standalone.py`: 37/37 pasan (sin regresiones)
+- Validación sintáctica Python: `websocket_feed.py`, `server.py`, `history_manager.py` OK
+- Validación HTML: 237/237 `<div>` balanceados, 2/2 `<script>` balanceados
+
+### Cómo arrancar en Mac (instrucciones completas)
+
+```bash
+# 1. Ir al directorio del repo
+cd ~/projects/ppmt
+
+# 2. Actualizar código
+git pull origin main
+
+# 3. Activar entorno virtual (si lo usas)
+source .venv/bin/activate
+# o: source venv/bin/activate
+
+# 4. Reinstalar paquete (importante: recoge los cambios)
+pip install -e .
+
+# 5. Verificar versión
+python3 -c "import ppmt; print(ppmt.__version__)"
+# debe mostrar: 0.34.1
+
+# 6. (Opcional) Ejecutar tests de regresión
+python3 src/tests/test_v0340.py
+# debe mostrar: 37 pasaron, 0 fallaron
+
+# 7. Arrancar el dashboard
+python3 -m ppmt.terminal.server
+# debe mostrar algo como:
+#   INFO:     Uvicorn running on http://0.0.0.0:8420
+
+# 8. Abrir en el navegador
+open http://localhost:8420
+```
+
+### Solución de problemas comunes en Mac
+
+| Problema | Solución |
+|----------|----------|
+| `python: command not found` | Usar `python3` (Mac no trae `python` por defecto) |
+| `ModuleNotFoundError: ppmt` | `pip install -e .` desde el directorio del repo |
+| Versión incorrecta | `pip uninstall ppmt-terminal -y && pip install -e .` |
+| DB locked | `lsof ~/.ppmt/ppmt.db \| awk 'NR>1 {print $2}' \| xargs kill` |
+| Puerto 8420 ocupado | `lsof -ti:8420 \| xargs kill -9` |
+| MEXC sigue rechazando | Cambiar a Binance en el chart toolbar del dashboard |
+| Chart no carga | Verificar que el servidor responde: `curl http://localhost:8420/api/health` |
+
+### Próximos pasos sugeridos (post-v0.34.1)
+
+1. **Probar el dashboard con Binance primero** — MEXC está dando problemas de rate-limit. Binance es más estable para validar el flujo.
+2. **Hacer un Sweep de Top 10 Mcap con TF=15m** — deberías ver resultados individuales por token, no todos iguales.
+3. **Si algún token da MEXC reject**, cambiar a Binance en el toolbar y reintentar.
+4. **Cuando tengas 3+ tokens PASS**, usar los checkboxes para seleccionar y cargarlos uno a uno en el Setup.
+5. **Confirmar que el Start Paper arranca** — el status bar debe mostrar `"Paper trading iniciado: ..."`. Si no, revisar la consola del navegador (F12).
+
+### Pendiente para v0.35 (próxima release)
+
+- Portfolio Runner: ejecutar varios tokens PASS en paralelo (no secuencial)
+- CLI `ppmt portfolio create/status/rebalance`
+- `ppmt insights` con data acumulada de `historical_scan`
+- Persistencia SQLite del PortfolioManager (tablas `portfolios` + `portfolio_positions`)
