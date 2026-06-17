@@ -104,11 +104,15 @@ def test_sweep_state_initial():
 
 
 def test_sweep_request_model_defaults():
-    """SweepRequest pydantic model accepts empty symbols (server uses defaults)."""
+    """SweepRequest pydantic model accepts empty symbols (server uses defaults).
+
+    v0.39.0: Updated to assert 'binance' (default since v0.35.0 — MEXC was
+    blocking subscriptions from EU networks).
+    """
     req = SweepRequest()
     assert req.symbols == []
     assert req.timeframe == "1h"
-    assert req.exchange == "mexc"
+    assert req.exchange == "binance"
     assert req.capital == 1_000.0
     assert req.skip_if_pass is True
 

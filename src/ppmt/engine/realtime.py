@@ -175,6 +175,15 @@ class ReplayConfig:
     """Callback fired when a trade is closed. Receives the trade dict."""
     on_candle: Optional[Callable] = None
     """Callback fired for each processed candle. Receives (candle_idx, price)."""
+    on_position: Optional[Callable] = None
+    """v0.39.0: Callback fired when a position opens OR closes.
+    Receives a dict with: {action: 'open'|'close', symbol, direction,
+    entry_price, entry_time, sl_price, tp_price, size, confidence,
+    exit_price (only on close), exit_time (only on close),
+    pnl_pct (only on close), exit_reason (only on close)}.
+    Used by the dashboard server to update _multi_sessions[node_id]
+    so /api/multi-status can report the open position to the chart
+    for entry/exit price-line overlay."""
     # v0.32.3: Validation mode — relaxes strict v0.25.0 signal filters so the
     # backtest can produce enough trades to reach the 5-trade MC threshold.
     # Live trading keeps strict filters (safety first); validation needs a
@@ -262,6 +271,18 @@ class LiveConfig:
     so launching 20+ parallel tokens via Start All gets most handshakes rejected.
     REST polling via ccxt uses ephemeral connections and handles rate limits
     automatically, making it reliable for multi-token paper trading."""
+    on_signal: Optional[Callable] = None
+    """v0.39.0: Same as ReplayConfig.on_signal — fired when a signal generates."""
+    on_trade: Optional[Callable] = None
+    """v0.39.0: Same as ReplayConfig.on_trade — fired when a trade closes."""
+    on_candle: Optional[Callable] = None
+    """v0.39.0: Same as ReplayConfig.on_candle — fired for each candle."""
+    on_position: Optional[Callable] = None
+    """v0.39.0: Fired when a position opens OR closes in live mode.
+    Payload: {action, symbol, direction, entry_price, entry_time, sl_price,
+    tp_price, size, confidence, exit_price?, exit_time?, pnl_pct?, exit_reason?}.
+    The dashboard server hooks this to update _multi_sessions[node_id]
+    so /api/multi-status can report the open position for chart overlay."""
 
 
 @dataclass
@@ -1386,6 +1407,25 @@ class RealtimeTrader:
             equity_point={"value": risk_mgr.capital, "timestamp": time.time()},
             positions=[],  # Will be updated by next candle
         )
+        # v0.39.0: Fire on_position callback with action='close' so the
+        # dashboard server can clear _multi_sessions[node_id]["open_position"]
+        # and the chart entry-price-line is removed.
+        if hasattr(self.config, 'on_position') and self.config.on_position:
+            try:
+                self.config.on_position({
+                    "action": "close",
+                    "symbol": trade.symbol,
+                    "direction": trade.direction,
+                    "entry_price": trade.entry_price,
+                    "entry_time": trade.entry_time,
+                    "exit_price": exit_price,
+                    "exit_time": str(exit_time),
+                    "pnl_pct": trade.pnl_pct,
+                    "exit_reason": exit_reason,
+                    "trade_id": trade.trade_id,
+                })
+            except Exception:
+                pass
 
     async def process_new_candle(
         self,
@@ -1772,6 +1812,25 @@ class RealtimeTrader:
                             f"| conf={weighted_confidence:.2f} | SL=${sl_price:.4f} "
                             f"TP=${tp_price:.4f} | pattern={''.join(current_symbols)}"
                         )
+                        # v0.39.0: Fire on_position callback so the dashboard
+                        # server can update _multi_sessions[node_id]["open_position"]
+                        # for /api/multi-status → chart entry-price-line overlay.
+                        if hasattr(cfg, 'on_position') and cfg.on_position:
+                            try:
+                                cfg.on_position({
+                                    "action": "open",
+                                    "symbol": cfg.symbol,
+                                    "direction": signal.direction or "LONG",
+                                    "entry_price": current_price,
+                                    "entry_time": current_time,
+                                    "sl_price": sl_price,
+                                    "tp_price": tp_price,
+                                    "size": size,
+                                    "confidence": signal.confidence,
+                                    "trade_id": trade_counter,
+                                })
+                            except Exception:
+                                pass
                     else:
                         # v0.38.2: Log EVERY rejection (removed throttle) so user
                         # can see WHY Trades=0 even with Signals > 0.

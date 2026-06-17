@@ -940,7 +940,40 @@ async def multi_start(req: MultiStartRequest) -> dict:
             # v0.38.9: track initial capital for realized_pnl_pct calculation
             "initial_capital": per_capital,
             "last_update_ts": 0.0,
+            # v0.39.0: track the currently-open position (None when flat) so
+            # /api/multi-status can expose it to the dashboard chart for an
+            # entry-price price-line overlay. Updated by cfg.on_position below.
+            "open_position": None,
         }
+
+        # v0.39.0: Wire on_position callback. The RealtimeTrader fires this
+        # when a position opens or closes (live mode only). We use it to
+        # update _multi_sessions[node_id]["open_position"] in real time so
+        # /api/multi-status can return the entry price to the chart, which
+        # renders a horizontal price line at the entry for the active token.
+        def _on_position_hook(payload, _nid=node_id):
+            try:
+                sess_ref = _multi_sessions.get(_nid)
+                if sess_ref is None:
+                    return
+                if payload.get("action") == "open":
+                    sess_ref["open_position"] = {
+                        "symbol": payload.get("symbol", ""),
+                        "direction": payload.get("direction", ""),
+                        "entry_price": payload.get("entry_price", 0.0),
+                        "entry_time": payload.get("entry_time", ""),
+                        "sl_price": payload.get("sl_price"),
+                        "tp_price": payload.get("tp_price"),
+                        "size": payload.get("size", 0.0),
+                        "confidence": payload.get("confidence", 0.0),
+                        "trade_id": payload.get("trade_id", 0),
+                        "opened_at": time.time(),
+                    }
+                else:  # action == "close"
+                    sess_ref["open_position"] = None
+            except Exception:
+                pass
+        config.on_position = _on_position_hook
 
         async def _run_one_token(_sym=sym, _tf=tf, _exch=exch, _cfg=config, _nid=node_id):
             sess = _multi_sessions[_nid]
@@ -1137,6 +1170,9 @@ async def multi_status() -> dict:
             "realized_pnl": realized_pnl,
             "realized_pnl_pct": realized_pnl_pct,
             "initial_capital": initial_cap,
+            # v0.39.0: currently-open position (None when flat) so the chart
+            # can render a price-line at the entry for the selected token.
+            "open_position": sess.get("open_position"),
         })
     return {
         "ok": True,

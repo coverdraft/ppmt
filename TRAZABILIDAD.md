@@ -4546,3 +4546,178 @@ ppmt terminal                               # dashboard :8420
   (mostrar dónde entró y dónde salió cada trade en el candlestick chart)
 - **Fase 2C**: UI/UX redesign completo del dashboard (jerarquía visual,
   agrupación lógica, mejor feedback)
+
+---
+
+## v0.39.0 — 2026-06-17 — Fase 2B + 2C: Chart Markers + UI/UX Polish
+
+### Contexto
+Tras v0.38.9 (que arregló 5 bugs operativos: sweep count, trade dedup,
+backtest pollution, patterns tab, P&L 0%), el usuario confirmó "ok con
+2b y sigue" — aprobando **Fase 2B (chart entry/exit markers)** y
+pidiendo continuar con **Fase 2C (UI/UX polish)**.
+
+El usuario quería específicamente: "cuando seleccionas un activo que
+esta operando mostrar donde entro y como va corriendo la operacion o
+si hizo varias operaciones mostrar donde entro y donde salio.. etc en
+el chart".
+
+### Cambios principales
+
+**Fase 2B — Chart Entry/Exit Markers (4 archivos)**
+
+1. `src/ppmt/engine/realtime.py`:
+   - Added `on_position: Optional[Callable]` field to both `LiveConfig`
+     and `ReplayConfig` (default None).
+   - In `process_new_candle`, after `risk_mgr.open_position()` and
+     `RealtimeTrade` construction, fire `cfg.on_position({...open...})`
+     with payload: action, symbol, direction, entry_price, entry_time,
+     sl_price, tp_price, size, confidence, trade_id.
+   - In `_close_trade`, after TerminalState update, fire
+     `cfg.on_position({...close...})` with payload: action, symbol,
+     direction, entry_price, entry_time, exit_price, exit_time,
+     pnl_pct, exit_reason, trade_id.
+   - Both callbacks wrapped in try/except (never crash the engine).
+
+2. `src/ppmt/terminal/server.py`:
+   - Added `_on_position_hook(payload, _nid)` closure wired to
+     `cfg.on_position`. On action='open': populates
+     `_multi_sessions[_nid]["open_position"]` dict with entry info +
+     `opened_at` timestamp. On action='close': sets it to None.
+   - Added `"open_position": None` to session_state template dict.
+   - `/api/multi-status` response now includes `open_position` field
+     per session (None when flat, dict when position is open).
+
+3. `src/ppmt/terminal/static/index.html`:
+   - Added 3 chart toolbar toggles: `Signals`, `Trades`, `Open Pos`.
+     (Renamed "Markers" → "Signals" since now there are 3 marker layers.)
+   - New `_chartState` object holds signals[], trades[], openPosition,
+     and openPosLine (Lightweight-Charts price line reference).
+   - New `_toChartTime(t)` helper: accepts ms-string, ms-int, s-int,
+     or ISO string → returns UNIX seconds (LCharts requirement).
+   - New `_buildTradeMarkers(trades)`: per trade produces up to 2 markers
+     (entry arrow colored by direction, exit circle colored by pnl).
+   - New `_buildSignalMarkers(signals)`: per signal produces 1 marker
+     (arrow colored by direction, semi-transparent so trades stand out).
+   - New `_mergeAndSortMarkers(sig, trd)`: sorts by time asc (LCharts
+     requirement), dedupes by (time, text, shape).
+   - New `_refreshChartMarkers()`: reconciles chart markers with
+     _chartState + checkbox states (Signals, Trades).
+   - New `_refreshOpenPositionLine()`: reconciles open-position price
+     line with _chartState.openPosition + checkbox state (Open Pos).
+     Removes existing line first, draws new line at entry_price
+     (green=LONG dashed, red=SHORT dashed).
+   - New `loadTradeMarkers()`: async fetch /api/trades?symbol=X&source=
+     all&timeframe=TF&limit=200, updates _chartState.trades.
+   - New `loadOpenPositionLine()`: async fetch /api/multi-status, find
+     session matching chart symbol, updates _chartState.openPosition.
+   - `loadChart()` now calls both after candles load.
+   - `setInterval(loadOpenPositionLine, 10000)` + `setInterval(loadTradeMarkers, 15000)`
+     keep markers fresh without manual Reload.
+   - WS-pushed signals from a DIFFERENT symbol no longer clobber trade
+     markers (only _chartState.signals is cleared).
+   - `resetValidationUI()` now uses _refreshChartMarkers() +
+     _refreshOpenPositionLine() instead of clobbering setMarkers([]).
+   - Replaced legacy `syncChartMarkers()` body to use _chartState.
+   - Removed legacy `addBacktestMarkers()` (was unused, dead code).
+
+**Fase 2C — UI/UX Polish (index.html CSS only)**
+
+- Softened palette (less neon, more "professional fintech"):
+  - bg: #0a0e17 → #0b1019 (warmer)
+  - text: #d4dce8 → #dde4ee (more legible)
+  - text2: #7b8da0 → #8a9bb0 (more legible)
+  - accent: #60a5fa → #5fa8f5 (refined)
+  - green: #4ade80 → #34d399 (less neon)
+  - red: #f87171 → #f87171 (same)
+- Added elevation tokens: --shadow-sm, --shadow-md, --glow-accent.
+- Base font: 12px → 13px. Line-height: 1.4 → 1.45.
+- Header: 40px → 48px, gradient bg, box-shadow. Logo 14px → 17px.
+- Chart section: 340px → 420px min-height, 50vh → 55vh max.
+- Chart toolbar: gradient bg, larger inputs (11px), focus ring.
+- Tab bar: 8px 14px → 11px 18px padding, 10px → 11px font. Badges
+  pill-shaped (border-radius 10px).
+- Panels: padding 6px 8px → 10px 14px, alternating subtle stripe
+  (nth-child(even) rgba bg), panel-title accent bar gets glow.
+- Buttons: padding 6px 12px, font 11px, hover lift (translateY -1px),
+  box-shadow on primary/success/danger.
+- Form inputs: padding 5px 8px, font 11px, focus ring
+  (box-shadow 0 0 0 2px accent).
+- Badges: pill-shaped (border-radius 10px).
+- Tables: cell padding 5px 8px, font 11px, zebra striping, header bg.
+- Stat cards: padding 7px 10px, value 14px, hover effect.
+- Pattern blocks: 14x14 → 17x17, font 8px.
+- Signal feed: padding 4px, font 10px, dir badge 44px width.
+- Status bar: 32px tall, gradient bg, font 10px.
+- Toggles: 36x18, knob 12px (easier to click).
+- Empty state: padding 16px, font-style italic.
+- Animations: fadeIn now includes translateY(2px → 0) for slide effect.
+
+### Archivos modificados
+- `src/ppmt/engine/realtime.py` — `on_position` callback field on
+  LiveConfig + ReplayConfig; fired in process_new_candle (open) and
+  _close_trade (close).
+- `src/ppmt/terminal/server.py` — `_on_position_hook` closure, session_state
+  `open_position` field, `/api/multi-status` returns `open_position`.
+- `src/ppmt/terminal/static/index.html` — 3 chart toolbar toggles
+  (Signals/Trades/Open Pos), `_chartState` object, `loadTradeMarkers`,
+  `loadOpenPositionLine`, `_refreshChartMarkers`, `_refreshOpenPositionLine`,
+  `_buildTradeMarkers`, `_buildSignalMarkers`, `_mergeAndSortMarkers`,
+  `_toChartTime`, setInterval polls (10s/15s). Full CSS palette +
+  typography + spacing overhaul.
+- `pyproject.toml`, `src/ppmt/__init__.py`, `src/ppmt/cli/main.py`,
+  `src/ppmt/terminal/static/index.html` — bump 0.38.9 → 0.39.0.
+- `tests/test_v0390_chart_markers.py` — NEW. 8 tests covering
+  `on_position` callback contract (LiveConfig + ReplayConfig field,
+  payload shapes for open/close, `_on_position_hook` open/close,
+  session_state default).
+- `tests/test_v0326_state_tagging.py` — Fixed stale assertion
+  (exchange 'mexc' → 'binance', default since v0.35.0).
+- `worklog.md`, `TRAZABILIDAD.md` — entries.
+
+### Riesgo
+**Bajo-Medio**. Los cambios de Fase 2B añaden un callback opcional
+(`on_position=None` por defecto). Si no se wiring en el servidor, no
+cambia comportamiento — sólo se pierde la línea de precio de posición
+abierta. El wiring en server.py es additive: añade `open_position: None`
+al session_state y un campo más al JSON de `/api/multi-status`. Los
+endpoints existentes no se rompen.
+
+Los cambios de Fase 2C son 100% CSS — no afectan lógica. La estructura
+HTML y los IDs existentes se preservan. Si algo se ve mal, se puede
+revertir solo el bloque `<style>` sin tocar el JS.
+
+### Cómo verificar
+```bash
+cd ~/my-project/ppmt
+git pull origin main
+pip install -e . --quiet
+ppmt --version                              # debe decir 0.39.0
+ppmt terminal                               # dashboard :8420
+# 1. Selecciona un token en el chart. Si hay una sesión live operando
+#    ese token con posición abierta, verás una línea horizontal dashed
+#    en el entry price (verde=LONG, rojo=SHORT) con label
+#    "LONG @ 0.012345" en el axis. Se actualiza cada 10s.
+# 2. Si el bot cerró trades recientemente, verás markers en el chart:
+#    - Entry: flecha verde arriba (LONG) o roja abajo (SHORT) + texto
+#      "L@0.01234 65%" (precio + confidence %)
+#    - Exit: círculo verde (win) o rojo (loss) + texto "X@0.01256 +1.82%"
+#    Markers appear within 15s of close (poll interval).
+# 3. Toggle Signals / Trades / Open Pos en la toolbar del chart para
+#    mostrar/ocultar cada capa independientemente.
+# 4. UI general: tipografía más legible (13px base), tab bar más grande
+#    con badges pill, tablas con zebra striping y header bg, botones con
+#    hover lift + shadow, paleta más suave (menos neon).
+# 5. Tests: PYTHONPATH=src python -m pytest tests/test_v0390_chart_markers.py -v
+#    → 8 tests pass.
+```
+
+### Próximos pasos sugeridos
+- **Fase 2D**: WebSocket push de trades cerrados (en vez de poll cada 15s)
+  para que los markers aparezcan instantáneamente al cerrar.
+- **Fase 2E**: Tooltips ricos en los markers (hover muestra pattern,
+  regime, R:R, full P&L).
+- **Bug investigation**: Los 13 tests pre-existing failures en
+  `test_oos_validation.py` y `test_v43_robust.py` son API drift
+  (PPMTTrie.merge y PPMT.build(symbols=) no existen más). Necesitan
+  reescribirse o marcarse como skip — no son fallos de regresión.

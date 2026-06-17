@@ -2,7 +2,7 @@
 
 > **Read this file FIRST when joining the project.**
 > Última actualización: 2026-06-17
-> Versión actual: **v0.38.9**
+> Versión actual: **v0.39.0**
 > Repositorio: https://github.com/coverdraft/ppmt
 
 ---

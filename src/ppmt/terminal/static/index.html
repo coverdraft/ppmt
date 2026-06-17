@@ -3,44 +3,50 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>PPMT Terminal v0.38.9</title>
+<title>PPMT Terminal v0.39.0</title>
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
-  --bg:#0a0e17;--bg2:#111822;--bg3:#1a2038;--bg4:#232b3a;
-  --border:#1e2a3a;--border2:#2a3a50;
-  --text:#d4dce8;--text2:#7b8da0;--text3:#4a5568;
-  --accent:#60a5fa;--accent2:#3b82f6;
-  --green:#4ade80;--green2:#16a34a;--red:#f87171;--red2:#dc2626;
-  --yellow:#fbbf24;--orange:#fb923c;--purple:#c084fc;
+  /* v0.39.0: Softened palette — less neon, more "professional fintech".
+     Slightly warmer bg, more legible text grays, more refined accents. */
+  --bg:#0b1019;--bg2:#121a26;--bg3:#1a2334;--bg4:#243046;
+  --border:#1e2a3d;--border2:#2c3b54;
+  --text:#dde4ee;--text2:#8a9bb0;--text3:#5a6878;
+  --accent:#5fa8f5;--accent2:#3b82f6;
+  --green:#34d399;--green2:#10b981;--red:#f87171;--red2:#ef4444;
+  --yellow:#fbbf24;--orange:#fb923c;--purple:#a78bfa;
   --mono:'JetBrains Mono','SF Mono','Fira Code','Cascadia Code',monospace;
   --sans:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;
-  --radius:4px;--radius-sm:3px;
+  --radius:6px;--radius-sm:4px;
+  /* v0.39.0: Subtle elevation tokens for cards/panels */
+  --shadow-sm:0 1px 2px rgba(0,0,0,0.25);
+  --shadow-md:0 2px 8px rgba(0,0,0,0.35);
+  --glow-accent:0 0 0 1px rgba(95,168,245,0.35),0 0 12px rgba(95,168,245,0.15);
 }
-html{font-size:12px}
-body{background:var(--bg);color:var(--text);font-family:var(--sans);line-height:1.4;min-height:100vh;overflow-y:auto;overflow-x:hidden;display:flex;flex-direction:column}
+html{font-size:13px}
+body{background:var(--bg);color:var(--text);font-family:var(--sans);line-height:1.45;min-height:100vh;overflow-y:auto;overflow-x:hidden;display:flex;flex-direction:column}
 
 /* === SCROLLBAR === */
-::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar{width:7px;height:7px}
 ::-webkit-scrollbar-track{background:var(--bg2)}
-::-webkit-scrollbar-thumb{background:var(--border2);border-radius:2px}
+::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
 ::-webkit-scrollbar-thumb:hover{background:var(--text3)}
 
 /* === HEADER === */
-.header{background:var(--bg2);border-bottom:1px solid var(--border);padding:0 12px;height:40px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;z-index:100;gap:8px}
-.header-left{display:flex;align-items:center;gap:8px}
-.logo{font-family:var(--mono);font-weight:700;font-size:14px;color:var(--accent);letter-spacing:-0.5px}
-.logo-ver{font-size:9px;color:var(--text3);font-weight:500;margin-left:3px;font-family:var(--mono);background:var(--bg3);padding:1px 4px;border-radius:2px;border:1px solid var(--border)}
-.status-dot{width:7px;height:7px;border-radius:50%;background:var(--text3);display:inline-block;flex-shrink:0}
-.status-dot.live{background:var(--green);box-shadow:0 0 6px var(--green);animation:pulse 2s infinite}
+.header{background:linear-gradient(180deg,#141d2c 0%,var(--bg2) 100%);border-bottom:1px solid var(--border2);padding:0 16px;height:48px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;z-index:100;gap:12px;box-shadow:var(--shadow-sm)}
+.header-left{display:flex;align-items:center;gap:10px}
+.logo{font-family:var(--mono);font-weight:800;font-size:17px;color:var(--accent);letter-spacing:-0.5px}
+.logo-ver{font-size:10px;color:var(--text3);font-weight:600;margin-left:5px;font-family:var(--mono);background:var(--bg3);padding:2px 6px;border-radius:3px;border:1px solid var(--border2)}
+.status-dot{width:9px;height:9px;border-radius:50%;background:var(--text3);display:inline-block;flex-shrink:0}
+.status-dot.live{background:var(--green);box-shadow:0 0 8px var(--green);animation:pulse 2s infinite}
 .status-dot.stopped{background:var(--red)}
 .status-dot.preparing{background:var(--yellow);animation:pulse 1s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
-.header-center{display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:10px}
-.header-tag{background:var(--bg3);border:1px solid var(--border);padding:2px 6px;border-radius:2px;font-size:10px;color:var(--text2);font-family:var(--mono);white-space:nowrap}
-.header-tag.hl{color:var(--text);font-weight:600}
-.header-right{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:10px;color:var(--text2)}
+.header-center{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:11px}
+.header-tag{background:var(--bg3);border:1px solid var(--border2);padding:3px 8px;border-radius:4px;font-size:11px;color:var(--text2);font-family:var(--mono);white-space:nowrap}
+.header-tag.hl{color:var(--text);font-weight:700;background:var(--bg4)}
+.header-right{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:11px;color:var(--text2)}
 
 /* === TERMINAL GRID (v0.34.3: TAB-BASED LAYOUT) === */
 .terminal-grid{
@@ -48,31 +54,31 @@ body{background:var(--bg);color:var(--text);font-family:var(--sans);line-height:
 }
 
 /* === CHART AREA (always visible at top) === */
-.chart-section{display:flex;flex-direction:column;border-right:1px solid var(--border);min-height:340px;max-height:50vh;overflow:hidden;border-bottom:1px solid var(--border)}
-.chart-toolbar{background:var(--bg2);border-bottom:1px solid var(--border);padding:4px 8px;display:flex;align-items:center;gap:6px;flex-shrink:0}
-.chart-toolbar select,.chart-toolbar input{background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:var(--mono);font-size:10px;padding:2px 5px;border-radius:2px;outline:none}
-.chart-toolbar select:focus,.chart-toolbar input:focus{border-color:var(--accent)}
-.chart-toolbar label{font-size:9px;color:var(--text3);font-family:var(--mono);text-transform:uppercase;letter-spacing:.5px}
+.chart-section{display:flex;flex-direction:column;border-right:1px solid var(--border);min-height:420px;max-height:55vh;overflow:hidden;border-bottom:1px solid var(--border2);background:var(--bg)}
+.chart-toolbar{background:linear-gradient(180deg,var(--bg3) 0%,var(--bg2) 100%);border-bottom:1px solid var(--border2);padding:6px 10px;display:flex;align-items:center;gap:8px;flex-shrink:0}
+.chart-toolbar select,.chart-toolbar input{background:var(--bg);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:11px;padding:4px 7px;border-radius:4px;outline:none;transition:border-color .15s}
+.chart-toolbar select:focus,.chart-toolbar input:focus{border-color:var(--accent);box-shadow:0 0 0 2px rgba(95,168,245,.15)}
+.chart-toolbar label{font-size:10px;color:var(--text2);font-family:var(--mono);text-transform:uppercase;letter-spacing:.6px;font-weight:600}
 .chart-container{flex:1;min-height:0;background:var(--bg);position:relative}
 #priceChart{width:100%;height:100%}
 
 /* === TAB BAR (v0.34.3) === */
 .tab-bar{
-  display:flex;background:var(--bg2);border-bottom:1px solid var(--border);
-  padding:0 4px;flex-shrink:0;overflow-x:auto;
+  display:flex;background:var(--bg2);border-bottom:1px solid var(--border2);
+  padding:0 8px;flex-shrink:0;overflow-x:auto;
 }
 .tab-btn{
   background:transparent;border:none;color:var(--text3);cursor:pointer;
-  font-family:var(--mono);font-size:10px;font-weight:600;
-  padding:8px 14px;border-bottom:2px solid transparent;
-  text-transform:uppercase;letter-spacing:.5px;white-space:nowrap;
-  transition:all .15s;
+  font-family:var(--mono);font-size:11px;font-weight:700;
+  padding:11px 18px;border-bottom:2px solid transparent;
+  text-transform:uppercase;letter-spacing:.6px;white-space:nowrap;
+  transition:all .15s;position:relative;
 }
-.tab-btn:hover{color:var(--text);background:rgba(96,165,250,.04)}
-.tab-btn.active{color:var(--accent);border-bottom-color:var(--accent);background:rgba(96,165,250,.06)}
+.tab-btn:hover{color:var(--text);background:rgba(95,168,245,.04)}
+.tab-btn.active{color:var(--accent);border-bottom-color:var(--accent);background:rgba(95,168,245,.07)}
 .tab-btn .tab-badge{
   display:inline-block;background:var(--bg3);color:var(--text2);
-  font-size:8px;padding:1px 4px;border-radius:2px;margin-left:4px;
+  font-size:9px;padding:2px 6px;border-radius:10px;margin-left:6px;font-weight:700;
 }
 .tab-btn.active .tab-badge{background:var(--accent);color:#fff}
 
@@ -115,78 +121,81 @@ body{background:var(--bg);color:var(--text);font-family:var(--sans);line-height:
 .tab-single{flex:1;min-height:0;overflow-y:auto}
 
 /* === PANELS === */
-.panel{border-bottom:1px solid var(--border);padding:6px 8px}
-.panel-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
-.panel-title{font-family:var(--mono);font-size:10px;font-weight:600;color:var(--accent);text-transform:uppercase;letter-spacing:.8px;display:flex;align-items:center;gap:5px}
-.panel-title::before{content:'';width:3px;height:12px;background:var(--accent);border-radius:1px;flex-shrink:0}
-.panel-collapse{background:none;border:none;color:var(--text3);cursor:pointer;font-size:12px;padding:2px;line-height:1;font-family:var(--mono)}
+.panel{border-bottom:1px solid var(--border);padding:10px 14px;background:var(--bg2)}
+.panel:nth-child(even){background:rgba(26,35,52,0.4)}
+.panel-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+.panel-title{font-family:var(--mono);font-size:11px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.8px;display:flex;align-items:center;gap:6px}
+.panel-title::before{content:'';width:3px;height:13px;background:var(--accent);border-radius:2px;flex-shrink:0;box-shadow:0 0 6px rgba(95,168,245,.5)}
+.panel-collapse{background:none;border:none;color:var(--text3);cursor:pointer;font-size:13px;padding:2px;line-height:1;font-family:var(--mono)}
 .panel-collapse:hover{color:var(--text)}
-.panel-body{font-size:11px}
+.panel-body{font-size:12px}
 
 /* === FORM ELEMENTS === */
-.btn{font-family:var(--mono);font-size:10px;font-weight:600;padding:4px 10px;border:1px solid var(--border);border-radius:2px;cursor:pointer;transition:all .15s;text-transform:uppercase;letter-spacing:.5px;display:inline-flex;align-items:center;gap:4px;white-space:nowrap}
+.btn{font-family:var(--mono);font-size:11px;font-weight:700;padding:6px 12px;border:1px solid var(--border2);border-radius:4px;cursor:pointer;transition:all .15s;text-transform:uppercase;letter-spacing:.5px;display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
 .btn:disabled{opacity:.35;cursor:not-allowed}
-.btn-primary{background:var(--accent2);color:#fff;border-color:var(--accent2)}
-.btn-primary:hover:not(:disabled){background:var(--accent);border-color:var(--accent)}
-.btn-success{background:var(--green2);color:#fff;border-color:var(--green2)}
-.btn-success:hover:not(:disabled){background:var(--green);border-color:var(--green)}
-.btn-danger{background:var(--red2);color:#fff;border-color:var(--red2)}
-.btn-danger:hover:not(:disabled){background:var(--red);border-color:var(--red)}
+.btn-primary{background:var(--accent2);color:#fff;border-color:var(--accent2);box-shadow:var(--shadow-sm)}
+.btn-primary:hover:not(:disabled){background:var(--accent);border-color:var(--accent);box-shadow:var(--shadow-md);transform:translateY(-1px)}
+.btn-success{background:var(--green2);color:#fff;border-color:var(--green2);box-shadow:var(--shadow-sm)}
+.btn-success:hover:not(:disabled){background:var(--green);border-color:var(--green);box-shadow:var(--shadow-md);transform:translateY(-1px)}
+.btn-danger{background:var(--red2);color:#fff;border-color:var(--red2);box-shadow:var(--shadow-sm)}
+.btn-danger:hover:not(:disabled){background:var(--red);border-color:var(--red);box-shadow:var(--shadow-md);transform:translateY(-1px)}
 .btn-warning{background:#b45309;color:#fff;border-color:#b45309}
 .btn-warning:hover:not(:disabled){background:var(--yellow);color:#000;border-color:var(--yellow)}
-.btn-ghost{background:transparent;color:var(--text2);border-color:var(--border)}
-.btn-ghost:hover:not(:disabled){background:var(--bg3);color:var(--text);border-color:var(--border2)}
-.btn-sm{padding:2px 6px;font-size:9px}
+.btn-ghost{background:transparent;color:var(--text2);border-color:var(--border2)}
+.btn-ghost:hover:not(:disabled){background:var(--bg3);color:var(--text);border-color:var(--text3)}
+.btn-sm{padding:4px 8px;font-size:10px}
 .btn-block{width:100%;justify-content:center}
 
-select,input[type="text"],input[type="number"]{background:var(--bg3);border:1px solid var(--border);color:var(--text);font-family:var(--mono);font-size:10px;padding:3px 6px;border-radius:2px;outline:none;width:100%}
-select:focus,input:focus{border-color:var(--accent)}
+select,input[type="text"],input[type="number"]{background:var(--bg);border:1px solid var(--border2);color:var(--text);font-family:var(--mono);font-size:11px;padding:5px 8px;border-radius:4px;outline:none;width:100%;transition:border-color .15s,box-shadow .15s}
+select:focus,input:focus{border-color:var(--accent);box-shadow:0 0 0 2px rgba(95,168,245,.15)}
 select{cursor:pointer}
-.form-row{display:flex;gap:4px;align-items:center;margin-bottom:4px}
-.form-row label{font-size:9px;color:var(--text3);font-family:var(--mono);text-transform:uppercase;letter-spacing:.5px;min-width:50px;flex-shrink:0}
+.form-row{display:flex;gap:6px;align-items:center;margin-bottom:6px}
+.form-row label{font-size:10px;color:var(--text2);font-family:var(--mono);text-transform:uppercase;letter-spacing:.5px;min-width:60px;flex-shrink:0;font-weight:600}
 .form-row .field{flex:1;min-width:0}
 
 /* === BADGES === */
-.badge{display:inline-flex;align-items:center;padding:1px 6px;border-radius:2px;font-family:var(--mono);font-size:9px;font-weight:700;letter-spacing:.5px;text-transform:uppercase}
-.badge-pass{background:rgba(74,222,128,.15);color:var(--green);border:1px solid rgba(74,222,128,.3)}
-.badge-fail{background:rgba(248,113,113,.15);color:var(--red);border:1px solid rgba(248,113,113,.3)}
-.badge-live{background:rgba(74,222,128,.15);color:var(--green);border:1px solid rgba(74,222,128,.3)}
-.badge-stopped{background:rgba(248,113,113,.15);color:var(--red);border:1px solid rgba(248,113,113,.3)}
-.badge-preparing{background:rgba(251,191,36,.15);color:var(--yellow);border:1px solid rgba(251,191,36,.3)}
+.badge{display:inline-flex;align-items:center;padding:2px 8px;border-radius:10px;font-family:var(--mono);font-size:10px;font-weight:700;letter-spacing:.5px;text-transform:uppercase}
+.badge-pass{background:rgba(52,211,153,.15);color:var(--green);border:1px solid rgba(52,211,153,.35)}
+.badge-fail{background:rgba(248,113,113,.15);color:var(--red);border:1px solid rgba(248,113,113,.35)}
+.badge-live{background:rgba(52,211,153,.15);color:var(--green);border:1px solid rgba(52,211,153,.35)}
+.badge-stopped{background:rgba(248,113,113,.15);color:var(--red);border:1px solid rgba(248,113,113,.35)}
+.badge-preparing{background:rgba(251,191,36,.15);color:var(--yellow);border:1px solid rgba(251,191,36,.35)}
 
 /* === PROGRESS === */
-.progress-bar{background:var(--bg3);border-radius:2px;height:4px;overflow:hidden;margin:4px 0}
-.progress-fill{height:100%;border-radius:2px;transition:width .4s ease;background:linear-gradient(90deg,var(--accent2),var(--accent))}
-.progress-steps{display:flex;gap:1px;margin:4px 0}
-.progress-step{flex:1;text-align:center;font-family:var(--mono);font-size:8px;padding:2px 1px;border-radius:1px;background:var(--bg3);color:var(--text3);border:1px solid var(--border);transition:all .3s}
-.progress-step.active{background:rgba(96,165,250,.15);color:var(--accent);border-color:var(--accent)}
-.progress-step.done{background:rgba(74,222,128,.1);color:var(--green);border-color:var(--green)}
+.progress-bar{background:var(--bg3);border-radius:3px;height:6px;overflow:hidden;margin:6px 0;border:1px solid var(--border)}
+.progress-fill{height:100%;border-radius:2px;transition:width .4s ease;background:linear-gradient(90deg,var(--accent2),var(--accent));box-shadow:0 0 6px rgba(95,168,245,.3)}
+.progress-steps{display:flex;gap:2px;margin:6px 0}
+.progress-step{flex:1;text-align:center;font-family:var(--mono);font-size:9px;padding:4px 2px;border-radius:3px;background:var(--bg3);color:var(--text3);border:1px solid var(--border);transition:all .3s;font-weight:600}
+.progress-step.active{background:rgba(95,168,245,.15);color:var(--accent);border-color:var(--accent)}
+.progress-step.done{background:rgba(52,211,153,.1);color:var(--green);border-color:var(--green)}
 .progress-step.error{background:rgba(248,113,113,.1);color:var(--red);border-color:var(--red)}
 
 /* === CHECKS === */
-.checks{display:grid;grid-template-columns:1fr 1fr;gap:2px 8px;margin:4px 0}
-.check-item{display:flex;align-items:center;gap:4px;font-family:var(--mono);font-size:10px}
-.check-item .check-icon{font-size:11px;font-weight:700}
+.checks{display:grid;grid-template-columns:1fr 1fr;gap:4px 10px;margin:6px 0}
+.check-item{display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:11px}
+.check-item .check-icon{font-size:13px;font-weight:700}
 .check-item.pass .check-icon{color:var(--green)}
 .check-item.fail .check-icon{color:var(--red)}
 .check-item.pending .check-icon{color:var(--text3)}
 
 /* === STATS GRID === */
-.stats-grid{display:grid;grid-template-columns:1fr 1fr;gap:4px}
-.stat-card{background:var(--bg);border:1px solid var(--border);border-radius:2px;padding:4px 6px}
-.stat-label{font-family:var(--mono);font-size:8px;color:var(--text3);text-transform:uppercase;letter-spacing:.5px;margin-bottom:1px}
-.stat-value{font-family:var(--mono);font-size:12px;font-weight:700;color:var(--text)}
+.stats-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.stat-card{background:var(--bg);border:1px solid var(--border2);border-radius:var(--radius-sm);padding:7px 10px;transition:border-color .15s,box-shadow .15s}
+.stat-card:hover{border-color:var(--accent);box-shadow:var(--shadow-sm)}
+.stat-label{font-family:var(--mono);font-size:9px;color:var(--text2);text-transform:uppercase;letter-spacing:.6px;margin-bottom:2px;font-weight:600}
+.stat-value{font-family:var(--mono);font-size:14px;font-weight:700;color:var(--text)}
 .stat-value.green{color:var(--green)}
 .stat-value.red{color:var(--red)}
 .stat-value.accent{color:var(--accent)}
 .stat-value.yellow{color:var(--yellow)}
 
 /* === TABLES === */
-.table-wrap{overflow-x:auto;margin:2px 0}
-table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:9px}
-th{text-align:left;color:var(--text3);font-weight:600;text-transform:uppercase;letter-spacing:.5px;padding:3px 4px;border-bottom:1px solid var(--border);font-size:8px;white-space:nowrap}
-td{padding:2px 4px;border-bottom:1px solid rgba(30,42,58,.4);white-space:nowrap}
-tr:hover td{background:rgba(96,165,250,.04)}
+.table-wrap{overflow-x:auto;margin:4px 0;border-radius:var(--radius-sm);border:1px solid var(--border)}
+table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:11px}
+th{text-align:left;color:var(--text2);font-weight:700;text-transform:uppercase;letter-spacing:.6px;padding:6px 8px;border-bottom:1px solid var(--border2);font-size:9px;white-space:nowrap;background:var(--bg3)}
+td{padding:5px 8px;border-bottom:1px solid var(--border);white-space:nowrap}
+tr:nth-child(even) td{background:rgba(26,35,52,.3)}
+tr:hover td{background:rgba(95,168,245,.07)}
 .text-green{color:var(--green)}
 .text-red{color:var(--red)}
 .text-yellow{color:var(--yellow)}
@@ -194,66 +203,67 @@ tr:hover td{background:rgba(96,165,250,.04)}
 .text-muted{color:var(--text3)}
 
 /* === EXPOSURE BAR === */
-.exposure-bar{background:var(--bg3);border-radius:2px;height:6px;overflow:hidden;margin:3px 0}
+.exposure-bar{background:var(--bg3);border-radius:3px;height:8px;overflow:hidden;margin:5px 0;border:1px solid var(--border)}
 .exposure-fill{height:100%;border-radius:2px;transition:width .3s}
 .exposure-fill.low{background:var(--green)}
 .exposure-fill.med{background:var(--yellow)}
 .exposure-fill.high{background:var(--red)}
 
 /* === PATTERN BUFFER === */
-.pattern-buffer{display:flex;flex-wrap:wrap;gap:2px;margin:3px 0}
-.pattern-block{width:14px;height:14px;border-radius:1px;display:flex;align-items:center;justify-content:center;font-size:7px;font-family:var(--mono);font-weight:700;color:rgba(255,255,255,.8);border:1px solid rgba(255,255,255,.08)}
-.pattern-block.regime-trend{background:rgba(74,222,128,.3)}
+.pattern-buffer{display:flex;flex-wrap:wrap;gap:3px;margin:5px 0}
+.pattern-block{width:17px;height:17px;border-radius:2px;display:flex;align-items:center;justify-content:center;font-size:8px;font-family:var(--mono);font-weight:700;color:rgba(255,255,255,.85);border:1px solid rgba(255,255,255,.1)}
+.pattern-block.regime-trend{background:rgba(52,211,153,.3)}
 .pattern-block.regime-volatile{background:rgba(251,191,36,.3)}
-.pattern-block.regime-ranging{background:rgba(96,165,250,.3)}
+.pattern-block.regime-ranging{background:rgba(95,168,245,.3)}
 .pattern-block.regime-quiet{background:rgba(85,102,119,.3)}
 
 /* === SIGNAL FEED === */
-.signal-item{display:flex;align-items:center;gap:4px;padding:2px 0;border-bottom:1px solid rgba(30,42,58,.3);font-family:var(--mono);font-size:9px}
-.signal-dir{font-weight:700;width:36px;text-align:center;padding:1px 3px;border-radius:1px;font-size:8px}
-.signal-dir.long{background:rgba(74,222,128,.12);color:var(--green)}
-.signal-dir.short{background:rgba(248,113,113,.12);color:var(--red)}
-.signal-time{color:var(--text3);min-width:44px}
+.signal-item{display:flex;align-items:center;gap:6px;padding:4px 0;border-bottom:1px solid var(--border);font-family:var(--mono);font-size:10px}
+.signal-dir{font-weight:700;width:44px;text-align:center;padding:2px 4px;border-radius:3px;font-size:9px}
+.signal-dir.long{background:rgba(52,211,153,.15);color:var(--green)}
+.signal-dir.short{background:rgba(248,113,113,.15);color:var(--red)}
+.signal-time{color:var(--text3);min-width:52px}
 .signal-price{color:var(--text);flex:1;text-align:right}
-.signal-conf{color:var(--accent);min-width:30px;text-align:right}
+.signal-conf{color:var(--accent);min-width:36px;text-align:right;font-weight:600}
 
 /* === MINI CHART === */
-.mini-chart{width:100%;height:36px;background:var(--bg3);border-radius:2px;border:1px solid var(--border)}
+.mini-chart{width:100%;height:40px;background:var(--bg3);border-radius:var(--radius-sm);border:1px solid var(--border2)}
 
 /* === STATUS BAR === */
-.status-bar{background:var(--bg2);border-top:1px solid var(--border);padding:0 12px;height:28px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;font-family:var(--mono);font-size:9px;color:var(--text3)}
-.status-left,.status-right{display:flex;align-items:center;gap:12px}
-.status-item{display:flex;align-items:center;gap:3px}
+.status-bar{background:linear-gradient(180deg,var(--bg2) 0%,#0e141e 100%);border-top:1px solid var(--border2);padding:0 14px;height:32px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;font-family:var(--mono);font-size:10px;color:var(--text2)}
+.status-left,.status-right{display:flex;align-items:center;gap:14px}
+.status-item{display:flex;align-items:center;gap:4px}
 .status-item .label{color:var(--text3)}
 .status-item .value{color:var(--text2)}
 .status-item .value.live{color:var(--green)}
 .status-item .value.error{color:var(--red)}
 
 /* === TOGGLE === */
-.toggle-wrap{display:flex;align-items:center;gap:5px;font-family:var(--mono);font-size:10px}
-.toggle{position:relative;width:32px;height:16px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;cursor:pointer;transition:all .2s}
+.toggle-wrap{display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:11px}
+.toggle{position:relative;width:36px;height:18px;background:var(--bg3);border:1px solid var(--border2);border-radius:9px;cursor:pointer;transition:all .2s}
 .toggle.active{background:var(--accent2);border-color:var(--accent)}
-.toggle-knob{position:absolute;top:2px;left:2px;width:10px;height:10px;background:var(--text);border-radius:50%;transition:all .2s}
-.toggle.active .toggle-knob{left:18px}
+.toggle-knob{position:absolute;top:2px;left:2px;width:12px;height:12px;background:var(--text);border-radius:50%;transition:all .2s}
+.toggle.active .toggle-knob{left:20px}
 
 /* === LEVERAGE SELECTOR === */
-.leverage-selector{display:flex;gap:1px;margin:3px 0}
-.lev-btn{font-family:var(--mono);font-size:9px;padding:2px 5px;border:1px solid var(--border);border-radius:1px;background:var(--bg3);color:var(--text2);cursor:pointer;transition:all .15s}
+.leverage-selector{display:flex;gap:2px;margin:5px 0}
+.lev-btn{font-family:var(--mono);font-size:10px;padding:3px 6px;border:1px solid var(--border2);border-radius:3px;background:var(--bg3);color:var(--text2);cursor:pointer;transition:all .15s;font-weight:600}
 .lev-btn.active{background:var(--accent2);color:#fff;border-color:var(--accent2)}
-.lev-btn:hover:not(.active){background:var(--bg4);border-color:var(--border2)}
+.lev-btn:hover:not(.active){background:var(--bg4);border-color:var(--text3)}
 
 /* === NODE ROW === */
-.node-row{display:flex;align-items:center;gap:3px;padding:3px 5px;background:var(--bg);border:1px solid var(--border);border-radius:2px;margin-bottom:3px;font-family:var(--mono);font-size:9px}
-.node-row .node-id{color:var(--accent);min-width:36px}
-.node-row .node-info{flex:1;display:flex;gap:4px;color:var(--text2)}
-.node-row .node-actions{display:flex;gap:1px}
+.node-row{display:flex;align-items:center;gap:5px;padding:5px 8px;background:var(--bg);border:1px solid var(--border2);border-radius:var(--radius-sm);margin-bottom:4px;font-family:var(--mono);font-size:10px;transition:border-color .15s}
+.node-row:hover{border-color:var(--accent)}
+.node-row .node-id{color:var(--accent);min-width:42px;font-weight:700}
+.node-row .node-info{flex:1;display:flex;gap:5px;color:var(--text2)}
+.node-row .node-actions{display:flex;gap:2px}
 
 /* === EMPTY STATE === */
-.empty-state{text-align:center;padding:10px;color:var(--text3);font-family:var(--mono);font-size:10px}
+.empty-state{text-align:center;padding:16px;color:var(--text3);font-family:var(--mono);font-size:11px;font-style:italic}
 
 /* === ANIMATIONS === */
-@keyframes fadeIn{from{opacity:0}to{opacity:1}}
-.fade-in{animation:fadeIn .2s ease}
+@keyframes fadeIn{from{opacity:0;transform:translateY(2px)}to{opacity:1;transform:translateY(0)}}
+.fade-in{animation:fadeIn .25s ease}
 
 /* === BLOTTER TABS === */
 .blotter-left{flex:0 0 65%;border-right:1px solid var(--border);overflow:hidden;display:flex;flex-direction:column}
@@ -266,7 +276,7 @@ tr:hover td{background:rgba(96,165,250,.04)}
 @media(max-width:1000px){
   .tab-grid-2,.tab-grid-3,.tab-grid-trading{grid-template-columns:1fr}
   .tab-grid-2 > div,.tab-grid-3 > div,.tab-grid-trading > div{border-right:none;border-bottom:1px solid var(--border)}
-  .chart-section{max-height:40vh}
+  .chart-section{max-height:42vh;min-height:300px}
   .blotter-section{flex-direction:column}
   .blotter-left{flex:1;border-right:none;border-bottom:1px solid var(--border)}
 }
@@ -277,7 +287,7 @@ tr:hover td{background:rgba(96,165,250,.04)}
 <!-- ========== HEADER ========== -->
 <header class="header">
   <div class="header-left">
-    <span class="logo">PPMT<span class="logo-ver">v0.38.9</span></span>
+    <span class="logo">PPMT<span class="logo-ver">v0.39.0</span></span>
     <span class="status-dot stopped" id="headerDot"></span>
     <span id="headerStatus" style="font-family:var(--mono);font-size:10px;color:var(--text2)">DETENIDO</span>
   </div>
@@ -321,7 +331,9 @@ tr:hover td{background:rgba(96,165,250,.04)}
       <button class="btn btn-ghost btn-sm" onclick="loadChart()">Reload</button>
       <div style="flex:1"></div>
       <label><input type="checkbox" id="showVolume" checked style="margin-right:3px;accent-color:var(--accent)"> Vol</label>
-      <label><input type="checkbox" id="showMarkers" checked style="margin-right:3px;accent-color:var(--accent)"> Markers</label>
+      <label><input type="checkbox" id="showMarkers" checked style="margin-right:3px;accent-color:var(--accent)"> Signals</label>
+      <label><input type="checkbox" id="showTrades" checked style="margin-right:3px;accent-color:var(--accent)"> Trades</label>
+      <label><input type="checkbox" id="showOpenPos" checked style="margin-right:3px;accent-color:var(--accent)"> Open Pos</label>
     </div>
     <div class="chart-container">
       <div id="priceChart"></div>
@@ -1086,10 +1098,21 @@ async function loadChart() {
       volumeSeries.setData(volumes);
 
       chart.timeScale().fitContent();
+
+      // v0.39.0: After candles load, fetch trade markers + open-position line
+      // for this symbol. Both are async and update _chartState; reconciliation
+      // happens inside their respective refresh functions.
+      loadTradeMarkers();
+      loadOpenPositionLine();
     } else {
       // v0.32.5: Clear chart when no data — don't leave stale candles
       candleSeries.setData([]);
       volumeSeries.setData([]);
+      // v0.39.0: Also clear trade markers + open-position line on empty chart
+      _chartState.trades = [];
+      _chartState.openPosition = null;
+      _refreshChartMarkers();
+      _refreshOpenPositionLine();
       console.log('loadChart: no candles for', symbol, 'on', exchange);
     }
   } catch (e) {
@@ -1102,44 +1125,203 @@ async function loadChart() {
   }
 }
 
-function syncChartMarkers(signals) {
-  if (!document.getElementById('showMarkers').checked) return;
-  if (!signals || !signals.length) return;
+// ============================================================
+// v0.39.0: CHART OVERLAY STATE — trade markers + open-position line
+// ============================================================
+// _chartState holds the latest snapshot of (a) closed-trade markers for
+// the current chart symbol+timeframe, (b) live signals from the WS, and
+// (c) the open-position price line. Every time any of these changes we
+// call _refreshChartMarkers() / _refreshOpenPositionLine() which reconcile
+// the chart's visuals with the latest state. This decouples data fetching
+// (polls, WS ticks) from rendering (single code path each).
+let _chartState = {
+  signals: [],          // last 50 signals from WS (current symbol only)
+  trades: [],           // closed trades for current chart symbol+tf (all sources)
+  openPosition: null,   // {entry_price, direction, ...} or null
+  openPosLine: null,    // Lightweight-Charts price line object reference
+};
 
-  const markers = signals.slice(-50).map(s => ({
-    time: s.time || s.timestamp,
-    position: s.direction === 'LONG' ? 'belowBar' : 'aboveBar',
-    color: s.direction === 'LONG' ? '#4ade80' : '#f87171',
-    shape: s.direction === 'LONG' ? 'arrowUp' : 'arrowDown',
-    text: s.direction + (s.confidence ? ` ${s.confidence}%` : '')
-  }));
-
-  candleSeries.setMarkers(markers);
+// Helper: convert a stored timestamp (string ms, int ms, or int s) to UNIX
+// seconds. Lightweight-Charts requires seconds for intraday timeframes.
+function _toChartTime(t) {
+  if (t === null || t === undefined || t === '') return null;
+  let n = typeof t === 'string' ? parseInt(t, 10) : Number(t);
+  if (!Number.isFinite(n)) {
+    // Try ISO string format (rare but defensive)
+    const d = new Date(t);
+    return isNaN(d.getTime()) ? null : Math.floor(d.getTime() / 1000);
+  }
+  if (n > 1e12) n = Math.floor(n / 1000);  // ms → s
+  return n;
 }
 
-function addBacktestMarkers(trades) {
-  if (!trades || !trades.length) return;
+// Helper: sort markers by time ascending (Lightweight-Charts requirement)
+// and dedupe by (time, text) to avoid overlapping duplicates when a signal
+// and a trade entry fall on the same candle.
+function _mergeAndSortMarkers(signalMarkers, tradeMarkers) {
+  const all = [...signalMarkers, ...tradeMarkers];
+  all.sort((a, b) => (a.time || 0) - (b.time || 0));
+  const seen = new Set();
+  return all.filter(m => {
+    if (m.time === null || m.time === undefined || !Number.isFinite(m.time)) return false;
+    const key = `${m.time}|${m.text || ''}|${m.shape || ''}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
 
-  const markers = trades.map(t => [
-    {
-      time: t.entry_time || t.entryTime,
-      position: t.direction === 'LONG' ? 'belowBar' : 'aboveBar',
-      color: '#60a5fa',
-      shape: 'circle',
-      text: 'E'
-    },
-    {
-      time: t.exit_time || t.exitTime,
-      position: t.direction === 'LONG' ? 'aboveBar' : 'belowBar',
-      color: (t.pnl || 0) >= 0 ? '#4ade80' : '#f87171',
-      shape: 'circle',
-      text: 'X'
+// Build trade entry/exit markers from /api/trades response. Each closed
+// trade produces up to 2 markers: an entry marker (colored by direction)
+// and an exit marker (colored by pnl). Open trades with no exit_time are
+// rendered as a single entry marker.
+function _buildTradeMarkers(trades) {
+  if (!trades || !trades.length) return [];
+  const markers = [];
+  for (const t of trades) {
+    const dir = (t.direction || 'LONG').toUpperCase();
+    const isLong = dir === 'LONG';
+    const entryTime = _toChartTime(t.entry_time);
+    const exitTime = _toChartTime(t.exit_time);
+    const pnl = Number(t.pnl_pct || 0);
+    const pnlStr = Number.isFinite(pnl) ? ` ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%` : '';
+    const conf = Number(t.confidence || 0);
+    const confStr = conf > 0 ? ` ${Math.round(conf * 100)}%` : '';
+
+    if (entryTime !== null) {
+      markers.push({
+        time: entryTime,
+        position: isLong ? 'belowBar' : 'aboveBar',
+        color: isLong ? '#22c55e' : '#ef4444',
+        shape: isLong ? 'arrowUp' : 'arrowDown',
+        text: `${isLong ? 'L' : 'S'}@${Number(t.entry_price || 0).toPrecision(4)}${confStr}`,
+      });
     }
-  ]).flat().filter(m => m.time);
+    if (exitTime !== null) {
+      const win = pnl >= 0;
+      markers.push({
+        time: exitTime,
+        position: isLong ? 'aboveBar' : 'belowBar',
+        color: win ? '#16a34a' : '#dc2626',
+        shape: 'circle',
+        text: `X@${Number(t.exit_price || 0).toPrecision(4)}${pnlStr}`,
+      });
+    }
+  }
+  return markers;
+}
 
-  // Merge with signal markers
-  const existingMarkers = candleSeries.markers ? [] : [];
-  candleSeries.setMarkers([...markers]);
+// Build signal markers from WS signals_history (current symbol only).
+function _buildSignalMarkers(signals) {
+  if (!signals || !signals.length) return [];
+  return signals.slice(-50).map(s => {
+    const dir = (s.direction || 'LONG').toUpperCase();
+    const isLong = dir === 'LONG';
+    const t = _toChartTime(s.time || s.timestamp);
+    const conf = Number(s.confidence || 0);
+    const confStr = conf > 0 ? ` ${Math.round(conf * 100)}%` : '';
+    return {
+      time: t,
+      position: isLong ? 'belowBar' : 'aboveBar',
+      color: isLong ? 'rgba(34,197,94,0.65)' : 'rgba(239,68,68,0.65)',
+      shape: isLong ? 'arrowUp' : 'arrowDown',
+      text: `${dir}${confStr}`,
+    };
+  }).filter(m => m.time !== null);
+}
+
+// Reconcile marker overlay on the chart. Pulls from _chartState.signals and
+// _chartState.trades. Respects the Signals/Trades checkbox toggles.
+function _refreshChartMarkers() {
+  if (!candleSeries || typeof candleSeries.setMarkers !== 'function') return;
+  const showSignals = document.getElementById('showMarkers')?.checked ?? true;
+  const showTrades = document.getElementById('showTrades')?.checked ?? true;
+  const sigMarkers = showSignals ? _buildSignalMarkers(_chartState.signals) : [];
+  const trdMarkers = showTrades ? _buildTradeMarkers(_chartState.trades) : [];
+  const merged = _mergeAndSortMarkers(sigMarkers, trdMarkers);
+  try { candleSeries.setMarkers(merged); } catch (e) { /* ignore race on reload */ }
+}
+
+// Reconcile the open-position price line on the chart. If a session is
+// running for the current chart symbol and has an open_position, draws a
+// horizontal price line at entry_price (green=LONG, red=SHORT). Removes
+// the line when flat or when toggled off.
+function _refreshOpenPositionLine() {
+  if (!candleSeries) return;
+  const show = document.getElementById('showOpenPos')?.checked ?? true;
+  // Remove existing line first
+  if (_chartState.openPosLine) {
+    try { candleSeries.removePriceLine(_chartState.openPosLine); } catch (e) {}
+    _chartState.openPosLine = null;
+  }
+  if (!show || !_chartState.openPosition) return;
+  const pos = _chartState.openPosition;
+  const entry = Number(pos.entry_price);
+  if (!Number.isFinite(entry) || entry <= 0) return;
+  const isLong = (pos.direction || 'LONG').toUpperCase() === 'LONG';
+  try {
+    _chartState.openPosLine = candleSeries.createPriceLine({
+      price: entry,
+      color: isLong ? 'rgba(34,197,94,0.85)' : 'rgba(239,68,68,0.85)',
+      lineWidth: 2,
+      lineStyle: LightweightCharts.LineStyle.Dashed,
+      axisLabelVisible: true,
+      title: `${isLong ? 'LONG' : 'SHORT'} @ ${entry.toPrecision(5)}`,
+    });
+  } catch (e) { /* chart may be mid-reload */ }
+}
+
+// Fetch closed trades for the current chart symbol+timeframe. Called on
+// chart load and on a 15s interval. Updates _chartState.trades and triggers
+// a marker refresh.
+async function loadTradeMarkers() {
+  const symbol = document.getElementById('chartSymbol')?.value;
+  const tf = document.getElementById('chartTimeframe')?.value;
+  if (!symbol) return;
+  try {
+    // source=all so we show both live and backtest trades for context.
+    // The chart's job is to show "what happened here" — filtering by source
+    // is the Trade History panel's job, not the chart's.
+    const url = `${API}/api/trades?symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(tf || '')}&source=all&limit=200`;
+    const res = await fetch(url);
+    if (!res.ok) return;
+    const data = await res.json();
+    _chartState.trades = (data && data.trades) || [];
+  } catch (e) {
+    console.warn('loadTradeMarkers failed:', e);
+    _chartState.trades = [];
+  }
+  _refreshChartMarkers();
+}
+
+// Fetch /api/multi-status, find the session matching the current chart
+// symbol, and update _chartState.openPosition. Called on chart load and
+// on the 5s poll tick.
+async function loadOpenPositionLine() {
+  const symbol = document.getElementById('chartSymbol')?.value;
+  if (!symbol) { _chartState.openPosition = null; _refreshOpenPositionLine(); return; }
+  try {
+    const res = await fetch(`${API}/api/multi-status`);
+    if (!res.ok) return;
+    const data = await res.json();
+    const sess = (data && data.sessions || []).find(s => s.symbol === symbol);
+    _chartState.openPosition = sess?.open_position || null;
+  } catch (e) {
+    _chartState.openPosition = null;
+  }
+  _refreshOpenPositionLine();
+}
+
+// Legacy callback: WS pushes signals_history for the active symbol — we
+// stash them in _chartState.signals and refresh markers. Replaces the old
+// syncChartMarkers() which clobbered trade markers.
+function syncChartMarkers(signals) {
+  if (!document.getElementById('showMarkers')?.checked) {
+    _chartState.signals = [];
+  } else {
+    _chartState.signals = signals || [];
+  }
+  _refreshChartMarkers();
 }
 
 // ============================================================
@@ -1414,11 +1596,11 @@ function updateDashboard(s) {
   if (s.signals_history && s.symbol === chartSym) {
     syncChartMarkers(s.signals_history);
   } else if (s.signals_history && s.symbol && s.symbol !== chartSym) {
-    // Different symbol: clear stale markers so we don't show token A's trades
-    // on token B's chart.
-    if (candleSeries && typeof candleSeries.setMarkers === 'function') {
-      candleSeries.setMarkers([]);
-    }
+    // v0.39.0: Different symbol — clear signal markers from _chartState
+    // (trade markers are kept since they're scoped to chartSym via /api/trades
+    // and may already match). Old behaviour clobbered trade markers too.
+    _chartState.signals = [];
+    _refreshChartMarkers();
   }
 
   // Money management
@@ -2560,11 +2742,19 @@ document.getElementById('showVolume').addEventListener('change', () => {
     visible: document.getElementById('showVolume').checked
   });
 });
-document.getElementById('showMarkers').addEventListener('change', () => {
-  if (!document.getElementById('showMarkers').checked) {
-    candleSeries.setMarkers([]);
-  }
-});
+// v0.39.0: Signals/Trades/OpenPos toggles now route through the unified
+// refresh functions instead of clobbering each other's markers.
+document.getElementById('showMarkers').addEventListener('change', _refreshChartMarkers);
+document.getElementById('showTrades').addEventListener('change', _refreshChartMarkers);
+document.getElementById('showOpenPos').addEventListener('change', _refreshOpenPositionLine);
+
+// v0.39.0: Poll trade markers + open-position line on a slow cadence so
+// newly-closed trades show up without a manual Reload, and the entry-price
+// line tracks position open/close events in real time. 10s/15s intervals
+// balance freshness vs backend load (10s for open-position since it's
+// a single round-trip; 15s for trade markers since they change less often).
+setInterval(loadOpenPositionLine, 10000);
+setInterval(loadTradeMarkers, 15000);
 
 // v0.32.5: When setup symbol changes, sync chart + reload BOTH chart and
 // trade history immediately. Previously this only set chartSymbol.value
@@ -2624,10 +2814,13 @@ function resetValidationUI() {
   const pt = document.getElementById('setupProgressText');
   if (pt) { pt.textContent = ''; pt.style.color = ''; }
 
-  // Clear chart markers from previous token
-  if (candleSeries && typeof candleSeries.setMarkers === 'function') {
-    candleSeries.setMarkers([]);
-  }
+  // v0.39.0: Clear chart markers + open-position line from previous token.
+  // Uses the unified refresh functions so both signals and trades are cleared.
+  _chartState.signals = [];
+  _chartState.trades = [];
+  _chartState.openPosition = null;
+  _refreshChartMarkers();
+  _refreshOpenPositionLine();
 }
 
 // v0.32.6: After switching token, check if the server already has a saved
