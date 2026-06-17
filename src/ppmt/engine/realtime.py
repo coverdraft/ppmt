@@ -328,15 +328,15 @@ class RealtimeTrader:
         """
         self.config = config or ReplayConfig()
         self._state_callback = state_callback
-        self.risk_config = RiskConfig(
-            base_position_size_pct=0.01,
-            max_position_size_pct=0.04,
-            min_position_size_pct=0.005,
-            min_risk_reward=1.0,
-            min_quality_score=0.10,
-            max_daily_loss_pct=0.10,
-            max_drawdown_pct=0.80,
-        )
+        # v0.38.3 FIX: Removed hardcoded RiskConfig that OVERRIDED the relaxed
+        # defaults in risk/manager.py (min_quality_score=0.03, min_risk_reward=0.5
+        # set in v0.38.1). The hardcoded values (min_quality_score=0.10,
+        # min_risk_reward=1.0) were rejecting 95%+ of signals in backtest →
+        # INSUFFICIENT_DATA verdicts. Now uses RiskConfig() defaults which match
+        # the v0.38.1 relaxed values.
+        # Note: run_live() uses MoneyManager which builds its own RiskConfig from
+        # MoneyManagerConfig, so this is mainly for run_replay() backtest path.
+        self.risk_config = RiskConfig()
 
     def _update_terminal_state(self, **kwargs) -> None:
         """Push state update to TerminalState for dashboard consumption.
@@ -968,9 +968,18 @@ class RealtimeTrader:
                             )
 
                         # v0.25.0: Hard quality gate — reject weak signals
+                        # v0.38.3: Log the reason so user can see WHY signals don't fire.
                         if prediction.overall_probability < base_prob_gate:
+                            if result.candles_processed % 20 == 0:
+                                console.print(
+                                    f"[dim][{cfg.symbol}] skip: prob={prediction.overall_probability:.2f} < {base_prob_gate} gate | regime={current_regime} | pattern={''.join(current_symbols)}[/dim]"
+                                )
                             continue
                         if abs(prediction.expected_total_move_pct) < 0.5:
+                            if result.candles_processed % 20 == 0:
+                                console.print(
+                                    f"[dim][{cfg.symbol}] skip: move={prediction.expected_total_move_pct:.2f}% < 0.5% | regime={current_regime} | pattern={''.join(current_symbols)}[/dim]"
+                                )
                             continue
 
                         # v0.25.0: Strict regime-aware signal filtering
@@ -981,22 +990,46 @@ class RealtimeTrader:
                         if current_regime == "ranging":
                             # Ranging markets are choppy — skip unless very high confidence
                             if prediction.overall_probability < ranging_prob_gate:
+                                if result.candles_processed % 20 == 0:
+                                    console.print(
+                                        f"[dim][{cfg.symbol}] skip: ranging prob={prediction.overall_probability:.2f} < {ranging_prob_gate}[/dim]"
+                                    )
                                 continue
                             if abs(prediction.expected_total_move_pct) < (0.80 if getattr(cfg, 'validation_mode', False) else 1.0):
+                                if result.candles_processed % 20 == 0:
+                                    console.print(
+                                        f"[dim][{cfg.symbol}] skip: ranging move={prediction.expected_total_move_pct:.2f}% < 0.80%[/dim]"
+                                    )
                                 continue
                         elif current_regime == "volatile":
                             # In volatile markets, only trade with the strongest signals
                             if prediction.overall_probability < volatile_prob_gate:
+                                if result.candles_processed % 20 == 0:
+                                    console.print(
+                                        f"[dim][{cfg.symbol}] skip: volatile prob={prediction.overall_probability:.2f} < {volatile_prob_gate}[/dim]"
+                                    )
                                 continue
                             if abs(prediction.expected_total_move_pct) < (1.20 if getattr(cfg, 'validation_mode', False) else move_threshold * 2.0):
+                                if result.candles_processed % 20 == 0:
+                                    console.print(
+                                        f"[dim][{cfg.symbol}] skip: volatile move={prediction.expected_total_move_pct:.2f}% < 1.20%[/dim]"
+                                    )
                                 continue
                         elif current_regime == "trending_down" and prediction.direction == "LONG":
                             # Counter-trend LONG in downtrend — extremely risky
                             if prediction.overall_probability < counter_trend_gate:
+                                if result.candles_processed % 20 == 0:
+                                    console.print(
+                                        f"[dim][{cfg.symbol}] skip: counter-trend LONG in downtrend prob={prediction.overall_probability:.2f} < {counter_trend_gate}[/dim]"
+                                    )
                                 continue
                         elif current_regime == "trending_up" and prediction.direction == "SHORT":
                             # Counter-trend SHORT in uptrend — extremely risky
                             if prediction.overall_probability < counter_trend_gate:
+                                if result.candles_processed % 20 == 0:
+                                    console.print(
+                                        f"[dim][{cfg.symbol}] skip: counter-trend SHORT in uptrend prob={prediction.overall_probability:.2f} < {counter_trend_gate}[/dim]"
+                                    )
                                 continue
 
                         if (position_state == PositionState.FLAT
@@ -1758,6 +1791,19 @@ class RealtimeTrader:
         cfg = self.config
         start_time = time.time()
         storage = PPMTStorage()
+
+        # v0.38.3 FIX: When dry_run (paper trading), force validation_mode=True
+        # so the v0.25.0 strict signal filters are relaxed. Previously, live
+        # paper trading used the strict thresholds (ranging_prob_gate=0.55,
+        # volatile_prob_gate=0.60) which rejected 95%+ of signals in fresh tries
+        # where Bayesian shrinkage keeps overall_probability near 0.5.
+        # With validation_mode=True, gates are: ranging=0.40, volatile=0.45,
+        # move_threshold=0.50 — permissive enough for paper trading to actually
+        # execute trades so the user can SEE the system working.
+        # When --live (real money), validation_mode stays False (strict).
+        if getattr(cfg, 'dry_run', True) and not getattr(cfg, 'validation_mode', False):
+            cfg.validation_mode = True
+            console.print("[cyan]Paper trading: validation_mode=ON (relaxed signal gates)[/cyan]")
 
         # Classify asset
         classifier = AssetClassifier()

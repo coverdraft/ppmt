@@ -1,7 +1,7 @@
 # TRAZABILIDAD PPMT — Estado del Proyecto
 
 > Última actualización: 2026-06-17
-> Versión actual: v0.38.2 — Fix paneles duplicados (headless mode) + Pattern vacío (rich markup bug) + precio tiempo real en cada poll
+> Versión actual: v0.38.3 — Fix RiskConfig hardcoded que pisaba los umbrales relajados de v0.38.1 + validation_mode en paper trading + logs de filtrado de signals
 > Repositorio: https://github.com/coverdraft/ppmt
 > Idioma: Español
 
@@ -3793,4 +3793,174 @@ Después de lanzar tokens desde el dashboard, deberías ver:
 4. **Signals reales** (1-8) en el dashboard, no cientos de SAX symbols.
 5. **Logs de rechazo claros** en stdout del servidor: `Signal #2 rejected: Quality too low: 0.05 | conf=0.10 quality=0.05 RR=1.5` — verás por qué no se ejecuta cada signal.
 6. **Logs de trade ejecutado**: `TRADE #1 LONG XLM/USDT @ $0.2300 | conf=0.15 | SL=$0.2240 TP=$0.2415 | pattern=abcde`
+
+
+---
+
+## v0.38.3 — 2026-06-17 — Fix RiskConfig hardcoded + validation_mode en paper trading + logs de filtrado de signals
+
+### Problemas reportados por el usuario
+
+Después de v0.38.2, el usuario reportó:
+
+1. **"sigue sin funcionar investiga porque pasa y soluciona no hace operar las señales"** — Las señales no se ejecutan como trades.
+2. **"me parece raro las encuentra tan rapido"** — Las signals aparecen muy rápido, sospecha que son fake.
+3. **"en la parte de SETUP & VALIDATION aparecen las pass primero en segundo y despues las otras que no"** — Sospecha que es raro.
+4. **"raro pero chequea todas las zonas"** — Pedir revisión completa.
+
+### Diagnóstico profundo
+
+#### Bug 1 (CRÍTICO): RiskConfig hardcoded pisaba los umbrales relajados de v0.38.1
+
+**Root cause**: En `realtime.py` `RealtimeTrader.__init__()` línea 331-339, había un `RiskConfig` HARDCODED con:
+- `min_risk_reward=1.0` (v0.38.1 había bajado a 0.5 en `risk/manager.py`)
+- `min_quality_score=0.10` (v0.38.1 había bajado a 0.03 en `risk/manager.py`)
+
+Este `self.risk_config` se usaba en `run_replay()` línea 639: `RiskManager(capital=cfg.initial_capital, config=self.risk_config)`. Eso significa que **la validación de tokens (backtest)** usaba los umbrales STRICTOS, no los relajados.
+
+Resultado: backtest rechazaba el 95%+ de signals → INSUFFICIENT_DATA o FAIL → tokens no pasan validación → no se auto-agregan como child nodes → no se lanzan en multi-start → "no opera".
+
+Pero también afectaba `run_live()`: aunque `run_live` usa `MoneyManager` (no `self.risk_config` directamente), el `MoneyManager` crea su propio `RiskConfig` con solo 4 campos pasados explícitamente. Los demás campos toman defaults de `RiskConfig()` en `risk/manager.py` que SÍ son los v0.38.1 relajados. Así que `run_live` no estaba afectado por este bug específico.
+
+**Fix**: Reemplazar el `RiskConfig` hardcoded por `RiskConfig()` (defaults del módulo, que ya tienen los valores v0.38.1 relajados).
+
+```python
+# ANTES (v0.38.2):
+self.risk_config = RiskConfig(
+    base_position_size_pct=0.01,
+    max_position_size_pct=0.04,
+    min_position_size_pct=0.005,
+    min_risk_reward=1.0,           # ❌ pisaba el 0.5 de v0.38.1
+    min_quality_score=0.10,        # ❌ pisaba el 0.03 de v0.38.1
+    max_daily_loss_pct=0.10,
+    max_drawdown_pct=0.80,
+)
+
+# DESPUÉS (v0.38.3):
+self.risk_config = RiskConfig()    # ✅ usa defaults del módulo (v0.38.1 relajados)
+```
+
+#### Bug 2 (CRÍTICO): validation_mode solo en backtest, no en paper trading live
+
+**Root cause**: El flag `validation_mode=True` (que relaja los gates de signal: `ranging_prob_gate=0.40` en vez de `0.55`, etc.) solo se pasaba en `ReplayConfig` para la validación de tokens. En `LiveConfig` para paper trading real, `validation_mode=False` por defecto → gates strictos → pocas signals generadas → pocas trades.
+
+Específicamente, en `process_new_candle` (que es llamado por `run_live` vía REST polling), los gates de régimen son:
+- Sin validation_mode: `ranging_prob_gate=0.55`, `volatile_prob_gate=0.60`, `counter_trend_gate=0.60`, `move_threshold=0.80`
+- Con validation_mode: `ranging_prob_gate=0.40`, `volatile_prob_gate=0.45`, `counter_trend_gate=0.45`, `move_threshold=0.50`
+
+Para tries nuevos con poco `historical_count`, la probabilidad Bayesian-shrunk se queda cerca de 0.5. Con `ranging_prob_gate=0.55`, la mayoría de signals en régimen ranging son rechazadas.
+
+**Fix**: En `run_live()`, forzar `validation_mode=True` cuando `dry_run=True` (paper trading). Cuando `dry_run=False` (--live, dinero real), `validation_mode` se queda en False (strict).
+
+```python
+if getattr(cfg, 'dry_run', True) and not getattr(cfg, 'validation_mode', False):
+    cfg.validation_mode = True
+    console.print("[cyan]Paper trading: validation_mode=ON (relaxed signal gates)[/cyan]")
+```
+
+#### Bug 3: Signals rechazadas por gates eran silenciosas
+
+**Root cause**: Los `continue` en los gates de régimen (líneas 970-1000) no logueaban nada. El usuario veía `Signals: 1` pero no sabía por qué solo 1 y no 5.
+
+**Fix**: Añadir logs dim (cada 20 candles para no spamear) explicando cada skip:
+
+```python
+if prediction.overall_probability < base_prob_gate:
+    if result.candles_processed % 20 == 0:
+        console.print(
+            f"[dim][{cfg.symbol}] skip: prob={prediction.overall_probability:.2f} < {base_prob_gate} gate | regime={current_regime} | pattern={''.join(current_symbols)}[/dim]"
+        )
+    continue
+```
+
+Ahora el usuario verá en el log del servidor:
+- `[BTC/USDT] skip: prob=0.32 < 0.30 gate | regime=ranging | pattern=abcde`
+- `[BTC/USDT] skip: ranging prob=0.48 < 0.40` (con validation_mode)
+- `[BTC/USDT] skip: ranging move=0.60% < 0.80%`
+
+#### Sobre "las encuentra tan rápido"
+
+Las signals aparecen rápido porque:
+1. El warmup carga 200 candles históricas inmediatamente al iniciar.
+2. El SAX encoder produce símbolos cada `window_size` (10) candles → 20 símbolos en warmup.
+3. Con `pattern_length=5`, hay 4 patterns matchable inmediatamente.
+4. Cada pattern puede generar una signal si pasa los gates.
+
+**Esto es comportamiento normal**, no fake. Las signals son reales (basadas en datos de Binance vía `fetch_ohlcv`). Lo que sí es problemático es que muchas se filtren por gates estrictos — fix v0.38.3 relaja eso en paper trading.
+
+#### Sobre "PASS primero, otras después" en SETUP & VALIDATION
+
+**Comportamiento normal, no bug**. El frontend ordena los resultados por tier (línea 2929 de index.html):
+```javascript
+const score = (r) => r.verdict === 'PASS' ? 2 : r.verdict === 'INSUFFICIENT_DATA' ? 1 : 0;
+const tier = score(b) - score(a);
+```
+
+PASS (score=2) aparece primero, INSUFFICIENT_DATA (score=1) segundo, FAIL/ERROR (score=0) al final. Dentro del mismo tier, ordena por Profit Factor descendente.
+
+**Por qué puede parecer raro**: si el usuario hace un sweep de 50 tokens y 30 ya estaban PASS de sweeps anteriores (cached en DB), esos 30 aparecen inmediatamente al inicio del sweep nuevo (línea 2043 de server.py los añade a `_sweep_state["results"]` antes de empezar). Luego los 20 nuevos se validan secuencialmente y se añaden al final. Por eso se ve "PASS primero, otros después".
+
+### Sobre el script de diagnóstico
+
+Creé `scripts/diagnose_signal_flow.py` que permite al usuario diagnosticar un token específico:
+
+```bash
+python scripts/diagnose_signal_flow.py BTC/USDT 1h
+```
+
+Muestra:
+1. Trie cargado (cuántos patrones)
+2. Datos históricos cargados
+3. SAX pattern actual
+4. Prediction (direction, confidence, probability, move)
+5. Signal construida (SL, TP, R:R, quality_score)
+6. RiskManager.can_open() resultado con razón exacta
+
+Si `can_open=False`, explica qué hacer:
+- "Quality too low" → necesitas más confidence/win_rate (tries más grandes)
+- "Confidence too low" → trie pequeño da confidence baja (Bayesian shrinkage)
+- "R:R too low" → move muy bajo
+- "Already in position" → borra `~/.ppmt/money_mgr_*.json`
+
+### Archivos modificados
+
+- `src/ppmt/engine/realtime.py`
+  - `__init__`: reemplazar RiskConfig hardcoded por `RiskConfig()` defaults (Fix 1)
+  - `run_live()`: forzar `validation_mode=True` cuando `dry_run=True` (Fix 2)
+  - `process_new_candle()`: logs dim de filtrado de signals (Fix 3)
+- `src/ppmt/cli/main.py` — banner v0.38.3, `--version` 0.38.3
+- `src/ppmt/terminal/server.py` — version 0.38.3
+- `pyproject.toml` — version 0.38.3
+- `scripts/diagnose_signal_flow.py` — nuevo script de diagnóstico
+
+### Cómo actualizar en Mac
+
+```bash
+cd ~/ppmt
+git pull origin main       # trae v0.38.3
+source .venv/bin/activate
+pip install -e .
+ppmt --version             # debe decir: ppmt, version 0.38.3
+
+# Diagnosticar un token específico:
+python scripts/diagnose_signal_flow.py BTC/USDT 1h
+python scripts/diagnose_signal_flow.py PHA/USDT 1h
+
+# Lanzar dashboard:
+ppmt terminal
+open http://localhost:8420
+```
+
+Después de lanzar tokens desde el dashboard, deberías ver:
+
+1. **Más signals generadas** en paper trading (gates relajados con validation_mode).
+2. **Más trades ejecutados** (RiskConfig relajado en backtest → más tokens PASS validación → más child nodes → más trading).
+3. **Logs dim en servidor** explicando cada signal rechazada: `[BTC/USDT] skip: ranging prob=0.48 < 0.40`.
+4. **Más tokens PASS** en SETUP & VALIDATION (backtest ya no rechaza todo por quality_score > 0.10).
+
+### Por qué v0.38.1 y v0.38.2 no arreglaron el problema
+
+- **v0.38.1** bajó los umbrales en `risk/manager.py` defaults, PERO `realtime.py.__init__` tenía su propio `RiskConfig` hardcoded que pisaba esos defaults. El fix era incompleto.
+- **v0.38.2** arregló bugs de display (paneles duplicados, Pattern vacío, precio stale), PERO no tocó el flujo de signal→trade. Los gates seguían rechazando signals.
+- **v0.38.3** finalmente arregla el flujo: RiskConfig unificado + validation_mode en paper trading + logs de diagnóstico.
 

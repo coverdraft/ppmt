@@ -47,7 +47,7 @@ def load_config() -> dict:
 
 
 @click.group()
-@click.version_option(version="0.38.2")
+@click.version_option(version="0.38.3")
 def cli():
     """PPMT Terminal - Autonomous Pattern-Based Trading Terminal"""
     pass
@@ -1010,7 +1010,7 @@ def terminal(host: str, port: int, open_browser: bool):
       ppmt terminal -p 9000             # Custom port
       ppmt terminal --open-browser      # Auto-open in browser
     """
-    console.print("[bold cyan]PPMT Terminal Dashboard v0.38.2[/bold cyan]")
+    console.print("[bold cyan]PPMT Terminal Dashboard v0.38.3[/bold cyan]")
 
     if open_browser:
         import webbrowser
