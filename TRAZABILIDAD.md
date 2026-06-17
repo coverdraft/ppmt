@@ -1,9 +1,22 @@
 # TRAZABILIDAD PPMT — Estado del Proyecto
 
 > Última actualización: 2026-06-17
-> Versión actual: v0.38.3 — Fix RiskConfig hardcoded que pisaba los umbrales relajados de v0.38.1 + validation_mode en paper trading + logs de filtrado de signals
+> Versión actual: **v0.38.6** — REST polling por defecto (fix Binance WS rate limit)
 > Repositorio: https://github.com/coverdraft/ppmt
 > Idioma: Español
+
+---
+
+## 🚨 SI ES NUEVO EN EL PROYECTO — EMPEZAR AQUÍ
+
+**No lea todo este archivo (4159 líneas).** Es historia detallada de cada versión.
+
+1. **Lea primero `HANDOFF.md`** (en la raíz del repo) — contexto completo, credenciales, qué se hizo, qué falta, reglas críticas.
+2. **Vuelva aquí solo a la sección `## v0.38.6`** (cerca del final del archivo) para ver el último cambio.
+3. **Luego lea** `src/ppmt/engine/realtime.py` líneas 930-1060 (skip filters) y `src/ppmt/terminal/server.py` líneas 940-1080 (validation bypass).
+4. **Estado actual**: ✅ Sistema operativo. Paper trading ejecuta trades en multi-token con REST polling.
+
+**Búsqueda rápida**: `grep -n "^## v0\.38" TRAZABILIDAD.md` muestra las secciones relevantes.
 
 ---
 
