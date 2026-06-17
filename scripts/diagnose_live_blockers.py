@@ -2,15 +2,15 @@
 """
 v0.38.4: Diagnóstico COMPLETO de por qué no se ejecutan trades en el dashboard.
 
-El script diagnose_signal_flow.py SOLO prueba can_open() en aislamiento,
-pero hay MÁS bloqueos en el camino que ese script no ve:
+Recorre los 3 bloqueos reales que impiden que el paper trading opere:
 
   Bloqueo 1 — VALIDATION GATE (server.py:951)
-    El live trader NUNCA ARRANCA si la validación guardada no es "PASS".
+    En v0.38.4, paper trading (dry_run=True) YA NO se bloquea por validation FAIL.
+    Solo real-money mantiene el gate estricto.
 
   Bloqueo 2 — SKIP FILTERS en realtime.py:970-1033 (run_live)
-    Aunque el trader arranque, hay 6 filtros de skip ANTES de que
-    la señal llegue a can_open().
+    6 filtros de skip ANTES de que la señal llegue a can_open().
+    En v0.38.4, validation_mode usa thresholds relajados (base_prob_gate=0.15, etc).
 
   Bloqueo 3 — Token sin datos / sin trie.
 
@@ -21,6 +21,7 @@ Uso:
 import sys
 import os
 import sqlite3
+import numpy as np
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(SCRIPT_DIR, '..', 'src'))
@@ -46,12 +47,17 @@ def section(title):
 def check_validation_gate(db_path, symbol=None, timeframe=None):
     section("[BLOQUEO 1] Validation Gate — ¿el trader arrancaría?")
     print("""
-En server.py:_run_one_token() línea 951:
-  if latest_val is None or latest_val.get("verdict") != "PASS":
-      verdict = await validate_token(...)
-      if verdict != "PASS":
+v0.38.4: Paper trading (dry_run=True) YA NO se bloquea por validation FAIL.
+Solo real-money (dry_run=False) mantiene el gate estricto.
+
+En server.py:_run_one_token():
+  if verdict != "PASS":
+      if _is_paper:
+          logger.warning("Paper trading: proceeding anyway")
+          # NO retorna — el trader ARRANCA
+      else:
           sess["status"] = "VALIDATION_FAILED"
-          return  # EL TRADER NUNCA ARRANCA
+          return  # Solo real-money se bloquea
 """)
 
     conn = sqlite3.connect(db_path)
@@ -75,7 +81,7 @@ En server.py:_run_one_token() línea 951:
         if not rows:
             print(f"  X  NO HAY validaciones guardadas para {symbol} {timeframe}")
             print(f"     -> Al iniciar multi-session, el trader intentara validar inline.")
-            print(f"     -> Si la validacion inline FALLA, status='VALIDATION_FAILED' y no arranca.")
+            print(f"     -> v0.38.4: aunque la validacion inline falle, paper trading arrancara.")
             conn.close()
             return "NO_VALIDATION"
 
@@ -94,21 +100,8 @@ En server.py:_run_one_token() línea 951:
         print(f"    MC verdict:    {mc_v}")
         print(f"    Fecha:         {ts}")
 
-        if verdict == "PASS":
-            print(f"\n  OK  PASS -> El trader ARRANCARIA para este token.")
-            print(f"     Si aun ves Trades=0, el problema esta en Bloqueo 2 (skip filters).")
-        elif verdict == "FAIL":
-            print(f"\n  X  FAIL -> El trader NUNCA ARRANCA para este token.")
-            wr_str = f"{wr*100:.1f}%" if wr else "N/A"
-            pf_str = f"{pf:.2f}" if pf else "N/A"
-            print(f"     Causa: win_rate={wr_str} (req >40%), PF={pf_str} (req >0.8).")
-            print(f"     Esto explica por que ves Signals>0 pero Trades=0.")
-        elif verdict == "INSUFFICIENT_DATA":
-            print(f"\n  X  INSUFFICIENT_DATA -> El trader NUNCA ARRANCA.")
-            print(f"     Causa: backtest produjo solo {trades} trades (req >=5).")
-            print(f"     Los skip filters del Bloqueo 2 estan rechazando casi todo.")
-        else:
-            print(f"\n  ?  Verdict desconocido: {verdict}")
+        print(f"\n  v0.38.4: Paper trading ARRANCARIA aunque el verdict sea FAIL/INSUFFICIENT_DATA.")
+        print(f"           Solo real-money se bloquearia por verdict != PASS.")
 
         if len(rows) > 1:
             print(f"\n  Validaciones anteriores:")
@@ -156,9 +149,11 @@ En server.py:_run_one_token() línea 951:
         fail_count = len(by_verdict.get("FAIL", []))
         insuf_count = len(by_verdict.get("INSUFFICIENT_DATA", []))
         print(f"\n  RESUMEN: {total} tokens validados")
-        print(f"    PASS:                {pass_count}  ({pass_count*100//total if total else 0}%) -> trader arrancaria")
-        print(f"    FAIL:                {fail_count}  ({fail_count*100//total if total else 0}%) -> trader NO arrancaria")
-        print(f"    INSUFFICIENT_DATA:   {insuf_count}  ({insuf_count*100//total if total else 0}%) -> trader NO arrancaria")
+        print(f"    PASS:                {pass_count}  ({pass_count*100//total if total else 0}%)")
+        print(f"    FAIL:                {fail_count}  ({fail_count*100//total if total else 0}%)")
+        print(f"    INSUFFICIENT_DATA:   {insuf_count}  ({insuf_count*100//total if total else 0}%)")
+        print(f"\n  v0.38.4: Paper trading arrancara para TODOS los tokens (PASS + FAIL + INSUFFICIENT_DATA)")
+        print(f"           porque el gate ya solo aplica a real-money mode.")
 
         conn.close()
         return by_verdict
@@ -172,6 +167,8 @@ def check_skip_filters(symbol, timeframe):
         from ppmt.core.sax import SAXEncoder
         from ppmt.engine.prediction import PredictionEngine
         from ppmt.core.profiles import TokenProfile
+        from ppmt.core.regime import RegimeDetector
+        from ppmt.data.classifier import AssetClassifier
     except ImportError as e:
         print(f"  X  No se pudo importar ppmt: {e}")
         print(f"     Ejecuta desde el directorio raiz del repo: cd ~/ppmt && python3 scripts/diagnose_live_blockers.py")
@@ -179,6 +176,7 @@ def check_skip_filters(symbol, timeframe):
 
     storage = PPMTStorage()
 
+    # Load trie
     all_tries = storage.load_all_tries(symbol)
     trie = all_tries.get("n3")
     if trie is None:
@@ -196,27 +194,48 @@ def check_skip_filters(symbol, timeframe):
 
     print(f"  OK {len(df)} candles cargadas (rango: {df.index[0]} -> {df.index[-1]})")
 
+    # Load TokenProfile (correct API: storage.load_token_profile + TokenProfile.from_dict)
+    token_profile = None
     try:
-        profile = TokenProfile.from_storage(storage, symbol, timeframe)
-        if profile is None:
-            profile = TokenProfile.calibrate_from_data(df, symbol=symbol)
-        print(f"  TokenProfile: alpha={profile.alpha}, window={profile.window}")
+        saved_profile_dict = storage.load_token_profile(symbol, timeframe)
+        if saved_profile_dict is not None:
+            token_profile = TokenProfile.from_dict(saved_profile_dict)
+            print(f"  TokenProfile (storage): alpha={token_profile.sax_alphabet_size}, "
+                  f"window={token_profile.sax_window_size}")
     except Exception as e:
-        print(f"  WARN: TokenProfile fallo ({e}), usando defaults alpha=3 window=7")
-        class _P:
-            alpha = 3
-            window = 7
-        profile = _P()
+        print(f"  WARN: No se pudo cargar TokenProfile desde storage: {e}")
 
-    sax = SAXEncoder(alphabet_size=profile.alpha, window_size=profile.window)
+    if token_profile is None:
+        # Fallback: classify by asset + timeframe
+        try:
+            classifier = AssetClassifier()
+            info = classifier.classify(symbol)
+            token_profile = TokenProfile.from_timeframe(
+                symbol=symbol,
+                asset_class=info.asset_class,
+                timeframe=timeframe,
+            )
+            print(f"  TokenProfile (defaults): alpha={token_profile.sax_alphabet_size}, "
+                  f"window={token_profile.sax_window_size}")
+        except Exception as e:
+            print(f"  WARN: TokenProfile fallo ({e}), usando defaults alpha=3 window=7")
+            class _P:
+                sax_alphabet_size = 3
+                sax_window_size = 7
+            token_profile = _P()
+
+    alpha = token_profile.sax_alphabet_size
+    window = token_profile.sax_window_size
+
+    sax = SAXEncoder(alphabet_size=alpha, window_size=window)
 
     try:
-        symbols, paa_mean, paa_std = sax.encode_with_normalization(df)
-        if len(symbols) < 5:
-            print(f"  X  SAX solo produjo {len(symbols)} simbolos")
+        symbols_encoded, paa_mean, paa_std = sax.encode_with_normalization(df)
+        if len(symbols_encoded) < 5:
+            print(f"  X  SAX solo produjo {len(symbols_encoded)} simbolos")
             storage.close()
             return
-        current_symbols = list(symbols[-5:])
+        current_symbols = list(symbols_encoded[-5:])
         print(f"  OK Pattern actual: {''.join(current_symbols)}")
     except Exception as e:
         print(f"  X  Error generando SAX: {e}")
@@ -237,25 +256,31 @@ def check_skip_filters(symbol, timeframe):
     print(f"    Overall prob:      {prediction.overall_probability:.4f}")
     print(f"    Expected move:     {prediction.expected_total_move_pct:+.4f}%")
 
+    # Regime detection (correct API: RegimeDetector().detect(prices_numpy))
     try:
-        from ppmt.core.regime import RegimeClassifier
-        regime_info = RegimeClassifier().classify(df.tail(100))
-        current_regime = regime_info.regime
+        prices = df['close'].values if 'close' in df.columns else df.iloc[:, -1].values
+        detector = RegimeDetector()
+        current_regime = detector.detect(prices)
         print(f"    Regime:            {current_regime}")
     except Exception as e:
         print(f"    WARN: No se pudo clasificar regime: {e}")
-        current_regime = "unknown"
+        current_regime = "ranging"  # default fallback
 
-    print(f"\n  Simulando skip filters (validation_mode=True, paper trading):")
+    # v0.38.4 thresholds for validation_mode (paper trading)
+    print(f"\n  Simulando skip filters (v0.38.4 validation_mode=True, paper trading):")
 
-    base_prob_gate = 0.30
-    ranging_prob_gate = 0.40
-    volatile_prob_gate = 0.45
-    counter_trend_gate = 0.45
-    move_threshold = 0.50
+    base_prob_gate = 0.15       # v0.38.4 (was 0.30)
+    ranging_prob_gate = 0.20    # v0.38.4 (was 0.40)
+    volatile_prob_gate = 0.25   # v0.38.4 (was 0.45)
+    counter_trend_gate = 0.25   # v0.38.4 (was 0.45)
+    move_threshold = 0.20       # v0.38.4 (was 0.50)
+    hard_move_floor = 0.15      # v0.38.4 (was 0.50 hard-coded)
+    ranging_move_floor = 0.20   # v0.38.4 (was 0.80)
+    volatile_move_floor = 0.30  # v0.38.4 (was 1.20)
 
     blockers = []
 
+    # Filter a) prob < base_prob_gate
     if prediction.overall_probability < base_prob_gate:
         blockers.append(
             f"a) prob={prediction.overall_probability:.2f} < {base_prob_gate} gate (base_prob_gate)"
@@ -263,13 +288,15 @@ def check_skip_filters(symbol, timeframe):
     else:
         print(f"  OK a) prob {prediction.overall_probability:.2f} >= {base_prob_gate} (base_prob_gate)")
 
-    if abs(prediction.expected_total_move_pct) < 0.5:
+    # Filter b) move < hard_move_floor
+    if abs(prediction.expected_total_move_pct) < hard_move_floor:
         blockers.append(
-            f"b) move={prediction.expected_total_move_pct:.2f}% < 0.5% (move_threshold)"
+            f"b) move={prediction.expected_total_move_pct:.2f}% < {hard_move_floor}% (hard_move_floor)"
         )
     else:
-        print(f"  OK b) move {prediction.expected_total_move_pct:.2f}% >= 0.5%")
+        print(f"  OK b) move {prediction.expected_total_move_pct:.2f}% >= {hard_move_floor}%")
 
+    # Filter c-h) regime-specific
     if current_regime == "ranging":
         if prediction.overall_probability < ranging_prob_gate:
             blockers.append(
@@ -277,9 +304,9 @@ def check_skip_filters(symbol, timeframe):
             )
         else:
             print(f"  OK c) ranging prob OK")
-        if abs(prediction.expected_total_move_pct) < 0.80:
+        if abs(prediction.expected_total_move_pct) < ranging_move_floor:
             blockers.append(
-                f"d) ranging move={prediction.expected_total_move_pct:.2f}% < 0.80%"
+                f"d) ranging move={prediction.expected_total_move_pct:.2f}% < {ranging_move_floor}%"
             )
         else:
             print(f"  OK d) ranging move OK")
@@ -290,9 +317,9 @@ def check_skip_filters(symbol, timeframe):
             )
         else:
             print(f"  OK e) volatile prob OK")
-        if abs(prediction.expected_total_move_pct) < 1.20:
+        if abs(prediction.expected_total_move_pct) < volatile_move_floor:
             blockers.append(
-                f"f) volatile move={prediction.expected_total_move_pct:.2f}% < 1.20%"
+                f"f) volatile move={prediction.expected_total_move_pct:.2f}% < {volatile_move_floor}%"
             )
         else:
             print(f"  OK f) volatile move OK")
@@ -313,6 +340,7 @@ def check_skip_filters(symbol, timeframe):
     else:
         print(f"  OK c-h) Regime={current_regime} no aplica filtros extra")
 
+    # Filter i) boosted_confidence check
     boosted_confidence = prediction.confidence
     boost_prob_trigger = 0.40
     boost_move_trigger = 0.80
@@ -331,17 +359,18 @@ def check_skip_filters(symbol, timeframe):
     else:
         print(f"  OK i) boosted_confidence {boosted_confidence:.4f} >= {effective_min_conf}")
 
+    # Filter j) final entry gate
     if (prediction.direction != "FLAT"
             and boosted_confidence >= effective_min_conf
             and abs(prediction.expected_total_move_pct) > move_threshold
-            and prediction.overall_probability > 0.30):
-        print(f"  OK j) Entry gate: la señal PASARIA todos los filtros")
+            and prediction.overall_probability > 0.15):
+        print(f"  OK j) Entry gate: la señal PASARIA todos los filtros (v0.38.4)")
     else:
         blockers.append(
             f"j) Entry gate final: dir={prediction.direction}, "
             f"boosted_conf={boosted_confidence:.4f}, "
-            f"move={abs(prediction.expected_total_move_pct):.2f}%, "
-            f"prob={prediction.overall_probability:.2f}"
+            f"move={abs(prediction.expected_total_move_pct):.2f}% (req >{move_threshold}%), "
+            f"prob={prediction.overall_probability:.2f} (req >0.15)"
         )
 
     if blockers:
