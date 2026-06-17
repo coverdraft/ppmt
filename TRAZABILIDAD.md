@@ -1,7 +1,7 @@
 # TRAZABILIDAD PPMT — Estado del Proyecto
 
 > Última actualización: 2026-06-17
-> Versión actual: v0.33.1 — grupos "Recién Listados" + "Alta Liquidez/Spread" + Sweep All Groups + sort por PF
+> Versión actual: v0.38.0 — Fix Pattern vacío en REST polling + SL/TP $0 + Chart auto-load + Mega lista Binance (301 bases)
 > Repositorio: https://github.com/coverdraft/ppmt
 > Idioma: Español
 
