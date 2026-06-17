@@ -1,7 +1,7 @@
 # TRAZABILIDAD PPMT — Estado del Proyecto
 
 > Última actualización: 2026-06-17
-> Versión actual: **v0.38.7** — Fase 0: higiene del repo (archive, no delete)
+> Versión actual: **v0.38.8** — Fase 1: unificación de thresholds (SignalThresholds + RegimeThresholds)
 > Repositorio: https://github.com/coverdraft/ppmt
 > Idioma: Español
 
@@ -4269,3 +4269,131 @@ ppmt terminal           # dashboard debe arrancar en :8420
 ls src/                 # debe mostrar solo: ppmt/
 ls _archive/v0.38.6_pre_cleanup/   # safety net intacto
 ```
+
+---
+
+## v0.38.8 — 2026-06-18 — Fase 1: Unificación de thresholds
+
+### Problema
+El motor tenía **3 juegos independientes de thresholds hardcoded** con
+inconsistencias silenciosas:
+
+1. **`signal.py` (SignalGenerator)**: dict `regime_thresholds` con claves
+   **MAYÚSCULAS** (`'TRENDING_UP'`, `'RANGING'`, etc.). Pero `RegimeDetector`
+   devuelve **minúsculas** (`'trending_up'`, `'ranging'`). Resultado: el
+   lookup siempre fallaba → caía al fallback `'UNKNOWN'` (0.60, 1.5). El
+   "regime-adaptive" era en realidad "always-unknown".
+2. **`realtime.py` (RealtimeTrader skip filters)**: 14 thresholds inline
+   (`base_prob_gate`, `ranging_prob_gate`, ..., `boost_move_trigger`) en
+   un if/else `validation_mode` de 30 líneas. Cualquier cambio requería
+   tocar 6 lugares distintos.
+3. **`ppmt.py` (`_detect_simple_regime`)**: static method con cutoffs
+   hardcodeados (0.08 vol, 0.02 move) desconectados del `RegimeDetector`
+   full-mode que corre en vivo. El trie se taggeaba con regímenes que no
+   se correspondían con los que el trader veía.
+
+Además, `signal.py:493` tenía un move floor `0.5` hardcodeado que **no
+respetaba `validation_mode`** — en paper mode rechazaba señales que
+`realtime.py` dejaba pasar (0.05%), causando inconsistencia entre las
+dos capas.
+
+### Solución
+Nuevo módulo `src/ppmt/core/thresholds.py` con dos dataclasses frozen:
+
+- **`SignalThresholds`**: unifica los 3 juegos. Factory methods
+  `.paper()` / `.real()` / `.for_mode(validation_mode)` preservan verbatim
+  los valores v0.38.7. Helpers `regime_confidence(name)` y
+  `regime_risk_reward(name)` son **case-insensitive** (fix bug).
+- **`RegimeThresholds`**: unifica los cutoffs del RegimeDetector
+  (vol=0.15, trend=0.001 — crypto-calibrados v0.11.0) con el detector
+  simple (simple_vol_cutoff=0.08, simple_move_cutoff=0.02).
+
+Nuevo método `RegimeDetector.detect_simple(window_df)` para taggear el
+trie durante el build, compartiendo thresholds con el detect full.
+
+### Procedimiento (5 commits)
+
+| Commit | Archivo | Cambio |
+|--------|---------|--------|
+| `07bab3f` | `core/thresholds.py` (NEW) + `core/__init__.py` + `tests/test_thresholds.py` | Módulo nuevo + 19 tests |
+| `a89c365` | `engine/signal.py` | `SignalGenerator` usa `SignalThresholds.for_mode()`. Dict `regime_thresholds` ahora con claves minúsculas. Move floor `0.5` → `self.thresholds.hard_move_floor`. Bug fix: `get_adaptive_thresholds('TRENDING_UP')` ahora retorna `(0.45, 1.2)` en vez de caer al fallback `(0.60, 1.5)`. |
+| `5dd90de` | `engine/realtime.py` | Bloque skip filters (líneas 939-1041) reescrito: 14 thresholds inline → `SignalThresholds.for_mode(validation_mode)`. Variables locales preservadas para no tocar lógica de los filters. |
+| `45215af` | `core/regime.py` + `engine/ppmt.py` | Nuevo `RegimeDetector.detect_simple()`. `ppmt.py:_detect_simple_regime` ahora es thin wrapper que delega. Callsite usa `self.regime_detector.detect_simple()`. |
+| (este commit) | 6 archivos | Bump v0.38.7 → v0.38.8 |
+
+### Valores preservados (paper / real)
+
+```
+SignalThresholds.paper()                SignalThresholds.real()
+  base_prob_gate      = 0.15              base_prob_gate      = 0.35
+  ranging_prob_gate   = 0.20              ranging_prob_gate   = 0.55
+  volatile_prob_gate  = 0.25              volatile_prob_gate  = 0.60
+  counter_trend_gate  = 0.25              counter_trend_gate  = 0.60
+  hard_move_floor     = 0.05              hard_move_floor     = 0.5
+  ranging_move_floor  = 0.05              ranging_move_floor  = 1.0
+  volatile_move_floor = 0.05              volatile_move_floor = 1.6
+  move_threshold      = 0.05              move_threshold      = 0.80
+  boost_prob_trigger  = 0.40              boost_prob_trigger  = 0.45
+  boost_move_trigger  = 0.80              boost_move_trigger  = 1.0
+  regime_min_confidence['trending_up']   = 0.45  (case-fixed)
+  regime_min_confidence['ranging']       = 0.60
+  regime_min_confidence['volatile']      = 0.55
+  regime_min_risk_reward['trending_up']  = 1.2
+  regime_min_risk_reward['volatile']     = 1.8
+
+RegimeThresholds.default()
+  vol_threshold       = 0.15   (crypto-calibrated, was 0.6 stock default)
+  trend_threshold     = 0.001  (crypto-calibrated, was 0.005 stock default)
+  simple_vol_cutoff   = 0.08   (preserved from ppmt.py v0.38.7)
+  simple_move_cutoff  = 0.02   (preserved from ppmt.py v0.38.7)
+```
+
+### Bug fix silencioso
+**Antes (v0.38.7)**: `SignalGenerator.get_adaptive_thresholds('TRENDING_UP')`
+→ lookup en dict con claves `'TRENDING_UP'` → match → retornaba `(0.45, 1.2)`.
+**PERO** el `regime_name` que llegaba era siempre `'trending_up'` (de
+RegimeDetector) → NO match → caía a `'UNKNOWN'` → retornaba `(0.60, 1.5)`.
+
+**Después (v0.38.8)**: claves lowercase + helper case-insensitive.
+`get_adaptive_thresholds('trending_up')` retorna `(0.45, 1.2)` correctamente.
+
+**Impacto**: en trending markets, las señales ahora necesitan menos
+confianza (0.45 vs 0.60) y menor R:R (1.2 vs 1.5) para pasar el gate.
+Esto era el comportamiento **documentado** en el docstring pero **nunca
+efectivo** por el bug de case. Es un fix de comportamiento, no un cambio
+de política.
+
+### Tests
+- `tests/test_thresholds.py` (NEW): 19 tests cubren factories, case
+  insensitivity, fallbacks, frozen, shared-instance safety. Todos verdes.
+- Suite completa: **286 pass, 13 fail preexistentes** (API drift en
+  `PPMTTrie.merge`, `PPMT.build(symbols=)`, `sweep_request_model`, y
+  `RegimeDetector` en datos sintéticos — confirmado con `git stash` que
+  los 13 failures existen en v0.38.7 sin mis cambios).
+
+### Archivos modificados
+- **NEW**: `src/ppmt/core/thresholds.py` (203 líneas)
+- **NEW**: `tests/test_thresholds.py` (174 líneas, 19 tests)
+- `src/ppmt/core/__init__.py` — export `SignalThresholds`, `RegimeThresholds`
+- `src/ppmt/core/regime.py` — new method `detect_simple()`
+- `src/ppmt/engine/signal.py` — `SignalThresholds` integration + bug fix
+- `src/ppmt/engine/realtime.py` — skip filters use `SignalThresholds`
+- `src/ppmt/engine/ppmt.py` — `_detect_simple_regime` delega a RegimeDetector
+- `pyproject.toml`, `src/ppmt/cli/main.py`, `src/ppmt/terminal/server.py`,
+  `src/ppmt/terminal/static/index.html` — bump 0.38.7 → 0.38.8
+- `HANDOFF.md`, `TRAZABILIDAD.md` — actualizada "versión actual"
+
+### Cómo verificar
+```bash
+cd ~/ppmt
+git pull origin main
+pip install -e . --quiet
+ppmt --version                              # debe decir 0.38.8
+PYTHONPATH=src python3 -m pytest tests/test_thresholds.py -v   # 19 pass
+ppmt terminal                               # dashboard :8420
+# Start All → tokens en RUNNING en 1-2 min (igual que v0.38.7)
+# Verificar: en trending markets, ahora pueden aparecer señales que
+# antes se rechazaban por confidence < 0.60 (gate era UNKNOWN, ahora
+# respeta trending_up=0.45).
+```
+

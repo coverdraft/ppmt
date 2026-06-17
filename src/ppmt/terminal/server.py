@@ -42,7 +42,7 @@ CONFIG_DIR = os.path.expanduser("~/.ppmt")
 # ------------------------------------------------------------------ #
 # FastAPI application
 # ------------------------------------------------------------------ #
-app = FastAPI(title="PPMT Terminal", version="0.38.7")
+app = FastAPI(title="PPMT Terminal", version="0.38.8")
 
 # Global terminal state (shared with engine)
 terminal_state: TerminalState = get_terminal_state()
