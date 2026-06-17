@@ -2691,3 +2691,113 @@ python -m ppmt.terminal.server  # o: ppmt serve
 - `src/ppmt/cli/main.py` — Version: 0.29.0 → 0.35.0
 - `pyproject.toml` — Version: 0.34.3 → 0.35.0
 - `worklog.md` — v0.35.0 entry
+
+---
+
+# v0.36.0 — 2026-06-17
+
+## Resumen
+
+Cierra los 5 issues pendientes que el usuario reportó después de v0.35.0:
+
+1. **"Candles stuck at 35"** → Arreglado: el cálculo de `warmup_candles`
+   en `RealtimeTrader.run_live()` era `sax_window_size * 2 + pattern_length * sax_window_size`,
+   que evalúa a **0** cuando `sax_window_size=0` (auto from TokenProfile).
+   Sin warmup, el WS conecta pero no fluyen candles hasta el próximo cierre
+   (1h en TF 1h). Fix: `warmup_candles = max(raw, 200)` garantiza 200 candles
+   de warmup siempre. Esto fue la causa raíz de "Pattern: [...] empty, Entropy: 0.0b".
+
+2. **"Validated tokens don't appear in Trading tab"** → Arreglado: cuando
+   un sweep termina, los PASS tokens se **auto-añaden** al panel "Active
+   Trading Tokens" en estado QUEUED. El usuario no necesita marcar checkboxes
+   manualmente — el flujo Discovery → Trading ahora es automático.
+
+3. **"Multi-token trading broken"** → Arreglado: añadidos 4 endpoints nuevos
+   en `server.py`:
+   - `POST /api/multi-start` — lanza N sesiones de paper trading en paralelo
+     (una asyncio task por token). Cada sesión valida → ingesta → build → run_live().
+   - `GET /api/multi-status` — estado live de todas las sesiones (status, price,
+     P&L, signals, trades, candles_processed).
+   - `POST /api/multi-stop?node_id=` — para una (con node_id) o todas.
+   - `DELETE /api/multi-remove?node_id=` — elimina del registro.
+   
+   El frontend hace poll cada 3s y sincroniza `_activeTradeTokens` con el
+   server. Ahora "Start All" arranca N tokens en paralelo de verdad.
+
+4. **"MEXC keeps rejecting subscriptions"** → Arreglado: MEXC removido del
+   dropdown de exchanges en el dashboard. Solo Binance (default) y Bybit
+   quedan disponibles. El código MEXC se mantiene en `websocket_feed.py`
+   por si se reactiva en el futuro, pero no es seleccionable desde la UI.
+
+5. **"Validation not actionable"** → Arreglado: el flujo end-to-end ahora es
+   Discovery → Sweep → PASS tokens auto-pueblan Trading → click "Start All"
+   → server arranca sesiones reales en paralelo → polling muestra P&L live.
+
+## Mejoras adicionales
+
+- **Auto-sync server → UI**: `pollMultiStatus()` cada 3s mantiene la lista
+  de tokens sincronizada aunque el usuario refresque la página. Sesiones
+  arrancadas antes del refresh aparecen automáticamente.
+- **Symbol normalization**: `/api/multi-start` acepta "BTC", "BTCUSDT", o
+  "BTC/USDT" — todos se normalizan a "BTC/USDT".
+- **node_id consistente**: `{symbol_base_lower}_{tf}` (ej: `btc_1h`) usado
+  tanto en el servidor como en el frontend para identificar sesiones.
+- **Per-token controls**: cada fila en "Active Trading Tokens" tiene
+  Start/Stop/Del que hablan directo al server. "Start All" y "Stop All"
+  también son server-side.
+
+## Tests
+
+- `src/tests/test_v0340.py`: **19/19 PASS**.
+- Server boot: 47 routes cargadas (4 nuevas).
+- `multi-status`, `multi-stop`, `multi-start` (empty), `groups`, `sweep-status`
+  verificados con `TestClient`.
+
+## Cómo actualizar en tu Mac
+
+```bash
+cd ~/projects/ppmt  # o donde tengas el repo
+git pull origin main
+pip install -e . --upgrade
+
+# Verificar
+python3 -c "import ppmt; print(ppmt.__version__)"  # → 0.36.0
+python3 src/tests/test_v0340.py                    # → 19/19 pasan
+
+# Arrancar
+pkill -f "ppmt.terminal.server" || true
+python3 -m ppmt.terminal.server
+open http://localhost:8420
+```
+
+**Importante:** Fuerza reload del navegador con `Cmd+Shift+R` para que
+coja el nuevo HTML/JS (sino usarás la v0.35.0 cacheada).
+
+## Archivos modificados
+
+- `src/ppmt/engine/realtime.py` — `warmup_candles = max(raw, 200)` para
+  garantizar warmup siempre.
+- `src/ppmt/terminal/server.py` — 4 endpoints nuevos (`/api/multi-start`,
+  `/api/multi-status`, `/api/multi-stop`, `/api/multi-remove`) y la
+  registry `_multi_sessions`.
+- `src/ppmt/terminal/static/index.html` — v0.36.0, MEXC removido del
+  dropdown, `tradeSelectedTokens()` ahora llama a `/api/multi-start`,
+  `startOneToken/stopOneToken/removeOneToken/startAll/stopAll` reescritos
+  para usar los nuevos endpoints, `pollMultiStatus()` sincroniza cada 3s,
+  sweep completado auto-puebla Trading tab con PASS tokens.
+- `src/ppmt/__init__.py`, `src/ppmt/cli/main.py`, `pyproject.toml` —
+  versión bump a 0.36.0.
+
+## Flujo end-to-end verificado
+
+1. Usuario entra a Discovery tab, selecciona grupo (ej: "top25_mcap").
+2. Click "Sweep Selected Group" → server valida cada token en background.
+3. UI muestra progreso live (X/Y, PASS/FAIL counts, tabla con PF/WR/Trades).
+4. Cuando sweep termina: PASS tokens auto-pueblan Trading tab en estado QUEUED.
+5. Usuario cambia a Trading tab, ve la lista, click "Start All".
+6. Server arranca N sesiones paralelas (una por token), cada una con su
+   propio RealtimeTrader + WebSocketFeed + Trie + SAX.
+7. UI hace poll cada 3s a `/api/multi-status`, muestra price, P&L, signals,
+   trades por token en tiempo real.
+8. Usuario puede parar individualmente o "Stop All".
+

@@ -1908,7 +1908,15 @@ class RealtimeTrader:
 
         # Warmup: how many candles to fetch before streaming?
         # Need at least (sax_window_size + pattern_length) candles to produce first signal
-        warmup_candles = cfg.sax_window_size * 2 + cfg.pattern_length * cfg.sax_window_size
+        # v0.36.0: When sax_window_size=0 (auto from TokenProfile), the formula below
+        # evaluates to 0 → no warmup → WS connects but no candles flow until the next
+        # candle period closes (up to 1h on 1h TF!). This was the root cause of
+        # "candles stuck at 35" reports — the 35 came from a previous session's
+        # terminal_state, not from the new WS connection.
+        # Fix: enforce a sane minimum (200) so warmup ALWAYS runs and feeds the
+        # SAX encoder + Trie immediately on session start.
+        _raw_warmup = cfg.sax_window_size * 2 + cfg.pattern_length * cfg.sax_window_size
+        warmup_candles = max(_raw_warmup, 200)
 
         console.print(f"\n[bold cyan]Starting Live Trading: {cfg.symbol} ({cfg.timeframe})[/bold cyan]")
         console.print(f"  Exchange: {cfg.exchange} ({'TESTNET' if cfg.testnet else 'MAINNET'})")

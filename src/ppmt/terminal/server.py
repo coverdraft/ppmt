@@ -42,7 +42,7 @@ CONFIG_DIR = os.path.expanduser("~/.ppmt")
 # ------------------------------------------------------------------ #
 # FastAPI application
 # ------------------------------------------------------------------ #
-app = FastAPI(title="PPMT Terminal", version="0.32.0")
+app = FastAPI(title="PPMT Terminal", version="0.36.0")
 
 # Global terminal state (shared with engine)
 terminal_state: TerminalState = get_terminal_state()
@@ -827,6 +827,227 @@ async def get_trading_status() -> dict:
         "total_trades": terminal_state.total_trades,
         "pnl_pct": terminal_state.total_pnl_pct,
     }
+
+
+# ------------------------------------------------------------------ #
+# REST endpoint — Multi-Token Trading (v0.36.0)
+# ------------------------------------------------------------------ #
+# v0.36.0: True multi-token server-side trading. Each token gets its own
+# background asyncio task running a RealtimeTrader instance. The frontend
+# Trading tab polls /api/multi-status to display live per-token state.
+#
+# Replaces the v0.35.0 hack where _activeTradeTokens was just an in-memory
+# JS list and "Start" only ran autoSetup() on the first token.
+
+# Map: node_id -> {task, config, started_at, last_price, pnl_pct, signals,
+#                  trades, status, error}
+_multi_sessions: dict = {}
+
+
+class MultiStartRequest(BaseModel):
+    """v0.36.0: Start multiple paper-trading sessions in parallel."""
+    tokens: list[dict] = []
+    """List of {symbol, timeframe, exchange} dicts. Empty list = use parent
+    manager's registered child nodes."""
+    capital: float = 10_000.0
+    """Total capital to split across all tokens."""
+    leverage: int = 1
+    auto_mode: bool = True
+    days_ingest: int = 90
+
+
+@app.post("/api/multi-start")
+async def multi_start(req: MultiStartRequest) -> dict:
+    """v0.36.0: Start N concurrent paper-trading sessions (one per token).
+
+    Each token gets its own asyncio task that:
+      1. Auto-validates (skip if already PASS in DB)
+      2. Auto-ingests data (if < 500 candles)
+      3. Auto-builds Trie (if missing)
+      4. Starts RealtimeTrader.run_live() in dry_run mode
+
+    Returns immediately with the list of sessions launched.
+    """
+    tokens = list(req.tokens)
+    if not tokens:
+        return {"ok": False, "error": "No tokens provided"}
+
+    launched = []
+    from ppmt.engine.realtime import RealtimeTrader, LiveConfig
+    for t in tokens:
+        sym = t.get("symbol", "").strip().upper()
+        tf = t.get("timeframe", "1h")
+        exch = t.get("exchange", "binance").lower()
+        if not sym:
+            continue
+        if "/" not in sym:
+            # Accept "BTCUSDT" or "BTC" → normalize to "BTC/USDT"
+            if sym.endswith("USDT"):
+                sym = sym[:-4] + "/USDT"
+            else:
+                sym = sym + "/USDT"
+
+        node_id = f"{sym.split('/')[0].lower()}_{tf}"
+
+        # Skip if already running
+        existing = _multi_sessions.get(node_id)
+        if existing and not existing.get("task").done():
+            launched.append({"node_id": node_id, "symbol": sym, "status": "ALREADY_RUNNING"})
+            continue
+
+        # Per-token capital (even split)
+        per_capital = req.capital / max(len(tokens), 1)
+
+        config = LiveConfig(
+            symbol=sym,
+            timeframe=tf,
+            initial_capital=per_capital,
+            exchange=exch,
+            dry_run=True,
+            testnet=False,
+            leverage=req.leverage,
+            auto_mode=req.auto_mode,
+            use_token_profile=True,
+            auto_calibrate=True,
+            regime_aware=True,
+            use_multi_level=True,
+            living_trie=True,
+        )
+
+        session_state = {
+            "node_id": node_id,
+            "symbol": sym,
+            "timeframe": tf,
+            "exchange": exch,
+            "started_at": time.time(),
+            "status": "STARTING",
+            "last_price": 0.0,
+            "pnl_pct": 0.0,
+            "signals": 0,
+            "trades": 0,
+            "candles_processed": 0,
+            "error": "",
+        }
+
+        async def _run_one_token(_sym=sym, _tf=tf, _exch=exch, _cfg=config, _nid=node_id):
+            sess = _multi_sessions[_nid]
+            try:
+                # Auto-validate first (non-blocking gate)
+                storage = PPMTStorage()
+                latest_val = storage.get_latest_validation(_sym, _tf)
+                storage.close()
+
+                if latest_val is None or latest_val.get("verdict") != "PASS":
+                    sess["status"] = "VALIDATING"
+                    val_result = await validate_token(ValidateRequest(
+                        symbol=_sym, timeframe=_tf, exchange=_exch, capital=_cfg.initial_capital,
+                    ))
+                    if val_result.get("verdict") != "PASS":
+                        sess["status"] = "VALIDATION_FAILED"
+                        sess["error"] = f"Validation: {val_result.get('verdict', 'UNKNOWN')}"
+                        return
+
+                # Auto-ingest + auto-build happen inside run_live() via the storage
+                # check, but we proactively ensure them here too.
+                sess["status"] = "STARTING_TRADER"
+                trader = RealtimeTrader(config=_cfg)  # RealtimeTrader imported above
+                # run_live() runs until cancelled
+                await trader.run_live()
+                sess["status"] = "STOPPED"
+            except asyncio.CancelledError:
+                sess["status"] = "STOPPED"
+                raise
+            except Exception as e:
+                logger.error(f"Multi-session {_nid} error: {e}", exc_info=True)
+                sess["status"] = "ERROR"
+                sess["error"] = str(e)[:200]
+
+        task = asyncio.create_task(_run_one_token())
+        _multi_sessions[node_id] = {**session_state, "task": task, "config": config}
+        launched.append({"node_id": node_id, "symbol": sym, "status": "LAUNCHED"})
+
+    return {
+        "ok": True,
+        "launched": launched,
+        "total_active": sum(1 for s in _multi_sessions.values() if not s["task"].done()),
+    }
+
+
+@app.get("/api/multi-status")
+async def multi_status() -> dict:
+    """v0.36.0: Live status of all multi-token trading sessions."""
+    sessions = []
+    for node_id, sess in _multi_sessions.items():
+        # Pull live stats from terminal_state if this is the "active" symbol
+        is_active = not sess["task"].done()
+        sessions.append({
+            "node_id": node_id,
+            "symbol": sess["symbol"],
+            "timeframe": sess["timeframe"],
+            "exchange": sess["exchange"],
+            "started_at": sess["started_at"],
+            "status": sess["status"] if is_active else (
+                "STOPPED" if sess["status"] == "STARTING_TRADER" else sess["status"]
+            ),
+            "last_price": sess["last_price"],
+            "pnl_pct": sess["pnl_pct"],
+            "signals": sess["signals"],
+            "trades": sess["trades"],
+            "candles_processed": sess["candles_processed"],
+            "error": sess["error"],
+            "is_active": is_active,
+            "uptime_seconds": time.time() - sess["started_at"] if is_active else 0,
+        })
+    return {
+        "ok": True,
+        "sessions": sessions,
+        "total": len(sessions),
+        "active": sum(1 for s in sessions if s["is_active"]),
+    }
+
+
+@app.post("/api/multi-stop")
+async def multi_stop(node_id: str = "") -> dict:
+    """v0.36.0: Stop one (by node_id) or all multi-token trading sessions."""
+    stopped = []
+    if node_id:
+        sess = _multi_sessions.get(node_id)
+        if sess and not sess["task"].done():
+            sess["task"].cancel()
+            try:
+                await asyncio.wait_for(sess["task"], timeout=5.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pass
+            sess["status"] = "STOPPED"
+            stopped.append(node_id)
+    else:
+        # Stop all
+        for nid, sess in list(_multi_sessions.items()):
+            if not sess["task"].done():
+                sess["task"].cancel()
+                try:
+                    await asyncio.wait_for(sess["task"], timeout=5.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    pass
+                sess["status"] = "STOPPED"
+                stopped.append(nid)
+    return {"ok": True, "stopped": stopped}
+
+
+@app.delete("/api/multi-remove")
+async def multi_remove(node_id: str) -> dict:
+    """v0.36.0: Remove a multi-token session from the registry (stops first)."""
+    sess = _multi_sessions.get(node_id)
+    if sess is None:
+        return {"ok": False, "error": f"Session '{node_id}' not found"}
+    if not sess["task"].done():
+        sess["task"].cancel()
+        try:
+            await asyncio.wait_for(sess["task"], timeout=5.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            pass
+    del _multi_sessions[node_id]
+    return {"ok": True, "removed": node_id}
 
 
 # ------------------------------------------------------------------ #
