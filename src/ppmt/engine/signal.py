@@ -26,6 +26,7 @@ from typing import Optional
 
 from ppmt.core.metadata import BlockLifecycleMetadata
 from ppmt.core.matcher import MatchResult
+from ppmt.core.thresholds import SignalThresholds
 
 
 class SignalType(Enum):
@@ -350,26 +351,56 @@ class SignalGenerator:
         trailing_activation_pct: float = 0.03,
         trailing_distance_pct: float = 0.015,
         prediction_depth: int = 5,
+        validation_mode: bool = False,
     ):
+        """
+        v0.38.8: Thresholds now sourced from SignalThresholds (core/thresholds.py).
+        The min_confidence / min_risk_reward params still work for backwards
+        compatibility but the regime-adaptive lookup goes through
+        self.thresholds (SignalThresholds.paper() or .real() based on
+        validation_mode).
+
+        Bug fix: regime names are now lowercase (matching RegimeDetector
+        output). Previously 'TRENDING_UP' was looked up against the dict
+        keyed with 'TRENDING_UP' (uppercase) — and RegimeDetector returns
+        'trending_up' (lowercase), so the lookup always fell back to
+        'UNKNOWN'. Now both sides use lowercase.
+        """
         self.min_confidence = min_confidence
         self.min_risk_reward = min_risk_reward
         self.unknown_block_exit = unknown_block_exit
         self.trailing_activation_pct = trailing_activation_pct
         self.trailing_distance_pct = trailing_distance_pct
         self.prediction_depth = prediction_depth
+        self.validation_mode = validation_mode
 
-        # Regime-adaptive thresholds
-        # In trending markets, we lower min_confidence to generate more signals
-        # In ranging/volatile, we keep it high to avoid false signals
+        # v0.38.8: Unified thresholds from core/thresholds.py.
+        # .paper() for validation_mode=True, .real() otherwise.
+        # The regime_min_confidence/regime_min_risk_reward dicts inside
+        # have lowercase keys (matching RegimeDetector output).
+        self.thresholds = SignalThresholds.for_mode(validation_mode)
+
+        # Backwards-compat shim: expose a regime_thresholds dict whose
+        # keys are LOWERCASE (callers that did
+        #   self.regime_thresholds['TRENDING_UP']['min_confidence']
+        # will now miss the lookup and fall back, which is the correct
+        # behaviour since the actual regime strings are lowercase).
+        # New code should use self.thresholds.regime_confidence(name)
+        # and self.thresholds.regime_risk_reward(name) instead.
         self.regime_thresholds = {
-            'TRENDING_UP': {'min_confidence': 0.45, 'min_risk_reward': 1.2},
-            'TRENDING_DOWN': {'min_confidence': 0.45, 'min_risk_reward': 1.2},
-            'RANGING': {'min_confidence': 0.60, 'min_risk_reward': 1.5},
-            'VOLATILE': {'min_confidence': 0.55, 'min_risk_reward': 1.8},
-            'UNKNOWN': {'min_confidence': 0.60, 'min_risk_reward': 1.5},
+            'trending_up':   {'min_confidence': self.thresholds.regime_confidence('trending_up'),
+                              'min_risk_reward': self.thresholds.regime_risk_reward('trending_up')},
+            'trending_down': {'min_confidence': self.thresholds.regime_confidence('trending_down'),
+                              'min_risk_reward': self.thresholds.regime_risk_reward('trending_down')},
+            'ranging':       {'min_confidence': self.thresholds.regime_confidence('ranging'),
+                              'min_risk_reward': self.thresholds.regime_risk_reward('ranging')},
+            'volatile':      {'min_confidence': self.thresholds.regime_confidence('volatile'),
+                              'min_risk_reward': self.thresholds.regime_risk_reward('volatile')},
+            'unknown':       {'min_confidence': self.thresholds.regime_confidence('unknown'),
+                              'min_risk_reward': self.thresholds.regime_risk_reward('unknown')},
         }
 
-    def get_adaptive_thresholds(self, regime_name: str = 'UNKNOWN') -> tuple[float, float]:
+    def get_adaptive_thresholds(self, regime_name: str = 'unknown') -> tuple[float, float]:
         """
         Get min_confidence and min_risk_reward adjusted for the current regime.
 
@@ -378,10 +409,16 @@ class SignalGenerator:
         - RANGING: Standard confidence (0.60) + standard R:R (1.5)
         - VOLATILE: Higher R:R (1.8) required → fewer but better signals
 
-        This directly addresses the problem of too few signals in trending markets.
+        v0.38.8: regime_name is case-insensitive (delegates to
+        SignalThresholds.regime_confidence / regime_risk_reward).
+        Bug fix: previously the dict keys were 'TRENDING_UP' (uppercase)
+        but RegimeDetector returns 'trending_up' (lowercase), so this
+        always fell back to 'UNKNOWN'. Now both sides use lowercase.
         """
-        thresholds = self.regime_thresholds.get(regime_name, self.regime_thresholds['UNKNOWN'])
-        return thresholds['min_confidence'], thresholds['min_risk_reward']
+        return (
+            self.thresholds.regime_confidence(regime_name),
+            self.thresholds.regime_risk_reward(regime_name),
+        )
 
     def generate_prediction_path(
         self,
@@ -489,8 +526,12 @@ class SignalGenerator:
         if meta.historical_count < 3:
             return None
 
-        # Determine direction from expected move
-        if abs(meta.expected_move_pct) < 0.5:
+        # Determine direction from expected move.
+        # v0.38.8: move floor now sourced from self.thresholds.hard_move_floor
+        # (was hardcoded 0.5). In paper mode (validation_mode=True) this is
+        # 0.05 (matches realtime.py paper floor); in real mode it is 0.5
+        # (preserved verbatim from v0.38.7).
+        if abs(meta.expected_move_pct) < self.thresholds.hard_move_floor:
             return None
 
         signal_type = (
