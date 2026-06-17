@@ -58,6 +58,7 @@ from ppmt.core.sax import SAXEncoder
 from ppmt.core.regime import RegimeDetector, RegimeInfo
 from ppmt.core.profiles import TokenProfile, TIMEFRAME_ALPHA_DEFAULTS, TradingCalibrationEngine
 from ppmt.core.matcher import FuzzyMatcher
+from ppmt.core.thresholds import SignalThresholds
 from ppmt.engine.prediction import PredictionEngine
 from ppmt.engine.signal import SignalType, Signal
 from ppmt.core.metadata import BlockLifecycleMetadata
@@ -941,39 +942,24 @@ class RealtimeTrader:
                         # Strategy: Only trade high-conviction setups in favorable regimes.
                         # v0.32.3: validation_mode relaxes these thresholds so backtest
                         # can produce enough trades for MC simulation.
-                        if getattr(cfg, 'validation_mode', False):
-                            # v0.38.5: Drastically lowered move thresholds.
-                            # v0.38.4 set move_threshold=0.20 and floors at 0.15/0.20/0.30,
-                            # but real BTC/USDT 1h signals routinely produce expected_move
-                            # of 0.10-0.18% — still below all three floors. Result:
-                            # 0 signals pass → trader never fires → STALE state.
-                            #
-                            # For paper trading, the goal is to verify the ENTIRE pipeline
-                            # (signal → order → fill → PnL tracking), not to be picky about
-                            # signal quality. So we drop all move floors to 0.05% (typical
-                            # Binance spread) and rely on confidence/prob gates only.
-                            #
-                            # Real-money mode keeps the strict thresholds (else branch below).
-                            move_threshold = 0.05      # v0.38.5: was 0.20
-                            prob_threshold = 0.15
-                            base_prob_gate = 0.15
-                            ranging_prob_gate = 0.20
-                            volatile_prob_gate = 0.25
-                            counter_trend_gate = 0.25
-                        else:
-                            # Original v0.25.0 strict thresholds (live trading — real money)
-                            move_threshold = 0.80
-                            prob_threshold = 0.30
-                            base_prob_gate = 0.35
-                            ranging_prob_gate = 0.55
-                            volatile_prob_gate = prob_threshold * 2.0  # 0.60
-                            counter_trend_gate = 0.60
+                        # v0.38.8: All thresholds now sourced from SignalThresholds
+                        # (core/thresholds.py). .paper() for validation_mode=True,
+                        # .real() for real-money. Values preserved verbatim from v0.38.7.
+                        _sig_thresholds = SignalThresholds.for_mode(
+                            getattr(cfg, 'validation_mode', False)
+                        )
+                        move_threshold = _sig_thresholds.move_threshold
+                        prob_threshold = _sig_thresholds.base_prob_gate  # final entry gate
+                        base_prob_gate = _sig_thresholds.base_prob_gate
+                        ranging_prob_gate = _sig_thresholds.ranging_prob_gate
+                        volatile_prob_gate = _sig_thresholds.volatile_prob_gate
+                        counter_trend_gate = _sig_thresholds.counter_trend_gate
 
                         # Confidence boost: if overall_probability is strong and move is
                         # significant, boost confidence up to min_confidence level
                         boosted_confidence = weighted_confidence
-                        boost_prob_trigger = 0.40 if getattr(cfg, 'validation_mode', False) else 0.45
-                        boost_move_trigger = 0.80 if getattr(cfg, 'validation_mode', False) else 1.0
+                        boost_prob_trigger = _sig_thresholds.boost_prob_trigger
+                        boost_move_trigger = _sig_thresholds.boost_move_trigger
                         if (prediction.overall_probability >= boost_prob_trigger
                                 and abs(prediction.expected_total_move_pct) >= boost_move_trigger):
                             # Strong pattern match — boost confidence by probability
@@ -994,7 +980,7 @@ class RealtimeTrader:
                         # that passes the floor also passes the final entry gate.
                         # Paper trading: 0.05% (just above Binance spread).
                         # Real money: 0.5% (only meaningful moves).
-                        _hard_move_floor = 0.05 if getattr(cfg, 'validation_mode', False) else 0.5
+                        _hard_move_floor = _sig_thresholds.hard_move_floor
                         if abs(prediction.expected_total_move_pct) < _hard_move_floor:
                             if result.candles_processed % 20 == 0:
                                 console.print(
@@ -1015,7 +1001,7 @@ class RealtimeTrader:
                                         f"[dim][{cfg.symbol}] skip: ranging prob={prediction.overall_probability:.2f} < {ranging_prob_gate}[/dim]"
                                     )
                                 continue
-                            _ranging_move_floor = 0.05 if getattr(cfg, 'validation_mode', False) else 1.0
+                            _ranging_move_floor = _sig_thresholds.ranging_move_floor
                             if abs(prediction.expected_total_move_pct) < _ranging_move_floor:
                                 if result.candles_processed % 20 == 0:
                                     console.print(
@@ -1030,7 +1016,7 @@ class RealtimeTrader:
                                         f"[dim][{cfg.symbol}] skip: volatile prob={prediction.overall_probability:.2f} < {volatile_prob_gate}[/dim]"
                                     )
                                 continue
-                            _volatile_move_floor = 0.05 if getattr(cfg, 'validation_mode', False) else move_threshold * 2.0
+                            _volatile_move_floor = _sig_thresholds.volatile_move_floor
                             if abs(prediction.expected_total_move_pct) < _volatile_move_floor:
                                 if result.candles_processed % 20 == 0:
                                     console.print(
