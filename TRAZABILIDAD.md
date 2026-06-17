@@ -5059,3 +5059,131 @@ ppmt terminal                               # dashboard :8420
 - **Refactor monolitos:** `realtime.py` (2844 líneas), `server.py`
   (~2920 líneas), `index.html` (~3962 líneas) — extraer a módulos.
 - En ~7 días: `git rm -r _archive/`.
+
+---
+
+## v0.39.4 — 2026-06-17
+
+### Problema
+
+Usuario reportó "seguimos igual" tras v0.39.2. Forensic audit de
+`~/.ppmt/ppmt.db` mostró: 0 tries, 0 ohlcv, 0 signals, 0 validations.
+El bot NUNCA había procesado end-to-end. Tras correr
+`validate_token(BTC/USDT, 1h)` manualmente, se observó:
+- 4320 candles ingested, 4 tries built (421 patterns)
+- 33 signals generated, pero sólo 2 trades (skip filters rechazaron 31/33)
+- Skip reasons: `ranging prob=0.17 < 0.20`, `prob=0.14 < 0.15 gate`
+- Bayesian shrinkage en fresh tries (421 patterns) mantiene
+  `overall_probability` en rango 0.10-0.20, debajo de los gates paper.
+
+Además: `validate_token` creaba `ReplayConfig` SIN `on_signal` →
+backtest signals NUNCA se persistían a SQLite → dashboard siempre
+mostraba "No signals" incluso tras backtests exitosos.
+
+Y: cuando `trie_n3 is None` en `run_live()`, el engine hacía silent
+early-return → session status se ponía "STOPPED" sin razón clara,
+sin que el usuario supiera qué pasó.
+
+### Causa raíz (3 bugs encadenados)
+
+1. **Paper-mode SignalThresholds demasiado estrictas para tries jóvenes:**
+   `base_prob_gate=0.15`, `ranging_prob_gate=0.20` rechazaban signals
+   con `overall_probability=0.14-0.17` (típico en fresh tries).
+
+2. **`process_new_candle()` entry check con thresholds HARDCODED:**
+   `abs(expected_total_move_pct) > 0.30` y
+   `prediction.overall_probability > 0.15` — independientes de
+   `SignalThresholds`. Aun cuando skip filters pasaban, este final
+   gate rechazaba signals en live mode.
+
+3. **`validate_token()` NO wireaba `on_signal` callback:** backtest
+   signals nunca persistían a SQLite. La tabla `signals` quedaba
+   siempre vacía. El dashboard's Signals panel siempre mostraba
+   "No signals" → usuario percibía "bot not operating".
+
+### Solución (v0.39.3 + v0.39.4)
+
+**v0.39.3 — Engine fixes:**
+
+- `core/thresholds.py`: `paper()` gates lowered 0.15/0.20/0.25/0.25 →
+  0.08/0.12/0.15/0.15. Comentario explica root cause. Real-mode
+  gates unchanged (strict 0.35/0.55/0.60/0.60).
+- `engine/realtime.py:1702-1718`: `process_new_candle` entry check
+  ahora usa `_live_move_floor` y `_live_prob_floor` variables que
+  dependen de `validation_mode` (0.10/0.08 paper, 0.30/0.15 real).
+- `terminal/server.py:1651-1701`: `validate_token` ahora crea
+  `_bt_on_signal` callback que persiste cada signal a SQLite vía
+  `save_signal()`. Backtest signals se hacen visibles en el dashboard.
+- `engine/realtime.py:1934-1951`: Cuando `trie_n3 is None` en
+  `run_live()`, se forwardea `error=_msg` al `state_callback`.
+- `terminal/server.py:1156-1161`: `_state_cb` captura `error=` kwarg
+  y setea `sess["status"] = "ERROR"` para que el dashboard lo muestre.
+
+**v0.39.4 — UI/UX Redesign (Apple HIG-inspired):**
+
+- **Nuevo tab "Operaciones" como default landing.** Diseño limpio,
+  operations-first. Responde "¿qué está haciendo el bot ahora?" en
+  <3 segundos.
+- **Hero KPIs** (Apple HIG 'Hero' pattern): Portfolio Value (38px),
+  Active Ops, Realized P&L, Win Rate, Exposure.
+- **Active Operations cards grid:** cada sesión es una card con:
+  - LONG/SHORT badge (verde/rojo)
+  - P&L $ y % (grande, color-coded)
+  - Entry/Current/SL/TP/Size si hay posición abierta
+  - Price/Regime/Signals/Trades si está FLAT
+  - Status pill (RUNNING/STARTING/ERROR/STOPPED)
+  - Click → `loadChart(symbol)` + switch a Trading tab
+- **Recently Closed list:** últimas 20 operaciones cerradas con
+  Symbol/Dir/Entry/Exit/P&L/P&L %/Reason. Click → chart.
+- **Empty states first-class:** icon + title + subtitle cuando no
+  hay data, en vez de "No data" plano.
+- **CSS HIG:** tabular-nums para todos los números (no jitter),
+  single accent color (blue), green/red reservado para P&L only,
+  generous whitespace, larger typography, rounded corners 12-14px.
+- **Tab bar:** "Operaciones" primera, las demás tabs (Discovery,
+  Validation, Trading, Portfolio, Patterns, History) se mantienen
+  como vistas secundarias "Pro".
+
+### Archivos modificados
+
+- `src/ppmt/core/thresholds.py` — paper() gates lowered
+- `src/ppmt/engine/realtime.py` — entry check + trie-missing error
+- `src/ppmt/terminal/server.py` — on_signal in validate_token + error capture
+- `src/ppmt/terminal/static/index.html` — nuevo tab Operaciones + CSS HIG
+- `tests/test_thresholds.py` — updated paper gate expectations
+- `pyproject.toml`, `__init__.py`, `cli/main.py`, `server.py` — bump 0.39.3 → 0.39.4
+
+### Verificación
+
+- `validate_token(BTC/USDT, 1h)`: 33 signals persisted to SQLite (was 0)
+- Skip count: 31 → 2 (only ranging 0.11<0.12, volatile 0.11<0.15)
+- 215 tests pass, 92 deselected (env + API drift)
+- Dashboard HTML sirve OK (218599 bytes, todos los elementos balanceados)
+- /api/multi-status + /api/trades responden OK
+- Real-mode gates unchanged (strict 0.35+ preserved)
+
+### Cómo verificar en LIVE
+
+```bash
+cd ~/ppmt
+git pull origin main
+pip install -e . --quiet
+ppmt terminal
+# 1. Abre dashboard → nuevo tab "Operaciones" es el default
+# 2. Click "Start All" en Operaciones o Trading tab
+# 3. Espera 1-2 min a que validate_token corra (ahora persiste signals)
+# 4. Operaciones tab muestra:
+#    - Hero KPIs con Portfolio Value, Realized P&L, etc.
+#    - Active Operations cards (LONG/SHORT, click → chart)
+#    - Recently Closed con historial
+# 5. SQLite: SELECT COUNT(*) FROM signals; → ahora > 0 tras backtest
+```
+
+### Próximos pasos sugeridos
+
+- Confirmar con usuario que el flujo end-to-end funciona en LIVE.
+- Si signals se generan pero pocos trades, considerar tunear más
+  los gates o el SL/TP ratio (actualmente 1.2x SL / 2x TP).
+- Backlog: WebSocket push de trades cerrados (Fase 2F).
+- Backlog: Frontend usar `multi_signals_by_symbol` para mostrar
+  signals del token actualmente visible en el chart.

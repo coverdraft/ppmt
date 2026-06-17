@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>PPMT Terminal v0.39.0</title>
+<title>PPMT Terminal v0.39.4</title>
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -280,6 +280,230 @@ tr:hover td{background:rgba(95,168,245,.07)}
   .blotter-section{flex-direction:column}
   .blotter-left{flex:1;border-right:none;border-bottom:1px solid var(--border)}
 }
+
+/* ================================================================ */
+/* v0.39.4 — OPERATIONS TAB (Apple HIG-inspired)                    */
+/* Clean, calm, operations-first. Larger typography, generous       */
+/* whitespace, single accent color, minimal chrome. Designed to     */
+/* answer "what is my bot doing right now?" in <3 seconds.          */
+/* ================================================================ */
+
+#tab-operations{
+  overflow-y:auto;background:var(--bg);padding:0;
+}
+.ops-container{
+  max-width:1280px;margin:0 auto;padding:24px 28px 48px;
+  display:flex;flex-direction:column;gap:28px;
+}
+
+/* === HERO (Apple HIG 'Hero' pattern — one big number + supporting KPIs) === */
+.ops-hero{
+  background:linear-gradient(180deg,var(--bg2) 0%,var(--bg3) 100%);
+  border:1px solid var(--border2);border-radius:14px;
+  padding:24px 28px;display:grid;
+  grid-template-columns:minmax(280px,1fr) 2fr;gap:32px;
+  box-shadow:var(--shadow-md);
+}
+.ops-hero-main{display:flex;flex-direction:column;justify-content:center;gap:6px}
+.ops-hero-grid{
+  display:grid;grid-template-columns:repeat(4,1fr);gap:1px;
+  background:var(--border);border-radius:10px;overflow:hidden;
+}
+.ops-hero-grid > .ops-kpi{
+  background:var(--bg2);padding:14px 16px;display:flex;flex-direction:column;gap:4px;
+}
+
+/* KPI labels — small, muted, ALL CAPS like iOS sidebar labels */
+.ops-kpi-label{
+  font-family:var(--mono);font-size:10px;font-weight:600;
+  color:var(--text3);text-transform:uppercase;letter-spacing:0.8px;
+}
+/* XL hero number — the only "huge" typography on the page */
+.ops-kpi-xl{
+  font-family:var(--sans);font-size:38px;font-weight:700;
+  color:var(--text);letter-spacing:-0.8px;line-height:1.1;
+  font-variant-numeric:tabular-nums;
+}
+.ops-kpi-val{
+  font-family:var(--sans);font-size:20px;font-weight:600;
+  color:var(--text);letter-spacing:-0.3px;line-height:1.2;
+  font-variant-numeric:tabular-nums;
+}
+.ops-kpi-sub{display:flex;align-items:baseline;gap:8px;margin-top:4px}
+.ops-delta{
+  font-family:var(--mono);font-size:13px;font-weight:600;
+  font-variant-numeric:tabular-nums;
+}
+.ops-delta-up{color:var(--green)}
+.ops-delta-down{color:var(--red)}
+.ops-delta-flat{color:var(--text2)}
+.ops-delta-label{font-family:var(--mono);font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.6px}
+
+/* === SECTIONS (Active Operations / Recently Closed) === */
+.ops-section{display:flex;flex-direction:column;gap:14px}
+.ops-section-header{
+  display:flex;align-items:center;justify-content:space-between;gap:12px;
+}
+.ops-section-title{
+  font-family:var(--sans);font-size:18px;font-weight:600;
+  color:var(--text);letter-spacing:-0.3px;margin:0;
+}
+.ops-section-actions{display:flex;align-items:center;gap:10px}
+.ops-count-badge{
+  font-family:var(--mono);font-size:11px;font-weight:600;
+  color:var(--text2);background:var(--bg3);
+  padding:4px 10px;border-radius:10px;border:1px solid var(--border2);
+}
+.ops-select{
+  background:var(--bg2);border:1px solid var(--border2);
+  color:var(--text);font-family:var(--mono);font-size:11px;
+  padding:5px 10px;border-radius:6px;outline:none;cursor:pointer;
+}
+.ops-link-btn{
+  background:transparent;border:none;cursor:pointer;
+  color:var(--accent);font-family:var(--sans);font-size:13px;font-weight:500;
+  padding:4px 10px;border-radius:6px;transition:background .15s;
+}
+.ops-link-btn:hover{background:rgba(95,168,245,0.10)}
+.ops-link-danger{color:var(--red)}
+.ops-link-danger:hover{background:rgba(248,113,113,0.10)}
+
+/* === ACTIVE OPS CARDS GRID === */
+.ops-cards{
+  display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px;
+}
+.ops-card{
+  background:var(--bg2);border:1px solid var(--border2);
+  border-radius:12px;padding:16px 18px;cursor:pointer;
+  display:flex;flex-direction:column;gap:12px;
+  transition:border-color .15s,transform .1s,box-shadow .15s;
+  position:relative;overflow:hidden;
+}
+.ops-card:hover{
+  border-color:var(--accent);
+  box-shadow:0 0 0 1px rgba(95,168,245,0.20),0 4px 14px rgba(0,0,0,0.30);
+}
+.ops-card:active{transform:scale(0.99)}
+/* Left edge accent — green for LONG, red for SHORT */
+.ops-card.ops-long{border-left:3px solid var(--green)}
+.ops-card.ops-short{border-left:3px solid var(--red)}
+.ops-card.ops-flat{border-left:3px solid var(--text3)}
+
+.ops-card-row{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.ops-card-symbol{
+  font-family:var(--sans);font-size:17px;font-weight:600;color:var(--text);
+  letter-spacing:-0.3px;
+}
+.ops-card-tf{
+  font-family:var(--mono);font-size:10px;color:var(--text3);
+  background:var(--bg3);padding:2px 6px;border-radius:4px;
+}
+.ops-card-dir{
+  font-family:var(--sans);font-size:11px;font-weight:700;
+  padding:3px 9px;border-radius:5px;letter-spacing:0.5px;text-transform:uppercase;
+}
+.ops-card-dir.long{color:var(--green);background:rgba(52,211,153,0.12)}
+.ops-card-dir.short{color:var(--red);background:rgba(248,113,113,0.12)}
+.ops-card-dir.flat{color:var(--text3);background:var(--bg3)}
+
+/* P&L display — large, color-coded */
+.ops-card-pnl{
+  font-family:var(--sans);font-size:22px;font-weight:700;
+  font-variant-numeric:tabular-nums;letter-spacing:-0.4px;
+}
+.ops-card-pnl.positive{color:var(--green)}
+.ops-card-pnl.negative{color:var(--red)}
+.ops-card-pnl.neutral{color:var(--text2)}
+.ops-card-pnl-pct{
+  font-family:var(--mono);font-size:12px;font-weight:600;
+  color:var(--text2);font-variant-numeric:tabular-nums;
+}
+
+.ops-card-meta{
+  display:grid;grid-template-columns:1fr 1fr;gap:8px 14px;
+  font-family:var(--mono);font-size:11px;color:var(--text2);
+  padding-top:10px;border-top:1px solid var(--border);
+}
+.ops-card-meta-item{display:flex;flex-direction:column;gap:1px}
+.ops-card-meta-label{
+  font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:0.6px;font-weight:600;
+}
+.ops-card-meta-val{color:var(--text);font-weight:500}
+
+/* Status pill (top-right of card) */
+.ops-card-status{
+  position:absolute;top:14px;right:14px;
+  font-family:var(--mono);font-size:9px;font-weight:600;
+  padding:2px 7px;border-radius:8px;text-transform:uppercase;letter-spacing:0.5px;
+}
+.ops-card-status.running{color:var(--green);background:rgba(52,211,153,0.10);border:1px solid rgba(52,211,153,0.25)}
+.ops-card-status.starting{color:var(--yellow);background:rgba(251,191,36,0.10);border:1px solid rgba(251,191,36,0.25)}
+.ops-card-status.error{color:var(--red);background:rgba(248,113,113,0.10);border:1px solid rgba(248,113,113,0.25)}
+.ops-card-status.stopped{color:var(--text3);background:var(--bg3);border:1px solid var(--border2)}
+
+/* === HISTORY LIST (Recently Closed) === */
+.ops-history{
+  background:var(--bg2);border:1px solid var(--border2);border-radius:12px;
+  overflow:hidden;
+}
+.ops-history-row{
+  display:grid;
+  grid-template-columns:24px 110px 70px 1fr 1fr 1fr 1fr 110px;
+  gap:14px;align-items:center;padding:12px 18px;
+  border-bottom:1px solid var(--border);cursor:pointer;
+  transition:background .12s;
+}
+.ops-history-row:last-child{border-bottom:none}
+.ops-history-row:hover{background:var(--bg3)}
+.ops-history-dir{
+  font-family:var(--sans);font-size:10px;font-weight:700;text-align:center;
+  padding:3px 0;border-radius:4px;text-transform:uppercase;
+}
+.ops-history-dir.long{color:var(--green);background:rgba(52,211,153,0.12)}
+.ops-history-dir.short{color:var(--red);background:rgba(248,113,113,0.12)}
+.ops-history-sym{font-family:var(--sans);font-size:14px;font-weight:600;color:var(--text)}
+.ops-history-cell{font-family:var(--mono);font-size:12px;color:var(--text2);font-variant-numeric:tabular-nums}
+.ops-history-cell.ops-mono-accent{color:var(--text)}
+.ops-history-pnl.positive{color:var(--green);font-weight:600}
+.ops-history-pnl.negative{color:var(--red);font-weight:600}
+.ops-history-reason{
+  font-family:var(--mono);font-size:10px;color:var(--text3);
+  text-transform:uppercase;letter-spacing:0.4px;text-align:right;
+}
+.ops-history-reason.tp{color:var(--green)}
+.ops-history-reason.sl{color:var(--red)}
+.ops-history-reason.trail{color:var(--accent)}
+
+/* === EMPTY STATES (Apple HIG-style: icon + title + subtitle) === */
+.ops-empty{
+  padding:48px 24px;text-align:center;
+  display:flex;flex-direction:column;align-items:center;gap:8px;
+  background:var(--bg2);border:1px dashed var(--border2);border-radius:12px;
+}
+.ops-empty-icon{
+  font-size:32px;color:var(--text3);font-weight:300;line-height:1;
+  margin-bottom:4px;
+}
+.ops-empty-title{
+  font-family:var(--sans);font-size:15px;font-weight:600;color:var(--text2);
+}
+.ops-empty-sub{
+  font-family:var(--sans);font-size:12px;color:var(--text3);max-width:340px;
+}
+
+/* === RESPONSIVE === */
+@media (max-width:900px){
+  .ops-hero{grid-template-columns:1fr;gap:18px}
+  .ops-hero-grid{grid-template-columns:repeat(2,1fr)}
+  .ops-cards{grid-template-columns:1fr}
+  .ops-history-row{
+    grid-template-columns:24px 1fr 1fr 1fr;
+    grid-template-areas:
+      "dir sym pnl pnl"
+      "dir entry exit reason";
+    gap:6px 12px;padding:10px 14px;
+  }
+}
 </style>
 </head>
 <body>
@@ -341,8 +565,12 @@ tr:hover td{background:rgba(95,168,245,.07)}
   </div>
 
   <!-- ========== TAB BAR (v0.34.3) ========== -->
+  <!-- v0.39.4: 'Operaciones' is now the default landing tab (Apple HIG-inspired
+       operations-first view). Discovery/Validation/Trading/etc become secondary
+       'Pro' tabs accessible via the tab bar. -->
   <div class="tab-bar" role="tablist">
-    <button class="tab-btn active" data-tab="discovery" onclick="switchTab('discovery')">Discovery</button>
+    <button class="tab-btn active" data-tab="operations" onclick="switchTab('operations')">Operaciones</button>
+    <button class="tab-btn" data-tab="discovery" onclick="switchTab('discovery')">Discovery</button>
     <button class="tab-btn" data-tab="validation" onclick="switchTab('validation')">Validation</button>
     <button class="tab-btn" data-tab="trading" onclick="switchTab('trading')">Trading</button>
     <button class="tab-btn" data-tab="portfolio" onclick="switchTab('portfolio')">Portfolio</button>
@@ -350,8 +578,88 @@ tr:hover td{background:rgba(95,168,245,.07)}
     <button class="tab-btn" data-tab="history" onclick="switchTab('history')">History &amp; Signals</button>
   </div>
 
+  <!-- ========== TAB: OPERACIONES (v0.39.4 — Apple HIG-inspired default view) ========== -->
+  <!-- Designed to answer 'what is my bot doing right now?' at a glance.
+       Hierarchy: Hero KPIs → Active Operations (cards) → Recently Closed (list).
+       Every operation is clickable → loads its chart + switches to Trading tab. -->
+  <div class="tab-content active" id="tab-operations">
+    <div class="ops-container">
+      <!-- HERO: Portfolio KPIs (Apple HIG 'Hero' pattern) -->
+      <div class="ops-hero">
+        <div class="ops-hero-main">
+          <div class="ops-kpi-label">Portfolio Value</div>
+          <div class="ops-kpi-xl" id="opsPortfolioValue">$1,000.00</div>
+          <div class="ops-kpi-sub" id="opsPortfolioChange">
+            <span class="ops-delta ops-delta-flat">+0.00 (0.00%)</span>
+            <span class="ops-delta-label">all-time</span>
+          </div>
+        </div>
+        <div class="ops-hero-grid">
+          <div class="ops-kpi">
+            <div class="ops-kpi-label">Active Ops</div>
+            <div class="ops-kpi-val" id="opsActiveCount">0</div>
+          </div>
+          <div class="ops-kpi">
+            <div class="ops-kpi-label">Realized P&amp;L</div>
+            <div class="ops-kpi-val" id="opsRealizedPnL">$0.00</div>
+          </div>
+          <div class="ops-kpi">
+            <div class="ops-kpi-label">Win Rate</div>
+            <div class="ops-kpi-val" id="opsWinRate">--</div>
+          </div>
+          <div class="ops-kpi">
+            <div class="ops-kpi-label">Exposure</div>
+            <div class="ops-kpi-val" id="opsExposure">0%</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Active Operations (cards grid — click any card to open chart) -->
+      <div class="ops-section">
+        <div class="ops-section-header">
+          <h2 class="ops-section-title">Active Operations</h2>
+          <div class="ops-section-actions">
+            <span class="ops-count-badge" id="opsActiveBadge">0 open</span>
+            <button class="ops-link-btn" id="opsStartAllBtn" onclick="opsStartAll()">Start All</button>
+            <button class="ops-link-btn ops-link-danger" id="opsStopAllBtn" onclick="opsStopAll()">Stop All</button>
+          </div>
+        </div>
+        <div class="ops-cards" id="opsCardsActive">
+          <!-- v0.39.4: Populated by renderOpsActiveCards() — empty state shown when no cards -->
+          <div class="ops-empty">
+            <div class="ops-empty-icon">○</div>
+            <div class="ops-empty-title">No active operations</div>
+            <div class="ops-empty-sub">Run a sweep in Discovery, then select tokens and Start.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Recently Closed Operations -->
+      <div class="ops-section">
+        <div class="ops-section-header">
+          <h2 class="ops-section-title">Recently Closed</h2>
+          <div class="ops-section-actions">
+            <select id="opsHistorySource" onchange="renderOpsHistory()" class="ops-select" title="Filter by source">
+              <option value="live">Live only</option>
+              <option value="backtest">Backtest only</option>
+              <option value="all">All sources</option>
+            </select>
+            <button class="ops-link-btn" onclick="loadTradeHistory();renderOpsHistory()">Reload</button>
+          </div>
+        </div>
+        <div class="ops-history" id="opsHistoryList">
+          <div class="ops-empty">
+            <div class="ops-empty-icon">⌖</div>
+            <div class="ops-empty-title">No closed operations yet</div>
+            <div class="ops-empty-sub">Closed trades will appear here with full P&amp;L breakdown.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div><!-- /tab-operations -->
+
   <!-- ========== TAB: DISCOVERY (Token Groups + Sweep Results) ========== -->
-  <div class="tab-content active" id="tab-discovery">
+  <div class="tab-content" id="tab-discovery">
     <div class="tab-grid-2">
       <div>
         <!-- ===== SIDEBAR (Token Groups) ===== -->
@@ -3954,6 +4262,414 @@ autoSetup = async function() {
 // Initial render
 renderActivityLog();
 logActivity('INFO', 'PPMT v0.36.0 dashboard initialized. Ready.');
+
+/* ================================================================== */
+/* v0.39.4 — OPERATIONS TAB (Apple HIG-inspired default view)         */
+/* ================================================================== */
+/* Populates the new 'Operaciones' tab from /api/multi-status and     */
+/* /api/trades. Renders:                                              */
+/*   1. Hero KPIs (Portfolio Value, Active Ops, Realized P&L, WR, Exposure) */
+/*   2. Active Operations cards grid (click any card → loads chart +  */
+/*      switches to Trading tab)                                      */
+/*   3. Recently Closed operations list (click → same chart behavior) */
+/*                                                                    */
+/* Design principles (Apple HIG):                                     */
+/*   - One primary action per view (here: click an operation)         */
+/*   - Generous whitespace, limited chrome                            */
+/*   - Single accent color (blue), green/red reserved for P&L only    */
+/*   - Tabular-nums for all numeric values (no jitter on update)      */
+/*   - Empty states are first-class (icon + title + subtitle)         */
+/* ================================================================== */
+
+// Cache of trades fetched from /api/trades (refreshed by loadTradeHistory)
+let _opsTradesCache = [];
+let _opsSummaryCache = null;
+
+/**
+ * Main entry point for the Operations tab. Called from:
+ *   - switchTab('operations')
+ *   - pollMultiStatus (every 3s)
+ *   - loadTradeHistory (after fetch completes)
+ *
+ * Pulls fresh data from /api/multi-status + /api/trades?source=live
+ * and re-renders all three sections (Hero, Active, History).
+ */
+async function refreshOperationsTab() {
+  try {
+    // Fetch both endpoints in parallel for snappy updates
+    const [multiRes, tradesRes] = await Promise.all([
+      fetch(`${API}/api/multi-status`).then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch(`${API}/api/trades?source=live&limit=50`).then(r => r.ok ? r.json() : null).catch(() => null),
+    ]);
+
+    const sessions = (multiRes && multiRes.sessions) ? multiRes.sessions : [];
+    if (tradesRes && tradesRes.trades) {
+      _opsTradesCache = tradesRes.trades;
+    }
+    if (tradesRes && tradesRes.summary) {
+      _opsSummaryCache = tradesRes.summary;
+    }
+
+    renderOpsHero(sessions);
+    renderOpsActiveCards(sessions);
+    renderOpsHistory();
+  } catch (e) {
+    console.error('refreshOperationsTab error:', e);
+  }
+}
+
+/**
+ * Render the Hero KPIs at the top of the Operations tab.
+ * Portfolio Value = sum of session portfolio_value (live) + sum of realized P&L.
+ * Active Ops = count of sessions with open_position != null.
+ * Realized P&L = sum of pnl from closed live trades.
+ * Win Rate = wins / total closed trades (live only).
+ * Exposure = sum of session exposure_pct / active session count.
+ */
+function renderOpsHero(sessions) {
+  // Portfolio Value = sum of (portfolio_value) across active sessions,
+  // plus realized P&L from closed trades. Fallback to summary from API.
+  const activeSessions = sessions.filter(s => s.is_active);
+  const portfolioSum = activeSessions.reduce((sum, s) => sum + Number(s.portfolio_value || 0), 0);
+  const initialSum = activeSessions.reduce((sum, s) => sum + Number(s.initial_capital || 0), 0);
+
+  // Realized P&L = sum of session realized_pnl
+  const realizedPnL = activeSessions.reduce((sum, s) => sum + Number(s.realized_pnl || 0), 0);
+  const realizedPnLPct = initialSum > 0 ? (realizedPnL / initialSum * 100) : 0;
+
+  // Active ops = sessions with an open position
+  const activeOps = activeSessions.filter(s => s.open_position && s.open_position.direction).length;
+
+  // Win rate from closed trades
+  const liveTrades = _opsTradesCache.filter(t => (t.source || 'live') === 'live');
+  const wins = liveTrades.filter(t => Number(t.pnl || 0) > 0).length;
+  const total = liveTrades.length;
+  const winRate = total > 0 ? (wins / total * 100) : null;
+
+  // Exposure = average across active sessions
+  const exposure = activeSessions.length > 0
+    ? activeSessions.reduce((sum, s) => sum + Number(s.exposure_pct || 0), 0) / activeSessions.length
+    : 0;
+
+  // Portfolio Value display (prefer sum of portfolio_value; fallback to initial + realized)
+  const portfolioValue = portfolioSum > 0 ? portfolioSum : (initialSum + realizedPnL);
+  const portEl = document.getElementById('opsPortfolioValue');
+  if (portEl) portEl.textContent = '$' + portfolioValue.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
+
+  // Delta (all-time realized P&L)
+  const deltaEl = document.getElementById('opsPortfolioChange');
+  if (deltaEl) {
+    const sign = realizedPnL > 0 ? '+' : '';
+    const cls = realizedPnL > 0 ? 'ops-delta-up' : realizedPnL < 0 ? 'ops-delta-down' : 'ops-delta-flat';
+    deltaEl.innerHTML = `<span class="ops-delta ${cls}">${sign}$${Math.abs(realizedPnL).toFixed(2)} (${sign}${realizedPnLPct.toFixed(2)}%)</span><span class="ops-delta-label">realized</span>`;
+  }
+
+  // Active ops count
+  const aocEl = document.getElementById('opsActiveCount');
+  if (aocEl) aocEl.textContent = activeOps;
+
+  // Realized P&L (KPI card)
+  const rpnlEl = document.getElementById('opsRealizedPnL');
+  if (rpnlEl) {
+    const sign = realizedPnL > 0 ? '+' : '';
+    rpnlEl.textContent = `${sign}$${realizedPnL.toFixed(2)}`;
+    rpnlEl.style.color = realizedPnL > 0 ? 'var(--green)' : realizedPnL < 0 ? 'var(--red)' : 'var(--text)';
+  }
+
+  // Win rate
+  const wrEl = document.getElementById('opsWinRate');
+  if (wrEl) {
+    wrEl.textContent = winRate === null ? '--' : `${winRate.toFixed(1)}%`;
+    if (winRate !== null) {
+      wrEl.style.color = winRate >= 50 ? 'var(--green)' : winRate > 0 ? 'var(--yellow)' : 'var(--text2)';
+    }
+  }
+
+  // Exposure
+  const exEl = document.getElementById('opsExposure');
+  if (exEl) exEl.textContent = `${(exposure * 100).toFixed(1)}%`;
+}
+
+/**
+ * Render the Active Operations cards grid.
+ * Each session becomes a card. If session has an open_position, we show
+ * the position's direction (LONG/SHORT), entry price, current price, P&L.
+ * If flat, we show "FLAT" and the session's realized P&L.
+ * Click anywhere on the card → loadChart(symbol) + switch to Trading tab.
+ */
+function renderOpsActiveCards(sessions) {
+  const container = document.getElementById('opsCardsActive');
+  if (!container) return;
+
+  // Only show sessions the user is actually trading (is_active=true).
+  // Order: open positions first (by P&L desc), then flat sessions (by activity desc).
+  const active = sessions.filter(s => s.is_active);
+  if (active.length === 0) {
+    container.innerHTML = `
+      <div class="ops-empty">
+        <div class="ops-empty-icon">○</div>
+        <div class="ops-empty-title">No active operations</div>
+        <div class="ops-empty-sub">Run a sweep in Discovery, then select tokens and Start.</div>
+      </div>`;
+    const badge = document.getElementById('opsActiveBadge');
+    if (badge) badge.textContent = '0 open';
+    return;
+  }
+
+  // Sort: open positions first, then by signals_generated desc
+  const sorted = active.slice().sort((a, b) => {
+    const aOpen = a.open_position && a.open_position.direction ? 1 : 0;
+    const bOpen = b.open_position && b.open_position.direction ? 1 : 0;
+    if (aOpen !== bOpen) return bOpen - aOpen;
+    return (b.signals || 0) - (a.signals || 0);
+  });
+
+  const openCount = sorted.filter(s => s.open_position && s.open_position.direction).length;
+  const badge = document.getElementById('opsActiveBadge');
+  if (badge) badge.textContent = `${openCount} open · ${sorted.length} sessions`;
+
+  container.innerHTML = sorted.map(s => {
+    const pos = s.open_position;
+    const hasPos = pos && pos.direction;
+    const dir = hasPos ? pos.direction : 'FLAT';
+    const dirCls = dir === 'LONG' ? 'long' : dir === 'SHORT' ? 'short' : 'flat';
+    const cardCls = dir === 'LONG' ? 'ops-long' : dir === 'SHORT' ? 'ops-short' : 'ops-flat';
+
+    // P&L: if open, use unrealized (pnl_pct); else use realized_pnl
+    let pnlPct = 0;
+    let pnlAbs = 0;
+    if (hasPos) {
+      // Unrealized P&L from open position vs current price
+      const entry = Number(pos.entry_price || 0);
+      const cur = Number(s.last_price || 0);
+      const size = Number(pos.size || 0);
+      if (entry > 0 && cur > 0) {
+        const diff = dir === 'LONG' ? (cur - entry) : (entry - cur);
+        pnlPct = (diff / entry) * 100;
+        pnlAbs = diff * size;
+      }
+    } else {
+      // Flat — show realized P&L for this session
+      pnlPct = Number(s.realized_pnl_pct || 0);
+      pnlAbs = Number(s.realized_pnl || 0);
+    }
+    const pnlSign = pnlAbs > 0 ? '+' : '';
+    const pnlCls = pnlAbs > 0 ? 'positive' : pnlAbs < 0 ? 'negative' : 'neutral';
+
+    // Status pill
+    const status = s.status || 'STOPPED';
+    let statusCls = 'stopped';
+    if (status === 'RUNNING' || status === 'LIVE') statusCls = 'running';
+    else if (status === 'STARTING' || status === 'CONNECTING' || status === 'WARMING_UP' || status === 'VALIDATING' || status === 'STARTING_TRADER') statusCls = 'starting';
+    else if (status === 'ERROR' || status === 'VALIDATION_FAILED') statusCls = 'error';
+
+    // Click handler — load this session's chart + switch to Trading tab
+    const onClick = `opsOpenChart('${s.symbol}','${s.timeframe}')`;
+
+    // Format prices nicely
+    const fmtPrice = (p) => p > 0 ? '$' + Number(p).toLocaleString('en-US', {minimumFractionDigits: p < 1 ? 6 : 2, maximumFractionDigits: p < 1 ? 6 : 4}) : '--';
+
+    return `
+    <div class="ops-card ${cardCls}" onclick="${onClick}">
+      <span class="ops-card-status ${statusCls}">${status}</span>
+      <div class="ops-card-row">
+        <div style="display:flex;align-items:center;gap:8px">
+          <span class="ops-card-symbol">${s.symbol}</span>
+          <span class="ops-card-tf">${s.timeframe}</span>
+        </div>
+        <span class="ops-card-dir ${dirCls}">${dir}</span>
+      </div>
+      <div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px">
+        <div class="ops-card-pnl ${pnlCls}">${pnlSign}$${Math.abs(pnlAbs).toFixed(2)}</div>
+        <div class="ops-card-pnl-pct">${pnlSign}${pnlPct.toFixed(2)}%</div>
+      </div>
+      <div class="ops-card-meta">
+        ${hasPos ? `
+          <div class="ops-card-meta-item">
+            <span class="ops-card-meta-label">Entry</span>
+            <span class="ops-card-meta-val">${fmtPrice(pos.entry_price)}</span>
+          </div>
+          <div class="ops-card-meta-item">
+            <span class="ops-card-meta-label">Current</span>
+            <span class="ops-card-meta-val">${fmtPrice(s.last_price)}</span>
+          </div>
+          <div class="ops-card-meta-item">
+            <span class="ops-card-meta-label">SL / TP</span>
+            <span class="ops-card-meta-val" style="font-size:10px">${fmtPrice(pos.sl_price)} / ${fmtPrice(pos.tp_price)}</span>
+          </div>
+          <div class="ops-card-meta-item">
+            <span class="ops-card-meta-label">Size</span>
+            <span class="ops-card-meta-val">${Number(pos.size || 0).toFixed(4)}</span>
+          </div>
+        ` : `
+          <div class="ops-card-meta-item">
+            <span class="ops-card-meta-label">Price</span>
+            <span class="ops-card-meta-val">${fmtPrice(s.last_price)}</span>
+          </div>
+          <div class="ops-card-meta-item">
+            <span class="ops-card-meta-label">Regime</span>
+            <span class="ops-card-meta-val">${s.regime || '--'}</span>
+          </div>
+          <div class="ops-card-meta-item">
+            <span class="ops-card-meta-label">Signals</span>
+            <span class="ops-card-meta-val">${s.signals || 0}</span>
+          </div>
+          <div class="ops-card-meta-item">
+            <span class="ops-card-meta-label">Trades</span>
+            <span class="ops-card-meta-val">${s.trades || 0}</span>
+          </div>
+        `}
+      </div>
+      ${s.error ? `<div style="font-family:var(--mono);font-size:10px;color:var(--red);margin-top:4px;padding-top:8px;border-top:1px solid var(--border)">⚠ ${s.error.substring(0, 80)}</div>` : ''}
+    </div>`;
+  }).join('');
+}
+
+/**
+ * Render the Recently Closed operations list.
+ * Uses _opsTradesCache (populated by loadTradeHistory or refreshOperationsTab).
+ * Filtered by the source selector (live/backtest/all).
+ * Click a row → loadChart(symbol) + switch to Trading tab.
+ */
+function renderOpsHistory() {
+  const container = document.getElementById('opsHistoryList');
+  if (!container) return;
+
+  const sourceFilter = (document.getElementById('opsHistorySource') || {}).value || 'live';
+  let trades = _opsTradesCache.slice();
+  if (sourceFilter !== 'all') {
+    trades = trades.filter(t => (t.source || 'live') === sourceFilter);
+  }
+  // Sort by exit_time desc (most recent first)
+  trades.sort((a, b) => {
+    const ta = new Date(a.exit_time || a.entry_time || 0).getTime();
+    const tb = new Date(b.exit_time || b.entry_time || 0).getTime();
+    return tb - ta;
+  });
+  // Top 20
+  trades = trades.slice(0, 20);
+
+  if (trades.length === 0) {
+    container.innerHTML = `
+      <div class="ops-empty">
+        <div class="ops-empty-icon">⌖</div>
+        <div class="ops-empty-title">No closed operations yet</div>
+        <div class="ops-empty-sub">Closed trades will appear here with full P&amp;L breakdown.</div>
+      </div>`;
+    return;
+  }
+
+  // Header row
+  const header = `
+    <div class="ops-history-row" style="cursor:default;background:var(--bg3);font-family:var(--mono);font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:0.6px;font-weight:600">
+      <div></div>
+      <div>Symbol</div>
+      <div style="text-align:center">Dir</div>
+      <div style="text-align:right">Entry</div>
+      <div style="text-align:right">Exit</div>
+      <div style="text-align:right">P&amp;L</div>
+      <div style="text-align:right">P&amp;L %</div>
+      <div style="text-align:right">Reason</div>
+    </div>`;
+
+  const rows = trades.map(t => {
+    const dir = (t.direction || 'LONG').toUpperCase();
+    const dirCls = dir === 'LONG' ? 'long' : 'short';
+    const pnl = Number(t.pnl || 0);
+    const pnlPct = Number(t.pnl_pct || 0);
+    const pnlSign = pnl > 0 ? '+' : '';
+    const pnlCls = pnl > 0 ? 'positive' : pnl < 0 ? 'negative' : '';
+    const fmtPrice = (p) => p > 0 ? '$' + Number(p).toLocaleString('en-US', {minimumFractionDigits: p < 1 ? 6 : 2, maximumFractionDigits: p < 1 ? 6 : 4}) : '--';
+    const reason = (t.exit_reason || '').toLowerCase();
+    let reasonCls = '';
+    if (reason.includes('tp') || reason.includes('take_profit')) reasonCls = 'tp';
+    else if (reason.includes('sl') || reason.includes('stop_loss')) reasonCls = 'sl';
+    else if (reason.includes('trail')) reasonCls = 'trail';
+    const reasonLabel = reason ? reason.replace(/_/g, ' ').substring(0, 12) : '--';
+
+    return `
+      <div class="ops-history-row" onclick="opsOpenChart('${t.symbol}','${t.timeframe || '1h'}')">
+        <div class="ops-history-dir ${dirCls}">${dir === 'LONG' ? 'L' : 'S'}</div>
+        <div class="ops-history-sym">${t.symbol}</div>
+        <div class="ops-history-cell" style="text-align:center;font-size:10px;color:var(--text3)">${t.timeframe || '--'}</div>
+        <div class="ops-history-cell ops-mono-accent" style="text-align:right">${fmtPrice(t.entry_price)}</div>
+        <div class="ops-history-cell ops-mono-accent" style="text-align:right">${fmtPrice(t.exit_price)}</div>
+        <div class="ops-history-cell ops-history-pnl ${pnlCls}" style="text-align:right">${pnlSign}$${Math.abs(pnl).toFixed(2)}</div>
+        <div class="ops-history-cell ops-history-pnl ${pnlCls}" style="text-align:right">${pnlSign}${pnlPct.toFixed(2)}%</div>
+        <div class="ops-history-reason ${reasonCls}">${reasonLabel}</div>
+      </div>`;
+  }).join('');
+
+  container.innerHTML = header + rows;
+}
+
+/**
+ * Click handler for any operation card or history row.
+ * Loads the symbol's chart + switches to the Trading tab so the user
+ * can see the chart with entry/exit markers.
+ */
+function opsOpenChart(symbol, timeframe) {
+  const chartSym = document.getElementById('chartSymbol');
+  const chartTF = document.getElementById('chartTimeframe');
+  if (chartSym) chartSym.value = symbol;
+  if (chartTF && timeframe) chartTF.value = timeframe;
+  loadChart();
+  switchTab('trading');
+}
+
+/**
+ * "Start All" button on Operations tab — calls /api/multi-start for
+ * every active trade token, then refreshes.
+ */
+async function opsStartAll() {
+  // Reuse the existing startAllActiveTokens function from the Trading tab
+  if (typeof startAllActiveTokens === 'function') {
+    await startAllActiveTokens();
+  }
+  setTimeout(refreshOperationsTab, 500);
+}
+
+/**
+ * "Stop All" button on Operations tab — calls /api/multi-stop for
+ * every active session, then refreshes.
+ */
+async function opsStopAll() {
+  if (typeof stopAllActiveTokens === 'function') {
+    await stopAllActiveTokens();
+  }
+  setTimeout(refreshOperationsTab, 500);
+}
+
+// Hook into existing data refreshes so the Operations tab stays in sync
+// whenever multi-status or trade history updates fire.
+(function _wireOpsTabRefresh() {
+  // Override pollMultiStatus to also refresh Operations tab if visible
+  const _origPoll = window.pollMultiStatus;
+  if (typeof _origPoll === 'function') {
+    window.pollMultiStatus = async function() {
+      await _origPoll.apply(this, arguments);
+      const opsTab = document.getElementById('tab-operations');
+      if (opsTab && opsTab.classList.contains('active')) {
+        refreshOperationsTab();
+      }
+    };
+  }
+  // Override loadTradeHistory to also refresh Operations history
+  const _origLoadTH = window.loadTradeHistory;
+  if (typeof _origLoadTH === 'function') {
+    window.loadTradeHistory = async function() {
+      const r = await _origLoadTH.apply(this, arguments);
+      const opsTab = document.getElementById('tab-operations');
+      if (opsTab && opsTab.classList.contains('active')) {
+        renderOpsHistory();
+      }
+      return r;
+    };
+  }
+})();
+
+// Initial load — fetch fresh data and render Operations tab
+refreshOperationsTab();
 
 </script>
 
