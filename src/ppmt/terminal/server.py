@@ -42,7 +42,7 @@ CONFIG_DIR = os.path.expanduser("~/.ppmt")
 # ------------------------------------------------------------------ #
 # FastAPI application
 # ------------------------------------------------------------------ #
-app = FastAPI(title="PPMT Terminal", version="0.36.1")
+app = FastAPI(title="PPMT Terminal", version="0.36.2")
 
 # Global terminal state (shared with engine)
 terminal_state: TerminalState = get_terminal_state()
@@ -927,6 +927,17 @@ async def multi_start(req: MultiStartRequest) -> dict:
             "trades": 0,
             "candles_processed": 0,
             "error": "",
+            # v0.36.2: extra live state for richer UI
+            "regime": "",
+            "pattern_buffer": [],
+            "entropy": 0.0,
+            "websocket_status": "disconnected",
+            "is_running": False,
+            "portfolio_value": 0.0,
+            "win_rate": 0.0,
+            "exposure_pct": 0.0,
+            "validation_verdict": "",
+            "last_update_ts": 0.0,
         }
 
         async def _run_one_token(_sym=sym, _tf=tf, _exch=exch, _cfg=config, _nid=node_id):
@@ -942,25 +953,79 @@ async def multi_start(req: MultiStartRequest) -> dict:
                     val_result = await validate_token(ValidateRequest(
                         symbol=_sym, timeframe=_tf, exchange=_exch, capital=_cfg.initial_capital,
                     ))
-                    if val_result.get("verdict") != "PASS":
+                    verdict = val_result.get("verdict", "UNKNOWN")
+                    sess["validation_verdict"] = verdict
+                    if verdict != "PASS":
                         sess["status"] = "VALIDATION_FAILED"
-                        sess["error"] = f"Validation: {val_result.get('verdict', 'UNKNOWN')}"
+                        sess["error"] = (
+                            f"Validation: {verdict} — "
+                            f"{val_result.get('reason', val_result.get('error', ''))}"[:200]
+                        )
                         return
 
-                # Auto-ingest + auto-build happen inside run_live() via the storage
-                # check, but we proactively ensure them here too.
+                # v0.36.2: Per-session state callback — bridges trader updates to
+                # this session's dict so /api/multi-status returns real values
+                # instead of all zeros. Also drives granular status transitions.
+                def _state_cb(_nid=_nid, **kwargs):
+                    s = _multi_sessions.get(_nid)
+                    if s is None:
+                        return
+                    if "current_price" in kwargs:
+                        s["last_price"] = float(kwargs["current_price"] or 0)
+                    if "total_pnl_pct" in kwargs:
+                        s["pnl_pct"] = float(kwargs["total_pnl_pct"] or 0)
+                    elif "portfolio_value" in kwargs and _cfg.initial_capital > 0:
+                        # Fallback: derive pct from portfolio value vs initial capital
+                        pv = float(kwargs["portfolio_value"] or 0)
+                        s["pnl_pct"] = ((pv - _cfg.initial_capital) / _cfg.initial_capital) * 100.0
+                    if "candles_processed" in kwargs:
+                        s["candles_processed"] = int(kwargs["candles_processed"] or 0)
+                    if "total_trades" in kwargs:
+                        s["trades"] = int(kwargs["total_trades"] or 0)
+                    if "sax_symbols_produced" in kwargs:
+                        s["signals"] = int(kwargs["sax_symbols_produced"] or 0)
+                    if "regime" in kwargs and kwargs["regime"]:
+                        s["regime"] = kwargs["regime"]
+                    if "pattern_buffer" in kwargs:
+                        s["pattern_buffer"] = list(kwargs["pattern_buffer"] or [])[-30:]
+                    if "entropy" in kwargs:
+                        s["entropy"] = float(kwargs["entropy"] or 0)
+                    if "websocket_status" in kwargs and kwargs["websocket_status"]:
+                        s["websocket_status"] = kwargs["websocket_status"]
+                    if "is_running" in kwargs:
+                        s["is_running"] = bool(kwargs["is_running"])
+                    if "portfolio_value" in kwargs:
+                        s["portfolio_value"] = float(kwargs["portfolio_value"] or 0)
+                    if "win_rate" in kwargs:
+                        s["win_rate"] = float(kwargs["win_rate"] or 0)
+                    if "exposure_pct" in kwargs:
+                        s["exposure_pct"] = float(kwargs["exposure_pct"] or 0)
+                    s["last_update_ts"] = time.time()
+                    # Status transitions driven by what we just learned
+                    if kwargs.get("is_running") and s["status"] in ("STARTING_TRADER", "STARTING"):
+                        s["status"] = "RUNNING"
+                    elif (kwargs.get("websocket_status") == "connecting"
+                          and s["status"] in ("STARTING_TRADER", "STARTING")):
+                        s["status"] = "CONNECTING"
+                    elif (kwargs.get("websocket_status") == "warming_up"
+                          and s["status"] in ("STARTING_TRADER", "STARTING", "CONNECTING")):
+                        s["status"] = "WARMING_UP"
+
                 sess["status"] = "STARTING_TRADER"
-                trader = RealtimeTrader(config=_cfg)  # RealtimeTrader imported above
+                trader = RealtimeTrader(config=_cfg, state_callback=_state_cb)
                 # run_live() runs until cancelled
                 await trader.run_live()
                 sess["status"] = "STOPPED"
+                sess["is_running"] = False
             except asyncio.CancelledError:
                 sess["status"] = "STOPPED"
+                sess["is_running"] = False
                 raise
             except Exception as e:
                 logger.error(f"Multi-session {_nid} error: {e}", exc_info=True)
                 sess["status"] = "ERROR"
                 sess["error"] = str(e)[:200]
+                sess["is_running"] = False
 
         task = asyncio.create_task(_run_one_token())
         _multi_sessions[node_id] = {**session_state, "task": task, "config": config}
@@ -975,28 +1040,49 @@ async def multi_start(req: MultiStartRequest) -> dict:
 
 @app.get("/api/multi-status")
 async def multi_status() -> dict:
-    """v0.36.0: Live status of all multi-token trading sessions."""
+    """v0.36.0: Live status of all multi-token trading sessions.
+
+    v0.36.2: Now also returns regime, pattern_buffer, entropy, websocket_status,
+    portfolio_value, win_rate, exposure_pct, and last_update_ts per session.
+    """
     sessions = []
+    now = time.time()
     for node_id, sess in _multi_sessions.items():
-        # Pull live stats from terminal_state if this is the "active" symbol
         is_active = not sess["task"].done()
+        # v0.36.2: Stale detection — if a session claims to be RUNNING but
+        # hasn't updated state in 60s, mark as STALE so the UI can surface it.
+        last_update = sess.get("last_update_ts", 0)
+        status = sess["status"]
+        if is_active and status == "RUNNING" and last_update > 0 and (now - last_update) > 60:
+            status = "STALE"
         sessions.append({
             "node_id": node_id,
             "symbol": sess["symbol"],
             "timeframe": sess["timeframe"],
             "exchange": sess["exchange"],
             "started_at": sess["started_at"],
-            "status": sess["status"] if is_active else (
-                "STOPPED" if sess["status"] == "STARTING_TRADER" else sess["status"]
+            "status": status if is_active else (
+                "STOPPED" if sess["status"] in ("STARTING_TRADER", "RUNNING", "CONNECTING", "WARMING_UP") else sess["status"]
             ),
-            "last_price": sess["last_price"],
-            "pnl_pct": sess["pnl_pct"],
-            "signals": sess["signals"],
-            "trades": sess["trades"],
-            "candles_processed": sess["candles_processed"],
-            "error": sess["error"],
+            "last_price": sess.get("last_price", 0.0),
+            "pnl_pct": sess.get("pnl_pct", 0.0),
+            "signals": sess.get("signals", 0),
+            "trades": sess.get("trades", 0),
+            "candles_processed": sess.get("candles_processed", 0),
+            "error": sess.get("error", ""),
             "is_active": is_active,
-            "uptime_seconds": time.time() - sess["started_at"] if is_active else 0,
+            "uptime_seconds": (now - sess["started_at"]) if is_active else 0,
+            # v0.36.2: new fields
+            "regime": sess.get("regime", ""),
+            "pattern_buffer": sess.get("pattern_buffer", [])[-30:],
+            "entropy": sess.get("entropy", 0.0),
+            "websocket_status": sess.get("websocket_status", "disconnected"),
+            "portfolio_value": sess.get("portfolio_value", 0.0),
+            "win_rate": sess.get("win_rate", 0.0),
+            "exposure_pct": sess.get("exposure_pct", 0.0),
+            "validation_verdict": sess.get("validation_verdict", ""),
+            "last_update_ts": last_update,
+            "seconds_since_update": (now - last_update) if last_update > 0 else 0,
         })
     return {
         "ok": True,

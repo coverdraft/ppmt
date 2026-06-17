@@ -3022,3 +3022,140 @@ $ python -m pytest tests/test_v0330_groups.py tests/test_v0331_groups.py
 
 Estos son issues de tests legacy que requieren refactor separado. No afectan la
 funcionalidad de grupos ni el startup del servidor.
+
+---
+
+# v0.36.2 — Fix Pattern Buffer "N N N", Multi-Session State Tracking, Validation Explainer
+
+**Fecha:** 2026-06-17
+**Motivación:** Usuario reporta:
+- "no funciona nada" — Pattern buffer muestra `N N N N...` (debería mostrar símbolos SAX reales a-h)
+- `Candles: 200` stuck (carga warmup pero no actualiza)
+- 4 tokens en STARTING_TRADER forever (XLM, OP, ICP, INJ)
+- Trade history muestra precios BTC (38452, 41940) aunque el token activo es XLM
+- "validation para que es?" — usuario no entiende el propósito de la validación
+- "encuentra muy pocos token cuando hace el analisis"
+
+## Root Causes
+
+### Bug 1: Pattern buffer todo "N"
+**Causa raíz:** En `engine/realtime.py` línea 2063 (modo WebSocket):
+```python
+pattern_symbol=stream_buf.last_symbol if stream_buf.last_symbol else None,
+```
+Esto pasaba `pattern_symbol=None` en CADA vela procesada. En `state.py`:
+```python
+if key == "pattern_symbol":
+    self.pattern_buffer.append(str(value))  # str(None) = "None"
+```
+Entonces el buffer se llenaba de strings "None". El UI luego hacía:
+```javascript
+const label = (sym.symbol || sym).substring(0, 1).toUpperCase();
+// "None".substring(0,1).toUpperCase() = "N"
+```
+Por eso aparecían 30 "N" en el buffer.
+
+**Fix:** Pasar el snapshot completo `pattern_buffer=list(stream_buf.pattern_buffer)[-30:]` directamente (via `setattr`, no append). Solo pasar `pattern_symbol` cuando hay un símbolo NUEVO real.
+
+### Bug 2: Multi-session status stuck STARTING_TRADER
+**Causa raíz:** El dict `session_state` en `server.py` tenía campos `last_price`, `pnl_pct`, `signals`, `trades`, `candles_processed` que NUNCA eran actualizados. El trader actualizaba el `terminal_state` global pero NO el dict per-session. El status quedaba en "STARTING_TRADER" porque nada lo cambiaba a "RUNNING".
+
+**Fix:**
+1. `RealtimeTrader.__init__` ahora acepta `state_callback=None`
+2. `_update_terminal_state()` invoca el callback con los mismos kwargs
+3. En `_run_one_token()` se crea un `_state_cb` que actualiza los campos del dict session
+4. El callback también maneja transiciones de status (STARTING → CONNECTING → WARMING_UP → RUNNING)
+
+### Bug 3: Trade history shows BTC prices
+**Causa raíz:** En `loadTradeHistory()` el fallback era `'BTC/USDT'` si no había setupSymbol. La DB tenía 434 trades BTC de testings previos, por eso aparecían.
+
+**Fix:** Si no hay setupSymbol, buscar el primer session activo y usar su símbolo. Solo usar "BTC/USDT" como último recurso.
+
+### Bug 4: "validation para que es?"
+**Causa raíz:** No había explicación visible en el UI.
+
+**Fix:** Caja de texto explicativa en el panel "Setup & Validation":
+> "Before trading a token, PPMT runs a backtest + Monte Carlo simulation to verify the strategy is profitable & safe. PASS = tradeable. FAIL = skip (win_rate > 40%, profit_factor > 0.8, risk_of_ruin < 20%, min 5 trades). Use Sweep to validate many tokens at once."
+
+## Cambios principales
+
+### `engine/realtime.py`
+- `RealtimeTrader.__init__(config=None, state_callback=None)` — nuevo parámetro
+- `_update_terminal_state(**kwargs)` — además de actualizar `_terminal_state`, invoca `self._state_callback(**kwargs)` si está seteado
+- Línea 2052-2073: En vez de `pattern_symbol=stream_buf.last_symbol if stream_buf.last_symbol else None`, ahora pasa `pattern_buffer=list(stream_buf.pattern_buffer)[-30:]` y `sax_symbols_produced=stream_buf.symbols_produced` directamente (setattr, no append)
+
+### `terminal/server.py`
+- `_run_one_token()`: define `_state_cb(_nid=_nid, **kwargs)` que actualiza TODOS los campos del session dict
+- Status transitions: STARTING → CONNECTING (ws_status='connecting') → WARMING_UP (ws_status='warming_up') → RUNNING (is_running=True)
+- `session_state` ampliado: `regime`, `pattern_buffer`, `entropy`, `websocket_status`, `is_running`, `portfolio_value`, `win_rate`, `exposure_pct`, `validation_verdict`, `last_update_ts`
+- `/api/multi-status`: retorna TODOS los campos nuevos + `seconds_since_update` + STALE detection (>60s sin update)
+- `RealtimeTrader(config=_cfg, state_callback=_state_cb)` — pasa el callback
+
+### `terminal/static/index.html`
+- `loadTradeHistory()`: fallback a primer session activo en vez de 'BTC/USDT'
+- `pollMultiStatus()`: sincroniza TODOS los campos nuevos del server
+- `renderActiveTradeTokens()`: tabla ampliada con columnas Regime, Pattern, Candles, Signals, Trades; status color mapping para RUNNING/CONNECTING/WARMING_UP/STALE/VALIDATING/VALIDATION_FAILED; ⚠ stale warning; error display por token
+- Box explicativo "What is validation?" en Setup & Validation panel
+- Version bump v0.36.1 → v0.36.2
+
+### `pyproject.toml`, `cli/main.py`
+- Version 0.36.2
+
+## Verificación
+
+```
+$ ppmt terminal
+PPMT Terminal Dashboard v0.36.2
+INFO:     Uvicorn running on http://localhost:8420
+
+$ curl http://localhost:8420/api/multi-status
+{"ok":true,"sessions":[],"total":0,"active":0}
+
+$ curl "http://localhost:8420/api/groups/resolve?group_id=memes&exchange=binance"
+{"count":21,"raw_count":65,"filtered_count":21,...}
+```
+
+### Test del callback:
+```python
+>>> from ppmt.engine.realtime import RealtimeTrader, LiveConfig
+>>> calls = []
+>>> def cb(**kw): calls.append(kw)
+>>> t = RealtimeTrader(config=LiveConfig(symbol='BTC/USDT', timeframe='1h'), state_callback=cb)
+>>> t._update_terminal_state(current_price=50000, candles_processed=1, pattern_buffer=['a','b','c'])
+>>> calls[0]
+{'current_price': 50000, 'candles_processed': 1, 'pattern_buffer': ['a','b','c']}
+```
+
+### Test del pattern_buffer (no más "None" pollution):
+```python
+>>> from ppmt.terminal.state import TerminalState
+>>> s = TerminalState()
+>>> s.update_sync(pattern_buffer=['a','b','c'])  # snapshot replace
+>>> s.update_sync(pattern_buffer=['a','b','c','d'])
+>>> s.pattern_buffer
+['a', 'b', 'c', 'd']  # NOT ['None','None','a','b','c','d']
+```
+
+### Tests:
+```
+$ python -m pytest tests/test_v0330_groups.py tests/test_v0331_groups.py
+======================== 31 passed, 1 warning in 3.13s =========================
+```
+
+## Archivos modificados
+
+- `src/ppmt/engine/realtime.py` — `state_callback` parameter, pattern_buffer snapshot fix
+- `src/ppmt/terminal/server.py` — per-session state callback, expanded `/api/multi-status`, version bump
+- `src/ppmt/terminal/static/index.html` — expanded multi-token table, validation explainer, trade history default to active session, version bump
+- `pyproject.toml` — version 0.36.2
+- `src/ppmt/cli/main.py` — banner v0.36.2
+
+## Nota sobre "encuentra muy pocos tokens"
+
+Esto ya estaba arreglado en v0.36.1 (expansión de grupos + filtrado por exchange). Si el usuario todavía ve pocos tokens, posibles causas:
+1. **Filter de volume activo**: revisar `min_volume_24h_usd` en la UI (probablemente alto)
+2. **Filter de volatility**: si está activo, muchos tokens quedan fuera
+3. **Limit default 50**: subir el limit a 0 (sin cap) o 100
+4. **Exchange**: si está en MEXC, algunos tokens Binance-only no aparecen y viceversa
+
+Recomendación al usuario: en la UI, poner `Limit = 0` y `Min Volume = 0` para ver TODOS los tokens del grupo disponibles en el exchange.

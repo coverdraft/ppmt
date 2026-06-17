@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>PPMT Terminal v0.36.1</title>
+<title>PPMT Terminal v0.36.2</title>
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -389,6 +389,10 @@ tr:hover td{background:rgba(96,165,250,.04)}
         <button class="panel-collapse" onclick="togglePanel('panelSetup')">-</button>
       </div>
       <div class="panel-body">
+        <!-- v0.36.2: What is validation? Explainer for the user -->
+        <div style="background:var(--bg);border:1px solid var(--border);border-radius:3px;padding:6px 8px;margin-bottom:8px;font-family:var(--mono);font-size:9px;color:var(--text3);line-height:1.4">
+          <strong style="color:var(--accent)">What is validation?</strong> Before trading a token, PPMT runs a backtest + Monte Carlo simulation to verify the strategy is profitable &amp; safe. <strong style="color:var(--text2)">PASS</strong> = tradeable. <strong style="color:var(--red)">FAIL</strong> = skip (win_rate &gt; 40%, profit_factor &gt; 0.8, risk_of_ruin &lt; 20%, min 5 trades). Use <em>Sweep</em> to validate many tokens at once.
+        </div>
         <div class="form-row">
           <label>Token</label>
           <div class="field"><select id="setupSymbol"></select></div>
@@ -901,7 +905,7 @@ tr:hover td{background:rgba(96,165,250,.04)}
 
 <script>
 // ============================================================
-// PPMT Terminal v0.36.1 — Trading Dashboard
+// PPMT Terminal v0.36.2 — Trading Dashboard
 // ============================================================
 
 const API = '';
@@ -2066,7 +2070,16 @@ async function checkTradingStatus() {
 }
 
 async function loadTradeHistory() {
-  const symbol = document.getElementById('setupSymbol').value || 'BTC/USDT';
+  // v0.36.2: Default to first active multi-session symbol instead of BTC/USDT
+  // so the trade history matches what the user is actually trading.
+  let symbol = document.getElementById('setupSymbol').value;
+  if (!symbol) {
+    // Find first active session with a symbol
+    const activeSession = _activeTradeTokens.find(t =>
+      t.status && !['STOPPED', 'ERROR', 'QUEUED'].includes(t.status)
+    );
+    symbol = activeSession ? activeSession.symbol : 'BTC/USDT';
+  }
   try {
     const res = await fetch(`${API}/api/trades?symbol=${encodeURIComponent(symbol)}&limit=50`);
     if (!res.ok) return;
@@ -3152,21 +3165,43 @@ function renderActiveTradeTokens() {
     return;
   }
   const rows = _activeTradeTokens.map((t, idx) => {
-    const pnlCls = (t.pnl_pct || 0) > 0 ? 'text-green' : (t.pnl_pct || 0) < 0 ? 'text-red' : 'text-muted';
-    const statusCls = t.status === 'LIVE' ? 'text-green' :
+    const pnl = Number(t.pnl_pct || 0);
+    const pnlCls = pnl > 0 ? 'text-green' : pnl < 0 ? 'text-red' : 'text-muted';
+    // v0.36.2: Status color mapping for new states (RUNNING/CONNECTING/WARMING_UP/STALE/VALIDATING/VALIDATION_FAILED)
+    const statusCls = (t.status === 'RUNNING' || t.status === 'LIVE') ? 'text-green' :
+                      (t.status === 'CONNECTING' || t.status === 'WARMING_UP' || t.status === 'VALIDATING' || t.status === 'STARTING' || t.status === 'STARTING_TRADER') ? 'text-yellow' :
+                      (t.status === 'STALE') ? 'text-yellow' :
                       t.status === 'QUEUED' ? 'text-yellow' :
                       t.status === 'STOPPED' ? 'text-muted' :
-                      t.status === 'ERROR' ? 'text-red' : 'text-muted';
+                      (t.status === 'ERROR' || t.status === 'VALIDATION_FAILED') ? 'text-red' : 'text-muted';
+    // Stale warning: if status RUNNING but no update in 60s, show ⚠
+    const staleWarning = (t.status === 'RUNNING' && Number(t.seconds_since_update || 0) > 60) ? ' ⚠' : '';
+    // v0.36.2: Regime badge color
+    const regime = t.regime || '--';
+    const regimeCls = regime.startsWith('trending') ? 'text-green' :
+                      regime === 'volatile' ? 'text-yellow' :
+                      regime === 'ranging' ? 'text-muted' : 'text-muted';
+    // v0.36.2: Pattern mini-preview (first 8 symbols)
+    const pat = (t.pattern_buffer || []).slice(-8).map(s => {
+      const sym = (typeof s === 'string' ? s : (s.symbol || '?'));
+      return `<span style="display:inline-block;width:9px;height:9px;border-radius:1px;background:var(--bg3);color:var(--text2);font-size:6px;text-align:center;line-height:9px;margin-right:1px">${sym.charAt(0).toUpperCase()}</span>`;
+    }).join('') || '<span class="text-muted">--</span>';
+    // Error display
+    const errDisplay = t.error ? `<div style="font-size:8px;color:var(--red);margin-top:2px">${t.error.substring(0, 50)}</div>` : '';
     return `<tr>
       <td style="padding:3px 6px">
         <input type="checkbox" class="active-tok-chk" data-idx="${idx}" style="margin-right:4px" checked>
         <span style="color:var(--text);font-weight:600">${t.symbol}</span>
+        ${errDisplay}
       </td>
       <td style="padding:3px 6px;text-align:center">${t.timeframe}</td>
       <td style="padding:3px 6px;text-align:center">${(t.exchange || '').toUpperCase()}</td>
-      <td style="padding:3px 6px;text-align:center" class="${statusCls}">${t.status}</td>
+      <td style="padding:3px 6px;text-align:center" class="${statusCls}">${t.status}${staleWarning}</td>
       <td style="padding:3px 6px;text-align:right">${t.last_price ? '$' + Number(t.last_price).toFixed(4) : '--'}</td>
-      <td style="padding:3px 6px;text-align:right" class="${pnlCls}">${(t.pnl_pct || 0).toFixed(2)}%</td>
+      <td style="padding:3px 6px;text-align:right" class="${pnlCls}">${pnl.toFixed(2)}%</td>
+      <td style="padding:3px 6px;text-align:right" class="${regimeCls}" style="font-size:9px">${regime}</td>
+      <td style="padding:3px 6px;text-align:center">${pat}</td>
+      <td style="padding:3px 6px;text-align:right">${t.candles_processed || 0}</td>
       <td style="padding:3px 6px;text-align:right">${t.signals || 0}</td>
       <td style="padding:3px 6px;text-align:right">${t.trades || 0}</td>
       <td style="padding:3px 6px;text-align:center">
@@ -3186,8 +3221,11 @@ function renderActiveTradeTokens() {
           <th style="padding:4px 6px;text-align:center;border-bottom:1px solid var(--border);font-size:9px;color:var(--text3);text-transform:uppercase">Status</th>
           <th style="padding:4px 6px;text-align:right;border-bottom:1px solid var(--border);font-size:9px;color:var(--text3);text-transform:uppercase">Price</th>
           <th style="padding:4px 6px;text-align:right;border-bottom:1px solid var(--border);font-size:9px;color:var(--text3);text-transform:uppercase">P&L</th>
-          <th style="padding:4px 6px;text-align:right;border-bottom:1px solid var(--border);font-size:9px;color:var(--text3);text-transform:uppercase">Signals</th>
-          <th style="padding:4px 6px;text-align:right;border-bottom:1px solid var(--border);font-size:9px;color:var(--text3);text-transform:uppercase">Trades</th>
+          <th style="padding:4px 6px;text-align:center;border-bottom:1px solid var(--border);font-size:9px;color:var(--text3);text-transform:uppercase">Regime</th>
+          <th style="padding:4px 6px;text-align:center;border-bottom:1px solid var(--border);font-size:9px;color:var(--text3);text-transform:uppercase">Pattern</th>
+          <th style="padding:4px 6px;text-align:right;border-bottom:1px solid var(--border);font-size:9px;color:var(--text3);text-transform:uppercase">Cand</th>
+          <th style="padding:4px 6px;text-align:right;border-bottom:1px solid var(--border);font-size:9px;color:var(--text3);text-transform:uppercase">Sig</th>
+          <th style="padding:4px 6px;text-align:right;border-bottom:1px solid var(--border);font-size:9px;color:var(--text3);text-transform:uppercase">Trd</th>
           <th style="padding:4px 6px;text-align:center;border-bottom:1px solid var(--border);font-size:9px;color:var(--text3);text-transform:uppercase">Actions</th>
         </tr>
       </thead>
@@ -3341,6 +3379,16 @@ async function pollMultiStatus() {
         local.pnl_pct = ss.pnl_pct;
         local.signals = ss.signals;
         local.trades = ss.trades;
+        local.candles_processed = ss.candles_processed;
+        local.regime = ss.regime;
+        local.pattern_buffer = ss.pattern_buffer;
+        local.entropy = ss.entropy;
+        local.websocket_status = ss.websocket_status;
+        local.portfolio_value = ss.portfolio_value;
+        local.win_rate = ss.win_rate;
+        local.exposure_pct = ss.exposure_pct;
+        local.error = ss.error;
+        local.seconds_since_update = ss.seconds_since_update;
       } else {
         // New server session we don't know about — add it locally
         _activeTradeTokens.push({
@@ -3354,6 +3402,16 @@ async function pollMultiStatus() {
           pnl_pct: ss.pnl_pct,
           signals: ss.signals,
           trades: ss.trades,
+          candles_processed: ss.candles_processed,
+          regime: ss.regime,
+          pattern_buffer: ss.pattern_buffer,
+          entropy: ss.entropy,
+          websocket_status: ss.websocket_status,
+          portfolio_value: ss.portfolio_value,
+          win_rate: ss.win_rate,
+          exposure_pct: ss.exposure_pct,
+          error: ss.error,
+          seconds_since_update: ss.seconds_since_update,
         });
       }
     }

@@ -314,8 +314,19 @@ class RealtimeTrader:
     FuzzyMatcher, 4-level matching, Living Trie, and prediction-aware SL/TP.
     """
 
-    def __init__(self, config=None):
+    def __init__(self, config=None, state_callback=None):
+        """
+        Args:
+            config: ReplayConfig or LiveConfig. Defaults to ReplayConfig().
+            state_callback: Optional callable that receives keyword args mirroring
+                TerminalState.update_sync(). When provided, every state update is
+                also forwarded to this callback — used by the multi-token launcher
+                in server.py to keep per-session state in sync (last_price, pnl_pct,
+                signals, trades, candles_processed, status).
+                v0.36.2.
+        """
         self.config = config or ReplayConfig()
+        self._state_callback = state_callback
         self.risk_config = RiskConfig(
             base_position_size_pct=0.01,
             max_position_size_pct=0.04,
@@ -331,12 +342,20 @@ class RealtimeTrader:
 
         Safe to call from synchronous code — uses update_sync().
         No-op if terminal module is not available.
+
+        v0.36.2: Also forwards the same kwargs to the per-session state_callback
+        (if provided) so multi-token sessions can track their own state.
         """
         if _terminal_state is not None:
             try:
                 _terminal_state.update_sync(**kwargs)
             except Exception:
                 pass  # Never let dashboard updates crash the engine
+        if self._state_callback is not None:
+            try:
+                self._state_callback(**kwargs)
+            except Exception:
+                pass  # Never let callback errors crash the engine
 
     def _setup_token_profile(self, cfg, info, storage, df=None):
         """
@@ -2050,6 +2069,12 @@ class RealtimeTrader:
                             pass
 
                         # v0.20.0: Update TerminalState with portfolio data
+                        # v0.36.2 FIX: Previously passed pattern_symbol=last_symbol (or None)
+                        # every candle, which caused update_sync() to append str(None)="None"
+                        # to pattern_buffer — hence the dashboard showed "N N N N..." instead
+                        # of actual SAX symbols (a, b, c, ...).
+                        # Now we pass the full pattern_buffer snapshot directly. The state's
+                        # setattr replaces the list wholesale (no append, no "None" pollution).
                         self._update_terminal_state(
                             current_price=recent_prices[-1] if recent_prices else 0,
                             candles_processed=result.candles_processed,
@@ -2060,7 +2085,8 @@ class RealtimeTrader:
                             total_trades=result.total_trades,
                             winning_trades=result.winning_trades,
                             exposure_pct=money_mgr.exposure_pct,
-                            pattern_symbol=stream_buf.last_symbol if stream_buf.last_symbol else None,
+                            pattern_buffer=list(stream_buf.pattern_buffer)[-30:],
+                            sax_symbols_produced=stream_buf.symbols_produced,
                             entropy=stream_buf.entropy,
                             regime=current_regime,
                         )
