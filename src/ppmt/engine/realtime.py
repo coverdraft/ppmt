@@ -1711,6 +1711,24 @@ class RealtimeTrader:
                                           if prediction.direction == "LONG"
                                           else PositionState.SHORT)
                         trade_counter += 1
+                        # v0.38.1: Log trade execution so user can see WHY trades happen
+                        console.print(
+                            f"[bold green]TRADE #{trade_counter}[/bold green] "
+                            f"{prediction.direction} {cfg.symbol} @ ${current_price:.4f} "
+                            f"| conf={weighted_confidence:.2f} | SL=${sl_price:.4f} "
+                            f"TP=${tp_price:.4f} | pattern={''.join(current_symbols)}"
+                        )
+                    else:
+                        # v0.38.1: Log rejection reason so user can see WHY trades don't happen.
+                        # Without this, signals > 0 but trades = 0 was a silent mystery.
+                        # Throttle to 1-in-10 to avoid spamming the console.
+                        if result.signals_generated % 10 == 0 or result.signals_generated <= 3:
+                            console.print(
+                                f"[yellow]Signal #{result.signals_generated} rejected:[/yellow] "
+                                f"{reason} | conf={weighted_confidence:.2f} "
+                                f"quality={signal.quality_score:.2f} "
+                                f"RR={signal.risk_reward_ratio:.2f}"
+                            )
 
         # Record equity
         result.candles_processed += 1
@@ -2036,23 +2054,22 @@ class RealtimeTrader:
                             paa_std=_paa_std,
                         )
 
-                        # v0.37.0: Sync new SAX symbols to StreamingPatternBuffer
-                        # using the authoritative counter. New symbols are always
-                        # at the end of _pattern_buffer (process_new_candle appends
-                        # them at the end, and trimming only removes from the front).
-                        new_produced = result.sax_symbols_produced
-                        if new_produced > prev_produced:
-                            n_new = new_produced - prev_produced
-                            if n_new <= len(_pattern_buffer):
-                                new_syms = _pattern_buffer[-n_new:]
-                            else:
-                                # Shouldn't happen, but be defensive
-                                new_syms = list(_pattern_buffer)
-                            for sym in new_syms:
-                                stream_buf._pattern_buffer.append(sym)
-                                stream_buf._symbol_counts[sym] += 1
-                                stream_buf._total_symbols += 1
-                                stream_buf._symbols_produced += 1
+                        # v0.38.1 FIX: Replaced incremental sync (which had multiple
+                        # subtle bugs around copy vs reference, trimming mismatch
+                        # between process_new_candle's pattern_length*2 and
+                        # stream_buf's pattern_length*3, and early returns leaving
+                        # _pattern_buffer out of sync) with a single authoritative
+                        # assignment. _pattern_buffer is the list returned by
+                        # process_new_candle — it contains the latest trimmed snapshot.
+                        # We rebuild stream_buf's internal state from it.
+                        if _pattern_buffer != stream_buf._pattern_buffer:
+                            # Recompute symbol counts from the new buffer to keep
+                            # entropy stats consistent with the trimmed buffer.
+                            from collections import Counter as _Counter
+                            stream_buf._pattern_buffer = list(_pattern_buffer)
+                            stream_buf._symbol_counts = _Counter(_pattern_buffer)
+                            stream_buf._total_symbols = sum(stream_buf._symbol_counts.values())
+                            stream_buf._symbols_produced = result.sax_symbols_produced
                             stream_buf._trim()
 
                         # v0.13.0: Living Trie updates
@@ -2221,18 +2238,13 @@ class RealtimeTrader:
                                 last_losing_trade_idx=last_losing_trade_idx,
                                 paa_mean=_paa_mean, paa_std=_paa_std,
                             )
-                            # v0.37.0: Sync streaming buffer
-                            _new_prod = result.sax_symbols_produced
-                            if _new_prod > _prev_prod:
-                                _n_new = _new_prod - _prev_prod
-                                _new_syms = (pattern_buffer[-_n_new:]
-                                             if _n_new <= len(pattern_buffer)
-                                             else list(pattern_buffer))
-                                for _sym in _new_syms:
-                                    stream_buf._pattern_buffer.append(_sym)
-                                    stream_buf._symbol_counts[_sym] += 1
-                                    stream_buf._total_symbols += 1
-                                    stream_buf._symbols_produced += 1
+                            # v0.38.1 FIX: Authoritative sync (same as WS mode)
+                            if pattern_buffer != stream_buf._pattern_buffer:
+                                from collections import Counter as _Counter
+                                stream_buf._pattern_buffer = list(pattern_buffer)
+                                stream_buf._symbol_counts = _Counter(pattern_buffer)
+                                stream_buf._total_symbols = sum(stream_buf._symbol_counts.values())
+                                stream_buf._symbols_produced = result.sax_symbols_produced
                                 stream_buf._trim()
                         console.print(f"[green]Warmup: processed {len(warmup_ohlcv)} historical candles[/green]")
                     except Exception as e:
@@ -2278,18 +2290,13 @@ class RealtimeTrader:
                                         exchange=exchange if not cfg.dry_run else poll_exchange,
                                         paa_mean=_paa_mean, paa_std=_paa_std,
                                     )
-                                    # v0.37.0: Sync streaming buffer
-                                    _new_prod = result.sax_symbols_produced
-                                    if _new_prod > _prev_prod:
-                                        _n_new = _new_prod - _prev_prod
-                                        _new_syms = (pattern_buffer[-_n_new:]
-                                                     if _n_new <= len(pattern_buffer)
-                                                     else list(pattern_buffer))
-                                        for _sym in _new_syms:
-                                            stream_buf._pattern_buffer.append(_sym)
-                                            stream_buf._symbol_counts[_sym] += 1
-                                            stream_buf._total_symbols += 1
-                                            stream_buf._symbols_produced += 1
+                                    # v0.38.1 FIX: Authoritative sync (same as WS mode)
+                                    if pattern_buffer != stream_buf._pattern_buffer:
+                                        from collections import Counter as _Counter
+                                        stream_buf._pattern_buffer = list(pattern_buffer)
+                                        stream_buf._symbol_counts = _Counter(pattern_buffer)
+                                        stream_buf._total_symbols = sum(stream_buf._symbol_counts.values())
+                                        stream_buf._symbols_produced = result.sax_symbols_produced
                                         stream_buf._trim()
 
                                     # v0.38.0 FIX: REST polling mode NEVER updated

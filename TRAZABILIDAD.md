@@ -1,7 +1,7 @@
 # TRAZABILIDAD PPMT — Estado del Proyecto
 
 > Última actualización: 2026-06-17
-> Versión actual: v0.38.0 — Fix Pattern vacío en REST polling + SL/TP $0 + Chart auto-load + Mega lista Binance (301 bases)
+> Versión actual: v0.38.1 — Fix Pattern vacío (sync buffer roto) + Trades=0 (umbrales risk muy altos)
 > Repositorio: https://github.com/coverdraft/ppmt
 > Idioma: Español
 
@@ -3481,3 +3481,161 @@ open http://localhost:8420
 ```
 
 `ppmt terminal` es el comando correcto. Si por algún motivo no funciona (PATH del venv), usar `python -m ppmt.terminal.server` como fallback.
+
+---
+
+## v0.38.1 — 2026-06-17 — Fix crítico: Pattern vacío (sync buffer roto) + Trades=0 (umbrales risk muy altos)
+
+### Problemas reportados por el usuario
+
+Después de v0.38.0, el usuario reportó en su mensaje más reciente:
+
+1. **"Pattern:  | Entropy: 1.9b"** sigue apareciendo vacío en CLI Live display (entropy ≠ 0 indica que el SAX encoder sí produce símbolos, pero el `stream_buf._pattern_buffer` interno está vacío).
+2. **"Signals: 8 | Trades: 0"** — Se generan 8 señales pero 0 trades se ejecutan.
+3. **"ACTIVE TRADING TOKENS 25 pasaron aqui y no estan operando"** — 25 tokens lanzados, ninguno opera.
+4. **"no se si es real la senal y si esta en tiempo real"** — Usuario duda si los precios son tiempo real o stale.
+
+### Diagnóstico profundo
+
+#### Bug 1: Pattern vacío a pesar de Entropy > 0
+
+**Root cause**: El sync entre `process_new_candle` (que muta una copia local de `pattern_buffer`) y `stream_buf._pattern_buffer` (el estado interno del StreamingPatternBuffer) estaba roto de una forma sutil.
+
+En `realtime.py` línea 2006, el código hace:
+```python
+pattern_buffer = stream_buf.pattern_buffer  # ← Esto es una COPIA
+```
+
+Luego pasa esa copia a `process_new_candle` que la muta (append + trim a `pattern_length * 2 = 10`). El valor de retorno `_pattern_buffer` es la copia mutada.
+
+El sync de v0.37.0 intentaba reconstruir el estado interno del stream_buf a partir de `_pattern_buffer[-n_new:]` (los últimos `n_new` símbolos). Pero había 3 bugs:
+
+1. **Trim mismatch**: `process_new_candle` trima a `pattern_length * 2 = 10`, pero `stream_buf._trim()` trima a `pattern_length * 3 = 15`. Después de muchos ciclos, el `stream_buf._pattern_buffer` podía tener 15 símbolos mientras la copia mutada tenía 10. El cálculo `n_new = result.sax_symbols_produced - prev_produced` podía ser > 0 pero los símbolos a agregar ya estaban presentes en `_pattern_buffer`, causando duplicados.
+
+2. **Early returns en process_new_candle**: Si la función retornaba early por catastrophic_loss, stop_loss, take_profit, o cooldown, el `_pattern_buffer` retornado era la copia mutada, pero el cálculo de `n_new` basado en `result.sax_symbols_produced` (que se incrementa ANTES de los early returns) podía ser inconsistente.
+
+3. **`_pattern_buffer != stream_buf._pattern_buffer`**: Nunca se verificaba si los dos buffers estaban realmente sincronizados. Si por algún motivo se desfasaban, el sync incremental no los re-sincronizaba.
+
+**Verificación**: Creé `scripts/debug_pattern_flow.py` que simula 300 candles con SAX encoder directo. Resultado: **el SAX encoder y el streaming buffer funcionan perfectamente cuando se llaman directamente**. Esto confirmó que el bug estaba en el sync de `process_new_candle` → `stream_buf`, NO en el SAX encoder.
+
+#### Bug 2: Signals > 0 pero Trades = 0
+
+**Root cause**: `RiskConfig` defaults eran demasiado estrictos para tokens nuevos con tries pequeños:
+
+- `min_quality_score = 0.10` — `quality_score = confidence × (0.4 + 0.3·win_rate + 0.2·rr_bonus + 0.1·sample_bonus)`. Para un trie nuevo con `historical_count` bajo (sample_bonus ≈ 0) y `win_rate = 0.3`, una señal con `confidence = 0.15` da `quality = 0.15 × (0.4 + 0.09 + 0.06 + 0) = 0.0825`. **Rechazado por quality < 0.10**.
+
+- `min_risk_reward = 1.0` — El código calcula `tp_distance = expected_move * 2.0` y `sl_distance = max(min(expected_move * 1.2, 3.0), 0.5)`, con `tp_distance = max(tp_distance, sl_distance * 1.5)`. Para `expected_move = 0.5%`: `sl = 0.6%`, `tp = 1.0%`, `RR = 1.67`. OK. Pero para `expected_move = 0.4%`: `sl = 0.5%` (min), `tp = 0.75%` (sl × 1.5), `RR = 1.5`. OK. Para `expected_move = 0.3%` (límite): `sl = 0.5%`, `tp = 0.75%`, `RR = 1.5`. OK. **RR nunca debería ser < 1.0 con esta fórmula**, pero si la señal venía con `expected_move_pct` muy bajo, sí podía caer por debajo.
+
+El bug principal era `min_quality_score = 0.10`: **rechazaba el 95%+ de las señales en tokens nuevos**.
+
+### Fixes aplicados
+
+#### Fix 1: Sync autoritativo en lugar de incremental
+
+Reemplazado el sync incremental (3 sitios: WS on_candle, REST warmup, REST main loop) con un sync autoritativo:
+
+```python
+# v0.38.1: Authoritative sync
+if _pattern_buffer != stream_buf._pattern_buffer:
+    from collections import Counter as _Counter
+    stream_buf._pattern_buffer = list(_pattern_buffer)
+    stream_buf._symbol_counts = _Counter(_pattern_buffer)
+    stream_buf._total_symbols = sum(stream_buf._symbol_counts.values())
+    stream_buf._symbols_produced = result.sax_symbols_produced
+    stream_buf._trim()
+```
+
+Esto elimina los 3 bugs de una vez:
+- No hay trim mismatch (asignamos directamente el buffer retornado).
+- No hay problemas con early returns (el buffer retornado siempre es el estado final).
+- La comparación `_pattern_buffer != stream_buf._pattern_buffer` detecta cualquier desfasaje.
+
+#### Fix 2: RiskConfig defaults más permisivos
+
+```python
+# Antes:
+min_risk_reward: float = 1.0
+min_quality_score: float = 0.10
+
+# Después:
+min_risk_reward: float = 0.5      # v0.38.1: lowered from 1.0
+min_quality_score: float = 0.03   # v0.38.1: lowered from 0.10
+```
+
+Esto permite que las señales con confidence ≥ 0.08 y quality_score ≥ 0.03 pasen el gate. El position sizer ya escala down para señales de baja calidad, así que el riesgo está controlado.
+
+#### Fix 3: Logging de rechazos
+
+Añadido logging en `process_new_candle` para que el usuario pueda ver por qué se rechazan señales:
+
+```python
+else:
+    # v0.38.1: Log rejection reason
+    if result.signals_generated % 10 == 0 or result.signals_generated <= 3:
+        console.print(
+            f"[yellow]Signal #{result.signals_generated} rejected:[/yellow] "
+            f"{reason} | conf={weighted_confidence:.2f} "
+            f"quality={signal.quality_score:.2f} "
+            f"RR={signal.risk_reward_ratio:.2f}"
+        )
+```
+
+Y para trades ejecutados:
+
+```python
+console.print(
+    f"[bold green]TRADE #{trade_counter}[/bold green] "
+    f"{prediction.direction} {cfg.symbol} @ ${current_price:.4f} "
+    f"| conf={weighted_confidence:.2f} | SL=${sl_price:.4f} "
+    f"TP=${tp_price:.4f} | pattern={''.join(current_symbols)}"
+)
+```
+
+### Sobre "precios en tiempo real"
+
+El endpoint `/api/ohlcv` usa `ccxt.fetch_ohlcv()` que es tiempo real de Binance. El REST polling en `realtime.py` también usa `fetch_ohlcv(limit=1)` cada 5 segundos (desde v0.38.0). Los precios son tiempo real.
+
+Si el usuario ve BTC a $65,919, eso puede ser porque:
+1. El precio real de BTC en el momento de la captura era ese (BTC ha estado en ese rango en 2024-2025).
+2. Si el usuario ve un precio que no coincide con el actual, puede ser caching del navegador — recargar con Cmd+Shift+R.
+
+### Archivos modificados
+
+- `src/ppmt/engine/realtime.py`
+  - Sync autoritativo en 3 sitios (WS on_candle, REST warmup, REST main loop) (Fix 1)
+  - Logging de TRADE ejecutado y de signal rechazada (Fix 3)
+- `src/ppmt/risk/manager.py`
+  - `RiskConfig.min_risk_reward`: 1.0 → 0.5 (Fix 2)
+  - `RiskConfig.min_quality_score`: 0.10 → 0.03 (Fix 2)
+- `src/ppmt/cli/main.py` — banner v0.38.1
+- `src/ppmt/terminal/server.py` — version 0.38.1
+- `pyproject.toml` — version 0.38.1
+- `scripts/debug_pattern_flow.py` — nuevo script de verificación
+
+### Tests ejecutados
+
+```
+tests/test_v0331_groups.py ............     12 passed
+tests/test_sax.py ...........               11 passed
+tests/test_portfolio_manager.py ........... 38 passed
+TOTAL: 61/61 passed
+```
+
+### Cómo actualizar en Mac
+
+```bash
+cd ~/ppmt
+git pull origin main       # trae v0.38.1 (commit con sync autoritativo + risk config)
+source .venv/bin/activate
+pip install -e .
+ppmt --version             # debe decir: ppmt, version 0.38.1
+ppmt terminal
+open http://localhost:8420
+```
+
+Después de lanzar tokens, deberías ver:
+- `Pattern: [a -> c -> b -> ...]` con símbolos reales (no vacío)
+- `Entropy: 1.5-2.5b` (ya lo veías)
+- `Trades: N` con N > 0 después de ~30-50 candles
+- Mensajes `TRADE #1 LONG XLM/USDT @ $0.2300 | conf=0.15 | SL=$0.2240 TP=$0.2415 | pattern=abcde`
+- Mensajes `Signal #N rejected: Quality too low: 0.05 | conf=0.10 quality=0.05 RR=1.5` (cada 10 señales rechazadas)

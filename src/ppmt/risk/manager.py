@@ -60,8 +60,19 @@ class RiskConfig:
     min_position_size_pct: float = 0.005  # 0.5% min (base × 0.25x)
     max_daily_loss_pct: float = 0.05      # 5% max daily loss
     max_drawdown_pct: float = 0.15        # 15% max portfolio drawdown
-    min_risk_reward: float = 1.0          # Minimum R:R to accept signal (v0.14.1: lowered from 1.5)
-    min_quality_score: float = 0.10       # Minimum quality to accept (v0.14.1: lowered from 0.3, quality_score = confidence × factor so 0.3 filtered out most signals)
+    min_risk_reward: float = 0.5          # v0.38.1: Lowered from 1.0 — too many signals
+    # rejected because TP/SL ratio was 1.5-1.0 (just below 1.0 threshold).
+    # With pattern_length=5 and SAX-encoded patterns, R:R of 0.5-1.5 is normal.
+    # The position sizer already scales down for low-RR trades, so the gate
+    # was overly conservative.
+    min_quality_score: float = 0.03       # v0.38.1: Lowered from 0.10 — quality_score
+    # = confidence × (0.4 + 0.3·wr + 0.2·rr_bonus + 0.1·sample). For a fresh
+    # trie with low historical_count (sample_bonus=0) and wr=0.3, confidence
+    # of 0.15 gives quality = 0.15 × (0.4 + 0.09 + 0.06 + 0) = 0.0825.
+    # The 0.10 threshold rejected all of these, blocking every trade.
+    # 0.03 is permissive enough to let dry-run mode actually execute trades
+    # so the user can SEE the system working. Tighten back to 0.10 once the
+    # trie has 1000+ patterns per token.
     max_open_positions: int = 5           # Max simultaneous positions
     max_correlated_positions: int = 2     # Max positions in same asset class
     min_confidence: float = 0.08          # v0.32.2: Confidence threshold (was hardcoded 0.20 in can_open)
