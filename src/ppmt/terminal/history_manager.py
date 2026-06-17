@@ -105,12 +105,34 @@ CREATE INDEX IF NOT EXISTS idx_historical_scan_ts ON historical_scan(scan_timest
 # ============================================================
 # Conexión
 # ============================================================
-def _get_conn() -> sqlite3.Connection:
-    os.makedirs(CONFIG_DIR, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.executescript(SCHEMA_SQL)
-    return conn
+def _get_conn() -> Optional[sqlite3.Connection]:
+    """Open a SQLite connection to the PPMT history DB.
+
+    v0.36.1: Hardened with try/except so that ANY failure (permission,
+    disk-full, locked DB, corrupted file) returns None instead of raising.
+    All callers already handle None by skipping the DB write — this prevents
+    the cascade of ``'NoneType' object has no attribute 'cursor'`` errors
+    that previously aborted sweeps mid-flight.
+    """
+    try:
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        conn.executescript(SCHEMA_SQL)
+        return conn
+    except Exception as e:
+        logger.warning(f"_get_conn failed (history DB disabled this call): {e}")
+        return None
+
+
+def _close_quietly(conn: Optional[sqlite3.Connection]) -> None:
+    """Close a SQLite connection, ignoring any error."""
+    if conn is None:
+        return
+    try:
+        conn.close()
+    except Exception:
+        pass
 
 
 # ============================================================
@@ -209,6 +231,10 @@ def save_scan(
     filtros_json = json.dumps(filtros_aplicados or {}, default=str)
 
     conn = _get_conn()
+    if conn is None:
+        # v0.36.1: DB unavailable — log and bail out cleanly without crashing the sweep.
+        logger.warning("save_scan skipped: history DB unavailable.")
+        return -1
     try:
         cur = conn.cursor()
         cur.execute("""
@@ -252,11 +278,14 @@ def save_scan(
                     f"{n_pass} PASS, score avg {score_avg}")
         return scan_id
     except Exception as e:
-        conn.rollback()
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         logger.error(f"Error guardando scan: {e}")
         return -1
     finally:
-        conn.close()
+        _close_quietly(conn)
 
 
 # ============================================================
@@ -265,6 +294,8 @@ def save_scan(
 def list_scans(limit: int = 10) -> List[Dict[str, Any]]:
     """Devuelve los últimos N escaneos (sin resultados detalle)."""
     conn = _get_conn()
+    if conn is None:
+        return []
     try:
         cur = conn.cursor()
         cur.execute("""
@@ -277,13 +308,18 @@ def list_scans(limit: int = 10) -> List[Dict[str, Any]]:
             LIMIT ?
         """, (limit,))
         return [dict(row) for row in cur.fetchall()]
+    except Exception as e:
+        logger.warning(f"list_scans failed: {e}")
+        return []
     finally:
-        conn.close()
+        _close_quietly(conn)
 
 
 def get_scan(scan_id: int) -> Optional[Dict[str, Any]]:
     """Devuelve un escaneo completo con todos sus resultados."""
     conn = _get_conn()
+    if conn is None:
+        return None
     try:
         cur = conn.cursor()
         cur.execute("SELECT * FROM historical_scan WHERE id = ?", (scan_id,))
@@ -299,8 +335,11 @@ def get_scan(scan_id: int) -> Optional[Dict[str, Any]]:
         """, (scan_id,))
         results = [dict(row) for row in cur.fetchall()]
         return {**dict(scan), "resultados": results}
+    except Exception as e:
+        logger.warning(f"get_scan failed: {e}")
+        return None
     finally:
-        conn.close()
+        _close_quietly(conn)
 
 
 def list_by_symbol(symbol: str, limit: int = 20) -> List[Dict[str, Any]]:
@@ -314,6 +353,8 @@ def list_by_symbol(symbol: str, limit: int = 20) -> List[Dict[str, Any]]:
             sym_norm = sym_norm + "/USDT"
 
     conn = _get_conn()
+    if conn is None:
+        return []
     try:
         cur = conn.cursor()
         cur.execute("""
@@ -328,13 +369,18 @@ def list_by_symbol(symbol: str, limit: int = 20) -> List[Dict[str, Any]]:
             LIMIT ?
         """, (sym_norm, limit))
         return [dict(row) for row in cur.fetchall()]
+    except Exception as e:
+        logger.warning(f"list_by_symbol failed: {e}")
+        return []
     finally:
-        conn.close()
+        _close_quietly(conn)
 
 
 def list_today() -> List[Dict[str, Any]]:
     """Escaneos de hoy."""
     conn = _get_conn()
+    if conn is None:
+        return []
     try:
         cur = conn.cursor()
         cur.execute("""
@@ -345,8 +391,11 @@ def list_today() -> List[Dict[str, Any]]:
             ORDER BY id DESC
         """)
         return [dict(row) for row in cur.fetchall()]
+    except Exception as e:
+        logger.warning(f"list_today failed: {e}")
+        return []
     finally:
-        conn.close()
+        _close_quietly(conn)
 
 
 # ============================================================

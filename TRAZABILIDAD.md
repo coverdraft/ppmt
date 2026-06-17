@@ -2801,3 +2801,224 @@ coja el nuevo HTML/JS (sino usarás la v0.35.0 cacheada).
    trades por token en tiempo real.
 8. Usuario puede parar individualmente o "Stop All".
 
+
+---
+
+# v0.36.1 — Fixes "no arranco" + history persistence + NoneType cascade
+
+## Por qué el server no arrancaba
+
+El usuario corría `python -m ppmt.terminal.server` y solo veía:
+
+```
+<frozen runpy>:128: RuntimeWarning: 'ppmt.terminal.server' found in sys.modules...
+(.venv) coco@cocos-MacBook-Air ppmt %
+```
+
+**Causa**: `server.py` NO tenía bloque `if __name__ == "__main__"`. Al
+ejecutarlo como módulo, el archivo se importaba pero `run_server()` nunca
+se llamaba — Python salía limpiamente sin hacer nada. El `RuntimeWarning`
+era cosmético (causado por `ppmt/terminal/__init__.py` que importaba
+`server` eagerly).
+
+## Fixes aplicados
+
+### 1. Server startup (ROOT CAUSE de "no arranco")
+- `server.py`: añadido `if __name__ == "__main__":` con argparse para
+  `--host` (default 0.0.0.0) y `--port` (default 8420), llama a `run_server()`.
+- `ppmt/terminal/__init__.py`: convertido a lazy `__getattr__` — ya no
+  importa `server` eagerly. El `RuntimeWarning` desaparece.
+
+### 2. Recalibration interval auto (v0.34.0 patch aplicado finalmente)
+- `LiveConfig.recalibration_interval`: default 2000 → 0 (auto).
+- `_run_loop()` (live mode): cuando `recalibration_interval <= 0`, resuelve
+  vía `get_recalibration_interval(_tf_to_minutes(cfg.timeframe))`.
+- Tabla: 1m/5m/15m → 2000 velas, 1h → 8000, 4h → 32k, 1d → 50k (cap).
+
+### 3. NoneType cursor cascade FIXED
+- `history_manager._get_conn()` ahora devuelve `None` en cualquier fallo
+  (permiso, disco lleno, DB locked, archivo corrupto). Antes lanzaba y
+  causaba `'NoneType' object has no attribute 'cursor'` que abortaba sweeps.
+- Las 5 funciones públicas (save_scan, list_scans, get_scan, list_by_symbol,
+  list_today) manejan `conn=None` gracefully + usan `_close_quietly()`.
+
+### 4. History persistence WIRED (era silenciosa)
+- Antes: `save_scan()` existía pero NUNCA era llamada desde `_sweep_runner`.
+  El historial quedaba siempre vacío.
+- Ahora: al finalizar cada sweep, `_sweep_runner` llama `save_scan()` con
+  todos los resultados (symbol, verdict, win_rate, profit_factor, etc.).
+- 4 endpoints REST nuevos:
+  - `GET /api/history/scans?limit=20` — lista sweeps recientes.
+  - `GET /api/history/scans/{scan_id}` — detalle completo de un scan.
+  - `GET /api/history/symbol/{symbol}` — historial de un token.
+  - `GET /api/history/today` — scans de hoy.
+
+### 5. History tab enriquecido
+- Añadido panel "Sweep History (SQLite)" arriba del todo en la tab History.
+- Tabla con: ID, Fecha, Grupo, TF, Total, PASS, FAIL, Skip, Score, Tiempo,
+  botón "View" que abre un alert con todos los resultados del scan.
+- `switchTab('history')` carga el historial lazy al abrir la tab.
+
+### 6. Version bump 0.36.0 → 0.36.1
+- `pyproject.toml`, `server.py` (FastAPI app version),
+  `cli/main.py` (`@click.version_option`), `index.html` (footer + script
+  header comment).
+
+## Verificación
+
+```
+$ python -m ppmt.terminal.server
+INFO:     Started server process [6796]
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8420
+```
+
+```
+$ python -m pytest tests/test_v0340.py
+============================== 19 passed in 2.50s ==============================
+```
+
+```
+$ curl http://localhost:8421/api/history/scans
+{"ok":true,"scans":[]}
+```
+
+## Archivos modificados
+
+- `src/ppmt/terminal/server.py` — `__main__` block, 4 endpoints `/api/history/*`,
+  `save_scan()` integrado en `_sweep_runner`, version bump.
+- `src/ppmt/terminal/__init__.py` — lazy `__getattr__` (elimina RuntimeWarning).
+- `src/ppmt/terminal/history_manager.py` — `_get_conn()` None-safe, `_close_quietly()`,
+  todas las funciones manejan conn=None.
+- `src/ppmt/terminal/static/index.html` — Sweep History panel en tab History,
+  `loadSweepHistory()` + `viewSweepDetail()` JS, `switchTab` lazy-load,
+  version bump.
+- `src/ppmt/engine/realtime.py` — `LiveConfig.recalibration_interval=0` default,
+  `_run_loop` auto-resuelve vía `get_recalibration_interval()`.
+- `pyproject.toml`, `src/ppmt/cli/main.py` — version bump 0.36.1.
+
+---
+
+# v0.36.1 — Token Groups Expansion + Exchange-Aware Filtering
+
+**Fecha:** 2026-06-17
+**Motivación:** Usuario reporta "no hay muchos tokens en esos grupos tipo en meme pero hay que ver todos hay poca seleccion dentro". Investigación revela:
+1. El grupo `memes` solo tenía 20 bases definidas, de las cuales solo ~11 están listadas en Binance (POPCAT, MEW, NAPT, MYRO, MOG, BALD, MFER, BOOK, GOAT no existen en Binance).
+2. Otros grupos también tenían muy pocos tokens: gaming (8), ai (8), defi (13), layer2 (10).
+3. La función `_resolve_static_group` no verificaba si los tokens están listados en el exchange seleccionado — devolvía todo, y luego fallaba al validar los que no existen.
+
+## Cambios principales
+
+### 1. Expansión masiva de grupos predefinidos (`data/groups.py`)
+
+| Grupo           | Antes | Después (bases) | En Binance |
+|-----------------|-------|-----------------|------------|
+| memes           |    20 |              65 |         21 |
+| gaming          |     8 |              61 |         30 |
+| defi            |    13 |              61 |         28 |
+| ai              |     8 |              37 |         16 |
+| layer1          |    16 |              48 |         43 |
+| layer2          |    10 |              26 |         18 |
+| altcoins_large  |    16 |              38 |         34 |
+| altcoins_mid    |    20 |              57 |         50 |
+| altcoins_small  |    20 |              56 |         36 |
+
+Total unique tokens across all groups on Binance: **~160** (era ~80 antes).
+
+Deduplicación: removidos OCEAN (top100_mcap), WAVES (altcoins_small), ALGO (layer1),
+MANTA/BOBA/LRC (layer2), SUSHI (defi), OCEAN/FET/AGIX/NMR/WLD/TAO/RNDR (ai),
+FORTH/SUPER/ALICE (gaming).
+
+### 2. Filtrado automático por exchange (`_resolve_static_group`)
+
+Nueva función `get_exchange_usdt_symbols(exchange)` que devuelve el set de símbolos
+USDT activamente listados (usa el cache de 60s de `fetch_market_snapshot`).
+
+`_resolve_static_group` ahora:
+1. Deduplica las bases (preservando orden)
+2. Construye `BASE/USDT` para cada una
+3. **Filtra contra `get_exchange_usdt_symbols(exchange)`** — descarta tokens no listados
+4. Si el fetch falla (sin internet), retorna todas (mejor que lista vacía)
+5. Aplica filtros del usuario (stablecoins, volume, etc.)
+6. Aplica limit al final
+
+```python
+# Ejemplo: usuario selecciona "memes" en Binance
+# Antes: 20 tokens (9 fallarían al validar: POPCAT, MEW, NAPT, MYRO, MOG, BALD, MFER, BOOK, GOAT)
+# Después: 21 tokens TODOS listados en Binance
+```
+
+### 3. Endpoint enriquecido `/api/groups/resolve`
+
+Ahora retorna:
+- `count`: tokens finales después de todos los filtros
+- `raw_count`: bases definidas en el grupo (antes de filtrar)
+- `filtered_count`: después de filtro de exchange, antes del limit
+
+### 4. UI mejorada (`index.html`)
+
+Después de cargar un grupo, el mensaje muestra:
+- `✓ 21 tokens cargados en dropdown` (caso simple)
+- `✓ 21 tokens cargados en dropdown (de 65: 44 no listados en binance)` (con info de filtrado)
+- `✓ 50 tokens cargados en dropdown (de 65: 15 no listados en binance, 0 por límite)` (filtrado + limit)
+
+### 5. Version bump 0.36.0 → 0.36.1
+
+- `pyproject.toml`
+- `cli/main.py` (banner + version_option)
+- `server.py` (FastAPI app version)
+- `index.html` (title)
+
+## Verificación
+
+### Server arranca correctamente con `ppmt terminal`:
+```
+$ ppmt terminal
+PPMT Terminal Dashboard v0.36.1
+  Starting PPMT Terminal Dashboard on http://localhost:8420
+INFO:     Uvicorn running on http://localhost:8420
+```
+
+### Resolve endpoint con nuevos campos:
+```
+$ curl "http://localhost:8420/api/groups/resolve?group_id=memes&exchange=binance"
+{"ok":true,"group_id":"memes","exchange":"binance",
+ "symbols":["DOGE/USDT","SHIB/USDT","FLOKI/USDT","MEME/USDT","PEPE/USDT",
+            "WIF/USDT","BONK/USDT","BOME/USDT","TURBO/USDT","NEIRO/USDT",
+            "PNUT/USDT","ACT/USDT","BANANA/USDT","SUN/USDT","BANANAS31/USDT",
+            "LAYER/USDT","BTTC/USDT","VELODROME/USDT","RENDER/USDT",
+            "VIRTUAL/USDT","COW/USDT"],
+ "count":21,"raw_count":65,"filtered_count":21,...}
+```
+
+### Tests pasan:
+```
+$ python -m pytest tests/test_v0330_groups.py tests/test_v0331_groups.py
+======================== 31 passed, 1 warning in 3.06s =========================
+```
+
+### Conteo por exchange:
+- Binance: 21 memes / 30 gaming / 28 defi / 16 ai / 43 layer1 / 18 layer2
+- MEXC: 37 memes / 37 gaming / 35 defi / 21 ai / 43 layer1 / 22 layer2
+
+## Archivos modificados
+
+- `src/ppmt/data/groups.py` — Expansión de 8 grupos predefinidos, nueva función
+  `get_exchange_usdt_symbols()`, `_resolve_static_group` con filtrado por exchange,
+  deduplicación de bases, export en `__all__`.
+- `src/ppmt/terminal/server.py` — Endpoint `/api/groups/resolve` retorna
+  `raw_count` y `filtered_count`, version bump 0.36.1.
+- `src/ppmt/terminal/static/index.html` — Mensaje informativo al cargar grupo
+  muestra tokens dropped por exchange / limit, version bump en `<title>`.
+- `src/ppmt/cli/main.py` — Banner del CLI actualizado a v0.36.1.
+- `pyproject.toml` — version = "0.36.1".
+
+## Nota sobre tests preexistentes fallidos
+
+13 tests siguen fallando por causas PRE-EXISTENTES no relacionadas con este cambio:
+- `test_oos_validation.py` (11 tests): problemas con el motor OOS para datos trending/ranging
+- `test_v0326_state_tagging.py::test_sweep_request_model_defaults`: cambio de schema en SweepRequest
+- `test_v43_robust.py::TestFullPipelineIntegration::test_trie_merge_preserves_observations`: `PPMTTrie.merge` no existe
+
+Estos son issues de tests legacy que requieren refactor separado. No afectan la
+funcionalidad de grupos ni el startup del servidor.

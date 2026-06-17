@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>PPMT Terminal v0.36.0</title>
+<title>PPMT Terminal v0.36.1</title>
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -812,6 +812,32 @@ tr:hover td{background:rgba(96,165,250,.04)}
 
   <!-- ========== TAB: HISTORY & SIGNALS ========== -->
   <div class="tab-content" id="tab-history">
+  <!-- v0.36.1: Sweep History (top section, full-width) -->
+  <div style="margin-bottom:6px">
+    <div class="panel" id="panelSweepHistory" style="border-bottom:none">
+      <div class="panel-header" style="margin-bottom:4px">
+        <div class="panel-title">Sweep History (SQLite)</div>
+        <div style="display:flex;gap:4px;align-items:center">
+          <span style="font-family:var(--mono);font-size:9px;color:var(--text3)" id="sweepHistoryCount">0 scans</span>
+          <button class="btn btn-ghost btn-sm" onclick="loadSweepHistory()">Reload</button>
+        </div>
+      </div>
+      <div class="panel-body" style="max-height:220px;overflow-y:auto">
+        <div class="table-wrap">
+          <table>
+            <thead><tr>
+              <th>ID</th><th>Fecha</th><th>Grupo</th><th>TF</th>
+              <th>Total</th><th>PASS</th><th>FAIL</th><th>Skip</th>
+              <th>Score</th><th>Tiempo</th><th>Acción</th>
+            </tr></thead>
+            <tbody id="sweepHistoryBody">
+              <tr><td colspan="11" class="text-muted" style="text-align:center">No sweep history yet. Run a sweep in the Discovery tab.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
   <!-- ===== BLOTTER ===== -->
   <div class="blotter-section">
     <!-- Trade History -->
@@ -868,14 +894,14 @@ tr:hover td{background:rgba(96,165,250,.04)}
     <div class="status-item" style="margin-left:12px"><span id="statusMessage" style="color:var(--text3)">Listo.</span></div>
   </div>
   <div class="status-right">
-    <span>PPMT v0.36.0</span>
+    <span>PPMT v0.36.1</span>
     <div class="status-item"><span class="label">Uptime:</span><span class="value" id="btmUptime">00:00:00</span></div>
   </div>
 </footer>
 
 <script>
 // ============================================================
-// PPMT Terminal v0.36.0 — Trading Dashboard
+// PPMT Terminal v0.36.1 — Trading Dashboard
 // ============================================================
 
 const API = '';
@@ -1999,6 +2025,10 @@ function switchTab(tabName) {
   if (window._priceChart) {
     try { window._priceChart.applyOptions({ width: window._priceChart.paneWidgets()[0].getWidth() }); } catch (e) {}
   }
+  // v0.36.1: Lazy-load sweep history when the user opens the History tab.
+  if (tabName === 'history') {
+    try { loadSweepHistory(); } catch (e) { console.warn('loadSweepHistory failed:', e); }
+  }
   console.log(`[PPMT] Tab switched to: ${tabName}`);
 }
 
@@ -2049,6 +2079,87 @@ async function loadTradeHistory() {
     loadTradeSummary(symbol);
   } catch (e) {
     console.error('loadTradeHistory error:', e);
+  }
+}
+
+// ============================================================
+// v0.36.1: Sweep History (loads from SQLite via /api/history/scans)
+// ============================================================
+async function loadSweepHistory() {
+  try {
+    const res = await fetch(`${API}/api/history/scans?limit=20`);
+    if (!res.ok) {
+      console.warn('loadSweepHistory: HTTP', res.status);
+      return;
+    }
+    const data = await res.json();
+    const scans = data.scans || [];
+    const countEl = document.getElementById('sweepHistoryCount');
+    const bodyEl = document.getElementById('sweepHistoryBody');
+    if (countEl) countEl.textContent = `${scans.length} scan${scans.length === 1 ? '' : 's'}`;
+    if (!bodyEl) return;
+    if (scans.length === 0) {
+      bodyEl.innerHTML = '<tr><td colspan="11" class="text-muted" style="text-align:center">No sweep history yet. Run a sweep in the Discovery tab.</td></tr>';
+      return;
+    }
+    bodyEl.innerHTML = scans.map(s => {
+      const ts = (s.scan_timestamp || '').toString().slice(0, 19);
+      const passCls = (s.tokens_pasaron || 0) > 0 ? 'text-green' : 'text-muted';
+      const failCls = (s.tokens_fallaron || 0) > 0 ? 'text-red' : 'text-muted';
+      const score = (s.score_avg || 0).toFixed(1);
+      const tiempo = (s.tiempo_ejecucion || 0).toFixed(1) + 's';
+      return `<tr>
+        <td style="padding:3px 6px">${s.id}</td>
+        <td style="padding:3px 6px;font-size:9px">${ts}</td>
+        <td style="padding:3px 6px;font-size:9px;max-width:200px;overflow:hidden;text-overflow:ellipsis" title="${escapeHtml(s.grupo_utilizado || '')}">${escapeHtml((s.grupo_utilizado || '').substring(0, 28))}</td>
+        <td style="padding:3px 6px">${escapeHtml(s.tf_utilizado || '')}</td>
+        <td style="padding:3px 6px;text-align:right">${s.total_tokens || 0}</td>
+        <td style="padding:3px 6px;text-align:right" class="${passCls}">${s.tokens_pasaron || 0}</td>
+        <td style="padding:3px 6px;text-align:right" class="${failCls}">${s.tokens_fallaron || 0}</td>
+        <td style="padding:3px 6px;text-align:right" class="text-yellow">${s.tokens_insuficientes || 0}</td>
+        <td style="padding:3px 6px;text-align:right">${score}</td>
+        <td style="padding:3px 6px;text-align:right;font-size:9px">${tiempo}</td>
+        <td style="padding:3px 6px"><button class="btn btn-ghost btn-sm" onclick="viewSweepDetail(${s.id})">View</button></td>
+      </tr>`;
+    }).join('');
+  } catch (e) {
+    console.error('loadSweepHistory error:', e);
+  }
+}
+
+async function viewSweepDetail(scanId) {
+  try {
+    const res = await fetch(`${API}/api/history/scans/${scanId}`);
+    if (!res.ok) {
+      alert('Could not load scan #' + scanId);
+      return;
+    }
+    const data = await res.json();
+    if (!data.ok) {
+      alert('Scan #' + scanId + ' not found: ' + (data.error || ''));
+      return;
+    }
+    const scan = data.scan;
+    const results = scan.resultados || [];
+    // Build a readable summary
+    const lines = results.map(r => {
+      const cls = r.resultado === 'PASS' ? 'PASS' :
+                  r.resultado === 'INSUFFICIENT_DATA' ? 'SKIP' : 'FAIL';
+      const wr = ((r.win_rate || 0) * 100).toFixed(1) + '%';
+      const pf = (r.profit_factor || 0).toFixed(2);
+      const dd = ((r.max_drawdown || 0) * 100).toFixed(1) + '%';
+      const sc = (r.score || 0).toFixed(1);
+      return `[${cls}] ${r.symbol} — PF ${pf} | WR ${wr} | DD ${dd} | ${r.total_trades || 0} trades | Score ${sc}`;
+    });
+    const header = `Scan #${scan.id} — ${scan.scan_timestamp}\n` +
+                   `Grupo: ${scan.grupo_utilizado} | TF: ${scan.tf_utilizado}\n` +
+                   `Total: ${scan.total_tokens} | PASS: ${scan.tokens_pasaron} | FAIL: ${scan.tokens_fallaron} | Skip: ${scan.tokens_insuficientes}\n` +
+                   `Score avg: ${(scan.score_avg || 0).toFixed(1)} | Tiempo: ${(scan.tiempo_ejecucion || 0).toFixed(1)}s\n` +
+                   `${'─'.repeat(70)}`;
+    alert(header + '\n\n' + (lines.join('\n') || 'No results.'));
+  } catch (e) {
+    console.error('viewSweepDetail error:', e);
+    alert('Error loading scan: ' + e.message);
   }
 }
 
@@ -2566,7 +2677,19 @@ async function loadGroupIntoDropdown() {
     if (allSyms.includes(prevChart)) chartSel.value = prevChart; else chartSel.value = syms[0];
 
     info.style.color = 'var(--green)';
-    info.textContent = `✓ ${syms.length} tokens cargados en dropdown`;
+    // v0.36.1: Show "X of Y tokens on exchange (Z dropped)"
+    const rawCount = data.raw_count || syms.length;
+    const filteredCount = data.filtered_count || syms.length;
+    const droppedByExchange = rawCount - filteredCount;
+    const droppedByLimit = filteredCount - syms.length;
+    let msg = `✓ ${syms.length} tokens cargados en dropdown`;
+    if (droppedByExchange > 0 || droppedByLimit > 0) {
+      const parts = [];
+      if (droppedByExchange > 0) parts.push(`${droppedByExchange} no listados en ${exchange}`);
+      if (droppedByLimit > 0) parts.push(`${droppedByLimit} por límite`);
+      msg += ` (de ${rawCount}: ${parts.join(', ')})`;
+    }
+    info.textContent = msg;
     // Trigger chart load
     if (typeof loadChart === 'function') loadChart();
   } catch (e) {

@@ -42,7 +42,7 @@ CONFIG_DIR = os.path.expanduser("~/.ppmt")
 # ------------------------------------------------------------------ #
 # FastAPI application
 # ------------------------------------------------------------------ #
-app = FastAPI(title="PPMT Terminal", version="0.36.0")
+app = FastAPI(title="PPMT Terminal", version="0.36.1")
 
 # Global terminal state (shared with engine)
 terminal_state: TerminalState = get_terminal_state()
@@ -1685,11 +1685,20 @@ async def resolve_token_group(
 ) -> dict:
     """v0.33.0: Resolve a group ID to the actual list of symbols.
 
+    v0.36.1: Also returns ``raw_count`` (number of bases defined in the group
+    before exchange filtering) and ``filtered_count`` (after exchange filter
+    but before limit) so the UI can show "X of Y tokens on exchange".
+
     Returns:
-      { "ok": True, "group_id": str, "symbols": [...], "count": int }
+      { "ok": True, "group_id": str, "symbols": [...], "count": int,
+        "raw_count": int, "filtered_count": int, "filters_applied": dict }
     """
     try:
-        from ppmt.data.groups import resolve_group
+        from ppmt.data.groups import (
+            resolve_group,
+            PREDEFINED_STATIC_GROUPS,
+            _load_custom_groups,
+        )
         filters = {
             "exclude_stablecoins": exclude_stablecoins,
             "only_usdt_pairs": only_usdt_pairs,
@@ -1698,13 +1707,39 @@ async def resolve_token_group(
             "min_listed_days": min_listed_days,
             "limit": limit,
         }
+
+        # Compute raw_count = number of unique bases defined for this group
+        raw_count = 0
+        if group_id in PREDEFINED_STATIC_GROUPS:
+            raw_count = len(set(PREDEFINED_STATIC_GROUPS[group_id].get("bases", [])))
+        else:
+            custom = _load_custom_groups()
+            if group_id in custom:
+                raw_count = len(set(custom[group_id].get("bases", [])))
+
         symbols = resolve_group(group_id, exchange=exchange, filters=filters)
+
+        # filtered_count = how many would be available WITHOUT the user's limit cap
+        filtered_count = raw_count
+        if limit and limit > 0:
+            filtered_count = min(raw_count, max(len(symbols), 0))
+        # If we can re-resolve with limit=0 to get true count, do it
+        try:
+            no_limit_filters = dict(filters)
+            no_limit_filters["limit"] = 0
+            no_limit_syms = resolve_group(group_id, exchange=exchange, filters=no_limit_filters)
+            filtered_count = len(no_limit_syms)
+        except Exception:
+            pass
+
         return {
             "ok": True,
             "group_id": group_id,
             "exchange": exchange,
             "symbols": symbols,
             "count": len(symbols),
+            "raw_count": raw_count,
+            "filtered_count": filtered_count,
             "filters_applied": filters,
         }
     except Exception as e:
@@ -1993,6 +2028,39 @@ async def _sweep_runner(symbols: list[str], timeframe: str, exchange: str, capit
         _save_parent_manager()
     except Exception:
         pass
+
+    # v0.36.1: Persist sweep results to SQLite history so the user can review
+    # past sweeps from the History tab. This was missing — save_scan() existed
+    # but was never called from the sweep runner, so "history" was always empty.
+    try:
+        from ppmt.terminal.history_manager import save_scan
+        resultados_for_db = []
+        for r in _sweep_state.get("results", []):
+            resultados_for_db.append({
+                "symbol": r.get("symbol", ""),
+                "resultado": r.get("verdict", "FAIL"),
+                "win_rate": r.get("win_rate", 0),
+                "profit_factor": r.get("profit_factor", 0),
+                "sharpe": 0.0,  # not currently returned by validate_token
+                "max_drawdown": r.get("max_drawdown", 0),
+                "total_trades": r.get("total_trades", 0),
+                "grupo": "sweep",
+                "cached": False,
+            })
+        if resultados_for_db:
+            started_at = _sweep_state.get("started_at") or time.time()
+            finished_at = _sweep_state.get("finished_at") or time.time()
+            save_scan(
+                grupo_utilizado=f"sweep ({len(symbols)} tokens)",
+                tf_utilizado=timeframe,
+                resultados=resultados_for_db,
+                filtros_aplicados={"exchange": exchange, "capital": capital},
+                dias_data=0,
+                tiempo_ejecucion=round(finished_at - started_at, 2),
+            )
+    except Exception as e:
+        logger.warning(f"save_scan failed at end of sweep (non-fatal): {e}")
+
     _sweep_state["running"] = False
     _sweep_state["finished_at"] = time.time()
     _sweep_state["current_symbol"] = ""
@@ -2018,6 +2086,56 @@ async def sweep_cancel() -> dict:
         return {"ok": False, "error": "No sweep running"}
     _sweep_state["running"] = False
     return {"ok": True, "message": "Sweep will stop after the current token."}
+
+
+# ------------------------------------------------------------------ #
+# REST endpoints — History (v0.36.1)
+# ------------------------------------------------------------------ #
+
+@app.get("/api/history/scans")
+async def history_list_scans(limit: int = 20) -> dict:
+    """List recent sweeps saved in the SQLite history DB."""
+    try:
+        from ppmt.terminal.history_manager import list_scans
+        rows = list_scans(limit=limit)
+        return {"ok": True, "scans": rows}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "scans": []}
+
+
+@app.get("/api/history/scans/{scan_id}")
+async def history_get_scan(scan_id: int) -> dict:
+    """Get a full scan with all per-token results."""
+    try:
+        from ppmt.terminal.history_manager import get_scan
+        scan = get_scan(scan_id)
+        if scan is None:
+            return {"ok": False, "error": "scan_id not found"}
+        return {"ok": True, "scan": scan}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/history/symbol/{symbol}")
+async def history_by_symbol(symbol: str, limit: int = 20) -> dict:
+    """Get validation history for a single symbol across all past scans."""
+    try:
+        from ppmt.terminal.history_manager import list_by_symbol
+        rows = list_by_symbol(symbol, limit=limit)
+        return {"ok": True, "rows": rows}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "rows": []}
+
+
+@app.get("/api/history/today")
+async def history_today() -> dict:
+    """Get scans run today."""
+    try:
+        from ppmt.terminal.history_manager import list_today
+        rows = list_today()
+        return {"ok": True, "scans": rows}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "scans": []}
 
 
 # ------------------------------------------------------------------ #
@@ -2250,3 +2368,16 @@ h1{color:#58a6ff}
 </head>
 <body><h1>PPMT Terminal — Dashboard file not found</h1></body>
 </html>"""
+
+
+# ------------------------------------------------------------------ #
+# Module entry point — allows `python -m ppmt.terminal.server`
+# ------------------------------------------------------------------ #
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="PPMT Terminal Dashboard Server")
+    parser.add_argument("--host", default="0.0.0.0", help="Bind host (default 0.0.0.0)")
+    parser.add_argument("--port", "-p", default=8420, type=int, help="Bind port (default 8420)")
+    args = parser.parse_args()
+    run_server(host=args.host, port=args.port)

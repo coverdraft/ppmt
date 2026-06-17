@@ -216,8 +216,10 @@ class LiveConfig:
     """v0.11.0: Use TokenProfile for automatic parameter selection."""
     auto_calibrate: bool = True
     """v0.11.0: Auto-calibrate SAX α/W using TradingCalibrationEngine."""
-    recalibration_interval: int = 2000
-    """v0.11.0: Re-calibrate every N candles in live mode. Default 2000."""
+    recalibration_interval: int = 0
+    """v0.11.0/v0.36.1: Re-calibrate every N candles in live mode. 0 = auto
+    (TF-aware: 2000 for ≤15m, scaled up for higher TFs, capped at 50k).
+    See :func:`get_recalibration_interval`."""
     use_multi_level: bool = True
     """v0.11.0: Enable 4-level matching."""
     living_trie: bool = True
@@ -2015,8 +2017,14 @@ class RealtimeTrader:
                             )
 
                         # v0.13.0: Periodic recalibration
+                        # v0.36.1: When recalibration_interval == 0 (default), auto-resolve
+                        # via TF-aware get_recalibration_interval().
                         candles_since_calibration += 1
                         recalc_interval = getattr(cfg, 'recalibration_interval', 0)
+                        if recalc_interval <= 0:
+                            recalc_interval = get_recalibration_interval(
+                                _tf_to_minutes(cfg.timeframe)
+                            )
                         if (recalc_interval > 0
                                 and candles_since_calibration >= recalc_interval):
                             _recalibrate(sax_encoder, cfg, storage, info)

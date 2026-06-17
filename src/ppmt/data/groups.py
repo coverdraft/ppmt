@@ -105,7 +105,7 @@ PREDEFINED_STATIC_GROUPS: Dict[str, Dict] = {
             "DYDX", "GMX", "COMP", "1INCH", "BAL", "YFI", "SUSHI", "CHZ", "ENJ", "GALA",
             "ROSE", "KAVA", "ZIL", "BAT", "ZRX", "LRC", "OCEAN", "ANKR", "CELO", "WAVES",
             "DASH", "ZEC", "DCR", "XMR", "NEO", "GAS", "QTUM", "ICX", "WAN", "KSM",
-            "MOVR", "GLMR", "CFX", "MASK", "FET", "AGIX", "OCEAN", "NMR", "RLC", "DODO",
+            "MOVR", "GLMR", "CFX", "MASK", "FET", "AGIX", "NMR", "RLC", "DODO",
         ],
     },
 
@@ -121,7 +121,11 @@ PREDEFINED_STATIC_GROUPS: Dict[str, Dict] = {
         "category": "category",
         "description": "Market Cap $5B+ (ADA, AVAX, DOT, LINK, MATIC, etc.)",
         "bases": ["ADA", "AVAX", "DOT", "LINK", "MATIC", "LTC", "BCH", "ATOM",
-                  "UNI", "NEAR", "APT", "FIL", "ARB", "OP", "ICP", "HBAR"],
+                  "UNI", "NEAR", "APT", "FIL", "ARB", "OP", "ICP", "HBAR",
+                  # v0.36.1: more large caps
+                  "VET", "INJ", "SUI", "SEI", "TIA", "STX", "RUNE", "GRT",
+                  "AAVE", "MKR", "LDO", "IMX", "RNDR", "FET", "ALGO", "FTM",
+                  "PEPE", "SHIB", "WIF", "BONK", "TON", "TRX"],
     },
     "altcoins_mid": {
         "label": "Altcoins Medianas",
@@ -129,7 +133,13 @@ PREDEFINED_STATIC_GROUPS: Dict[str, Dict] = {
         "description": "Market Cap $1B–$10B (INJ, SUI, SEI, GRT, RUNE, TIA, etc.)",
         "bases": ["INJ", "SUI", "SEI", "GRT", "ALGO", "FTM", "STX", "RUNE",
                   "TIA", "IMX", "LDO", "MKR", "CRV", "SNX", "EGLD", "THETA",
-                  "FLOW", "XTZ", "ROSE", "KAVA"],
+                  "FLOW", "XTZ", "ROSE", "KAVA",
+                  # v0.36.1: more mid caps
+                  "ZIL", "BAT", "ZRX", "LRC", "OCEAN", "ANKR", "CELO", "WAVES",
+                  "DASH", "ZEC", "DCR", "NEO", "GAS", "QTUM", "ICX", "KSM",
+                  "MOVR", "GLMR", "CFX", "MASK", "FET", "AGIX", "NMR", "WLD",
+                  "COMP", "1INCH", "BAL", "YFI", "SUSHI", "DYDX", "GMX",
+                  "CHZ", "ENJ", "GALA", "SAND", "MANA", "AXS"],
     },
     "altcoins_small": {
         "label": "Altcoins Pequeñas",
@@ -137,12 +147,18 @@ PREDEFINED_STATIC_GROUPS: Dict[str, Dict] = {
         "description": "Market Cap < $1B (ZIL, BAT, ZRX, LRC, ANKR, etc.)",
         "bases": ["ZIL", "BAT", "ZRX", "LRC", "OCEAN", "ANKR", "CELO", "WAVES",
                   "DASH", "ZEC", "DCR", "NEO", "GAS", "QTUM", "ICX", "KSM",
-                  "MOVR", "GLMR", "CFX", "MASK"],
+                  "MOVR", "GLMR", "CFX", "MASK",
+                  # v0.36.1: more small caps
+                  "ONT", "ZEN", "XEC", "DGB", "SC", "XEM", "NANO", "IOTA",
+                  "LSK", "KMD", "SYS", "RVN", "ARPA", "CTSI", "OGN",
+                  "PERP", "BAND", "POWR", "MTL", "STMX", "CVC", "KEY", "DENT",
+                  "HOT", "REQ", "RDN", "MFT", "BTS", "BCD", "BTG", "XVG",
+                  "MAID", "DGD", "REP", "WINGS", "NMR"],
     },
     "memes": {
         "label": "Memes",
         "category": "category",
-        "description": "DOGE, SHIB, PEPE, WIF, BONK, FLOKI, MEME, TURBO, MOG, POPCAT, etc.",
+        "description": "DOGE, SHIB, PEPE, WIF, BONK, FLOKI, MEME, TURBO, MOG, POPCAT, etc. (~55 tokens — los no listados en el exchange se filtran automáticamente)",
         "bases": [
             # Classic memes
             "DOGE", "SHIB", "FLOKI", "MEME",
@@ -150,10 +166,23 @@ PREDEFINED_STATIC_GROUPS: Dict[str, Dict] = {
             "PEPE",
             # Solana memes (high vol, often list on MEXC/Binance)
             "WIF", "BONK", "POPCAT", "BOME", "MEW", "NAPT", "MYRO",
+            "WEN", "SLERF", "BODEN", "TREMP", "NON",
             # Base/Ethereum memes
             "TURBO", "MOG", "BALD", "MFER",
             # Newer memes that have been listed broadly
             "BOOK", "NEIRO", "PNUT", "GOAT",
+            # v0.36.1: more memes (some only on MEXC, will be auto-filtered on Binance)
+            "ACT", "BAN", "CAT", "HIPPO", "MOO", "PAC", "RIO", "ANI",
+            "SUNDOG", "MIM", "KEK", "CHOMP", "BANANA", "SUN",
+            # Binance-listed meme-adjacent / community tokens
+            "1000SATS", "1000PEPE", "1000SHIB", "1000BONK", "1000FLOKI",
+            "1000WIF", "1000TURBO", "1000LUNC",
+            # Recent Binance meme listings
+            "BANANAS31", "MOCA", "CREAT", "PROMPT", "LAYER", "BTTC",
+            "VELODROME", "RENDER", "VIRTUAL", "COW",
+            # Other community tokens
+            "BABYDOGE", "ELON", "DOGGO", "SAMO", "DOBO",
+            "NYAN", "CATE", "KISHU",
         ],
     },
     "layer1": {
@@ -161,33 +190,66 @@ PREDEFINED_STATIC_GROUPS: Dict[str, Dict] = {
         "category": "category",
         "description": "Blockchains base (ETH, SOL, AVAX, ADA, NEAR, etc.)",
         "bases": ["ETH", "SOL", "AVAX", "ADA", "NEAR", "ATOM", "ALGO", "FTM",
-                  "SUI", "SEI", "APT", "ICP", "EGLD", "FLOW", "XTZ", "KAS"],
+                  "SUI", "SEI", "APT", "ICP", "EGLD", "FLOW", "XTZ", "KAS",
+                  # v0.36.1: more L1s
+                  "BTC", "BNB", "TRX", "TON", "XRP", "LTC", "BCH", "DOT",
+                  "MATIC", "XLM", "HBAR", "VET", "INJ", "TIA", "STX", "RUNE",
+                  "DASH", "ZEC", "XMR", "NEO", "GAS", "QTUM", "ICX",
+                  "CFX", "KSM", "MOVR", "GLMR", "ROSE", "KAVA", "CELO",
+                  "WAVES", "ZIL"],
     },
     "layer2": {
         "label": "Layer 2",
         "category": "category",
         "description": "Escalabilidad sobre Ethereum (ARB, OP, MATIC, IMX, etc.)",
         "bases": ["ARB", "OP", "MATIC", "IMX", "LRC", "MNT", "STRK", "MANTA",
-                  "BLAST", "SCROLL"],
+                  "BLAST", "SCROLL",
+                  # v0.36.1: more L2s
+                  "ZK", "ZRO", "ETHFI", "OMNI", "LISTA", "DYM", "REZ", "BB",
+                  "IO", "TIA", "CTSI", "BOBA", "METIS",
+                  "OMG", "POL", "CELO"],
     },
     "defi": {
         "label": "DeFi",
         "category": "category",
         "description": "UNI, AAVE, MKR, CRV, SNX, COMP, etc.",
         "bases": ["UNI", "AAVE", "MKR", "CRV", "SNX", "COMP", "1INCH", "BAL",
-                  "YFI", "SUSHI", "DYDX", "GMX", "LDO"],
+                  "YFI", "SUSHI", "DYDX", "GMX", "LDO",
+                  # v0.36.1: more DeFi
+                  "CTSI", "BAND", "PERP", "OGN", "RAY", "SRM", "ORCA", "JUP",
+                  "PYTH", "WLD", "TULIP", "STEP", "ATLAS", "AURORA", "FLR",
+                  "RUNE", "THOR", "BTCST", "KP3R", "ALPHA", "SWRV", "DODO",
+                  "KEY", "BNT", "BOND", "HEGIC", "COVER", "REP", "LON",
+                  "PSP", "FARM", "INDEX", "PIVX", "BANANA", "VELODROME",
+                  "CAKE", "XVS", "ALPACA", "FOR", "BAKE", "ATH", "WBTC",
+                  "PNG", "BADGER", "TRU", "LINA", "TRIBE", "RGT"],
     },
     "ai": {
         "label": "IA / AI",
         "category": "category",
         "description": "FET, RNDR, AGIX, OCEAN, NMR, etc.",
-        "bases": ["FET", "RNDR", "AGIX", "OCEAN", "NMR", "WLD", "TAO", "GPC"],
+        "bases": ["FET", "RNDR", "AGIX", "OCEAN", "NMR", "WLD", "TAO", "GPC",
+                  # v0.36.1: more AI tokens
+                  "VIRTUAL", "GRIFFAIN", "AI16Z", "ZEREBRO", "PROMPT", "LAYER",
+                  "DAI", "ARKM", "CTXC", "DBC", "IEXEC", "RLC",
+                  "HOT", "PHB", "NCT", "BDP", "XRT", "MTL",
+                  "ARPA", "BAND", "DIA", "LIT", "KAVA", "STORJ", "MAID",
+                  "SC", "BLZ", "WICI", "ATH"],
     },
     "gaming": {
         "label": "Gaming / Metaverse",
         "category": "category",
         "description": "SAND, MANA, AXS, GALA, ENJ, etc.",
-        "bases": ["SAND", "MANA", "AXS", "GALA", "ENJ", "CHZ", "ILLV", "APE"],
+        "bases": ["SAND", "MANA", "AXS", "GALA", "ENJ", "CHZ", "ILLV", "APE",
+                  # v0.36.1: more gaming/metaverse
+                  "GMT", "ALICE", "SLP", "TLM", "GHST", "REVV", "MEME",
+                  "PYR", "STAR", "MC", "MBOX", "DEGO", "BAKE", "SKILL",
+                  "RFOX", "GST", "LOOKS", "DPET", "CWS", "DVI", "TVK",
+                  "AVT", "OAS", "BST", "AGLD", "METIS", "OXT", "SUPER",
+                  "FORTH", "PUSH", "RARE", "HIFI", "HOT", "POWR", "COCOS",
+                  "PROS", "WAXP", "UFM", "DGB", "BURGER", "COTI", "WEMIX",
+                  "GO", "POKT", "QI", "TRU", "PERL", "WIN",
+                  "PHA", "RAD", "HIGH", "GLM", "MOVR"],
     },
 }
 
@@ -605,14 +667,56 @@ def list_groups() -> Dict[str, Dict]:
     return out
 
 
+def get_exchange_usdt_symbols(exchange: str = "binance") -> set:
+    """Return the set of USDT-quoted symbols actively listed on the exchange.
+
+    v0.36.1: Used by `_resolve_static_group` to filter out tokens that aren't
+    actually listed (e.g. POPCAT and BALD are not on Binance but are on MEXC).
+    Cached for 60s together with the ticker snapshot.
+
+    Falls back to the ticker cache (which already filters to active USDT pairs)
+    so we don't make a second HTTP call.
+    """
+    # The ticker snapshot already contains all active USDT pairs we care about.
+    # Reuse it instead of calling load_markets() a second time.
+    tickers = fetch_market_snapshot(exchange)
+    return set(tickers.keys())
+
+
 def _resolve_static_group(gdef: Dict, exchange: str, filters: Optional[Dict]) -> List[str]:
     """Convert a static group's `bases` to filtered CCXT symbols.
 
-    Drops tokens not listed on the exchange (so "Top 100 Market Cap" doesn't
-    fail on MEXC if a particular token isn't there).
+    v0.36.1: Auto-drops tokens not listed on the selected exchange so the
+    dropdown only shows tokens the user can actually validate/trade. If
+    fetch_market_snapshot fails (no internet / exchange down), falls back
+    to returning all bases (better than empty list — caller will see errors
+    when trying to actually fetch data).
     """
     bases = gdef.get("bases", [])
-    symbols = [f"{b}/USDT" for b in bases]
+    # Deduplicate while preserving order
+    seen = set()
+    unique_bases = []
+    for b in bases:
+        if b not in seen:
+            seen.add(b)
+            unique_bases.append(b)
+    symbols = [f"{b}/USDT" for b in unique_bases]
+
+    # v0.36.1: Filter to tokens actually listed on the exchange
+    try:
+        listed = get_exchange_usdt_symbols(exchange)
+        if listed:  # non-empty → exchange responded, safe to filter
+            before = len(symbols)
+            symbols = [s for s in symbols if s in listed]
+            dropped = before - len(symbols)
+            if dropped > 0:
+                logger.info(
+                    f"Static group '{gdef.get('label', '?')}': dropped {dropped} "
+                    f"tokens not listed on {exchange} ({before} → {len(symbols)})"
+                )
+    except Exception as e:
+        logger.warning(f"Exchange symbol filter failed (returning all): {e}")
+
     return apply_filters(symbols, filters, exchange)
 
 
@@ -721,4 +825,5 @@ __all__ = [
     "save_custom_group",
     "delete_custom_group",
     "clear_ticker_cache",
+    "get_exchange_usdt_symbols",
 ]
