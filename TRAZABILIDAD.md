@@ -2524,3 +2524,123 @@ empiece a generar señales, necesitas:
    muestra `"Paper trading iniciado: UNI/USDT 1h en mexc..."`
 4. Espera 5-15 minutos (dependiendo del TF) a que se cierre la primera
    vela y el motor procese señales
+
+---
+
+## v0.34.3 — 2026-06-17 — Bug crítico + Tabs UI
+
+### BUG CRÍTICO CORREGIDO: NoneType cursor
+
+**Síntoma:** 80+ tokens en cada sweep mostraban
+`FAIL ... ⚠ 'NoneType' object has no attribute 'cursor'` con
+0 trades, 0 PF, 0 WR. El motor parecía no procesar la mayoría de tokens.
+
+**Root cause:** `DataCollector.close()` cerraba la conexión SQLite
+compartida con `validate_token()` / `start_trading()`. La siguiente
+llamada a `storage.load_all_tries()` o `storage.save_trie()` 
+encontraba `self.conn = None` y crasheaba con `'NoneType' object has
+no attribute 'cursor'`.
+
+**Fix:**
+1. `data/collector.py`: añadido flag `_owns_storage`. Si el caller pasa
+   su propio storage, `close()` NO lo cierra — solo cierra el ccxt exchange.
+2. `data/storage.py`: añadido método `_reconnect()` para re-abrir la
+   conexión cerrada por error (defensive).
+3. `terminal/server.py`: en `validate_token` y `start_trading`, después
+   de `collector.close()`, se verifica `storage.conn is None` y se
+   re-abre con `_reconnect()` o se crea una nueva instancia.
+
+### BUG CORREGIDO: Pattern Buffer siempre 'N'
+
+**Síntoma:** El PATTERN BUFFER (SAX) mostraba 30 'N' idénticos aunque
+no hubiera sesión activa y candles_processed=0.
+
+**Root cause:** El `terminal_state` no se reseteaba al iniciar una nueva
+sesión. El pattern_buffer quedaba con datos de la sesión anterior.
+
+**Fix:** `start_trading()` ahora llama `terminal_state.reset()` antes
+de empezar, limpiando pattern_buffer, signals_history, equity_curve,
+positions, etc.
+
+### BUG CORREGIDO: WebSocket keepalive ping timeout
+
+**Síntoma:** Cada ~30s aparecía
+`WebSocket error: sent 1011 (internal error) keepalive ping timeout`
+seguido de `Reconnecting in 2s (attempt 1)`.
+
+**Root cause:** Binance y Bybit usaban `ping_timeout=10` — demasiado
+agresivo. Bajo jitter de red o carga del servidor, el pong no llegaba
+en 10s, forzando reconnect.
+
+**Fix:** `data/websocket_feed.py`: subido a `ping_timeout=60` para
+Binance y Bybit. MEXC ya usaba `ping_interval=None, ping_timeout=None`
+(desde v0.32.4) y no se ve afectado.
+
+### MEJORA: Más memes en el grupo
+
+**Síntoma:** "veo pocas memes en los grupos"
+
+**Fix:** `data/groups.py`: expandido el grupo `memes` de 7 a 20 tokens:
+- Clásicos: DOGE, SHIB, FLOKI, MEME
+- PEPE family: PEPE
+- Solana: WIF, BONK, POPCAT, BOME, MEW, NAPT, MYRO
+- Base/Ethereum: TURBO, MOG, BALD, MFER
+- Nuevos: BOOK, NEIRO, PNUT, GOAT
+
+### MEJORA: UI reorganizado en TABS
+
+**Síntoma:** "es una forma incomoda como esta puesta y ordenada el
+terminal para ver todos los datos que arroja"
+
+**Fix:** `terminal/static/index.html` reorganizado en 6 tabs:
+
+1. **Discovery** — TOKEN GROUPS + SETUP & VALIDATION + Sweep Results
+   (ahora con panel grande dedicado a los resultados del sweep)
+2. **Trading** — TRADING CONTROL + MONEY MANAGEMENT + Live Session Feed
+   (muestra candles, SAX, WS status, señales en vivo)
+3. **Portfolio** — PORTFOLIO & POSITIONS + REGIME & PATTERN
+4. **Patterns** — Vista detallada del Pattern Buffer + Living Trie
+5. **History & Signals** — TRADE HISTORY + SIGNALS
+
+El chart siempre visible arriba. Cada tab llena el espacio restante
+con scroll interno.
+
+### Tests
+
+19/19 pasan:
+```
+python3 src/tests/test_v0340.py
+```
+
+### Cómo actualizar en tu Mac
+
+```bash
+cd ~/projects/ppmt
+git pull origin main
+source .venv/bin/activate    # o el venv que uses
+pip install -e .
+
+# Verificar
+python3 -c "import ppmt; print(ppmt.__version__)"  # → 0.34.3
+python3 src/tests/test_v0340.py                    # → 19/19 pasan
+
+# Arrancar
+python3 -m ppmt.terminal.server
+open http://localhost:8420
+```
+
+**Importante:** Después de actualizar, fuerza reload del navegador
+con `Cmd+Shift+R` para que coja el nuevo HTML/CSS/JS (sino el navegador
+usará la versión cacheada y seguirás viendo v0.34.2).
+
+### Qué deberías ver ahora
+
+1. Al hacer un sweep de 20 tokens, los 20 deberían validar correctamente
+   (sin el error NoneType). Algunos PASS, algunos FAIL, pero todos con
+   trades reales y métricas.
+2. La UI tiene 6 tabs arriba. Empieza en **Discovery** para configurar
+   el grupo y lanzar el sweep. Cambia a **Trading** para iniciar paper
+   trading. Cambia a **Patterns** para ver el SAX buffer en vivo.
+3. Al pulsar **Start Paper**, el pattern buffer se resetea. Si la sesión
+   no produce señales, el buffer se queda vacío con el mensaje
+   "No data yet — start a trading session to see live SAX symbols".

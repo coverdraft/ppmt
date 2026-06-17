@@ -454,10 +454,15 @@ class WebSocketFeed:
         if self.on_status:
             self.on_status("connected", f"Connected to Binance ({self.symbol})")
 
+        # v0.34.3: Increased ping_timeout from 10 to 60s. The old 10s timeout
+        # was too aggressive — under network jitter or Binance server load,
+        # pongs wouldn't arrive in time, triggering
+        # "WebSocket error: sent 1011 (internal error) keepalive ping timeout"
+        # and forcing reconnects. 60s gives plenty of headroom.
         async with websockets.connect(
             url,
             ping_interval=20,
-            ping_timeout=10,
+            ping_timeout=60,
             close_timeout=5,
         ) as ws:
             self._ws = ws
@@ -527,7 +532,7 @@ class WebSocketFeed:
         async with websockets.connect(
             url,
             ping_interval=20,
-            ping_timeout=10,
+            ping_timeout=60,  # v0.34.3: was 10, too aggressive
             close_timeout=5,
         ) as ws:
             self._ws = ws

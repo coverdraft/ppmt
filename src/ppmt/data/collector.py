@@ -105,6 +105,13 @@ class DataCollector:
         fallback_chain: Optional[List[str]] = None,
     ):
         self.exchange = exchange
+        # v0.34.3: Track whether we created our own storage so close() only
+        # closes what we own. CRITICAL BUG: when validate_token() passes its
+        # own storage instance, the old close() would close it, then any
+        # subsequent call (load_all_tries, save_trie, save_validation) would
+        # crash with "'NoneType' object has no attribute 'cursor'". This was
+        # the root cause of 80+ tokens showing FAIL with 0 trades in sweeps.
+        self._owns_storage = storage is None
         self.storage = storage or PPMTStorage()
         self._ccxt_exchange = None
         self.fallback_chain = fallback_chain or DEFAULT_FALLBACK_CHAIN
@@ -846,12 +853,18 @@ class DataCollector:
             return result
 
     def close(self) -> None:
-        """Clean up resources."""
+        """Clean up resources.
+
+        v0.34.3: Only close storage if we created it. If the caller passed
+        in their own storage instance, they own its lifecycle — closing it
+        here would invalidate their connection and cause NoneType crashes.
+        """
         if self._ccxt_exchange:
             try:
                 self._ccxt_exchange.close()
             except Exception:
                 pass
             self._ccxt_exchange = None
-        if self.storage:
+        # v0.34.3: CRITICAL — only close storage we own
+        if self.storage and self._owns_storage:
             self.storage.close()

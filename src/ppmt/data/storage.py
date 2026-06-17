@@ -52,6 +52,21 @@ class PPMTStorage:
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self._create_tables()
 
+    def _reconnect(self) -> None:
+        """v0.34.3: Re-open the connection after close() was called.
+
+        Defensive helper used by validate_token() to recover from a closed
+        storage instance (e.g. when a child component closed a shared storage
+        by mistake). If conn is already open, this is a no-op.
+        """
+        if self.conn is not None:
+            return
+        self.conn = sqlite3.connect(self.db_path)
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA synchronous=NORMAL")
+        # _create_tables is idempotent (CREATE TABLE IF NOT EXISTS)
+        self._create_tables()
+
     def _create_tables(self) -> None:
         """Create database tables if they don't exist."""
         cursor = self.conn.cursor()

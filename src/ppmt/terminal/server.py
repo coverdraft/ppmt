@@ -668,6 +668,24 @@ async def start_trading(req: StartTradingRequest) -> dict:
         logger.warning(f"Pre-trade gate check failed: {e} — proceeding anyway")
 
     try:
+        # v0.34.3: Reset terminal state so the new session doesn't show stale
+        # pattern_buffer / signals / equity_curve from a previous session.
+        # Without this, the dashboard shows 30 'n' (SAX neutral) symbols from
+        # the previous run forever, even after Stop+Start.
+        terminal_state.reset()
+        terminal_state.update_sync(
+            symbol=req.symbol,
+            timeframe=req.timeframe,
+            exchange=req.exchange,
+            is_running=True,
+            websocket_status="connecting",
+            mode="paper",
+            started_at=time.time(),
+            capital=req.capital,
+            leverage=req.leverage,
+            auto_mode=req.auto_mode,
+        )
+
         # Step 1: Auto-ingest data if needed
         storage = PPMTStorage()
         df = storage.load_ohlcv(req.symbol, req.timeframe)
@@ -680,10 +698,18 @@ async def start_trading(req: StartTradingRequest) -> dict:
                 df = collector.fetch_and_save(req.symbol, req.timeframe, days=req.days_ingest)
                 candles_count = len(df) if df is not None and not df.empty else 0
                 logger.info(f"Ingested {candles_count} candles")
+                # v0.34.3: collector.close() no longer closes the shared storage.
                 if hasattr(collector, 'close'):
                     collector.close()
             except Exception as e:
                 logger.warning(f"Auto-ingest failed: {e} — continuing with existing data")
+
+        # v0.34.3: Defensive — re-open storage if it was closed by a child.
+        if storage.conn is None:
+            try:
+                storage._reconnect()
+            except Exception:
+                storage = PPMTStorage()
 
         # Step 2: Auto-build Trie if needed
         all_tries = storage.load_all_tries(req.symbol)
@@ -937,10 +963,20 @@ async def validate_token(req: ValidateRequest) -> dict:
                 # Shorter TFs need less because each day produces more candles.
                 days = _days_for_tf(req.timeframe, default=180)
                 df = collector.fetch_and_save(req.symbol, req.timeframe, days=days)
+                # v0.34.3: collector.close() no longer closes the shared storage
+                # (collector now tracks _owns_storage). Safe to call.
                 if hasattr(collector, 'close'):
                     collector.close()
             except Exception as e:
                 logger.warning(f"Auto-ingest for validation failed: {e}")
+
+        # v0.34.3: Defensive — if storage was somehow closed, re-open it.
+        # This guards against any future regression in the collector lifecycle.
+        if storage.conn is None:
+            try:
+                storage._reconnect()
+            except Exception:
+                storage = PPMTStorage()  # fallback: create a fresh instance
 
         # Step 2: Ensure trie exists
         all_tries = storage.load_all_tries(req.symbol)

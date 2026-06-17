@@ -142,8 +142,19 @@ PREDEFINED_STATIC_GROUPS: Dict[str, Dict] = {
     "memes": {
         "label": "Memes",
         "category": "category",
-        "description": "DOGE, SHIB, PEPE, WIF, BONK, FLOKI, etc.",
-        "bases": ["DOGE", "SHIB", "PEPE", "WIF", "BONK", "FLOKI", "MEME"],
+        "description": "DOGE, SHIB, PEPE, WIF, BONK, FLOKI, MEME, TURBO, MOG, POPCAT, etc.",
+        "bases": [
+            # Classic memes
+            "DOGE", "SHIB", "FLOKI", "MEME",
+            # PEPE family
+            "PEPE",
+            # Solana memes (high vol, often list on MEXC/Binance)
+            "WIF", "BONK", "POPCAT", "BOME", "MEW", "NAPT", "MYRO",
+            # Base/Ethereum memes
+            "TURBO", "MOG", "BALD", "MFER",
+            # Newer memes that have been listed broadly
+            "BOOK", "NEIRO", "PNUT", "GOAT",
+        ],
     },
     "layer1": {
         "label": "Layer 1",
