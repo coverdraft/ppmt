@@ -3964,3 +3964,96 @@ Después de lanzar tokens desde el dashboard, deberías ver:
 - **v0.38.2** arregló bugs de display (paneles duplicados, Pattern vacío, precio stale), PERO no tocó el flujo de signal→trade. Los gates seguían rechazando signals.
 - **v0.38.3** finalmente arregla el flujo: RiskConfig unificado + validation_mode en paper trading + logs de diagnóstico.
 
+
+---
+
+## v0.38.4 (17 jun 2026) — Paper trading bypass: validation gate + skip filters relajados
+
+### Problema reportado por el usuario
+"Chequea que puede ser sigue igual no funciona" — tras v0.38.3 el dashboard seguía mostrando Trades=0 aunque el diagnóstico `diagnose_signal_flow.py` dijera `can_open=True`.
+
+### Análisis exhaustivo del flujo
+Trazado el flujo completo desde `server.py:_run_one_token()` hasta `realtime.py:run_live()` y `realtime.py:run_replay()`. Se identificaron **3 bloqueos reales** que el script anterior no veía:
+
+#### Bloqueo 1 — Validation Gate en `server.py:951-964`
+```python
+if latest_val is None or latest_val.get("verdict") != "PASS":
+    verdict = await validate_token(...)
+    if verdict != "PASS":
+        sess["status"] = "VALIDATION_FAILED"
+        return   # ← EL TRADER NUNCA ARRANCA
+```
+El live trader **NUNCA ARRANCA** si la última validación guardada no es `PASS`. El log del usuario mostraba tokens con `WR=20%`, `WR=33%`, `INSUFFICIENT_DATA(trades=2 < 5)` → todos FAIL → ningún trader arrancaba → 0 trades.
+
+#### Bloqueo 2 — Skip Filters en `realtime.py:970-1033`
+Aunque el trader arranque, hay **6 filtros de skip ANTES** de que la señal llegue a `can_open()`:
+- a) `prob < 0.30` (base_prob_gate)
+- b) `abs(move) < 0.5%` (hard-coded)
+- c) `ranging prob < 0.40`
+- d) `volatile prob < 0.45`
+- e) `counter-trend prob < 0.45`
+- f) `boosted_confidence < effective_min_conf`
+
+El log del usuario mostraba miles de `skip: prob=0.07 < 0.3 gate`. El prediction engine produce `overall_probability≈0.07-0.20` porque `historical_count` es bajo (5-15 matches por patrón) → **Bayesian shrinkage** empuja la probabilidad cerca de 0.5.
+
+#### Bloqueo 3 — PHA/USDT no existe en Binance
+PHA está listado en MEXC, no en Binance → `No hay datos para PHA/USDT 1h`.
+
+### Fixes aplicados
+
+#### Fix 1 — `server.py:_run_one_token()`
+Paper trading (`dry_run=True`) **ya no se bloquea** si la validación es FAIL o INSUFFICIENT_DATA. Solo marca una advertencia en `sess["error"]` y sigue. El gate estricto se mantiene solo para `dry_run=False` (real money).
+
+#### Fix 2 — `realtime.py:938-954` (skip filters en validation_mode)
+| Variable | v0.32.3 | v0.38.4 |
+|---|---|---|
+| `move_threshold` | 0.50 | **0.20** |
+| `prob_threshold` | 0.30 | **0.15** |
+| `base_prob_gate` | 0.30 | **0.15** |
+| `ranging_prob_gate` | 0.40 | **0.20** |
+| `volatile_prob_gate` | 0.45 | **0.25** |
+| `counter_trend_gate` | 0.45 | **0.25** |
+| Hard `move < 0.5%` floor | 0.50 (hard-coded) | **0.15** (validation_mode) |
+| `ranging move < 0.80%` | 0.80 | **0.20** (validation_mode) |
+| `volatile move < 1.20%` | 1.20 | **0.30** (validation_mode) |
+
+Real-money mode (`validation_mode=False`) mantiene los thresholds estrictos originales.
+
+#### Fix 3 — Script de diagnóstico nuevo
+Creado `scripts/diagnose_live_blockers.py` que recorre los 3 bloqueos en orden y dice exactamente cuál falla. Documenta cómo usarlo:
+```bash
+python3 scripts/diagnose_live_blockers.py                # lista TODOS los tokens
+python3 scripts/diagnose_live_blockers.py BTC/USDT 1h    # diagnostica un token
+```
+
+### Comportamiento esperado tras v0.38.4
+1. **Paper trading arrancará** para tokens aunque la validación sea FAIL/INSUFFICIENT_DATA.
+2. **Las señales pasarán los skip filters** porque los gates ahora están alineados con el rango real de `overall_probability` (0.07-0.30 en vez de requerir 0.30+).
+3. **Verás Trades > 0** en el dashboard después de unos minutos de operación.
+4. **Real-money mode** mantiene los gates estrictos — solo cambia cuando el usuario pase a producción.
+
+### Archivos modificados
+- `src/ppmt/terminal/server.py` — Fix 1 (validation gate bypass en paper)
+- `src/ppmt/engine/realtime.py` — Fix 2 (skip filters relajados en validation_mode)
+- `scripts/diagnose_live_blockers.py` — Script de diagnóstico nuevo
+- `pyproject.toml`, `src/ppmt/cli/main.py`, `src/ppmt/terminal/server.py`, `src/ppmt/terminal/static/index.html` — Version bump 0.38.3 → 0.38.4
+
+### Cómo probar en la Mac del usuario
+```bash
+cd ~/ppmt
+git pull origin main
+pip install -e .   # solo si cambió pyproject.toml
+
+# Reinicia el terminal:
+ppmt terminal
+# o: python3 -m ppmt.terminal.server
+
+# En el dashboard:
+# 1. Trading tab → Start Paper Trading
+# 2. Espera 5-10 minutos
+# 3. Deberías ver Signals>0 y Trades>0
+
+# Diagnóstico:
+python3 scripts/diagnose_live_blockers.py
+python3 scripts/diagnose_live_blockers.py BTC/USDT 1h
+```

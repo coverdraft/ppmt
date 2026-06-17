@@ -42,7 +42,7 @@ CONFIG_DIR = os.path.expanduser("~/.ppmt")
 # ------------------------------------------------------------------ #
 # FastAPI application
 # ------------------------------------------------------------------ #
-app = FastAPI(title="PPMT Terminal", version="0.38.3")
+app = FastAPI(title="PPMT Terminal", version="0.38.4")
 
 # Global terminal state (shared with engine)
 terminal_state: TerminalState = get_terminal_state()
@@ -944,10 +944,17 @@ async def multi_start(req: MultiStartRequest) -> dict:
             sess = _multi_sessions[_nid]
             try:
                 # Auto-validate first (non-blocking gate)
+                # v0.38.4: Paper trading (dry_run=True) NO debe bloquear el arranque del
+                # trader si la validación es FAIL o INSUFFICIENT_DATA. La idea es que el
+                # usuario pueda VER el sistema operando (con señales+trades) aunque los
+                # KPIs aún no alcancen el umbral de "producción". El usuario decide luego
+                # cuándo pasar a real money basándose en sus propios datos.
+                # Solo el modo real-money (dry_run=False) mantiene el gate estricto.
                 storage = PPMTStorage()
                 latest_val = storage.get_latest_validation(_sym, _tf)
                 storage.close()
 
+                _is_paper = getattr(_cfg, "dry_run", True)
                 if latest_val is None or latest_val.get("verdict") != "PASS":
                     sess["status"] = "VALIDATING"
                     val_result = await validate_token(ValidateRequest(
@@ -956,12 +963,21 @@ async def multi_start(req: MultiStartRequest) -> dict:
                     verdict = val_result.get("verdict", "UNKNOWN")
                     sess["validation_verdict"] = verdict
                     if verdict != "PASS":
-                        sess["status"] = "VALIDATION_FAILED"
-                        sess["error"] = (
-                            f"Validation: {verdict} — "
-                            f"{val_result.get('reason', val_result.get('error', ''))}"[:200]
-                        )
-                        return
+                        _reason = (f"Validation: {verdict} — "
+                                   f"{val_result.get('reason', val_result.get('error', ''))}")[:200]
+                        if _is_paper:
+                            # v0.38.4: Paper trading — seguir adelante aunque la
+                            # validación no pase. Solo marcamos una advertencia.
+                            logger.warning(
+                                f"[{_nid}] Paper trading: validation NOT PASS ({verdict}) "
+                                f"but proceeding anyway (dry_run=True). Trader will start."
+                            )
+                            sess["error"] = f"WARNING: {_reason} (paper trading proceeding)"
+                        else:
+                            # Real-money mode: keep strict gate
+                            sess["status"] = "VALIDATION_FAILED"
+                            sess["error"] = _reason
+                            return
 
                 # v0.36.2: Per-session state callback — bridges trader updates to
                 # this session's dict so /api/multi-status returns real values

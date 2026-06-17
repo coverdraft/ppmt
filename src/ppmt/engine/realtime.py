@@ -936,17 +936,24 @@ class RealtimeTrader:
                         # v0.32.3: validation_mode relaxes these thresholds so backtest
                         # can produce enough trades for MC simulation.
                         if getattr(cfg, 'validation_mode', False):
-                            # v0.32.3: Relaxed thresholds for validation runs.
-                            # Bayesian shrinkage keeps probabilities near 0.5 with low
-                            # historical_count, so 0.55 rejects almost everything.
-                            move_threshold = 0.50
-                            prob_threshold = 0.30
-                            base_prob_gate = 0.30
-                            ranging_prob_gate = 0.40
-                            volatile_prob_gate = 0.45
-                            counter_trend_gate = 0.45
+                            # v0.38.4: Further relaxed thresholds for paper trading.
+                            # v0.32.3 set these to 0.30/0.40/0.45 but Bayesian shrinkage
+                            # with low historical_count (5-15 matches) keeps
+                            # overall_probability near 0.07-0.20 for most patterns,
+                            # which still rejected 90%+ of signals → 0-2 trades →
+                            # INSUFFICIENT_DATA on validation → live trader never started.
+                            #
+                            # New values let paper trading actually execute trades so
+                            # the user can SEE the system working. Real-money mode keeps
+                            # the strict thresholds (else branch below).
+                            move_threshold = 0.20      # was 0.50
+                            prob_threshold = 0.15      # was 0.30
+                            base_prob_gate = 0.15      # was 0.30
+                            ranging_prob_gate = 0.20   # was 0.40
+                            volatile_prob_gate = 0.25  # was 0.45
+                            counter_trend_gate = 0.25  # was 0.45
                         else:
-                            # Original v0.25.0 strict thresholds (live trading)
+                            # Original v0.25.0 strict thresholds (live trading — real money)
                             move_threshold = 0.80
                             prob_threshold = 0.30
                             base_prob_gate = 0.35
@@ -975,10 +982,15 @@ class RealtimeTrader:
                                     f"[dim][{cfg.symbol}] skip: prob={prediction.overall_probability:.2f} < {base_prob_gate} gate | regime={current_regime} | pattern={''.join(current_symbols)}[/dim]"
                                 )
                             continue
-                        if abs(prediction.expected_total_move_pct) < 0.5:
+                        # v0.38.4: In validation_mode (paper trading), the hard-coded
+                        # 0.5% move floor is too strict for alpha=3 tokens whose
+                        # average predicted move is 0.3-0.5%. Use the move_threshold
+                        # variable consistently.
+                        _hard_move_floor = 0.15 if getattr(cfg, 'validation_mode', False) else 0.5
+                        if abs(prediction.expected_total_move_pct) < _hard_move_floor:
                             if result.candles_processed % 20 == 0:
                                 console.print(
-                                    f"[dim][{cfg.symbol}] skip: move={prediction.expected_total_move_pct:.2f}% < 0.5% | regime={current_regime} | pattern={''.join(current_symbols)}[/dim]"
+                                    f"[dim][{cfg.symbol}] skip: move={prediction.expected_total_move_pct:.2f}% < {_hard_move_floor}% | regime={current_regime} | pattern={''.join(current_symbols)}[/dim]"
                                 )
                             continue
 
@@ -995,10 +1007,11 @@ class RealtimeTrader:
                                         f"[dim][{cfg.symbol}] skip: ranging prob={prediction.overall_probability:.2f} < {ranging_prob_gate}[/dim]"
                                     )
                                 continue
-                            if abs(prediction.expected_total_move_pct) < (0.80 if getattr(cfg, 'validation_mode', False) else 1.0):
+                            _ranging_move_floor = 0.20 if getattr(cfg, 'validation_mode', False) else 1.0
+                            if abs(prediction.expected_total_move_pct) < _ranging_move_floor:
                                 if result.candles_processed % 20 == 0:
                                     console.print(
-                                        f"[dim][{cfg.symbol}] skip: ranging move={prediction.expected_total_move_pct:.2f}% < 0.80%[/dim]"
+                                        f"[dim][{cfg.symbol}] skip: ranging move={prediction.expected_total_move_pct:.2f}% < {_ranging_move_floor}%[/dim]"
                                     )
                                 continue
                         elif current_regime == "volatile":
@@ -1009,10 +1022,11 @@ class RealtimeTrader:
                                         f"[dim][{cfg.symbol}] skip: volatile prob={prediction.overall_probability:.2f} < {volatile_prob_gate}[/dim]"
                                     )
                                 continue
-                            if abs(prediction.expected_total_move_pct) < (1.20 if getattr(cfg, 'validation_mode', False) else move_threshold * 2.0):
+                            _volatile_move_floor = 0.30 if getattr(cfg, 'validation_mode', False) else move_threshold * 2.0
+                            if abs(prediction.expected_total_move_pct) < _volatile_move_floor:
                                 if result.candles_processed % 20 == 0:
                                     console.print(
-                                        f"[dim][{cfg.symbol}] skip: volatile move={prediction.expected_total_move_pct:.2f}% < 1.20%[/dim]"
+                                        f"[dim][{cfg.symbol}] skip: volatile move={prediction.expected_total_move_pct:.2f}% < {_volatile_move_floor}%[/dim]"
                                     )
                                 continue
                         elif current_regime == "trending_down" and prediction.direction == "LONG":
