@@ -266,17 +266,17 @@ def check_skip_filters(symbol, timeframe):
         print(f"    WARN: No se pudo clasificar regime: {e}")
         current_regime = "ranging"  # default fallback
 
-    # v0.38.4 thresholds for validation_mode (paper trading)
-    print(f"\n  Simulando skip filters (v0.38.4 validation_mode=True, paper trading):")
+    # v0.38.5 thresholds for validation_mode (paper trading)
+    print(f"\n  Simulando skip filters (v0.38.5 validation_mode=True, paper trading):")
 
-    base_prob_gate = 0.15       # v0.38.4 (was 0.30)
-    ranging_prob_gate = 0.20    # v0.38.4 (was 0.40)
-    volatile_prob_gate = 0.25   # v0.38.4 (was 0.45)
-    counter_trend_gate = 0.25   # v0.38.4 (was 0.45)
-    move_threshold = 0.20       # v0.38.4 (was 0.50)
-    hard_move_floor = 0.15      # v0.38.4 (was 0.50 hard-coded)
-    ranging_move_floor = 0.20   # v0.38.4 (was 0.80)
-    volatile_move_floor = 0.30  # v0.38.4 (was 1.20)
+    base_prob_gate = 0.15       # unchanged from v0.38.4
+    ranging_prob_gate = 0.20    # unchanged
+    volatile_prob_gate = 0.25   # unchanged
+    counter_trend_gate = 0.25   # unchanged
+    move_threshold = 0.05       # v0.38.5: was 0.20
+    hard_move_floor = 0.05      # v0.38.5: was 0.15
+    ranging_move_floor = 0.05   # v0.38.5: was 0.20
+    volatile_move_floor = 0.05  # v0.38.5: was 0.30
 
     blockers = []
 
@@ -364,7 +364,7 @@ def check_skip_filters(symbol, timeframe):
             and boosted_confidence >= effective_min_conf
             and abs(prediction.expected_total_move_pct) > move_threshold
             and prediction.overall_probability > 0.15):
-        print(f"  OK j) Entry gate: la señal PASARIA todos los filtros (v0.38.4)")
+        print(f"  OK j) Entry gate: la señal PASARIA todos los filtros (v0.38.5)")
     else:
         blockers.append(
             f"j) Entry gate final: dir={prediction.direction}, "

@@ -4057,3 +4057,56 @@ ppmt terminal
 python3 scripts/diagnose_live_blockers.py
 python3 scripts/diagnose_live_blockers.py BTC/USDT 1h
 ```
+
+---
+
+## v0.38.5 — 2026-06-17 — Move floors a 0.05% en validation_mode
+
+### Problema
+v0.38.4 dejó `move_threshold=0.20` y floors en `0.15/0.20/0.30` para validation_mode,
+pero las señales reales de BTC/USDT 1h rutinariamente producen `expected_total_move`
+de **0.10-0.18%** — todavía por debajo de los tres pisos. Resultado:
+
+- Diagnostic: `BLOQUEOS DETECTADOS (3): b) move=0.14% < 0.15%, d) ranging move < 0.20%, j) Entry gate final`
+- Dashboard: `STALE` en todos los tokens (task corriendo pero sin callbacks porque todas las señales caen en `continue`)
+- API: `total_trades: 0` en TODOS los nodos
+
+### Root cause
+Tres pisos de move distintos en `realtime.py`:
+
+| Línea | Variable | v0.38.4 | v0.38.5 |
+|-------|----------|---------|---------|
+| 951   | `move_threshold` (final entry gate) | 0.20 | **0.05** |
+| 991   | `_hard_move_floor` | 0.15 | **0.05** |
+| 1012  | `_ranging_move_floor` | 0.20 | **0.05** |
+| 1027  | `_volatile_move_floor` | 0.30 | **0.05** |
+
+### Fix
+`src/ppmt/engine/realtime.py` — bajé los 4 pisos a `0.05` para validation_mode.
+0.05% es apenas más que el spread típico de Binance, así que dejamos pasar señales
+reales y filtramos solo ruido absoluto. Las gates de prob/confidence (que sí estaban
+bien calibradas: base_prob=0.15, ranging=0.20, volatile=0.25, min_conf=0.08) siguen
+activas — son ellas las que realmente deciden calidad de señal.
+
+### Archivos modificados
+- `src/ppmt/engine/realtime.py` — 4 pisos de move bajados a 0.05
+- `scripts/diagnose_live_blockers.py` — actualizado para reflejar v0.38.5
+- `pyproject.toml`, `src/ppmt/cli/main.py`, `src/ppmt/terminal/server.py`,
+  `src/ppmt/terminal/static/index.html` — bump 0.38.4 → 0.38.5
+
+### Cómo verificar
+```bash
+cd ~/ppmt
+git pull origin main
+pip install -e . --quiet
+ppmt terminal
+```
+
+En otra terminal, después de 5-10 min:
+```bash
+python3 scripts/diagnose_live_blockers.py BTC/USDT 1h
+# Debe decir: "OK j) Entry gate: la señal PASARIA todos los filtros (v0.38.5)"
+
+curl -s http://localhost:8420/api/multi-status | python3 -m json.tool | grep -E "status|trades|signals"
+# Debe mostrar status=RUNNING, trades>0
+```
