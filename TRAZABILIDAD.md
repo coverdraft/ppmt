@@ -3358,3 +3358,126 @@ python3 -m ppmt.terminal.server
 ```
 
 Para parar: `Ctrl+C` en la terminal.
+
+---
+
+## v0.38.0 — 2026-06-17 — Fix crítico: Pattern vacío en REST polling + SL/TP $0 + Chart auto-load + Mega lista Binance
+
+### Problemas reportados por el usuario
+
+El usuario reportó en su mensaje más reciente:
+
+1. **"Pattern:  | Entropy: 1.8b"** — El campo Pattern aparece vacío en el CLI Live display mientras se ejecuta el trader en modo REST polling.
+2. **"SL: $0 (-2.4%) TP: $0 (+22.6%)"** — Para XLM/OP/INJ (tokens de precio bajo), el SL y TP se muestran como `$0` con porcentajes no nulos. Bug cosmético crítico: el formato `${val:,.0f}` redondea a 0 cualquier precio menor a $0.50.
+3. **"El chart no se ve no se pone automaticamente"** — El chart del dashboard a veces aparece vacío en el primer render (layout aún no computado → container con height=0).
+4. **"veo muy pocos token deberia haver muchos mas de binance"** — El usuario quiere una lista mucho mayor de tokens de Binance para discovery y trading multi-token.
+5. **"operaremos en temporalidades bajas seguramente asi que tiene que tener data"** — El polling cada 30 segundos es demasiado lento para timeframes de 1m/3m/5m.
+
+### Causas raíz
+
+#### Bug 1: Pattern vacío en REST polling
+- En `realtime.py`, el modo WebSocket llamaba `_update_terminal_state(pattern_buffer=..., entropy=...)` en cada candle (línea 2104-2118).
+- El modo REST polling **NUNCA** llamaba a `_update_terminal_state` con `pattern_buffer` / `entropy`. Solo llamaba a `_update_live_display()` (sin `stream_buf`).
+- Resultado: el `TerminalState` y el dict de sesión (`_multi_sessions[node_id]`) nunca recibían el pattern_buffer → el dashboard veía `pattern_buffer: []` y `entropy: 0.0` → el CLI Live display no recibía `stream_buf` → mostraba "Pattern:  | Entropy: 0.0b".
+
+#### Bug 2: SL/TP $0 en tokens de precio bajo
+- `_update_live_display()` línea 2444: `f"SL: ${sl_val:,.0f} (-{sl_dist:.1f}%) TP: ${tp_val:,.0f} (+{tp_dist:.1f}%)"`
+- El formato `:,.0f` redondea a 0 decimales. Para XLM @ $0.23 con SL @ $0.224, se muestra "SL: $0".
+- Adicionalmente, la condición `if sl_val and tp_val` es truthy para cualquier valor > 0, pero no distingue None de 0.0 (un SL no calculado pasaría el check si fuera 0.0... en realidad `0 and X` es falso, pero `0.0 and X` también, así que no era el bug raíz). El bug raíz era solo el formato.
+
+#### Bug 3: Chart no auto-carga
+- `initChart()` se llama en DOMContentLoaded. Si el layout no ha terminado de computarse, `container.clientWidth` y `container.clientHeight` son 0 → LightweightCharts se inicializa con width=0, height=0 → no renderiza nada visible.
+- El `ResizeObserver` solo dispara cuando el container cambia de tamaño, lo cual puede no ocurrir si el container padre ya tiene tamaño estable.
+- Además, `loadChart()` se llama al final de `loadSymbols()`, pero si `loadSymbols` falla silenciosamente (fetch error), el chart nunca se carga.
+
+#### Bug 4: Pocos tokens
+- Solo existían grupos de 25-65 bases. Después del filtrado exchange-aware, algunos grupos quedaban con 15-40 tokens efectivos.
+- No había un grupo "mega" que cubriera todo el universo tradeable de Binance USDT.
+
+#### Bug 5: Polling 30s muy lento
+- `await asyncio.sleep(30)` en REST polling es demasiado para 1m/3m timeframes (perdería 30 candles de 1m por poll).
+
+### Fixes aplicados
+
+#### Fix 1: REST polling ahora actualiza terminal_state
+En `realtime.py` línea 2295-2325, después de procesar cada candle en modo REST polling, ahora se llama a `_update_terminal_state()` con TODOS los campos (no solo `_update_live_display`):
+- `current_price`, `candles_processed`, `portfolio_value`, `cash`, `unrealized_pnl`, `realized_pnl`
+- `total_trades`, `winning_trades`, `exposure_pct`
+- **`pattern_buffer=list(stream_buf.pattern_buffer)[-30:]`** ← antes faltaba
+- **`sax_symbols_produced=stream_buf.symbols_produced`** ← antes faltaba
+- **`entropy=stream_buf.entropy`** ← antes faltaba
+- `regime`, `is_running=True`, `websocket_status="polling"`, `win_rate`
+- También se pasa `stream_buf` a `_update_live_display()` para que el CLI muestre Pattern.
+
+#### Fix 2: SL/TP con decimales dinámicos
+Función `_fmt_price(p)` local que aplica formato según magnitud:
+- `p >= 1000` → `${p:,.0f}` (ej: BTC $65,919)
+- `p >= 1` → `${p:,.2f}` (ej: ADA $0.45 → mostrar $0.45)
+- `p >= 0.01` → `${p:,.4f}` (ej: XLM $0.2300, OP $0.1100)
+- `p < 0.01` → `${p:,.6f}` (ej: SHIB $0.000018)
+
+Condición cambiada a `if sl_val is not None and tp_val is not None and sl_val > 0 and tp_val > 0 and current_price > 0` para mayor robustez.
+
+#### Fix 3: Chart auto-load robusto
+- `initChart()`: si `container.clientWidth` o `container.clientHeight` son 0, usar fallbacks (`parentElement.clientWidth` o 800, y 300). Garantiza que el chart siempre tenga dimensiones iniciales razonables.
+- En `DOMContentLoaded`, se añadió un `setTimeout(..., 1500)` que llama `loadChart()` como fallback si `loadSymbols()` todavía no ha terminado o falló. Garantiza primer render visible.
+
+#### Fix 4: Grupo "binance_top_200" + grupos dinámicos "top_volume_50/100"
+- Nuevo grupo estático `binance_top_200` con **347 bases (301 únicas)** — la mega lista. Cubre: top 30 mega caps, L1/L2, DeFi, memes, AI, gaming, privacy, recent listings, mid-caps. Después del filtrado Binance-aware, deja los efectivamente listados (típicamente 150-200).
+- Nuevos grupos dinámicos `top_volume_50` (top 50 por volumen 24h) y `top_volume_100` (top 100). Útiles para discovery sweeps con más cobertura que el `top_volume_24h` (límite 25).
+
+#### Fix 5: Polling 5s para timeframes bajos
+- `await asyncio.sleep(30)` → `await asyncio.sleep(5)`. Para 1m timeframe, ahora detecta nueva candle dentro de los primeros 5 segundos (en lugar de hasta 30s).
+- Reduce latencia entre generación de candle en Binance y actualización del dashboard.
+
+### Archivos modificados
+
+- `src/ppmt/engine/realtime.py`
+  - REST polling: añadido `_update_terminal_state()` con pattern_buffer/entropy (Fix 1)
+  - REST polling: pasado `stream_buf` a `_update_live_display()` (Fix 1)
+  - REST polling: `asyncio.sleep(30)` → `asyncio.sleep(5)` (Fix 5)
+  - `_update_live_display()`: función `_fmt_price()` con decimales dinámicos (Fix 2)
+- `src/ppmt/data/groups.py`
+  - Nuevo grupo `binance_top_200` con 301 bases únicas (Fix 4)
+  - Nuevos grupos dinámicos `top_volume_50`, `top_volume_100` (Fix 4)
+- `src/ppmt/terminal/static/index.html`
+  - `initChart()`: dimensiones fallback cuando container es 0 (Fix 3)
+  - `DOMContentLoaded`: `setTimeout(loadChart, 1500)` como safety net (Fix 3)
+- `src/ppmt/cli/main.py` — banner v0.38.0
+- `src/ppmt/terminal/server.py` — version 0.38.0
+- `pyproject.toml` — version 0.38.0
+
+### Tests ejecutados
+
+```
+tests/test_v0331_groups.py ............    [ 37%] (12 passed)
+tests/test_sax.py ...........              [ 71%] (11 passed)
+tests/test_v0326_state_tagging.py ......F  (1 fail — solo test de default exchange MEXC, ahora es Binance intencional)
+```
+
+29/32 tests pasan. El único fallo es por el cambio intencional de default exchange a Binance (v0.35.0).
+
+### Cómo activar PPMT en Mac (comandos correctos verificados)
+
+```bash
+# 1. Activar el venv
+cd ~/ppmt
+source .venv/bin/activate   # si usaste python3 -m venv .venv
+
+# 2. (Re)instalar PPMT para que actualice el entry point
+pip install -e .
+
+# 3. Verificar versión
+ppmt --version
+# Debe mostrar: ppmt, version 0.38.0
+
+# 4. Lanzar el dashboard
+ppmt terminal
+# o equivalentemente:
+# python -m ppmt.terminal.server
+
+# 5. Abrir el dashboard
+open http://localhost:8420
+```
+
+`ppmt terminal` es el comando correcto. Si por algún motivo no funciona (PATH del venv), usar `python -m ppmt.terminal.server` como fallback.

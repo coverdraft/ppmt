@@ -2292,12 +2292,40 @@ class RealtimeTrader:
                                             stream_buf._symbols_produced += 1
                                         stream_buf._trim()
 
+                                    # v0.38.0 FIX: REST polling mode NEVER updated
+                                    # terminal_state with pattern_buffer / entropy,
+                                    # so dashboard showed Pattern: [] empty.
+                                    # Now mirror WebSocket mode's update calls.
+                                    self._update_terminal_state(
+                                        current_price=recent_prices[-1] if recent_prices else 0,
+                                        candles_processed=result.candles_processed,
+                                        portfolio_value=money_mgr.total_value,
+                                        cash=money_mgr.cash,
+                                        unrealized_pnl=money_mgr.unrealized_pnl,
+                                        realized_pnl=money_mgr.realized_pnl,
+                                        total_trades=result.total_trades,
+                                        winning_trades=result.winning_trades,
+                                        exposure_pct=money_mgr.exposure_pct,
+                                        pattern_buffer=list(stream_buf.pattern_buffer)[-30:],
+                                        sax_symbols_produced=stream_buf.symbols_produced,
+                                        entropy=stream_buf.entropy,
+                                        regime=current_regime,
+                                        is_running=True,
+                                        websocket_status="polling",
+                                        win_rate=(result.winning_trades / result.total_trades * 100.0) if result.total_trades > 0 else 0.0,
+                                    )
+                                    # v0.20.0: Update money manager positions
+                                    if current_position is not None and recent_prices:
+                                        try:
+                                            money_mgr.update_position(cfg.symbol, recent_prices[-1])
+                                        except Exception:
+                                            pass
                                     _update_live_display(live_display, cfg, result, position_state,
                                                          current_position, current_regime, recent_prices,
-                                                         risk_mgr)
+                                                         risk_mgr, stream_buf)
 
-                            # Poll every 30 seconds
-                            await asyncio.sleep(30)
+                            # Poll every 5 seconds for low-timeframe responsiveness (v0.38.0)
+                            await asyncio.sleep(5)
 
                         except KeyboardInterrupt:
                             console.print("\n[yellow]Interrupted by user. Shutting down...[/yellow]")
@@ -2438,10 +2466,25 @@ def _update_live_display(
         direction_str = f" ({current_position.direction})"
         sl_val = getattr(current_position, 'sl_price', None)
         tp_val = getattr(current_position, 'tp_price', None)
-        if sl_val and tp_val and current_price > 0:
+        # v0.38.0 FIX: Previous condition `if sl_val and tp_val` was True for
+        # any non-zero sl_val/tp_val, but the format string `${sl_val:,.0f}`
+        # rounded prices < $0.5 to "$0" — so XLM/OP/INJ showed "SL: $0 (-2.4%)".
+        # Now use dynamic decimal places based on price magnitude, and require
+        # sl_val/tp_val to be strictly non-None and strictly positive.
+        if sl_val is not None and tp_val is not None and sl_val > 0 and tp_val > 0 and current_price > 0:
             sl_dist = abs(current_price - sl_val) / current_price * 100
             tp_dist = abs(tp_val - current_price) / current_price * 100
-            sl_tp_str = f" | SL: ${sl_val:,.0f} (-{sl_dist:.1f}%) TP: ${tp_val:,.0f} (+{tp_dist:.1f}%)"
+            # v0.38.0: Dynamic decimals — $1000+ → 0dp, $1+ → 2dp, <$1 → 4dp, <$0.01 → 6dp
+            def _fmt_price(p: float) -> str:
+                if p >= 1000:
+                    return f"${p:,.0f}"
+                elif p >= 1:
+                    return f"${p:,.2f}"
+                elif p >= 0.01:
+                    return f"${p:,.4f}"
+                else:
+                    return f"${p:,.6f}"
+            sl_tp_str = f" | SL: {_fmt_price(sl_val)} (-{sl_dist:.1f}%) TP: {_fmt_price(tp_val)} (+{tp_dist:.1f}%)"
 
     # Buffer info
     buf_str = ""

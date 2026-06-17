@@ -944,6 +944,15 @@ document.addEventListener('DOMContentLoaded', () => {
   setInterval(updateUptime, 1000);
   setInterval(loadTradeHistory, 30000);
   setInterval(checkTradingStatus, 15000);
+  // v0.38.0: Auto-load chart after a short delay even if loadSymbols
+  // fails or returns slowly — ensures the user always sees a chart on
+  // first paint instead of an empty panel.
+  setTimeout(() => {
+    const sel = document.getElementById('chartSymbol');
+    if (sel && sel.value && typeof loadChart === 'function') {
+      loadChart();
+    }
+  }, 1500);
 });
 
 // ============================================================
@@ -952,9 +961,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
 function initChart() {
   const container = document.getElementById('priceChart');
+  // v0.38.0: If container has 0 dimensions (layout not yet computed),
+  // use sensible defaults so the chart renders immediately instead of
+  // staying invisible until the next resize event.
+  const w = container.clientWidth || container.parentElement.clientWidth || 800;
+  const h = container.clientHeight || 300;
   chart = LightweightCharts.createChart(container, {
-    width: container.clientWidth,
-    height: container.clientHeight,
+    width: w,
+    height: h,
     layout: {
       background: { type: 'solid', color: '#0a0e17' },
       textColor: '#7b8da0',

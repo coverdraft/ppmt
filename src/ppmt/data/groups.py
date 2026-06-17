@@ -251,6 +251,69 @@ PREDEFINED_STATIC_GROUPS: Dict[str, Dict] = {
                   "GO", "POKT", "QI", "TRU", "PERL", "WIN",
                   "PHA", "RAD", "HIGH", "GLM", "MOVR"],
     },
+    # v0.38.0: NEW massive Binance-focused group — pulls from all major
+    # Binance USDT pairs. After exchange-aware filtering, this resolves
+    # to ~150-180 actual Binance-listed tokens. The user explicitly asked
+    # for "muchos más tokens de binance" — this delivers.
+    "binance_top_200": {
+        "label": "Binance Top 200 (Mega Lista)",
+        "category": "market_cap",
+        "description": "Mega lista: ~200 bases Binance USDT. Filtrado automático deja solo los listados.",
+        "bases": [
+            # Top 30 mega caps
+            "BTC", "ETH", "BNB", "SOL", "XRP", "ADA", "AVAX", "DOGE", "TRX", "TON",
+            "DOT", "LINK", "MATIC", "LTC", "BCH", "ATOM", "UNI", "ETC", "XLM", "NEAR",
+            "APT", "FIL", "ARB", "OP", "AAVE", "ICP", "HBAR", "VET", "INJ", "RNDR",
+            # Layer 1 / 2 / Smart Contract Platforms
+            "SUI", "SEI", "GRT", "ALGO", "FTM", "STX", "RUNE", "TIA", "IMX", "LDO",
+            "MKR", "CRV", "SNX", "SAND", "MANA", "AXS", "EGLD", "THETA", "FLOW", "XTZ",
+            "KAS", "DASH", "ZEC", "XMR", "NEO", "GAS", "QTUM", "ICX", "CFX", "KSM",
+            "MOVR", "GLMR", "ROSE", "KAVA", "CELO", "WAVES", "ZIL", "MNT", "STRK",
+            "MANTA", "BLAST", "SCROLL", "ZK", "ZRO", "ETHFI", "OMNI", "LISTA", "DYM",
+            "REZ", "BB", "IO", "CTSI", "BOBA", "METIS", "OMG", "POL",
+            # DeFi
+            "COMP", "1INCH", "BAL", "YFI", "SUSHI", "DYDX", "GMX", "BAND", "PERP",
+            "OGN", "RAY", "SRM", "ORCA", "JUP", "PYTH", "WLD", "FLR", "KP3R", "ALPHA",
+            "SWRV", "DODO", "BNT", "BOND", "HEGIC", "COVER", "REP", "LON", "PSP",
+            "FARM", "INDEX", "PIVX", "VELODROME", "CAKE", "XVS", "ALPACA", "FOR",
+            "BAKE", "ATH", "PNG", "BADGER", "TRU", "LINA", "TRIBE",
+            # Memes
+            "SHIB", "PEPE", "WIF", "BONK", "BOME", "MEW", "MYRO", "WEN", "SLERF",
+            "TURBO", "MOG", "BOOK", "NEIRO", "PNUT", "GOAT", "FLOKI", "MEME",
+            "1000SATS", "1000PEPE", "1000SHIB", "1000BONK", "1000FLOKI", "1000WIF",
+            "1000TURBO", "BABYDOGE", "ELON", "SAMO", "NYAN",
+            # AI / Big Data / Compute
+            "FET", "AGIX", "OCEAN", "NMR", "TAO", "ARKM", "CTXC", "DBC", "IEXEC",
+            "RLC", "PHB", "NCT", "BDP", "XRT", "ARPA", "DIA", "LIT", "STORJ", "MAID",
+            "SC", "BLZ", "VIRTUAL", "GRIFFAIN", "AI16Z", "ZEREBRO", "PROMPT", "LAYER",
+            # Gaming / NFT / Metaverse
+            "ENJ", "CHZ", "ILLV", "APE", "GMT", "ALICE", "SLP", "TLM", "GHST", "REVV",
+            "PYR", "STAR", "MC", "MBOX", "DEGO", "SKILL", "RFOX", "GST", "LOOKS",
+            "DPET", "CWS", "DVI", "TVK", "AVT", "OAS", "BST", "AGLD", "OXT", "SUPER",
+            "FORTH", "PUSH", "RARE", "HIFI", "COCOS", "PROS", "WAXP", "UFM", "DGB",
+            "BURGER", "COTI", "WEMIX", "POKT", "QI", "PERL", "WIN", "PHA", "RAD", "HIGH",
+            # Privacy / Payments / Oracle / Storage
+            "XMR", "ZEC", "DASH", "ROSE", "SCRT", "KEEP", "XHV", "TRAC", "AR",
+            "STORJ", "FILECOIN", "BAND", "DIA", "API3", "LINK",
+            # Recent Binance listings / trending
+            "BANANAS31", "MOCA", "CREAT", "BTTC", "COW", "RENDER", "VIRTUAL",
+            "LAYER", "PROMPT", "ARC", "ORCA", "JUP", "PYTH", "TNSR", "OMNI",
+            "REZ", "BB", "ETHFI", "EIGEN", "ZRO", "TAO", "IO", "LISTA", "DYM",
+            "MANTA", "BLAST", "SCROLL", "ZK", "BTC", "TIA", "SEI", "SUI", "NEIRO",
+            "PNUT", "ACT", "BAN", "HIPPO", "MOO", "PAC", "RIO", "ANI", "SUNDOG",
+            "MIM", "KEK", "CHOMP", "BANANA", "SUN",
+            # Misc mid-caps
+            "GMT", "WEMIX", "KLAY", "WAVES", "IOTA", "MIOTA", "ONT", "NEO", "GAS",
+            "QTUM", "XEM", "LSK", "WAVES", "NANO", "DGB", "SC", "MAID", "XVC",
+            "BCN", "XDN", "BLK", "DMD", "XMG", "ARG", "BTA", "HNC", "MUE", "UNO",
+            # Extra altcoins from various sectors
+            "CYBER", "MAV", "MAVB", "ASTR", "CFG", "ENS", "GAL", "GMT", "HOOK",
+            "MAGIC", "NFP", "OX", "PORTAL", "RARE", "RON", "SFP", "TOKEN", "TOMI",
+            "UMA", "VOXEL", "WLD", "XAI", "XNO", "YGG", "ZBC",
+        ],
+    },
+    # v0.38.0: NEW "binance_volume_50" — uses Binance 24h volume to get the
+    # 50 most liquid USDT pairs. This is a dynamic group.
 }
 
 
@@ -274,6 +337,24 @@ DYNAMIC_GROUPS = {
         "sort_key": "quoteVolume",
         "descending": True,
         "limit": 25,
+    },
+    # v0.38.0: NEW — Top 50 / Top 100 by volume for users who want more
+    # tokens than the 25-cap default. Useful when running discovery sweeps.
+    "top_volume_50": {
+        "label": "Mayor Volumen 24h (Top 50)",
+        "category": "dynamic",
+        "description": "Top 50 por volumen en USDT (24h)",
+        "sort_key": "quoteVolume",
+        "descending": True,
+        "limit": 50,
+    },
+    "top_volume_100": {
+        "label": "Mayor Volumen 24h (Top 100)",
+        "category": "dynamic",
+        "description": "Top 100 por volumen en USDT (24h) — util para discovery sweeps",
+        "sort_key": "quoteVolume",
+        "descending": True,
+        "limit": 100,
     },
     "top_volatility_24h": {
         "label": "Mayor Volatilidad 24h",
