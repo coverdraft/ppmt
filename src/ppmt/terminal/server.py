@@ -1188,6 +1188,12 @@ async def validate_token(req: ValidateRequest) -> dict:
         return {"ok": True, **val_result}
 
     except Exception as e:
+        # v0.34.2: log full traceback para que el usuario pueda ver en el
+        # servidor qué falló en cada token del sweep (antes era silencioso).
+        logger.error(
+            f"validate_token failed for {req.symbol} {req.timeframe}: {e}",
+            exc_info=True,
+        )
         terminal_state.update_sync(
             auto_setup_status={**_status_token,
                                "step": "error", "status": "error",
@@ -1662,7 +1668,29 @@ async def _sweep_runner(symbols: list[str], timeframe: str, exchange: str, capit
             )
             # validate_token is async — call directly
             val_result = await validate_token(val_req)
-            verdict = val_result.get("verdict", "UNKNOWN")
+
+            # v0.34.2: Si validate_token devolvió {ok: False, error: ...} sin
+            # verdict (excepción capturada dentro), marcar como FAIL con el
+            # error visible. Antes se marcaba como UNKNOWN silenciosamente.
+            if not val_result.get("ok", True) and "verdict" not in val_result:
+                err_msg = val_result.get("error", "Unknown validation error")
+                logger.warning(f"Sweep validation for {sym} returned error: {err_msg}")
+                _sweep_state["failed"] += 1
+                _sweep_state["results"].append({
+                    "symbol": sym,
+                    "verdict": "FAIL",
+                    "win_rate": 0,
+                    "profit_factor": 0,
+                    "total_trades": 0,
+                    "max_drawdown": 0,
+                    "risk_of_ruin": 1.0,
+                    "error": err_msg[:200],  # truncate to avoid huge UI
+                })
+                _sweep_state["done"] += 1
+                await asyncio.sleep(0.1)
+                continue
+
+            verdict = val_result.get("verdict", "FAIL")  # default FAIL, no UNKNOWN
             entry = {
                 "symbol": sym,
                 "verdict": verdict,
@@ -1693,10 +1721,11 @@ async def _sweep_runner(symbols: list[str], timeframe: str, exchange: str, capit
                 _sweep_state["failed"] += 1
             _sweep_state["results"].append(entry)
         except Exception as e:
-            logger.warning(f"Sweep validation for {sym} failed: {e}")
+            logger.warning(f"Sweep validation for {sym} raised: {e}", exc_info=True)
             _sweep_state["failed"] += 1
             _sweep_state["results"].append({
-                "symbol": sym, "verdict": "ERROR", "error": str(e),
+                "symbol": sym, "verdict": "FAIL", "error": str(e)[:200],
+                "win_rate": 0, "profit_factor": 0, "total_trades": 0,
             })
         _sweep_state["done"] += 1
         # Yield between tokens so the event loop can process WS / other requests

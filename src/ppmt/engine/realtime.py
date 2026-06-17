@@ -76,6 +76,48 @@ except ImportError:
 console = Console()
 
 
+# ============================================================
+# v0.34.0: TF-aware recalibration interval
+# ============================================================
+# 15m es la referencia (2000 velas ≈ 21 días).
+# TFs más altos → menos recalibraciones (más espaciadas).
+# TFs más bajos → usar el base (no tiene sentido recalibrar cada 200 velas).
+# Techo de 50k para TFs muy altos (4h, 1d) — mantiene Living Trie vivo
+# sin forzar recalibraciones absurdas (526 años para 1d).
+_RECALIBRATION_CEILING = 50_000
+_RECALIBRATION_BASE = 2_000
+_RECALIBRATION_REF_TF_MIN = 15
+
+_TF_TO_MINUTES = {
+    "1m": 1, "3m": 3, "5m": 5, "10m": 10, "15m": 15, "30m": 30,
+    "1h": 60, "2h": 120, "4h": 240, "6h": 360, "8h": 480, "12h": 720,
+    "1d": 1440, "3d": 4320, "1w": 10080, "1M": 43200,
+}
+
+
+def _tf_to_minutes(tf: str) -> int:
+    """Convierte '15m' -> 15, '1h' -> 60, '1d' -> 1440. Default 15."""
+    return _TF_TO_MINUTES.get(tf, 15)
+
+
+def get_recalibration_interval(tf_minutes: int) -> int:
+    """Calcula el intervalo de recalibración óptimo según el TF.
+
+    Tabla:
+      1m  → 2,000  (33h)
+      5m  → 2,000  (7d)
+      15m → 2,000  (21d)  ← referencia
+      1h  → 8,000  (333d)
+      4h  → 32,000 (1333d)
+      1d  → 50,000 (526d, capped)
+    """
+    if tf_minutes <= 0:
+        return _RECALIBRATION_BASE
+    factor = max(1.0, tf_minutes / _RECALIBRATION_REF_TF_MIN)
+    interval = int(_RECALIBRATION_BASE * factor)
+    return min(interval, _RECALIBRATION_CEILING)
+
+
 class TraderMode(Enum):
     """Trading mode."""
     REPLAY = "replay"   # Replay historical data

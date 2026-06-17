@@ -233,15 +233,19 @@ DYNAMIC_GROUPS = {
     # date when available, otherwise inferred from market metadata (listings
     # at/after the cutoff). Useful for catching early opportunities but
     # inherently noisy — pair with min_volume filter to drop dead listings.
+    # v0.34.0: listing_days_min=3 — los primeros 72h suelen tener precios
+    # inestables (market makers ajustando, poca liquidez). Evitar operarlos
+    # hasta que tengan data consolidada.
     "recently_listed_30d": {
         "label": "Recién Listados (30d)",
         "category": "dynamic",
-        "description": "Tokens listados en los últimos 30 días (volumen > $1M)",
+        "description": "Tokens listados entre 3 y 30 días (volumen > $1M, min 72h de data)",
         "sort_key": "quoteVolume",
         "descending": True,
         "limit": 25,
         "min_volume_usd": 1_000_000,
         "listing_days_max": 30,
+        "listing_days_min": 3,  # v0.34.0: evitar inestabilidad inicial
     },
     # v0.33.1: High liquidity / tight spread group — for scalpers.
     # Spread = (ask - bid) / mid. Tokens with spread < 0.05% are the most
@@ -614,7 +618,10 @@ def _resolve_dynamic_group(
     candidates: List[tuple] = []  # (sort_value, symbol)
     # v0.33.1: Time cutoffs for recently_listed group
     listing_days_max = gdef.get("listing_days_max", 0)
+    listing_days_min = gdef.get("listing_days_min", 0)  # v0.34.0
     listing_cutoff_ts = (time.time() - listing_days_max * 86400) if listing_days_max > 0 else 0
+    # v0.34.0: minimum age cutoff (don't list tokens too young — unstable prices)
+    listing_min_cutoff_ts = (time.time() - listing_days_min * 86400) if listing_days_min > 0 else 0
     # v0.33.1: Max spread filter for high_liquidity_low_spread group
     max_spread_pct = gdef.get("max_spread_pct", 0)
 
@@ -629,10 +636,16 @@ def _resolve_dynamic_group(
             continue
 
         # v0.33.1: Recently-listed filter — skip if listing date unknown or too old
-        if listing_days_max > 0:
+        # v0.34.0: Also skip if token is too young (< listing_days_min)
+        if listing_days_max > 0 or listing_days_min > 0:
             listing_ts = t.get("listing_ts")
-            if listing_ts is None or listing_ts < listing_cutoff_ts:
+            if listing_ts is None:
+                # No listing date → can't apply age filter, skip
                 continue
+            if listing_days_max > 0 and listing_ts < listing_cutoff_ts:
+                continue  # too old
+            if listing_days_min > 0 and listing_ts > listing_min_cutoff_ts:
+                continue  # too young (first 72h unstable)
 
         # v0.33.1: Max-spread filter — skip if spread unknown or too wide
         if max_spread_pct > 0:

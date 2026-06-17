@@ -2297,3 +2297,230 @@ open http://localhost:8420
 - CLI `ppmt portfolio create/status/rebalance`
 - `ppmt insights` con data acumulada de `historical_scan`
 - Persistencia SQLite del PortfolioManager (tablas `portfolios` + `portfolio_positions`)
+
+---
+
+## v0.34.2 — Patches reales aplicados + UNKNOWN → FAIL con error visible (17 jun 2026)
+
+### Contexto
+
+El usuario ejecutó los tests v0.34.0 en su Mac y **7 tests fallaron**:
+- 6 tests de `get_recalibration_interval` / `_tf_to_minutes` → `ImportError`
+- 1 test de `listing_days_min` → `KeyError` (no existía en `DYNAMIC_GROUPS`)
+
+**Causa raíz:** En v0.34.0 escribí los patches como documentación en
+`patch_recalibration.py` y `patch_min_dias.py`, pero NUNCA los apliqué a
+los archivos reales `engine/realtime.py` y `data/groups.py`. Fallo mío.
+
+### Otros bugs detectados por el usuario al usar el dashboard
+
+1. **Header mostraba "v0.33.1"** aunque el footer dijera v0.34.1 — string
+   hardcoded en el HTML (`<title>`, `<span class="logo-ver">`)
+2. **Muchos tokens UNKNOWN en el sweep** (103 FAIL + muchos UNKNOWN) — el
+   `_sweep_runner` ponía `verdict = "UNKNOWN"` cuando `validate_token`
+   devolvía `{ok: False, error: ...}` sin `verdict` key (excepción capturada
+   silenciosamente dentro de `validate_token`)
+3. **`validate_token` capturaba excepciones sin log** — el `except Exception`
+   devolvía error al cliente pero no logueaba el traceback, así que era
+   imposible saber por qué fallaban 100 tokens
+
+### Fixes aplicados
+
+#### Fix 1: Aplicar `get_recalibration_interval` y `_tf_to_minutes` a `engine/realtime.py`
+
+Añadidas las funciones al módulo (líneas 79-118), justo después de `console = Console()`:
+
+```python
+_RECALIBRATION_CEILING = 50_000
+_RECALIBRATION_BASE = 2_000
+_RECALIBRATION_REF_TF_MIN = 15
+
+_TF_TO_MINUTES = {
+    "1m": 1, "3m": 3, "5m": 5, "10m": 10, "15m": 15, "30m": 30,
+    "1h": 60, "2h": 120, "4h": 240, "6h": 360, "8h": 480, "12h": 720,
+    "1d": 1440, "3d": 4320, "1w": 10080, "1M": 43200,
+}
+
+def _tf_to_minutes(tf: str) -> int:
+    return _TF_TO_MINUTES.get(tf, 15)
+
+def get_recalibration_interval(tf_minutes: int) -> int:
+    if tf_minutes <= 0:
+        return _RECALIBRATION_BASE
+    factor = max(1.0, tf_minutes / _RECALIBRATION_REF_TF_MIN)
+    interval = int(_RECALIBRATION_BASE * factor)
+    return min(interval, _RECALIBRATION_CEILING)
+```
+
+Verificado con tests reales contra el código:
+```
+get_recalibration_interval(60) = 8000   ✓
+get_recalibration_interval(240) = 32000 ✓
+get_recalibration_interval(1440) = 50000 ✓ (capped)
+_tf_to_minutes("1h") = 60               ✓
+```
+
+#### Fix 2: Aplicar `listing_days_min: 3` a `data/groups.py`
+
+En `DYNAMIC_GROUPS["recently_listed_30d"]` se añadió el campo:
+
+```python
+"listing_days_min": 3,  # v0.34.0: evitar inestabilidad inicial
+```
+
+Y se actualizó la lógica de filtrado en `resolve_group()` (líneas 620-648)
+para que aplique tanto `listing_days_max` como `listing_days_min`:
+
+```python
+listing_days_min = gdef.get("listing_days_min", 0)
+listing_min_cutoff_ts = (time.time() - listing_days_min * 86400) if listing_days_min > 0 else 0
+
+# En el loop:
+if listing_days_max > 0 or listing_days_min > 0:
+    listing_ts = t.get("listing_ts")
+    if listing_ts is None:
+        continue  # sin fecha de listing, no podemos filtrar
+    if listing_days_max > 0 and listing_ts < listing_cutoff_ts:
+        continue  # demasiado antiguo
+    if listing_days_min > 0 and listing_ts > listing_min_cutoff_ts:
+        continue  # demasiado nuevo (< 72h, inestable)
+```
+
+#### Fix 3: Versiones hardcoded en el HTML
+
+Cambiados los 4 strings de versión en `static/index.html`:
+
+| Antes | Después |
+|-------|---------|
+| `<title>PPMT Terminal v0.32.6</title>` | `<title>PPMT Terminal v0.34.2</title>` |
+| `<span class="logo-ver">v0.33.1</span>` | `<span class="logo-ver">v0.34.2</span>` |
+| `<span>PPMT v0.34.1</span>` (footer) | `<span>PPMT v0.34.2</span>` |
+| `// PPMT Terminal v0.33.1` (comentario JS) | `// PPMT Terminal v0.34.2` |
+
+#### Fix 4: UNKNOWN → FAIL con error visible
+
+**En `server.py` (`_sweep_runner`):**
+
+Antes:
+```python
+verdict = val_result.get("verdict", "UNKNOWN")  # ← UNKNOWN silencioso
+```
+
+Después:
+```python
+# Si validate_token devolvió {ok: False, error: ...} sin verdict
+# (excepción capturada dentro), marcar como FAIL con el error visible
+if not val_result.get("ok", True) and "verdict" not in val_result:
+    err_msg = val_result.get("error", "Unknown validation error")
+    logger.warning(f"Sweep validation for {sym} returned error: {err_msg}")
+    _sweep_state["failed"] += 1
+    _sweep_state["results"].append({
+        "symbol": sym, "verdict": "FAIL",
+        "win_rate": 0, "profit_factor": 0, "total_trades": 0,
+        "max_drawdown": 0, "risk_of_ruin": 1.0,
+        "error": err_msg[:200],  # truncate to avoid huge UI
+    })
+    _sweep_state["done"] += 1
+    await asyncio.sleep(0.1)
+    continue
+
+verdict = val_result.get("verdict", "FAIL")  # default FAIL, no UNKNOWN
+```
+
+**En `server.py` (`validate_token` except):**
+
+Añadido `logger.error(..., exc_info=True)` para que el traceback completo
+aparezca en los logs del servidor. Antes era silencioso.
+
+**En `static/index.html` (sweep results rendering):**
+
+Cada fila FAIL ahora muestra el error en rojo si existe:
+```javascript
+const errTag = r.error
+  ? ` <span class="text-red" style="font-size:8px" title="${escapeHtml(r.error)}">⚠ ${escapeHtml(r.error.substring(0,60))}</span>`
+  : '';
+```
+
+Añadida función `escapeHtml(s)` para evitar XSS injection desde el backend.
+
+### Resultado esperado en el próximo sweep
+
+Después de v0.34.2, cuando hagas un sweep:
+- Los tokens que fallan por excepción (data no disponible, símbolo no listado
+  en MEXC, etc.) aparecerán como **FAIL** en vez de UNKNOWN
+- Verás el error al lado derecho de la fila, en rojo, formato:
+  `FAIL TRX/USDT PF 0.00 WR 0.0% 0 trades Score 20.0 ⚠ No data available for TRX/USDT 1h...`
+- En los logs del servidor (`python3 -m ppmt.terminal.server`), verás el
+  traceback completo de cada fallo con `exc_info=True`
+
+### Cómo identificar por qué fallan muchos tokens
+
+En tu screenshot anterior, había 1 PASS (UNI, PF 9.47, 9 trades) y 103 FAIL.
+Después de v0.34.2, podrás ver el motivo de cada FAIL en el panel de sweep.
+
+Causas probables (en orden de frecuencia):
+1. **Símbolo no listado en MEXC** (TRX, TON, MATIC, etc. son USD-pegged o
+   no existen en MEXC spot) → cambia a Binance
+2. **Data insuficiente** — el token existe pero no hay 90 días de histórico
+   (símbolos nuevos como SCROLL, GPC, ILLV)
+3. **WebSocket reject de MEXC** — el retry de v0.34.1 debería mitigar
+4. **Trie build failure** — símbolo con datos raros (gaps, precios 0)
+
+### Tests ejecutados
+
+```
+✓ Todos los tests de recalibración pasan (12/12)
+✓ Test recently_listed_has_min_days pasa (1/1)
+TOTAL: 13/13 tests pasan
+```
+
+(Tests de SweepResultCache, history_manager y score_signal ya pasaban en v0.34.0.)
+
+### Cómo actualizar en tu Mac
+
+```bash
+cd ~/projects/ppmt
+git pull origin main
+source .venv/bin/activate
+pip install -e .
+
+# Verificar
+python3 -c "import ppmt; print(ppmt.__version__)"  # → 0.34.2
+python3 src/tests/test_v0340.py                    # → 19/19 pasan
+
+# Arrancar
+python3 -m ppmt.terminal.server
+open http://localhost:8420
+```
+
+### Observaciones sobre el screenshot del usuario
+
+Datos positivos detectados en su screenshot:
+
+1. **El motor SÍ funciona** — UNI/USDT dio 9 trades con PF 9.47 y WR 77.8%.
+   Esa es una operación real del backtest, no demo data.
+2. **ETH/USDT PASS cached** — el cache del sweep funciona (segunda vez que
+   aparece, marcado como cached).
+3. **El panel Portfolio & Positions existe** — está en la columna central
+   izquierda, muestra Portfolio Value $1,182.47, Cash $1,182.47, etc.
+4. **La Trade History funciona** — muestra 9 operaciones con entry/exit/PnL
+   y reason (take_profit, trailing_stop, stop_loss).
+
+Datos problemáticos:
+1. **Candles: 0, WS: CONECTADO** — el WS está conectado pero no procesa
+   candles. Esto es porque la sesión de Paper Trading no está activa
+   (botón START PAPER no fue pulsado). Es esperado.
+2. **Price $0.12920000 estático** — el precio del chart es el último
+   conocido, no se actualiza en tiempo real porque no hay sesión activa.
+3. **WS: CONECTADO en el status bar** — el feed del CHART está conectado,
+   no el del trader. Son dos conexiones distintas.
+
+Para que el precio empiece a actualizarte en tiempo real y el motor
+empiece a generar señales, necesitas:
+1. Seleccionar un token (ej: UNI/USDT que ya tienes PASS)
+2. Pulsa **Prepare Token** (debería decir "Setup complete (PASS)" rápido
+   porque ya está cacheado)
+3. Pulsa **Start Paper** — el botón cambia a "Running" y el status bar
+   muestra `"Paper trading iniciado: UNI/USDT 1h en mexc..."`
+4. Espera 5-15 minutos (dependiendo del TF) a que se cierre la primera
+   vela y el motor procese señales
