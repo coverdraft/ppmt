@@ -4110,3 +4110,49 @@ python3 scripts/diagnose_live_blockers.py BTC/USDT 1h
 curl -s http://localhost:8420/api/multi-status | python3 -m json.tool | grep -E "status|trades|signals"
 # Debe mostrar status=RUNNING, trades>0
 ```
+
+---
+
+## v0.38.6 — 2026-06-17 — REST polling por defecto (Binance WS rate limit)
+
+### Problema
+v0.38.5 dejó los filtros de señal correctos, las señales empezaron a pasar, pero
+los tokens se quedaban en `websocket_status: connecting` eterno y pasaban a STALE.
+
+Diagnóstico de red del usuario:
+```
+curl https://stream.binance.com:9443/    → 404 (llega pero handshake WS falla)
+ping stream.binance.com                  → 100% packet loss
+curl https://api.binance.com/api/v3/...  → 200 OK ✓ (REST API perfecto)
+```
+
+BONK/USDT logró conectar una vez (`Connected to Binance (BONK/USDT)`) — eso confirma
+que WS funciona desde la red del usuario. El problema real: **Binance limita a 5
+conexiones WS por IP cada 5 minutos**. Al hacer Start All con 20+ tokens, la mayoría
+de los handshakes quedan rechazados y los traders se quedan pegados en "connecting".
+
+### Fix
+`src/ppmt/engine/realtime.py`:
+- Agregado `use_websocket: bool = False` en `LiveConfig` (default False)
+- Cambio de `use_websocket = True` hardcodeado → `getattr(cfg, 'use_websocket', False)`
+- Default: REST polling (ccxt) que usa conexiones efímeras y maneja rate limits solo
+
+REST polling es ligeramente más lento que WS (poll cada 5s vs tick streaming), pero
+es 100% confiable para paper trading multi-token. Para real-money de un solo token,
+el usuario puede setear `use_websocket=True` manualmente.
+
+### Archivos modificados
+- `src/ppmt/engine/realtime.py` — flag `use_websocket` + lógica de selección
+- `pyproject.toml`, `src/ppmt/cli/main.py`, `src/ppmt/terminal/server.py`,
+  `src/ppmt/terminal/static/index.html` — bump 0.38.5 → 0.38.6
+
+### Cómo verificar
+```bash
+cd ~/ppmt
+git pull origin main
+pip install -e . --quiet
+ppmt terminal
+# En el dashboard: Start All
+# Después de 1-2 min, todos los tokens deben pasar a RUNNING (no STALE)
+# Los logs deben decir: "Connected to binance (REST polling)"
+```

@@ -254,7 +254,13 @@ class LiveConfig:
     kelly_fraction: float = 0.25
     """Fraction of Kelly to use (0.25 = Quarter-Kelly, conservative)."""
     trie_persist_interval: int = 100
-    """Save Living Trie to DB every N candles. 0 = only on shutdown."""""
+    """Save Living Trie to DB every N candles. 0 = only on shutdown."""
+    use_websocket: bool = False
+    """v0.38.6: Use WebSocket feed (True) or REST polling (False).
+    Default False because Binance WS limits to 5 connections per IP per 5min,
+    so launching 20+ parallel tokens via Start All gets most handshakes rejected.
+    REST polling via ccxt uses ephemeral connections and handles rate limits
+    automatically, making it reliable for multi-token paper trading."""
 
 
 @dataclass
@@ -1999,14 +2005,17 @@ class RealtimeTrader:
         recent_highs = []
         recent_lows = []
 
-        # v0.12.0: Choose WebSocket or REST polling
-        use_websocket = True
-        try:
-            import websockets  # noqa: F401
-        except ImportError:
-            use_websocket = False
-            console.print("[yellow]websockets not installed — using REST polling (slower)[/yellow]")
-            console.print("[dim]Install with: pip install websockets>=12.0[/dim]")
+        # v0.38.6: Choose WebSocket or REST polling.
+        # Default: REST polling (cfg.use_websocket=False) because Binance WS is
+        # frequently blocked from EU networks. User can opt-in via LiveConfig.
+        use_websocket = getattr(cfg, 'use_websocket', False)
+        if use_websocket:
+            try:
+                import websockets  # noqa: F401
+            except ImportError:
+                use_websocket = False
+                console.print("[yellow]websockets not installed — falling back to REST polling[/yellow]")
+                console.print("[dim]Install with: pip install websockets>=12.0[/dim]")
 
         # Warmup: how many candles to fetch before streaming?
         # Need at least (sax_window_size + pattern_length) candles to produce first signal

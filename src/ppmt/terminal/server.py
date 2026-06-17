@@ -42,7 +42,7 @@ CONFIG_DIR = os.path.expanduser("~/.ppmt")
 # ------------------------------------------------------------------ #
 # FastAPI application
 # ------------------------------------------------------------------ #
-app = FastAPI(title="PPMT Terminal", version="0.38.5")
+app = FastAPI(title="PPMT Terminal", version="0.38.6")
 
 # Global terminal state (shared with engine)
 terminal_state: TerminalState = get_terminal_state()
@@ -944,7 +944,7 @@ async def multi_start(req: MultiStartRequest) -> dict:
             sess = _multi_sessions[_nid]
             try:
                 # Auto-validate first (non-blocking gate)
-                # v0.38.5: Paper trading (dry_run=True) NO debe bloquear el arranque del
+                # v0.38.6: Paper trading (dry_run=True) NO debe bloquear el arranque del
                 # trader si la validación es FAIL o INSUFFICIENT_DATA. La idea es que el
                 # usuario pueda VER el sistema operando (con señales+trades) aunque los
                 # KPIs aún no alcancen el umbral de "producción". El usuario decide luego
@@ -966,7 +966,7 @@ async def multi_start(req: MultiStartRequest) -> dict:
                         _reason = (f"Validation: {verdict} — "
                                    f"{val_result.get('reason', val_result.get('error', ''))}")[:200]
                         if _is_paper:
-                            # v0.38.5: Paper trading — seguir adelante aunque la
+                            # v0.38.6: Paper trading — seguir adelante aunque la
                             # validación no pase. Solo marcamos una advertencia.
                             logger.warning(
                                 f"[{_nid}] Paper trading: validation NOT PASS ({verdict}) "
