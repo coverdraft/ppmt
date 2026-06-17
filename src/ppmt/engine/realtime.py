@@ -1983,6 +1983,25 @@ class RealtimeTrader:
                         nonlocal peak_capital, last_losing_trade_idx
                         nonlocal candles_since_calibration
 
+                        # v0.37.0 CRITICAL FIX: StreamingPatternBuffer sync bug.
+                        #
+                        # PREVIOUS BUG: `pattern_buffer = stream_buf.pattern_buffer`
+                        # returns a COPY. We then passed that copy to process_new_candle,
+                        # which mutated it in-place (append + del). After the call,
+                        # both `pattern_buffer` and the returned `_pattern_buffer`
+                        # pointed to the SAME mutated list, so the diff
+                        # `_pattern_buffer[len(pattern_buffer):]` was ALWAYS empty.
+                        # Result: stream_buf._pattern_buffer, _symbol_counts,
+                        # _total_symbols, _symbols_produced NEVER updated.
+                        # Dashboard showed Pattern: [...] | Entropy: 0.0b forever,
+                        # even though SAX symbols were produced internally.
+                        #
+                        # FIX: Use the authoritative `result.sax_symbols_produced`
+                        # counter (incremented inside process_new_candle) to compute
+                        # how many new symbols were produced this candle, then sync
+                        # the StreamingPatternBuffer accordingly.
+                        prev_produced = stream_buf._symbols_produced
+
                         # Use StreamingPatternBuffer for SAX symbol management
                         pattern_buffer = stream_buf.pattern_buffer
 
@@ -2017,12 +2036,19 @@ class RealtimeTrader:
                             paa_std=_paa_std,
                         )
 
-                        # v0.13.0: Sync buffer state back to StreamingPatternBuffer
-                        # (process_new_candle returns updated lists)
-                        # We track new symbols via the returned pattern_buffer
-                        new_symbols_in_buf = _pattern_buffer[len(pattern_buffer):]
-                        if new_symbols_in_buf:
-                            for sym in new_symbols_in_buf:
+                        # v0.37.0: Sync new SAX symbols to StreamingPatternBuffer
+                        # using the authoritative counter. New symbols are always
+                        # at the end of _pattern_buffer (process_new_candle appends
+                        # them at the end, and trimming only removes from the front).
+                        new_produced = result.sax_symbols_produced
+                        if new_produced > prev_produced:
+                            n_new = new_produced - prev_produced
+                            if n_new <= len(_pattern_buffer):
+                                new_syms = _pattern_buffer[-n_new:]
+                            else:
+                                # Shouldn't happen, but be defensive
+                                new_syms = list(_pattern_buffer)
+                            for sym in new_syms:
                                 stream_buf._pattern_buffer.append(sym)
                                 stream_buf._symbol_counts[sym] += 1
                                 stream_buf._total_symbols += 1
@@ -2159,6 +2185,11 @@ class RealtimeTrader:
 
                     last_candle_ts = 0
 
+                    # v0.37.0 FIX: Initialize pattern_buffer for REST polling mode.
+                    # Previously this was missing — first call to process_new_candle
+                    # would crash with NameError: pattern_buffer is not defined.
+                    pattern_buffer = []
+
                     # Warmup: fetch some historical candles first
                     try:
                         warmup_ohlcv = await poll_exchange.fetch_ohlcv(
@@ -2172,6 +2203,8 @@ class RealtimeTrader:
                                 closed=True, exchange=cfg.exchange,
                                 symbol=cfg.symbol, timeframe=cfg.timeframe,
                             )
+                            # v0.37.0: Track prev_produced for streaming buffer sync
+                            _prev_prod = stream_buf._symbols_produced
                             (sax_buffer, pattern_buffer, position_state, current_position,
                              trade_counter, current_regime, peak_capital,
                              last_losing_trade_idx) = await self.process_new_candle(
@@ -2188,6 +2221,19 @@ class RealtimeTrader:
                                 last_losing_trade_idx=last_losing_trade_idx,
                                 paa_mean=_paa_mean, paa_std=_paa_std,
                             )
+                            # v0.37.0: Sync streaming buffer
+                            _new_prod = result.sax_symbols_produced
+                            if _new_prod > _prev_prod:
+                                _n_new = _new_prod - _prev_prod
+                                _new_syms = (pattern_buffer[-_n_new:]
+                                             if _n_new <= len(pattern_buffer)
+                                             else list(pattern_buffer))
+                                for _sym in _new_syms:
+                                    stream_buf._pattern_buffer.append(_sym)
+                                    stream_buf._symbol_counts[_sym] += 1
+                                    stream_buf._total_symbols += 1
+                                    stream_buf._symbols_produced += 1
+                                stream_buf._trim()
                         console.print(f"[green]Warmup: processed {len(warmup_ohlcv)} historical candles[/green]")
                     except Exception as e:
                         console.print(f"[yellow]Warmup failed: {e}[/yellow]")
@@ -2213,6 +2259,8 @@ class RealtimeTrader:
                                         timeframe=cfg.timeframe,
                                     )
 
+                                    # v0.37.0: Track prev_produced for streaming buffer sync
+                                    _prev_prod = stream_buf._symbols_produced
                                     (sax_buffer, pattern_buffer, position_state, current_position,
                                      trade_counter, current_regime, peak_capital,
                                      last_losing_trade_idx) = await self.process_new_candle(
@@ -2230,6 +2278,19 @@ class RealtimeTrader:
                                         exchange=exchange if not cfg.dry_run else poll_exchange,
                                         paa_mean=_paa_mean, paa_std=_paa_std,
                                     )
+                                    # v0.37.0: Sync streaming buffer
+                                    _new_prod = result.sax_symbols_produced
+                                    if _new_prod > _prev_prod:
+                                        _n_new = _new_prod - _prev_prod
+                                        _new_syms = (pattern_buffer[-_n_new:]
+                                                     if _n_new <= len(pattern_buffer)
+                                                     else list(pattern_buffer))
+                                        for _sym in _new_syms:
+                                            stream_buf._pattern_buffer.append(_sym)
+                                            stream_buf._symbol_counts[_sym] += 1
+                                            stream_buf._total_symbols += 1
+                                            stream_buf._symbols_produced += 1
+                                        stream_buf._trim()
 
                                     _update_live_display(live_display, cfg, result, position_state,
                                                          current_position, current_regime, recent_prices,

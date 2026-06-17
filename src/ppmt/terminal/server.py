@@ -42,7 +42,7 @@ CONFIG_DIR = os.path.expanduser("~/.ppmt")
 # ------------------------------------------------------------------ #
 # FastAPI application
 # ------------------------------------------------------------------ #
-app = FastAPI(title="PPMT Terminal", version="0.36.2")
+app = FastAPI(title="PPMT Terminal", version="0.37.0")
 
 # Global terminal state (shared with engine)
 terminal_state: TerminalState = get_terminal_state()
@@ -1166,6 +1166,59 @@ async def get_trade_summary(symbol: Optional[str] = None) -> dict:
         summary = storage.get_trade_summary(symbol=symbol)
         storage.close()
         return {"ok": True, "summary": summary}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+class ClearHistoryRequest(BaseModel):
+    """v0.37.0: Request body for clearing stale trade/signal history."""
+    symbol: Optional[str] = None  # None = clear ALL symbols
+    older_than_days: int = 0      # 0 = clear all matching
+    clear_trades: bool = True
+    clear_signals: bool = True
+
+
+@app.post("/api/clear-history")
+async def clear_history(req: ClearHistoryRequest) -> dict:
+    """v0.37.0: Clear stale trade/signal history from SQLite.
+
+    Use case: The dashboard's Trade History panel was showing 434 fake
+    BTC trades at $38,452 / $41,940 / $50,919 from a previous backtest,
+    even while the user was trading XLM/OP/ICP/INJ at $0.23 / $0.11.
+    This endpoint lets the user clear that stale data.
+
+    Args (in body):
+        symbol: If provided, only clear this symbol. If None, clear ALL.
+        older_than_days: If >0, only clear rows older than N days.
+        clear_trades: Whether to clear the trades table (default True).
+        clear_signals: Whether to clear the signals table (default True).
+
+    Returns:
+        {ok: True, trades_deleted: N, signals_deleted: N}
+    """
+    try:
+        storage = PPMTStorage()
+        trades_deleted = 0
+        signals_deleted = 0
+        if req.clear_trades:
+            trades_deleted = storage.clear_trades(
+                symbol=req.symbol, older_than_days=req.older_than_days,
+            )
+        if req.clear_signals:
+            signals_deleted = storage.clear_signals(
+                symbol=req.symbol, older_than_days=req.older_than_days,
+            )
+        storage.close()
+        return {
+            "ok": True,
+            "trades_deleted": trades_deleted,
+            "signals_deleted": signals_deleted,
+            "message": (
+                f"Cleared {trades_deleted} trades and {signals_deleted} signals"
+                + (f" for {req.symbol}" if req.symbol else " (all symbols)")
+                + (f" older than {req.older_than_days} days" if req.older_than_days > 0 else "")
+            ),
+        }
     except Exception as e:
         return {"ok": False, "error": str(e)}
 

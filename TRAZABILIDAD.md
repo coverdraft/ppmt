@@ -3159,3 +3159,202 @@ Esto ya estaba arreglado en v0.36.1 (expansión de grupos + filtrado por exchang
 4. **Exchange**: si está en MEXC, algunos tokens Binance-only no aparecen y viceversa
 
 Recomendación al usuario: en la UI, poner `Limit = 0` y `Min Volume = 0` para ver TODOS los tokens del grupo disponibles en el exchange.
+
+---
+
+# v0.37.0 — SAX Streaming Buffer Sync Fix + Clear History
+
+**Fecha**: 2026-06-17
+**Commit**: pendiente
+
+## Problemas reportados por el usuario
+
+1. **SAX Pattern siempre vacío**: El dashboard mostraba `Pattern: [...] | Entropy: 0.0b` aunque el motor hubiera procesado 200+ candles. SAX Symbols Produced stuck at 0. Living Trie vacío.
+2. **Trade History con datos stale**: 434 trades con precios BTC ($38452, $41940, $50919) aparecían aunque el usuario estuviera operando XLM/OP/ICP/INJ.
+3. **0 trades a pesar de 50 señales**: Los traders nunca ejecutaban operaciones.
+4. **"Validation para que es?"**: El usuario no entendía el propósito de la validación.
+5. **Pocos tokens en discovery/sweep**: El sweep encontraba muy pocos candidatos.
+
+## Root cause analysis
+
+### Bug #1 (CRÍTICO) — SAX StreamingPatternBuffer nunca se actualizaba
+
+En `engine/realtime.py`, el callback `on_candle` tenía este flujo:
+
+```python
+pattern_buffer = stream_buf.pattern_buffer  # COPY A
+(sax_buffer, _pattern_buffer, ...) = await self.process_new_candle(
+    pattern_buffer=pattern_buffer,  # pasa COPY A
+    ...
+)
+# process_new_candle MUTA COPY A in-place (append + del)
+# _pattern_buffer devuelto ES COPY A (mismo objeto)
+new_symbols_in_buf = _pattern_buffer[len(pattern_buffer):]
+# ↑ Siempre [] porque pattern_buffer IS _pattern_buffer
+```
+
+**Resultado**: `stream_buf._pattern_buffer`, `_symbol_counts`, `_total_symbols`, `_symbols_produced` NUNCA se actualizaban. El dashboard leía `stream_buf.pattern_buffer` → siempre `[]` → mostraba `Pattern: [...] | Entropy: 0.0b`.
+
+### Bug #2 — REST polling mode: `pattern_buffer` nunca se inicializaba
+
+En el fallback REST polling (cuando websockets no está instalado), `pattern_buffer` se usaba pero no se inicializaba → `NameError` en la primera candle.
+
+### Bug #3 — Trade history con datos stale
+
+El endpoint `/api/trades` lee directamente de SQLite (`~/.ppmt/ppmt.db`). Cualquier trade guardado previamente (de backtests, sesiones live anteriores, etc.) se muestra sin distinción. No existía forma de limpiar estos datos.
+
+## Fixes aplicados
+
+### Fix #1 — SAX sync usando counter autoritativo
+
+En `engine/realtime.py` (líneas ~1980-2056 del callback `on_candle`):
+
+```python
+prev_produced = stream_buf._symbols_produced  # capturar ANTES
+pattern_buffer = stream_buf.pattern_buffer  # COPY
+(sax_buffer, _pattern_buffer, ...) = await self.process_new_candle(...)
+
+new_produced = result.sax_symbols_produced  # counter autoritativo
+if new_produced > prev_produced:
+    n_new = new_produced - prev_produced
+    new_syms = _pattern_buffer[-n_new:] if n_new <= len(_pattern_buffer) else list(_pattern_buffer)
+    for sym in new_syms:
+        stream_buf._pattern_buffer.append(sym)
+        stream_buf._symbol_counts[sym] += 1
+        stream_buf._total_symbols += 1
+        stream_buf._symbols_produced += 1
+    stream_buf._trim()
+```
+
+Mismo fix aplicado al fallback REST polling (warmup + main loop).
+
+### Fix #2 — Inicializar `pattern_buffer = []` en REST polling
+
+```python
+# v0.37.0 FIX: Initialize pattern_buffer for REST polling mode.
+pattern_buffer = []
+```
+
+### Fix #3 — Endpoint `/api/clear-history`
+
+**`data/storage.py`** — añadidos métodos:
+- `clear_trades(symbol=None, older_than_days=0)` — borra trades por symbol/edad
+- `clear_signals(symbol=None, older_than_days=0)` — borra signals por symbol/edad
+
+**`terminal/server.py`** — añadido endpoint:
+- `POST /api/clear-history` con body `{symbol, older_than_days, clear_trades, clear_signals}`
+- Retorna `{ok, trades_deleted, signals_deleted, message}`
+
+**`terminal/static/index.html`** — añadido botón "Clear" en Trade History panel:
+- Llama a `/api/clear-history` con el symbol activo (o ALL si está vacío)
+- Confirm dialog antes de borrar
+- Reload automático del panel después
+
+## Verificación
+
+### Script de verificación SAX sync fix:
+```
+$ python3 scripts/verify_sax_sync_fix.py
+
+[1/2] OLD (buggy) sync behavior:
+  result.sax_symbols_produced = 5  (SAX encoder DID produce)
+  buf._pattern_buffer          = []  (EMPTY — never synced!)
+  buf._symbols_produced        = 0  (stuck at 0)
+  buf.entropy                  = 0.000
+
+[2/2] NEW (fixed) sync behavior:
+  buf._pattern_buffer          = ['g', 'b', 'b', 'f', 'a']  (POPULATED!)
+  buf._symbols_produced        = 5
+  buf.entropy                  = 1.922
+  buf.has_pattern()            = True
+
+PASS: All assertions passed.
+```
+
+### Tests existentes:
+```
+$ python -m pytest tests/test_sax.py tests/test_v0330_groups.py tests/test_v0331_groups.py tests/test_encoder.py
+============================= 51 passed in 2.91s ==============================
+```
+
+### Test del nuevo endpoint:
+```python
+>>> from ppmt.data.storage import PPMTStorage
+>>> s = PPMTStorage()
+>>> assert hasattr(s, 'clear_trades')  # ✓
+>>> assert hasattr(s, 'clear_signals')  # ✓
+
+>>> from ppmt.terminal.server import app
+>>> routes = [r.path for r in app.routes]
+>>> assert '/api/clear-history' in routes  # ✓
+```
+
+## Sobre "Validation para que es?"
+
+La validación ya tiene un explainer en la UI (v0.36.2, línea 394 del index.html):
+
+> **What is validation?** Before trading a token, PPMT runs a backtest + Monte Carlo simulation to verify the strategy is profitable & safe. **PASS** = tradeable. **FAIL** = skip (win_rate > 40%, profit_factor > 0.8, risk_of_ruin < 20%, min 5 trades). Use *Sweep* to validate many tokens at once.
+
+Resumen para el usuario:
+- **Validation** = prueba de fuego pre-trade. Sin PASS, no se puede operar ese token.
+- Criterios: WR > 40%, PF > 0.8, RoR < 20%, mínimo 5 trades en backtest.
+- **Sweep** = validation masiva en muchos tokens a la vez.
+
+## Sobre "pocos tokens en discovery"
+
+Mejoras ya aplicadas en v0.36.1 (grupos expandidos + filtrado por exchange). Si el usuario sigue viendo pocos:
+1. Subir `Limit` a 0 (sin cap) o 100
+2. Bajar `Min Volume` a 0
+3. Quitar filtros de volatility/category
+
+## Sobre "0 trades a pesar de señales"
+
+Con el fix del SAX sync, el streaming buffer ahora se actualiza correctamente. Eso permite:
+- `buf.has_pattern()` = True (hay suficiente historia)
+- Predicciones reales del trie
+- Señales con entry/exit/SL/TP reales
+- Trades ejecutados en dry-run
+
+Antes del fix, el buffer estaba vacío → nunca se cumplía `len(pattern_buffer) >= pattern_length` → nunca se generaban señales → 0 trades.
+
+## Archivos modificados
+
+- `src/ppmt/engine/realtime.py` — SAX sync fix en 3 sitios (WS on_candle, REST warmup, REST main loop); `pattern_buffer = []` init en REST
+- `src/ppmt/data/storage.py` — añadidos `clear_trades()` y `clear_signals()`
+- `src/ppmt/terminal/server.py` — añadido `POST /api/clear-history` endpoint + `ClearHistoryRequest` model; version bump
+- `src/ppmt/terminal/static/index.html` — botón "Clear" en Trade History + función `clearTradeHistory()` JS; version bump
+- `src/ppmt/cli/main.py` — banner v0.37.0
+- `pyproject.toml` — version 0.37.0
+- `scripts/verify_sax_sync_fix.py` — nuevo script de verificación
+
+## Cómo correr en Mac (comandos correctos)
+
+```bash
+# 1. Clonar / actualizar el repo
+cd ~/ppmt  # o donde tengas el repo
+git pull origin main
+
+# 2. Crear/activar venv (recomendado)
+python3 -m venv .venv
+source .venv/bin/activate
+
+# 3. Instalar dependencias
+pip install -e .
+# Dependencias críticas:
+pip install fastapi uvicorn click rich pandas numpy scipy websockets ccxt
+
+# 4. Lanzar el dashboard
+ppmt terminal
+# o equivalentemente:
+# python -m ppmt.terminal.server
+
+# 5. Abrir el dashboard
+open http://localhost:8420
+```
+
+Si `ppmt terminal` no funciona (PATH), usar:
+```bash
+python3 -m ppmt.terminal.server
+```
+
+Para parar: `Ctrl+C` en la terminal.

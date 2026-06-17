@@ -665,6 +665,74 @@ class PPMTStorage:
             "profit_factor": gross_profit / gross_loss if gross_loss > 0 else 0,
         }
 
+    def clear_trades(self, symbol: Optional[str] = None, older_than_days: int = 0) -> int:
+        """Delete trade history rows.
+
+        v0.37.0: Added so users can clear stale/backtest trades that pollute
+        the dashboard's Trade History panel (e.g. 434 fake BTC trades at
+        $38,452 from a previous backtest, shown while trading XLM/OP/ICP).
+
+        Args:
+            symbol: If provided, only delete trades for this symbol.
+                    If None, delete ALL trades (use with caution).
+            older_than_days: If >0, only delete trades older than N days
+                             (based on created_at). 0 = delete all matching.
+
+        Returns:
+            Number of rows deleted.
+        """
+        cursor = self._ensure_conn().cursor()
+        conditions = []
+        params: list = []
+
+        if symbol:
+            conditions.append("symbol = ?")
+            params.append(symbol)
+        if older_than_days > 0:
+            conditions.append(
+                "created_at < datetime('now', ?)"
+            )
+            params.append(f"-{older_than_days} days")
+
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+        cursor.execute(f"DELETE FROM trades {where}", params)
+        deleted = cursor.rowcount
+        self._ensure_conn().commit()
+        return deleted
+
+    def clear_signals(self, symbol: Optional[str] = None, older_than_days: int = 0) -> int:
+        """Delete signal history rows.
+
+        v0.37.0: Companion to clear_trades() for clearing stale signals.
+
+        Args:
+            symbol: If provided, only delete signals for this symbol.
+            older_than_days: If >0, only delete signals older than N days.
+
+        Returns:
+            Number of rows deleted.
+        """
+        cursor = self._ensure_conn().cursor()
+        conditions = []
+        params: list = []
+
+        if symbol:
+            conditions.append("symbol = ?")
+            params.append(symbol)
+        if older_than_days > 0:
+            conditions.append(
+                "created_at < datetime('now', ?)"
+            )
+            params.append(f"-{older_than_days} days")
+
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+        cursor.execute(f"DELETE FROM signals {where}", params)
+        deleted = cursor.rowcount
+        self._ensure_conn().commit()
+        return deleted
+
     # === Validation Results (v0.31.0) ===
 
     def save_validation(self, val_dict: dict) -> int:
