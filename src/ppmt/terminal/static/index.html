@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>PPMT Terminal v0.34.3</title>
+<title>PPMT Terminal v0.35.0</title>
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -105,6 +105,13 @@ body{background:var(--bg);color:var(--text);font-family:var(--sans);line-height:
 }
 .tab-grid-3 > div{overflow-y:auto;border-right:1px solid var(--border)}
 .tab-grid-3 > div:last-child{border-right:none}
+/* v0.35.0: Asymmetric layout for Trading tab — wider left sidebar (controls) */
+.tab-grid-trading{
+  display:grid;grid-template-columns:1.4fr 1.2fr 1fr;gap:0;
+  flex:1;min-height:0;overflow:hidden;
+}
+.tab-grid-trading > div{overflow-y:auto;border-right:1px solid var(--border)}
+.tab-grid-trading > div:last-child{border-right:none}
 .tab-single{flex:1;min-height:0;overflow-y:auto}
 
 /* === PANELS === */
@@ -257,8 +264,8 @@ tr:hover td{background:rgba(96,165,250,.04)}
 
 /* === RESPONSIVE === */
 @media(max-width:1000px){
-  .tab-grid-2,.tab-grid-3{grid-template-columns:1fr}
-  .tab-grid-2 > div,.tab-grid-3 > div{border-right:none;border-bottom:1px solid var(--border)}
+  .tab-grid-2,.tab-grid-3,.tab-grid-trading{grid-template-columns:1fr}
+  .tab-grid-2 > div,.tab-grid-3 > div,.tab-grid-trading > div{border-right:none;border-bottom:1px solid var(--border)}
   .chart-section{max-height:40vh}
   .blotter-section{flex-direction:column}
   .blotter-left{flex:1;border-right:none;border-bottom:1px solid var(--border)}
@@ -270,7 +277,7 @@ tr:hover td{background:rgba(96,165,250,.04)}
 <!-- ========== HEADER ========== -->
 <header class="header">
   <div class="header-left">
-    <span class="logo">PPMT<span class="logo-ver">v0.34.3</span></span>
+    <span class="logo">PPMT<span class="logo-ver">v0.35.0</span></span>
     <span class="status-dot stopped" id="headerDot"></span>
     <span id="headerStatus" style="font-family:var(--mono);font-size:10px;color:var(--text2)">DETENIDO</span>
   </div>
@@ -308,9 +315,9 @@ tr:hover td{background:rgba(96,165,250,.04)}
       </select>
       <label>Exchange</label>
       <select id="chartExchange" style="width:70px">
-        <option value="mexc">MEXC</option>
-        <option value="binance">Binance</option>
+        <option value="binance" selected>Binance</option>
         <option value="bybit">Bybit</option>
+        <option value="mexc">MEXC</option>
       </select>
       <button class="btn btn-ghost btn-sm" onclick="loadChart()">Reload</button>
       <div style="flex:1"></div>
@@ -486,9 +493,9 @@ tr:hover td{background:rgba(96,165,250,.04)}
 
         </div><!-- /sidebar (discovery col) -->
       </div><!-- /discovery col-1 -->
-      <!-- Discovery col-2: Sweep Results (large) -->
+      <!-- Discovery col-2: Sweep Results (large) + Pipeline Activity Log -->
       <div>
-        <div class="panel" style="border-bottom:none;height:100%;display:flex;flex-direction:column;overflow:hidden">
+        <div class="panel" style="height:55%;display:flex;flex-direction:column;overflow:hidden">
           <div class="panel-header" style="margin-bottom:4px;flex-shrink:0">
             <div class="panel-title">Sweep Results</div>
             <span style="font-family:var(--mono);font-size:9px;color:var(--text3)" id="sweepStatusText">No sweep yet</span>
@@ -499,13 +506,28 @@ tr:hover td{background:rgba(96,165,250,.04)}
             </div>
           </div>
         </div>
+        <!-- v0.35.0: Pipeline Activity Log — shows data flowing through the system -->
+        <div class="panel" style="height:45%;border-bottom:none;display:flex;flex-direction:column;overflow:hidden">
+          <div class="panel-header" style="margin-bottom:4px;flex-shrink:0">
+            <div class="panel-title">Pipeline Activity Log</div>
+            <div style="display:flex;gap:6px;align-items:center">
+              <span style="font-family:var(--mono);font-size:9px;color:var(--text3)" id="activityLogStatus">Idle</span>
+              <button class="btn btn-ghost btn-sm" style="padding:1px 6px;font-size:9px" onclick="clearActivityLog()">Clear</button>
+            </div>
+          </div>
+          <div class="panel-body" style="flex:1;overflow:hidden;display:flex;flex-direction:column">
+            <div id="activityLogBody" style="flex:1;overflow-y:auto;font-family:var(--mono);font-size:9px;background:var(--bg3);border:1px solid var(--border);border-radius:2px;padding:4px">
+              <div style="color:var(--text3)">Waiting for events... Run a sweep or start paper trading to see live activity.</div>
+            </div>
+          </div>
+        </div>
       </div><!-- /discovery col-2 -->
     </div><!-- /tab-grid-2 -->
   </div><!-- /tab-discovery -->
 
-  <!-- ========== TAB: TRADING (Control + Money Management) ========== -->
+  <!-- ========== TAB: TRADING (Control + Active Tokens + Live Feed) ========== -->
   <div class="tab-content" id="tab-trading">
-    <div class="tab-grid-2">
+    <div class="tab-grid-trading">
       <div>
         <div class="sidebar-section">
 
@@ -551,6 +573,33 @@ tr:hover td{background:rgba(96,165,250,.04)}
           </div>
           <span style="font-size:9px;color:var(--text3)">Auto</span>
           <span style="font-family:var(--mono);font-size:9px;color:var(--accent);margin-left:3px" id="autoModeLabel">MANUAL</span>
+        </div>
+
+        <!-- v0.35.0: Position & Live Status — more data per user request -->
+        <div style="margin-top:8px;padding-top:6px;border-top:1px solid var(--border)">
+          <div style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-bottom:3px;text-transform:uppercase;letter-spacing:.5px">Position &amp; Live Status</div>
+          <div class="stats-grid" style="margin-bottom:4px">
+            <div class="stat-card"><div class="stat-label">Position</div><div class="stat-value" id="ctrlPosition" style="font-size:10px">FLAT</div></div>
+            <div class="stat-card"><div class="stat-label">P&amp;L</div><div class="stat-value" id="ctrlPnl" style="font-size:10px">+0.00%</div></div>
+            <div class="stat-card"><div class="stat-label">Regime</div><div class="stat-value" id="ctrlRegime" style="font-size:10px">--</div></div>
+            <div class="stat-card"><div class="stat-label">Candles</div><div class="stat-value" id="ctrlCandles" style="font-size:10px">0</div></div>
+            <div class="stat-card"><div class="stat-label">Signals</div><div class="stat-value" id="ctrlSignals" style="font-size:10px">0</div></div>
+            <div class="stat-card"><div class="stat-label">Trades</div><div class="stat-value" id="ctrlTrades" style="font-size:10px">0</div></div>
+            <div class="stat-card"><div class="stat-label">Pattern</div><div class="stat-value" id="ctrlPattern" style="font-size:10px;font-family:var(--mono)">[...]</div></div>
+            <div class="stat-card"><div class="stat-label">Entropy</div><div class="stat-value" id="ctrlEntropy" style="font-size:10px">0.0b</div></div>
+          </div>
+        </div>
+
+        <!-- v0.35.0: Last Trade -->
+        <div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--border)">
+          <div style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-bottom:3px;text-transform:uppercase;letter-spacing:.5px">Last Trade</div>
+          <div id="ctrlLastTrade" style="font-family:var(--mono);font-size:9px;color:var(--text3)">No trades yet.</div>
+        </div>
+
+        <!-- v0.35.0: Last 5 Signals -->
+        <div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--border)">
+          <div style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-bottom:3px;text-transform:uppercase;letter-spacing:.5px">Recent Signals (last 5)</div>
+          <div id="ctrlRecentSignals" style="font-family:var(--mono);font-size:9px;color:var(--text3);max-height:80px;overflow-y:auto">No signals yet.</div>
         </div>
       </div>
     </div>
@@ -612,7 +661,21 @@ tr:hover td{background:rgba(96,165,250,.04)}
 
         </div><!-- /sidebar (trading col) -->
       </div><!-- /trading col-1 -->
-      <!-- Trading col-2: Live Trade Feed / Signals -->
+      <!-- v0.35.0: Trading col-2 — Active Trading Tokens (multi-token list) -->
+      <div>
+        <div class="panel" style="border-bottom:none;height:100%;display:flex;flex-direction:column;overflow:hidden">
+          <div class="panel-header" style="margin-bottom:4px;flex-shrink:0">
+            <div class="panel-title">Active Trading Tokens</div>
+            <span style="font-family:var(--mono);font-size:9px;color:var(--text3)" id="activeTokensCount">0 tokens</span>
+          </div>
+          <div class="panel-body" style="flex:1;overflow:hidden;display:flex;flex-direction:column">
+            <div id="activeTokensBody" style="flex:1;overflow-y:auto;font-family:var(--mono);font-size:10px">
+              <div class="empty-state">No active tokens. Run a sweep in Discovery and select PASS tokens to trade.</div>
+            </div>
+          </div>
+        </div>
+      </div><!-- /trading col-2 -->
+      <!-- Trading col-3: Live Trade Feed / Signals -->
       <div>
         <div class="panel" style="border-bottom:none;height:100%;display:flex;flex-direction:column;overflow:hidden">
           <div class="panel-header" style="margin-bottom:4px;flex-shrink:0">
@@ -633,7 +696,7 @@ tr:hover td{background:rgba(96,165,250,.04)}
             </div>
           </div>
         </div>
-      </div><!-- /trading col-2 -->
+      </div><!-- /trading col-3 -->
     </div><!-- /tab-grid-2 -->
   </div><!-- /tab-trading -->
 
@@ -806,14 +869,14 @@ tr:hover td{background:rgba(96,165,250,.04)}
     <div class="status-item" style="margin-left:12px"><span id="statusMessage" style="color:var(--text3)">Listo.</span></div>
   </div>
   <div class="status-right">
-    <span>PPMT v0.34.3</span>
+    <span>PPMT v0.35.0</span>
     <div class="status-item"><span class="label">Uptime:</span><span class="value" id="btmUptime">00:00:00</span></div>
   </div>
 </footer>
 
 <script>
 // ============================================================
-// PPMT Terminal v0.34.2 — Trading Dashboard
+// PPMT Terminal v0.35.0 — Trading Dashboard
 // ============================================================
 
 const API = '';
@@ -1153,8 +1216,65 @@ function updateDashboard(s) {
   // Trading control
   document.getElementById('ctrlSymbol').textContent = s.symbol || '--';
   document.getElementById('ctrlTF').textContent = s.timeframe || '--';
-  document.getElementById('ctrlExchange').textContent = (s.exchange || 'mexc').toUpperCase();
+  document.getElementById('ctrlExchange').textContent = (s.exchange || 'binance').toUpperCase();
   document.getElementById('ctrlPrice').textContent = s.current_price ? formatPrice(s.current_price) : '--';
+
+  // v0.35.0: Position & Live Status (extra data the user requested)
+  const setText = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = (val === undefined || val === null) ? '--' : val; };
+  setText('ctrlPosition', s.position_state || s.position || 'FLAT');
+  const pnl = (s.pnl_pct !== undefined) ? s.pnl_pct :
+              (s.unrealized_pnl_pct !== undefined ? s.unrealized_pnl_pct : null);
+  if (pnl !== null) {
+    const pnlEl = document.getElementById('ctrlPnl');
+    if (pnlEl) {
+      pnlEl.textContent = (pnl >= 0 ? '+' : '') + Number(pnl).toFixed(2) + '%';
+      pnlEl.className = 'stat-value ' + (pnl >= 0 ? 'text-green' : 'text-red');
+      pnlEl.style.fontSize = '10px';
+    }
+  }
+  setText('ctrlRegime', s.regime || '--');
+  setText('ctrlCandles', s.candles_processed !== undefined ? s.candles_processed : 0);
+  setText('ctrlSignals', (s.signals_history && s.signals_history.length) ? s.signals_history.length : 0);
+  setText('ctrlTrades', s.total_trades !== undefined ? s.total_trades : 0);
+  // Pattern buffer — show last 12 chars to fit
+  const pattern = (s.pattern_buffer && s.pattern_buffer.length) ? s.pattern_buffer : '';
+  const patEl = document.getElementById('ctrlPattern');
+  if (patEl) patEl.textContent = pattern ? '[' + pattern.slice(-12) + ']' : '[...]';
+  const entropy = s.entropy !== undefined ? Number(s.entropy).toFixed(2) + 'b' : '0.0b';
+  setText('ctrlEntropy', entropy);
+
+  // v0.35.0: Last Trade
+  const ltEl = document.getElementById('ctrlLastTrade');
+  if (ltEl) {
+    if (s.trade_history && s.trade_history.length > 0) {
+      const lt = s.trade_history[s.trade_history.length - 1];
+      const pnlCls = (lt.pnl_pct || 0) >= 0 ? 'text-green' : 'text-red';
+      ltEl.innerHTML = `<span class="${pnlCls}">${lt.direction || '--'} ${lt.symbol || ''}</span>
+        <span style="color:var(--text3);margin-left:6px">P&L ${(lt.pnl_pct||0)>=0?'+':''}${Number(lt.pnl_pct||0).toFixed(2)}%</span>
+        <span style="color:var(--text3);margin-left:4px">${(lt.exit_time || '').toString().substring(5,19)}</span>`;
+    } else {
+      ltEl.textContent = 'No trades yet.';
+    }
+  }
+
+  // v0.35.0: Recent Signals (last 5 from signals_history)
+  const rsEl = document.getElementById('ctrlRecentSignals');
+  if (rsEl) {
+    if (s.signals_history && s.signals_history.length > 0) {
+      rsEl.innerHTML = s.signals_history.slice(-5).reverse().map(sig => {
+        const dir = (sig.direction || sig.action || sig.signal || '--').toUpperCase();
+        const cls = dir === 'LONG' ? 'text-green' : dir === 'SHORT' ? 'text-red' : 'text-muted';
+        return `<div style="padding:1px 0;border-bottom:1px solid var(--border)">
+          <span class="${cls}" style="font-weight:600">${dir}</span>
+          <span style="color:var(--text);margin-left:4px">${sig.symbol || s.symbol || ''}</span>
+          <span style="color:var(--text3);margin-left:6px">@ $${Number(sig.price||sig.entry_price||0).toFixed(4)}</span>
+          <span style="color:var(--text3);margin-left:4px">conf ${(Number(sig.confidence||0)*100).toFixed(0)}%</span>
+        </div>`;
+      }).join('');
+    } else {
+      rsEl.textContent = 'No signals yet.';
+    }
+  }
 
   // Auto mode
   if (s.auto_mode !== undefined) {
@@ -1629,7 +1749,7 @@ function updateNodes(nodes) {
 
 async function loadSymbols() {
   try {
-    const res = await fetch(`${API}/api/market/symbols?exchange=mexc`);
+    const res = await fetch(`${API}/api/market/symbols?exchange=binance`);
     if (!res.ok) throw new Error('Error cargando simbolos');
     const data = await res.json();
 
@@ -2407,7 +2527,7 @@ function _collectFilters() {
 
 async function loadGroupIntoDropdown() {
   const groupId = document.getElementById('groupSelect').value;
-  const exchange = document.getElementById('chartExchange').value || 'mexc';
+  const exchange = document.getElementById('chartExchange').value || 'binance';
   const filters = _collectFilters();
   const info = document.getElementById('groupInfo');
   info.style.display = 'block';
@@ -2525,7 +2645,7 @@ async function deleteCustomGroup() {
 
 async function startSweep(sweepAll) {
   const timeframe = document.getElementById('setupTimeframe').value || '1h';
-  const exchange = document.getElementById('chartExchange').value || 'mexc';
+  const exchange = document.getElementById('chartExchange').value || 'binance';
   const capital = parseFloat(document.getElementById('setupCapital').value) || 1000;
   // v0.33.0: Use the selected group + filters; fall back to legacy 25-majors
   // list if no group is selected or 'none' is chosen.
@@ -2612,6 +2732,8 @@ async function pollSweepStatus() {
     if (results.length > 0) {
       const container = document.getElementById('sweepResults');
       container.style.display = 'block';
+      // v0.35.0: Also populate the LARGE Discovery col-2 panel
+      const largeContainer = document.getElementById('sweepResultsLarge');
       const sorted = results.slice().sort((a, b) => {
         const score = (r) => r.verdict === 'PASS' ? 2 : r.verdict === 'INSUFFICIENT_DATA' ? 1 : 0;
         const tier = score(b) - score(a);
@@ -2621,6 +2743,54 @@ async function pollSweepStatus() {
         const pfB = Number.isFinite(b.profit_factor) ? b.profit_factor : 0;
         return pfB - pfA;
       });
+
+      // v0.35.0: Build a richer table for the Discovery col-2 large panel
+      function renderLargeRow(r) {
+        const cls = r.verdict === 'PASS' ? 'text-green' :
+                    r.verdict === 'INSUFFICIENT_DATA' ? 'text-yellow' :
+                    r.verdict === 'ERROR' ? 'text-muted' : 'text-red';
+        const wr = r.win_rate !== undefined ? (r.win_rate * 100).toFixed(1) + '%' : '--';
+        const pf = r.profit_factor !== undefined ? Number(r.profit_factor).toFixed(2) : '--';
+        const trades = r.total_trades || 0;
+        const skippedTag = r.skipped ? ' <span class="text-muted">(cached)</span>' : '';
+        const errTag = r.error ? ` <span class="text-red" style="font-size:8px" title="${escapeHtml(r.error)}">⚠ ${escapeHtml(r.error.substring(0,80))}</span>` : '';
+        const score = computeScore(r);
+        const checkbox = r.verdict === 'PASS'
+          ? `<input type="checkbox" class="sweep-pass-chk" data-symbol="${r.symbol}" style="margin-right:6px;vertical-align:middle" onclick="event.stopPropagation()">`
+          : '<span style="display:inline-block;width:13px"></span>';
+        const ror = r.risk_of_ruin !== undefined ? (r.risk_of_ruin * 100).toFixed(1) + '%' : '--';
+        return `<tr>
+          <td style="padding:3px 6px">${checkbox}<span class="${cls}" style="font-weight:600">${r.verdict}</span></td>
+          <td style="padding:3px 6px;color:var(--text)">${r.symbol}</td>
+          <td style="padding:3px 6px;text-align:right">${pf}</td>
+          <td style="padding:3px 6px;text-align:right">${wr}</td>
+          <td style="padding:3px 6px;text-align:right">${trades}</td>
+          <td style="padding:3px 6px;text-align:right">${ror}</td>
+          <td style="padding:3px 6px;text-align:right">${score.toFixed(1)}${skippedTag}</td>
+          <td style="padding:3px 6px">${errTag}</td>
+        </tr>`;
+      }
+      const largeHtml = `
+        <table style="width:100%;border-collapse:collapse;font-family:var(--mono);font-size:10px">
+          <thead>
+            <tr style="position:sticky;top:0;background:var(--bg2);z-index:1">
+              <th style="padding:4px 6px;text-align:left;border-bottom:1px solid var(--border);font-size:9px;color:var(--text3);text-transform:uppercase">Verdict</th>
+              <th style="padding:4px 6px;text-align:left;border-bottom:1px solid var(--border);font-size:9px;color:var(--text3);text-transform:uppercase">Symbol</th>
+              <th style="padding:4px 6px;text-align:right;border-bottom:1px solid var(--border);font-size:9px;color:var(--text3);text-transform:uppercase">PF</th>
+              <th style="padding:4px 6px;text-align:right;border-bottom:1px solid var(--border);font-size:9px;color:var(--text3);text-transform:uppercase">WR</th>
+              <th style="padding:4px 6px;text-align:right;border-bottom:1px solid var(--border);font-size:9px;color:var(--text3);text-transform:uppercase">Trades</th>
+              <th style="padding:4px 6px;text-align:right;border-bottom:1px solid var(--border);font-size:9px;color:var(--text3);text-transform:uppercase">RoR</th>
+              <th style="padding:4px 6px;text-align:right;border-bottom:1px solid var(--border);font-size:9px;color:var(--text3);text-transform:uppercase">Score</th>
+              <th style="padding:4px 6px;text-align:left;border-bottom:1px solid var(--border);font-size:9px;color:var(--text3);text-transform:uppercase">Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${sorted.map(renderLargeRow).join('')}
+          </tbody>
+        </table>`;
+      if (largeContainer) largeContainer.innerHTML = largeHtml;
+
+      // Keep the small compact list (Setup panel) too
       container.innerHTML = sorted.map(r => {
         const cls = r.verdict === 'PASS' ? 'text-green' :
                     r.verdict === 'INSUFFICIENT_DATA' ? 'text-yellow' :
@@ -2629,9 +2799,7 @@ async function pollSweepStatus() {
         const pf = r.profit_factor !== undefined ? Number(r.profit_factor).toFixed(2) : '--';
         const trades = r.total_trades || 0;
         const skippedTag = r.skipped ? ' <span class="text-muted">(cached)</span>' : '';
-        // v0.34.2: mostrar error si existe (FAIL con causa visible)
         const errTag = r.error ? ` <span class="text-red" style="font-size:8px" title="${escapeHtml(r.error)}">⚠ ${escapeHtml(r.error.substring(0,60))}</span>` : '';
-        // v0.34.1: checkbox for PASS tokens so user can select which to trade
         const checkbox = r.verdict === 'PASS'
           ? `<input type="checkbox" class="sweep-pass-chk" data-symbol="${r.symbol}" style="margin-right:4px;vertical-align:middle" onclick="event.stopPropagation()">`
           : '<span style="display:inline-block;width:13px"></span>';
@@ -2650,6 +2818,23 @@ async function pollSweepStatus() {
       const hasPass = sorted.some(r => r.verdict === 'PASS');
       document.getElementById('btnSelectAllPass').style.display = hasPass ? 'block' : 'none';
       document.getElementById('btnTradeSelected').style.display = hasPass ? 'block' : 'none';
+    }
+
+    // v0.35.0: Update the Sweep Results panel status text
+    const sweepStatusEl = document.getElementById('sweepStatusText');
+    if (sweepStatusEl) {
+      const total = s.total || 0;
+      const done = s.done || 0;
+      if (s.running) {
+        sweepStatusEl.textContent = `Running: ${done}/${total} (${s.passed} PASS / ${s.failed} FAIL)`;
+        sweepStatusEl.style.color = 'var(--accent)';
+      } else if (s.finished_at > 0) {
+        sweepStatusEl.textContent = `Done: ${s.passed} PASS / ${s.failed} FAIL / ${s.skipped} skipped — ${total} total`;
+        sweepStatusEl.style.color = 'var(--text3)';
+      } else {
+        sweepStatusEl.textContent = 'No sweep yet';
+        sweepStatusEl.style.color = 'var(--text3)';
+      }
     }
 
     // Stop polling when sweep finishes
@@ -2718,8 +2903,11 @@ function selectAllPassTokens() {
   showStatusMsg('Todos los tokens PASS seleccionados.');
 }
 
-// v0.34.1: tradeSelectedTokens — pasa los tokens seleccionados al setup
-// y arranca Start Paper para cada uno (secuencialmente)
+// v0.35.0: _activeTradeTokens — lista persistente (en memoria) de tokens
+// que el usuario ha marcado para operar. Se alimenta desde el botón
+// "Trade Selected" del Discovery tab y se renderiza en el Trading tab.
+let _activeTradeTokens = []; // [{symbol, timeframe, exchange, addedAt, status}]
+
 async function tradeSelectedTokens() {
   const selected = [];
   document.querySelectorAll('.sweep-pass-chk').forEach(chk => {
@@ -2729,22 +2917,293 @@ async function tradeSelectedTokens() {
     alert('Selecciona al menos un token PASS (usa los checkboxes).');
     return;
   }
-  // Por ahora: cargar el primero en el setup y avisar al usuario
-  // (la ejecución multi-token simultánea requiere v0.35 portfolio runner)
-  const first = selected[0];
-  document.getElementById('setupSymbol').value = first.split('/')[0] + '/USDT';
-  document.getElementById('chartSymbol').value = first;
-  loadChart();
 
-  let msg = `Has seleccionado ${selected.length} token(s):\n\n`;
-  msg += selected.join(', ') + '\n\n';
-  msg += `Se ha cargado ${first} en el panel de Setup.\n`;
-  msg += `Pulsa "Prepare Token" y luego "Start Paper" para operarlo.\n\n`;
-  msg += `Nota: la ejecución simultánea de varios tokens requiere el\n`;
-  msg += `Portfolio Runner (planeado para v0.35). Por ahora puedes operarlos\n`;
-  msg += `uno a uno secuencialmente.`;
-  alert(msg);
+  const tf = document.getElementById('setupTimeframe').value || '1h';
+  const exchange = document.getElementById('chartExchange').value || 'binance';
+
+  // Merge into _activeTradeTokens (avoid duplicates)
+  let addedCount = 0;
+  for (const sym of selected) {
+    const exists = _activeTradeTokens.find(t => t.symbol === sym && t.timeframe === tf);
+    if (!exists) {
+      _activeTradeTokens.push({
+        symbol: sym,
+        timeframe: tf,
+        exchange,
+        addedAt: new Date().toISOString(),
+        status: 'QUEUED',
+        pnl_pct: 0,
+        signals: 0,
+        trades: 0,
+        last_price: 0,
+      });
+      addedCount++;
+    }
+  }
+
+  // Render the Trading tab panel
+  renderActiveTradeTokens();
+
+  // Auto-switch to the Trading tab so the user sees their selection
+  switchTab('trading');
+
+  showStatusMsg(`${addedCount} token(s) añadido(s) a Trading. Total: ${_activeTradeTokens.length} activos.`);
+
+  // If only 1 token selected, also load it as the primary chart/setup
+  if (selected.length === 1) {
+    const first = selected[0];
+    const setupSel = document.getElementById('setupSymbol');
+    if (setupSel) setupSel.value = first.split('/')[0] + '/USDT';
+    const chartSym = document.getElementById('chartSymbol');
+    if (chartSym) { chartSym.value = first; loadChart(); }
+  }
 }
+
+// v0.35.0: renderActiveTradeTokens — dibuja la tabla de tokens activos
+// en el panel "Active Trading Tokens" del Trading tab.
+function renderActiveTradeTokens() {
+  const container = document.getElementById('activeTokensBody');
+  if (!container) return;
+  if (_activeTradeTokens.length === 0) {
+    container.innerHTML = '<div class="empty-state">No active tokens. Run a sweep in Discovery and select PASS tokens to trade.</div>';
+    return;
+  }
+  const rows = _activeTradeTokens.map((t, idx) => {
+    const pnlCls = (t.pnl_pct || 0) > 0 ? 'text-green' : (t.pnl_pct || 0) < 0 ? 'text-red' : 'text-muted';
+    const statusCls = t.status === 'LIVE' ? 'text-green' :
+                      t.status === 'QUEUED' ? 'text-yellow' :
+                      t.status === 'STOPPED' ? 'text-muted' :
+                      t.status === 'ERROR' ? 'text-red' : 'text-muted';
+    return `<tr>
+      <td style="padding:3px 6px">
+        <input type="checkbox" class="active-tok-chk" data-idx="${idx}" style="margin-right:4px" checked>
+        <span style="color:var(--text);font-weight:600">${t.symbol}</span>
+      </td>
+      <td style="padding:3px 6px;text-align:center">${t.timeframe}</td>
+      <td style="padding:3px 6px;text-align:center">${(t.exchange || '').toUpperCase()}</td>
+      <td style="padding:3px 6px;text-align:center" class="${statusCls}">${t.status}</td>
+      <td style="padding:3px 6px;text-align:right">${t.last_price ? '$' + Number(t.last_price).toFixed(4) : '--'}</td>
+      <td style="padding:3px 6px;text-align:right" class="${pnlCls}">${(t.pnl_pct || 0).toFixed(2)}%</td>
+      <td style="padding:3px 6px;text-align:right">${t.signals || 0}</td>
+      <td style="padding:3px 6px;text-align:right">${t.trades || 0}</td>
+      <td style="padding:3px 6px;text-align:center">
+        <button class="btn btn-ghost btn-sm" style="padding:1px 6px;font-size:9px" onclick="startOneToken(${idx})">Start</button>
+        <button class="btn btn-ghost btn-sm" style="padding:1px 6px;font-size:9px" onclick="stopOneToken(${idx})">Stop</button>
+        <button class="btn btn-ghost btn-sm" style="padding:1px 6px;font-size:9px" onclick="removeOneToken(${idx})">Del</button>
+      </td>
+    </tr>`;
+  }).join('');
+  container.innerHTML = `
+    <table style="width:100%;border-collapse:collapse;font-family:var(--mono);font-size:10px">
+      <thead>
+        <tr style="position:sticky;top:0;background:var(--bg2);z-index:1">
+          <th style="padding:4px 6px;text-align:left;border-bottom:1px solid var(--border);font-size:9px;color:var(--text3);text-transform:uppercase">Symbol</th>
+          <th style="padding:4px 6px;text-align:center;border-bottom:1px solid var(--border);font-size:9px;color:var(--text3);text-transform:uppercase">TF</th>
+          <th style="padding:4px 6px;text-align:center;border-bottom:1px solid var(--border);font-size:9px;color:var(--text3);text-transform:uppercase">Exch</th>
+          <th style="padding:4px 6px;text-align:center;border-bottom:1px solid var(--border);font-size:9px;color:var(--text3);text-transform:uppercase">Status</th>
+          <th style="padding:4px 6px;text-align:right;border-bottom:1px solid var(--border);font-size:9px;color:var(--text3);text-transform:uppercase">Price</th>
+          <th style="padding:4px 6px;text-align:right;border-bottom:1px solid var(--border);font-size:9px;color:var(--text3);text-transform:uppercase">P&L</th>
+          <th style="padding:4px 6px;text-align:right;border-bottom:1px solid var(--border);font-size:9px;color:var(--text3);text-transform:uppercase">Signals</th>
+          <th style="padding:4px 6px;text-align:right;border-bottom:1px solid var(--border);font-size:9px;color:var(--text3);text-transform:uppercase">Trades</th>
+          <th style="padding:4px 6px;text-align:center;border-bottom:1px solid var(--border);font-size:9px;color:var(--text3);text-transform:uppercase">Actions</th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div style="display:flex;gap:4px;margin-top:6px;padding:6px 0;border-top:1px solid var(--border)">
+      <button class="btn btn-success btn-sm" onclick="startAllActiveTokens()" style="flex:1">Start All</button>
+      <button class="btn btn-danger btn-sm" onclick="stopAllActiveTokens()" style="flex:1">Stop All</button>
+      <button class="btn btn-ghost btn-sm" onclick="clearActiveTokens()" style="flex:1">Clear List</button>
+    </div>`;
+}
+
+// v0.35.0: per-token controls
+async function startOneToken(idx) {
+  const t = _activeTradeTokens[idx];
+  if (!t) return;
+  // Set as the primary token in the chart/setup
+  const setupSel = document.getElementById('setupSymbol');
+  if (setupSel) setupSel.value = t.symbol.split('/')[0] + '/USDT';
+  const chartSym = document.getElementById('chartSymbol');
+  if (chartSym) { chartSym.value = t.symbol; loadChart(); }
+  // Auto-setup + start paper
+  await autoSetup();
+  t.status = 'LIVE';
+  renderActiveTradeTokens();
+  showStatusMsg(`Started ${t.symbol}.`);
+}
+
+async function stopOneToken(idx) {
+  const t = _activeTradeTokens[idx];
+  if (!t) return;
+  t.status = 'STOPPED';
+  renderActiveTradeTokens();
+  showStatusMsg(`Stopped ${t.symbol}.`);
+}
+
+function removeOneToken(idx) {
+  _activeTradeTokens.splice(idx, 1);
+  renderActiveTradeTokens();
+}
+
+async function startAllActiveTokens() {
+  if (_activeTradeTokens.length === 0) return;
+  if (!confirm(`Start paper trading on ${_activeTradeTokens.length} token(s)?\nNote: simultaneous multi-token trading requires the Portfolio Runner (planned v0.36). For now, the first token will be loaded.`)) return;
+  // Load first token as primary
+  await startOneToken(0);
+}
+
+function stopAllActiveTokens() {
+  _activeTradeTokens.forEach(t => { t.status = 'STOPPED'; });
+  stopTrading();
+  renderActiveTradeTokens();
+}
+
+function clearActiveTokens() {
+  if (!confirm('Clear all active tokens?')) return;
+  _activeTradeTokens = [];
+  renderActiveTradeTokens();
+}
+
+// v0.35.0: pollActiveTokensLive — actualiza precios y P&L de los tokens activos
+// cada 5s llamando a /api/price?symbols=...
+let _activeTokensPollHandle = null;
+async function pollActiveTokensLive() {
+  if (_activeTradeTokens.length === 0) return;
+  const symbols = _activeTradeTokens.map(t => t.symbol).join(',');
+  try {
+    const res = await fetch(`${API}/api/market/symbols?exchange=binance`);
+    // Try a simple price fetch via the chart-load endpoint instead
+    for (const t of _activeTradeTokens) {
+      try {
+        const r = await fetch(`${API}/api/price?symbol=${encodeURIComponent(t.symbol)}&exchange=${t.exchange}`);
+        if (r.ok) {
+          const data = await r.json();
+          if (data && data.price) {
+            t.last_price = data.price;
+          }
+        }
+      } catch (e) { /* skip */ }
+    }
+    renderActiveTradeTokens();
+  } catch (e) { /* skip */ }
+}
+
+// ============================================================
+// v0.35.0: PIPELINE ACTIVITY LOG
+// ============================================================
+// Captura eventos del pipeline (sweep progress, validation, signals,
+// WS status, trades) y los muestra en tiempo real en el panel
+// "Pipeline Activity Log" del Discovery tab.
+let _activityLog = []; // [{ts, level, msg}]
+const _MAX_ACTIVITY_LOG = 200;
+
+function logActivity(level, msg) {
+  const ts = new Date();
+  const entry = {
+    ts: ts.toTimeString().substring(0, 8),
+    level: level || 'INFO',  // INFO, OK, WARN, ERR, SWEEP, SIGNAL
+    msg: msg,
+  };
+  _activityLog.push(entry);
+  if (_activityLog.length > _MAX_ACTIVITY_LOG) _activityLog.shift();
+  renderActivityLog();
+}
+
+function renderActivityLog() {
+  const body = document.getElementById('activityLogBody');
+  if (!body) return;
+  if (_activityLog.length === 0) {
+    body.innerHTML = '<div style="color:var(--text3)">Waiting for events... Run a sweep or start paper trading to see live activity.</div>';
+    return;
+  }
+  const colorMap = {
+    INFO: 'var(--text2)',
+    OK: 'var(--green)',
+    WARN: 'var(--yellow)',
+    ERR: 'var(--red)',
+    SWEEP: 'var(--accent)',
+    SIGNAL: 'var(--green)',
+  };
+  body.innerHTML = _activityLog.slice(-100).reverse().map(e => {
+    const color = colorMap[e.level] || 'var(--text2)';
+    return `<div style="padding:1px 0;color:${color};border-bottom:1px solid rgba(255,255,255,.04)">
+      <span style="color:var(--text3);margin-right:6px">${e.ts}</span>
+      <span style="font-weight:600;margin-right:6px">[${e.level}]</span>
+      <span>${escapeHtml(e.msg)}</span>
+    </div>`;
+  }).join('');
+}
+
+function clearActivityLog() {
+  _activityLog = [];
+  renderActivityLog();
+}
+
+// Hook into existing events: pollSweepStatus, autoSetup, etc.
+// We'll patch the relevant functions to log key milestones.
+const _origStartSweep = startSweep;
+startSweep = async function(sweepAll) {
+  logActivity('SWEEP', `Sweep ${sweepAll ? 'ALL GROUPS' : 'selected group'} starting...`);
+  await _origStartSweep(sweepAll);
+};
+
+const _origPollSweepStatus = pollSweepStatus;
+let _lastSweepDone = 0;
+let _lastSweepSymbol = '';
+pollSweepStatus = async function() {
+  await _origPollSweepStatus();
+  try {
+    const res = await fetch(`${API}/api/sweep-status`);
+    if (!res.ok) return;
+    const s = await res.json();
+    // Log when a new token starts validating
+    if (s.running && s.current_symbol && s.current_symbol !== _lastSweepSymbol) {
+      _lastSweepSymbol = s.current_symbol;
+      logActivity('SWEEP', `Validating ${s.current_symbol} (${s.done}/${s.total})...`);
+    }
+    // Log completion
+    if (s.finished_at > 0 && _lastSweepDone !== s.finished_at) {
+      _lastSweepDone = s.finished_at;
+      logActivity('OK', `Sweep done: ${s.passed} PASS / ${s.failed} FAIL / ${s.skipped} skipped`);
+      // Find PASS tokens and log them
+      const passTokens = (s.results || []).filter(r => r.verdict === 'PASS' && !r.skipped);
+      passTokens.forEach(r => {
+        logActivity('OK', `PASS: ${r.symbol} — PF ${Number(r.profit_factor||0).toFixed(2)}, WR ${(r.win_rate*100).toFixed(1)}%, ${r.total_trades||0} trades`);
+      });
+    }
+  } catch (e) { /* skip */ }
+};
+
+// Log WS status changes
+let _lastWsStatus = '';
+function logWsStatus(status) {
+  if (status !== _lastWsStatus) {
+    _lastWsStatus = status;
+    const level = status === 'streaming' ? 'OK' : status === 'connected' ? 'INFO' :
+                  status === 'reconnecting' || status === 'error' ? 'WARN' : 'INFO';
+    logActivity(level, `WebSocket: ${status}`);
+  }
+}
+
+// Log autoSetup milestones
+const _origAutoSetup = autoSetup;
+autoSetup = async function() {
+  logActivity('INFO', `Auto-setup starting for ${document.getElementById('setupSymbol').value || ''}...`);
+  try {
+    const result = await _origAutoSetup();
+    logActivity('OK', `Auto-setup complete`);
+    return result;
+  } catch (e) {
+    logActivity('ERR', `Auto-setup failed: ${e.message}`);
+    throw e;
+  }
+};
+
+// Initial render
+renderActivityLog();
+logActivity('INFO', 'PPMT v0.35.0 dashboard initialized. Ready.');
+
 </script>
 
 </body>

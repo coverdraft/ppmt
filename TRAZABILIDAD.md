@@ -2644,3 +2644,50 @@ usará la versión cacheada y seguirás viendo v0.34.2).
 3. Al pulsar **Start Paper**, el pattern buffer se resetea. Si la sesión
    no produce señales, el buffer se queda vacío con el mensaje
    "No data yet — start a trading session to see live SAX symbols".
+
+---
+
+# v0.35.0 — 2026-06-17
+
+## Resumen
+
+Corrige 4 problemas críticos reportados por el usuario:
+1. **Sweep resultados no muestra nada** en Discovery tab → Arreglado: ahora el panel grande "Sweep Results" se renderiza con tabla completa (PF, WR, Trades, RoR, Score, Notes).
+2. **No aparecen en trading los seleccionados** para operar → Arreglado: el botón "Trade Selected" ahora pobla el nuevo panel "Active Trading Tokens" en el Trading tab con todos los PASS tokens seleccionados, con controles por-token (Start/Stop/Del) y globales (Start All/Stop All/Clear).
+3. **MEXC subscription rejected after 3 retries** → Arreglado: el exchange por defecto ahora es **Binance** en toda la app (server.py: 12 endpoints, index.html: 4 lugares).
+4. **'NoneType' object has no attribute 'cursor'** durante sweep → Arreglado: añadido `PPMTStorage._ensure_conn()` que reabre la conexión lazy. Todos los 30+ métodos de storage ahora lo usan. Una conexión cerrada por un collector.close() o storage.close() ya no crashea la siguiente operación.
+
+## Mejoras adicionales
+
+- **Pipeline Activity Log** (Discovery tab, panel inferior): log en vivo de eventos del pipeline — sweep milestones, PASS tokens, WS status, auto-setup. Color-codificado (INFO/OK/WARN/ERR/SWEEP/SIGNAL).
+- **Trading Control enriquecido**: nuevas secciones Position & Live Status (8 stats), Last Trade (con dirección, precios, P&L), Recent Signals (últimas 5 señales con dirección, precio, confianza).
+- **Layout Trading tab**: cambiado de 2 columnas a 3 columnas asimétricas (`tab-grid-trading`: 1.4fr : 1.2fr : 1fr) — Control | Active Tokens | Live Feed.
+- **Responsive**: el nuevo layout colapsa a 1 columna en móvil.
+
+## Tests
+
+- `src/tests/test_v0340.py`: 19/19 PASS (recalibration, listing_days_min, sweep cache, history_manager, score_signal).
+- `tests/test_sax.py`, `test_trie.py`, `test_matcher.py`, `test_encoder.py`: 50/50 PASS.
+- Server boot: 43 routes cargadas, todos los módulos importan OK.
+
+## Cómo actualizar en el ordenador del usuario
+
+```bash
+cd ~/ppmt  # o donde tengas el repo
+git pull origin main
+pip install -e . --upgrade
+# Reinicia el terminal:
+pkill -f "ppmt.terminal.server" || true
+python -m ppmt.terminal.server  # o: ppmt serve
+# Abre http://localhost:8420
+```
+
+## Archivos modificados
+
+- `src/ppmt/terminal/static/index.html` — UI: tab layout, Activity Log, Active Tokens panel, enriched Trading Control
+- `src/ppmt/terminal/server.py` — Default exchange: mexc → binance (12 places)
+- `src/ppmt/data/storage.py` — Added `_ensure_conn()`, patched all 30+ methods
+- `src/ppmt/__init__.py` — Version: 0.34.3 → 0.35.0
+- `src/ppmt/cli/main.py` — Version: 0.29.0 → 0.35.0
+- `pyproject.toml` — Version: 0.34.3 → 0.35.0
+- `worklog.md` — v0.35.0 entry

@@ -254,3 +254,30 @@ Stage Summary:
   * Both dropdowns (chart + setup) stay in sync
 - Dropdown now shows real major tokens (AAVE, BCH, ADA, AVAX, etc.)
   instead of being filled with "1000BONK/USDT"-style leveraged tokens
+
+---
+Task ID: v0.35.0
+Agent: main
+Task: PPMT v0.35.0 — Fix MEXC blocking, NoneType cursor errors, sweep results display, multi-token trading UI, activity log
+
+Work Log:
+- Switched default exchange from "mexc" to "binance" across server.py (12 endpoints) and index.html (4 places). MEXC was rejecting subscriptions with "Reason: Blocked!" — Binance has no such rate limiting.
+- Added PPMTStorage._ensure_conn() method that lazily reopens the SQLite connection if it was closed. Patched all 30+ storage methods (load_ohlcv, save_validation, save_trie, etc.) to call self._ensure_conn().cursor() instead of self.conn.cursor(). This eliminates the "'NoneType' object has no attribute 'cursor'" errors that were marking 50+ tokens as FAIL during sweeps.
+- Updated pollSweepStatus() in index.html to ALSO render results into the Discovery col-2 large panel (sweepResultsLarge) — previously only the small compact list was updated, leaving the large panel showing "Run a sweep..." forever. Now displays a full sortable table with PF, WR, Trades, RoR, Score columns.
+- Refactored tradeSelectedTokens() to populate a new _activeTradeTokens[] in-memory list of all selected PASS tokens, render them in the Trading tab's new "Active Trading Tokens" panel with per-token Start/Stop/Del buttons and a "Start All" / "Stop All" / "Clear List" toolbar. Auto-switches to Trading tab after selection.
+- Changed Trading tab layout from tab-grid-2 (2 col) to a new tab-grid-trading asymmetric 3-column layout (1.4fr : 1.2fr : 1fr) — col-1 Trading Control, col-2 Active Trading Tokens, col-3 Live Session Feed.
+- Enriched Trading Control panel with 3 new sections: Position & Live Status (Position, P&L, Regime, Candles, Signals, Trades, Pattern, Entropy), Last Trade (direction, prices, P&L), Recent Signals (last 5 from signals_history).
+- Added a "Pipeline Activity Log" panel at the bottom of Discovery col-2 (45% height). It captures sweep milestones, PASS tokens, WS status changes, auto-setup events, and renders them as a color-coded log. Provides the "ver los datos armandose" experience the user requested.
+- Updated version strings from 0.34.3 → 0.35.0 in __init__.py, pyproject.toml, cli/main.py, index.html (title, logo, status bar).
+
+Stage Summary:
+- All 19 v0.34.0 tests pass (recalibration, listing_days_min, sweep cache, history_manager, score_signal).
+- All 50 SAX/Trie/Matcher/Encoder tests pass.
+- Server boots cleanly with 43 routes; all module imports succeed.
+- HTML structure balanced (355 div open / 355 close, 2 script tags).
+- Default exchange is now Binance everywhere — MEXC blocking issue resolved.
+- NoneType cursor errors eliminated via defensive _ensure_conn().
+- Sweep results now visible in Discovery tab's large right panel.
+- Selected PASS tokens flow into Trading tab's new "Active Trading Tokens" panel.
+- Discovery tab shows a live Pipeline Activity Log so user can see data flowing.
+- Trading Control panel shows Position, P&L, Regime, Candles, Signals, Trades, Pattern, Entropy, Last Trade, Recent Signals.

@@ -67,9 +67,25 @@ class PPMTStorage:
         # _create_tables is idempotent (CREATE TABLE IF NOT EXISTS)
         self._create_tables()
 
+    def _ensure_conn(self) -> "sqlite3.Connection":
+        """v0.35.0: Lazy reconnect for ALL storage methods.
+
+        Every read/write method calls `cursor = self._ensure_conn().cursor()`
+        instead of `cursor = self._ensure_conn().cursor()`. If the connection was closed
+        (e.g. by an early `storage.close()` in a pipeline), this transparently
+        reopens it so the call succeeds instead of raising
+        `'NoneType' object has no attribute 'cursor'`.
+
+        This is the root-cause fix for the v0.34.x sweep errors where 50+ tokens
+        per sweep were marked FAIL with the NoneType cursor error.
+        """
+        if self.conn is None:
+            self._reconnect()
+        return self.conn
+
     def _create_tables(self) -> None:
         """Create database tables if they don't exist."""
-        cursor = self.conn.cursor()
+        cursor = self._ensure_conn().cursor()
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS assets (
@@ -204,13 +220,13 @@ class PPMTStorage:
             ON validations(symbol, timeframe, created_at DESC)
         """)
 
-        self.conn.commit()
+        self._ensure_conn().commit()
 
     # === Asset Management ===
 
     def register_asset(self, symbol: str, asset_class: str) -> None:
         """Register or update an asset in the database."""
-        cursor = self.conn.cursor()
+        cursor = self._ensure_conn().cursor()
         cursor.execute(
             """INSERT INTO assets (symbol, asset_class, weight_profile, first_seen, last_updated)
                VALUES (?, ?, ?, datetime('now'), datetime('now'))
@@ -219,11 +235,11 @@ class PPMTStorage:
                    last_updated=datetime('now')""",
             (symbol, asset_class, self._infer_weight_profile(asset_class)),
         )
-        self.conn.commit()
+        self._ensure_conn().commit()
 
     def get_assets(self) -> list[dict]:
         """Get all tracked assets with metadata."""
-        cursor = self.conn.cursor()
+        cursor = self._ensure_conn().cursor()
         cursor.execute("""
             SELECT a.symbol, a.asset_class, a.weight_profile,
                    a.first_seen, a.last_updated, a.candle_count
@@ -289,7 +305,7 @@ class PPMTStorage:
                 float(row["volume"]),
             ))
 
-        cursor = self.conn.cursor()
+        cursor = self._ensure_conn().cursor()
         cursor.executemany(
             """INSERT OR IGNORE INTO ohlcv
                (symbol, timeframe, timestamp, open, high, low, close, volume)
@@ -304,7 +320,7 @@ class PPMTStorage:
             (symbol, symbol),
         )
 
-        self.conn.commit()
+        self._ensure_conn().commit()
         return inserted
 
     def load_ohlcv(self, symbol: str, timeframe: str) -> pd.DataFrame:
@@ -314,7 +330,7 @@ class PPMTStorage:
         Returns:
             DataFrame with DatetimeIndex and columns: open, high, low, close, volume
         """
-        cursor = self.conn.cursor()
+        cursor = self._ensure_conn().cursor()
         cursor.execute(
             """SELECT timestamp, open, high, low, close, volume
                FROM ohlcv
@@ -334,7 +350,7 @@ class PPMTStorage:
 
     def get_candle_count(self, symbol: str, timeframe: str) -> int:
         """Get the number of stored candles for a symbol/timeframe."""
-        cursor = self.conn.cursor()
+        cursor = self._ensure_conn().cursor()
         cursor.execute(
             "SELECT COUNT(*) FROM ohlcv WHERE symbol = ? AND timeframe = ?",
             (symbol, timeframe),
@@ -343,7 +359,7 @@ class PPMTStorage:
 
     def get_last_timestamp(self, symbol: str, timeframe: str) -> Optional[int]:
         """Get the last candle timestamp for incremental fetching."""
-        cursor = self.conn.cursor()
+        cursor = self._ensure_conn().cursor()
         cursor.execute(
             "SELECT MAX(timestamp) FROM ohlcv WHERE symbol = ? AND timeframe = ?",
             (symbol, timeframe),
@@ -363,7 +379,7 @@ class PPMTStorage:
             trie: PPMTTrie instance to serialize
         """
         data = json.dumps(trie.to_dict())
-        cursor = self.conn.cursor()
+        cursor = self._ensure_conn().cursor()
         cursor.execute(
             """INSERT INTO tries (symbol, level, data, updated_at)
                VALUES (?, ?, ?, datetime('now'))
@@ -372,7 +388,7 @@ class PPMTStorage:
                    updated_at=datetime('now')""",
             (symbol, level, data),
         )
-        self.conn.commit()
+        self._ensure_conn().commit()
 
     def load_trie(self, symbol: str, level: str) -> Optional[PPMTTrie]:
         """
@@ -385,7 +401,7 @@ class PPMTStorage:
         Returns:
             PPMTTrie instance or None if not found.
         """
-        cursor = self.conn.cursor()
+        cursor = self._ensure_conn().cursor()
         cursor.execute(
             "SELECT data FROM tries WHERE symbol = ? AND level = ?",
             (symbol, level),
@@ -424,7 +440,7 @@ class PPMTStorage:
     def save_engine_state(self, symbol: str, state: dict) -> None:
         """Save engine state (weights, stats) for persistence."""
         data = json.dumps(state, default=str)
-        cursor = self.conn.cursor()
+        cursor = self._ensure_conn().cursor()
         cursor.execute(
             """INSERT INTO engine_states (symbol, data, updated_at)
                VALUES (?, ?, datetime('now'))
@@ -433,11 +449,11 @@ class PPMTStorage:
                    updated_at=datetime('now')""",
             (symbol, data),
         )
-        self.conn.commit()
+        self._ensure_conn().commit()
 
     def load_engine_state(self, symbol: str) -> Optional[dict]:
         """Load engine state for a symbol."""
-        cursor = self.conn.cursor()
+        cursor = self._ensure_conn().cursor()
         cursor.execute(
             "SELECT data FROM engine_states WHERE symbol = ?",
             (symbol,),
@@ -455,7 +471,7 @@ class PPMTStorage:
 
     def save_signal(self, signal_dict: dict) -> None:
         """Save a signal to the history log."""
-        cursor = self.conn.cursor()
+        cursor = self._ensure_conn().cursor()
         cursor.execute(
             """INSERT INTO signals
                (symbol, signal_type, confidence, quality_score, sizing_multiplier,
@@ -479,7 +495,7 @@ class PPMTStorage:
                 signal_dict.get("timestamp", 0),
             ),
         )
-        self.conn.commit()
+        self._ensure_conn().commit()
 
     def get_signals(
         self,
@@ -488,7 +504,7 @@ class PPMTStorage:
         signal_type: Optional[str] = None,
     ) -> list[dict]:
         """Get historical signals for a symbol."""
-        cursor = self.conn.cursor()
+        cursor = self._ensure_conn().cursor()
 
         if signal_type:
             cursor.execute(
@@ -530,7 +546,7 @@ class PPMTStorage:
         Returns:
             Row ID of the inserted trade.
         """
-        cursor = self.conn.cursor()
+        cursor = self._ensure_conn().cursor()
         cursor.execute(
             """INSERT INTO trades
                (symbol, timeframe, direction, entry_price, exit_price,
@@ -563,7 +579,7 @@ class PPMTStorage:
                 trade_dict.get("session_id", ""),
             ),
         )
-        self.conn.commit()
+        self._ensure_conn().commit()
         return cursor.lastrowid
 
     def get_trades(
@@ -581,7 +597,7 @@ class PPMTStorage:
             limit: Max trades to return
             node_id: Filter by node ID (optional)
         """
-        cursor = self.conn.cursor()
+        cursor = self._ensure_conn().cursor()
         conditions = []
         params = []
 
@@ -611,7 +627,7 @@ class PPMTStorage:
 
         Returns total trades, win rate, P&L, etc.
         """
-        cursor = self.conn.cursor()
+        cursor = self._ensure_conn().cursor()
         condition = "WHERE symbol = ?" if symbol else ""
         params = [symbol] if symbol else []
 
@@ -653,7 +669,7 @@ class PPMTStorage:
 
     def save_validation(self, val_dict: dict) -> int:
         """Save a validation result."""
-        cursor = self.conn.cursor()
+        cursor = self._ensure_conn().cursor()
         cursor.execute(
             """INSERT INTO validations
                (symbol, timeframe, verdict, win_rate, profit_factor,
@@ -675,12 +691,12 @@ class PPMTStorage:
                 json.dumps(val_dict.get("details", {})),
             ),
         )
-        self.conn.commit()
+        self._ensure_conn().commit()
         return cursor.lastrowid
 
     def get_latest_validation(self, symbol: str, timeframe: str = "1h") -> Optional[dict]:
         """Get the most recent validation result for a symbol/timeframe."""
-        cursor = self.conn.cursor()
+        cursor = self._ensure_conn().cursor()
         cursor.execute(
             """SELECT * FROM validations
                WHERE symbol = ? AND timeframe = ?
@@ -710,7 +726,7 @@ class PPMTStorage:
         """
         key = f"{symbol}:{timeframe}:profile"
         data = json.dumps(profile_dict, default=str)
-        cursor = self.conn.cursor()
+        cursor = self._ensure_conn().cursor()
         cursor.execute(
             """INSERT INTO engine_states (symbol, data, updated_at)
                VALUES (?, ?, datetime('now'))
@@ -719,7 +735,7 @@ class PPMTStorage:
                    updated_at=datetime('now')""",
             (key, data),
         )
-        self.conn.commit()
+        self._ensure_conn().commit()
 
     def load_token_profile(self, symbol: str, timeframe: str) -> Optional[dict]:
         """
@@ -738,7 +754,7 @@ class PPMTStorage:
             Dict with TokenProfile fields, or None if not found.
         """
         key = f"{symbol}:{timeframe}:profile"
-        cursor = self.conn.cursor()
+        cursor = self._ensure_conn().cursor()
         cursor.execute(
             "SELECT data FROM engine_states WHERE symbol = ?",
             (key,),
