@@ -42,7 +42,7 @@ CONFIG_DIR = os.path.expanduser("~/.ppmt")
 # ------------------------------------------------------------------ #
 # FastAPI application
 # ------------------------------------------------------------------ #
-app = FastAPI(title="PPMT Terminal", version="0.38.8")
+app = FastAPI(title="PPMT Terminal", version="0.38.9")
 
 # Global terminal state (shared with engine)
 terminal_state: TerminalState = get_terminal_state()
@@ -937,6 +937,8 @@ async def multi_start(req: MultiStartRequest) -> dict:
             "win_rate": 0.0,
             "exposure_pct": 0.0,
             "validation_verdict": "",
+            # v0.38.9: track initial capital for realized_pnl_pct calculation
+            "initial_capital": per_capital,
             "last_update_ts": 0.0,
         }
 
@@ -1065,7 +1067,28 @@ async def multi_status() -> dict:
 
     v0.36.2: Now also returns regime, pattern_buffer, entropy, websocket_status,
     portfolio_value, win_rate, exposure_pct, and last_update_ts per session.
+    v0.38.9: Now also returns `realized_pnl` and `realized_pnl_pct` per session
+    (sum of pnl from closed live trades in SQLite). This lets the Trading tab
+    show realized P&L separately from unrealized, addressing the user's concern
+    that "P&L always shows 0.00% even when trades have closed".
     """
+    # v0.38.9: Bulk-fetch realized P&L per symbol+timeframe to avoid N+1 queries.
+    # Each session looks up its realized pnl from this dict.
+    realized_map: dict[tuple[str, str], float] = {}
+    try:
+        storage = PPMTStorage()
+        cursor = storage._ensure_conn().cursor()
+        cursor.execute(
+            """SELECT symbol, timeframe, COALESCE(SUM(pnl), 0) as total_pnl
+               FROM trades WHERE source = 'live'
+               GROUP BY symbol, timeframe"""
+        )
+        for row in cursor.fetchall():
+            realized_map[(row[0], row[1])] = float(row[2] or 0)
+        storage.close()
+    except Exception as e:
+        logger.warning(f"multi_status: realized_pnl bulk fetch failed: {e}")
+
     sessions = []
     now = time.time()
     for node_id, sess in _multi_sessions.items():
@@ -1076,10 +1099,16 @@ async def multi_status() -> dict:
         status = sess["status"]
         if is_active and status == "RUNNING" and last_update > 0 and (now - last_update) > 60:
             status = "STALE"
+        # v0.38.9: Realized P&L from SQLite (sum of pnl for this symbol+tf, live source)
+        sym = sess["symbol"]
+        tf = sess["timeframe"]
+        realized_pnl = realized_map.get((sym, tf), 0.0)
+        initial_cap = float(sess.get("initial_capital", 0) or 0)
+        realized_pnl_pct = (realized_pnl / initial_cap * 100.0) if initial_cap > 0 else 0.0
         sessions.append({
             "node_id": node_id,
-            "symbol": sess["symbol"],
-            "timeframe": sess["timeframe"],
+            "symbol": sym,
+            "timeframe": tf,
             "exchange": sess["exchange"],
             "started_at": sess["started_at"],
             "status": status if is_active else (
@@ -1104,6 +1133,10 @@ async def multi_status() -> dict:
             "validation_verdict": sess.get("validation_verdict", ""),
             "last_update_ts": last_update,
             "seconds_since_update": (now - last_update) if last_update > 0 else 0,
+            # v0.38.9: new realized P&L fields
+            "realized_pnl": realized_pnl,
+            "realized_pnl_pct": realized_pnl_pct,
+            "initial_capital": initial_cap,
         })
     return {
         "ok": True,
@@ -1167,36 +1200,56 @@ async def get_trades(
     symbol: Optional[str] = None,
     timeframe: Optional[str] = None,
     limit: int = 50,
+    source: Optional[str] = "live",
 ) -> dict:
-    """Get closed trade history from persistent storage."""
+    """Get closed trade history from persistent storage.
+
+    v0.38.9: Added `source` query param (default 'live'). The dashboard's
+    Trade History panel now shows only live/paper trades by default, hiding
+    the noisy backtest trades from validation runs. Pass source=null or
+    source=all to see everything, source=backtest for backtest only.
+    """
     try:
         storage = PPMTStorage()
-        trades = storage.get_trades(symbol=symbol, timeframe=timeframe, limit=limit)
-        summary = storage.get_trade_summary(symbol=symbol)
+        # Normalize 'all' to None (no filter)
+        src = None if source in (None, "all", "") else source
+        trades = storage.get_trades(
+            symbol=symbol, timeframe=timeframe, limit=limit, source=src,
+        )
+        summary = storage.get_trade_summary(symbol=symbol, source=src)
         storage.close()
-        return {"ok": True, "trades": trades, "summary": summary}
+        return {"ok": True, "trades": trades, "summary": summary, "source": src or "all"}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
 
 @app.get("/api/trade-summary")
-async def get_trade_summary(symbol: Optional[str] = None) -> dict:
-    """Get aggregate trade statistics."""
+async def get_trade_summary(
+    symbol: Optional[str] = None,
+    source: Optional[str] = "live",
+) -> dict:
+    """Get aggregate trade statistics.
+
+    v0.38.9: Added `source` filter (default 'live').
+    """
     try:
         storage = PPMTStorage()
-        summary = storage.get_trade_summary(symbol=symbol)
+        src = None if source in (None, "all", "") else source
+        summary = storage.get_trade_summary(symbol=symbol, source=src)
         storage.close()
-        return {"ok": True, "summary": summary}
+        return {"ok": True, "summary": summary, "source": src or "all"}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
 
 class ClearHistoryRequest(BaseModel):
-    """v0.37.0: Request body for clearing stale trade/signal history."""
+    """v0.37.0: Request body for clearing stale trade/signal history.
+    v0.38.9: Added optional `source` filter to clear only backtest or live."""
     symbol: Optional[str] = None  # None = clear ALL symbols
     older_than_days: int = 0      # 0 = clear all matching
     clear_trades: bool = True
     clear_signals: bool = True
+    source: Optional[str] = None  # None = all sources, 'backtest' or 'live' to filter
 
 
 @app.post("/api/clear-history")
@@ -1208,11 +1261,16 @@ async def clear_history(req: ClearHistoryRequest) -> dict:
     even while the user was trading XLM/OP/ICP/INJ at $0.23 / $0.11.
     This endpoint lets the user clear that stale data.
 
+    v0.38.9: Added `source` filter — pass 'backtest' to clear only backtest
+    data (preserving live trades), 'live' for the reverse, or None (default)
+    to clear everything.
+
     Args (in body):
         symbol: If provided, only clear this symbol. If None, clear ALL.
         older_than_days: If >0, only clear rows older than N days.
         clear_trades: Whether to clear the trades table (default True).
         clear_signals: Whether to clear the signals table (default True).
+        source: If provided, only clear trades with this source.
 
     Returns:
         {ok: True, trades_deleted: N, signals_deleted: N}
@@ -1224,12 +1282,14 @@ async def clear_history(req: ClearHistoryRequest) -> dict:
         if req.clear_trades:
             trades_deleted = storage.clear_trades(
                 symbol=req.symbol, older_than_days=req.older_than_days,
+                source=req.source,
             )
         if req.clear_signals:
             signals_deleted = storage.clear_signals(
                 symbol=req.symbol, older_than_days=req.older_than_days,
             )
         storage.close()
+        src_label = f" (source={req.source})" if req.source else ""
         return {
             "ok": True,
             "trades_deleted": trades_deleted,
@@ -1237,6 +1297,7 @@ async def clear_history(req: ClearHistoryRequest) -> dict:
             "message": (
                 f"Cleared {trades_deleted} trades and {signals_deleted} signals"
                 + (f" for {req.symbol}" if req.symbol else " (all symbols)")
+                + src_label
                 + (f" older than {req.older_than_days} days" if req.older_than_days > 0 else "")
             ),
         }
@@ -2046,41 +2107,49 @@ async def sweep_tokens(req: SweepRequest) -> dict:
             "INJ/USDT", "SUI/USDT", "TIA/USDT", "SEI/USDT", "RUNE/USDT",
         ]
 
-    # Filter out tokens we can skip (already PASS)
+    # Filter out tokens we can skip (already PASS in a previous sweep).
+    # v0.38.9 fix: Previously, cached PASS tokens were added to results list
+    # (showing in the UI as PASS) but counted in `skipped` instead of `passed`,
+    # producing misleading summaries like "9 PASS / 49 FAIL / 103 skipped"
+    # when the actual list showed 36 PASS (27 cached + 9 fresh). Now we track
+    # cached_pass separately and seed `passed` with it in the reset block.
+    cached_pass_count = 0
+    original_symbol_count = len(symbols)
     if req.skip_if_pass:
         try:
             storage = PPMTStorage()
-            skipped = []
             to_run = []
             for s in symbols:
                 v = storage.get_latest_validation(s, req.timeframe)
                 if v and v.get("verdict") == "PASS":
-                    skipped.append(s)
+                    cached_pass_count += 1
                     _sweep_state["results"].append({
                         "symbol": s, "verdict": "PASS",
                         "win_rate": v.get("win_rate", 0),
                         "profit_factor": v.get("profit_factor", 0),
                         "total_trades": v.get("total_trades", 0),
-                        "skipped": True,
+                        "skipped": True,  # flag for UI "(cached)" tag
                     })
                 else:
                     to_run.append(s)
             storage.close()
-            _sweep_state["skipped"] = len(skipped)
             symbols = to_run
         except Exception as e:
             logger.warning(f"Sweep skip-check failed: {e}")
 
-    # Reset state
+    # Reset state. `passed` seeds with cached_pass_count so the summary
+    # matches the visible results list. `skipped` starts at 0 and is only
+    # incremented in-loop for INSUFFICIENT_DATA verdicts.
     _sweep_state = {
         "running": True,
-        "total": len(symbols),
-        "done": 0,
+        "total": original_symbol_count,  # includes cached, matches DB row
+        "done": cached_pass_count,       # cached tokens are already "done"
         "current_symbol": symbols[0] if symbols else "",
-        "passed": 0,
+        "passed": cached_pass_count,
         "failed": 0,
-        "skipped": _sweep_state.get("skipped", 0),
-        "results": list(_sweep_state.get("results", [])),  # preserve skipped
+        "skipped": 0,
+        "cached_pass": cached_pass_count,  # new field for UI display
+        "results": list(_sweep_state.get("results", [])),
         "started_at": time.time(),
         "finished_at": 0.0,
         "error": "",
@@ -2091,16 +2160,27 @@ async def sweep_tokens(req: SweepRequest) -> dict:
     if not symbols:
         _sweep_state["running"] = False
         _sweep_state["finished_at"] = time.time()
-        return {"ok": True, "message": "All tokens already validated.", "total": 0}
+        return {
+            "ok": True,
+            "message": f"All {cached_pass_count} tokens already validated (cached PASS).",
+            "total": cached_pass_count,
+            "passed": cached_pass_count,
+            "cached_pass": cached_pass_count,
+        }
 
     # Launch background task
     asyncio.create_task(_sweep_runner(symbols, req.timeframe, req.exchange, req.capital))
 
     return {
         "ok": True,
-        "message": f"Sweeping {len(symbols)} tokens in the background.",
-        "total": len(symbols),
-        "skipped": _sweep_state["skipped"],
+        "message": (
+            f"Sweeping {len(symbols)} tokens in the background"
+            + (f" ({cached_pass_count} cached PASS skipped)" if cached_pass_count else "")
+            + "."
+        ),
+        "total": original_symbol_count,
+        "to_run": len(symbols),
+        "cached_pass": cached_pass_count,
     }
 
 
@@ -2224,11 +2304,14 @@ async def _sweep_runner(symbols: list[str], timeframe: str, exchange: str, capit
     _sweep_state["running"] = False
     _sweep_state["finished_at"] = time.time()
     _sweep_state["current_symbol"] = ""
+    cached = _sweep_state.get("cached_pass", 0)
+    fresh_pass = _sweep_state["passed"] - cached
     logger.info(
-        f"Sweep complete: {_sweep_state['passed']} PASS, "
+        f"Sweep complete: {_sweep_state['passed']} PASS "
+        f"({cached} cached + {fresh_pass} fresh), "
         f"{_sweep_state['failed']} FAIL, "
-        f"{_sweep_state['skipped']} skipped "
-        f"({_sweep_state['done']}/{_sweep_state['total']} run)"
+        f"{_sweep_state['skipped']} INSUFFICIENT_DATA "
+        f"({_sweep_state['done']}/{_sweep_state['total']} total)"
     )
 
 

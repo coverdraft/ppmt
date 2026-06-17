@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>PPMT Terminal v0.38.8</title>
+<title>PPMT Terminal v0.38.9</title>
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -277,7 +277,7 @@ tr:hover td{background:rgba(96,165,250,.04)}
 <!-- ========== HEADER ========== -->
 <header class="header">
   <div class="header-left">
-    <span class="logo">PPMT<span class="logo-ver">v0.38.8</span></span>
+    <span class="logo">PPMT<span class="logo-ver">v0.38.9</span></span>
     <span class="status-dot stopped" id="headerDot"></span>
     <span id="headerStatus" style="font-family:var(--mono);font-size:10px;color:var(--text2)">DETENIDO</span>
   </div>
@@ -849,8 +849,13 @@ tr:hover td{background:rgba(96,165,250,.04)}
       <div class="panel" id="panelTradeHistory" style="border-bottom:none;flex:1;display:flex;flex-direction:column;overflow:hidden">
         <div class="panel-header" style="margin-bottom:4px;flex-shrink:0">
           <div class="panel-title">Trade History</div>
+          <select id="tradeHistorySource" onchange="loadTradeHistory()" title="v0.38.9: Filter trades by source. Live = paper/real trades only. Backtest = validation runs. All = both." style="font-size:10px;padding:2px 4px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:2px">
+            <option value="live" selected>Live only</option>
+            <option value="backtest">Backtest only</option>
+            <option value="all">All sources</option>
+          </select>
           <button class="btn btn-ghost btn-sm" onclick="loadTradeHistory()">Reload</button>
-          <button class="btn btn-ghost btn-sm" onclick="clearTradeHistory()" title="v0.38.6: Clear stale trades/signals from SQLite (e.g. old backtest data showing wrong prices)">Clear</button>
+          <button class="btn btn-ghost btn-sm" onclick="clearTradeHistory()" title="v0.38.9: Clear backtest trades from SQLite (preserves live trades). For nuclear wipe, Shift+Click.">Clear</button>
         </div>
         <div class="panel-body" style="flex:1;overflow:hidden;display:flex;flex-direction:column">
           <div class="stats-grid" style="margin-bottom:4px;flex-shrink:0" id="tradeSummaryGrid">
@@ -899,7 +904,7 @@ tr:hover td{background:rgba(96,165,250,.04)}
     <div class="status-item" style="margin-left:12px"><span id="statusMessage" style="color:var(--text3)">Listo.</span></div>
   </div>
   <div class="status-right">
-    <span>PPMT v0.38.8</span>
+    <span>PPMT v0.38.9</span>
     <div class="status-item"><span class="label">Uptime:</span><span class="value" id="btmUptime">00:00:00</span></div>
   </div>
 </footer>
@@ -1361,12 +1366,16 @@ function updateDashboard(s) {
   // Pattern buffer
   updatePatternBuffer(s.pattern_buffer || []);
 
-  // Living trie
+  // Living trie — v0.38.9: fixed field names to match trie.py properties
+  // (pattern_count, max_depth, trading_observations, last_update).
+  // Previously used `nodes`/`patterns` which never existed, so all stats
+  // showed "--" forever.
   if (s.living_trie_stats) {
-    document.getElementById('trieNodes').textContent = s.living_trie_stats.nodes || '--';
+    document.getElementById('trieNodes').textContent = s.living_trie_stats.pattern_count || '--';
     document.getElementById('trieDepth').textContent = s.living_trie_stats.max_depth || '--';
-    document.getElementById('triePatterns').textContent = s.living_trie_stats.patterns || '--';
-    document.getElementById('trieLastUpdate').textContent = s.living_trie_stats.last_update || '--';
+    document.getElementById('triePatterns').textContent = s.living_trie_stats.trading_observations || '--';
+    const tlu = s.living_trie_stats.last_update;
+    document.getElementById('trieLastUpdate').textContent = tlu ? new Date(tlu * 1000).toLocaleTimeString() : '--';
   }
 
   // Signals
@@ -1470,14 +1479,20 @@ function updateDashboard(s) {
       regime.includes('RANGE') ? 'badge-live' : ''
     );
   }
+  // v0.34.3 / v0.38.9: Patterns tab — fixed field names to match backend.
+  // Was using `pattern_count`/`depth`/`total_observations`, but actual fields
+  // are `pattern_count`/`max_depth`/`trading_observations`.
   const tn2 = document.getElementById('trieNodes2');
   if (tn2 && s.living_trie_stats) tn2.textContent = s.living_trie_stats.pattern_count || '--';
   const td2 = document.getElementById('trieDepth2');
-  if (td2 && s.living_trie_stats) td2.textContent = s.living_trie_stats.depth || '--';
+  if (td2 && s.living_trie_stats) td2.textContent = s.living_trie_stats.max_depth || '--';
   const tp2 = document.getElementById('triePatterns2');
-  if (tp2 && s.living_trie_stats) tp2.textContent = s.living_trie_stats.total_observations || '--';
+  if (tp2 && s.living_trie_stats) tp2.textContent = s.living_trie_stats.trading_observations || '--';
   const tlu2 = document.getElementById('trieLastUpdate2');
-  if (tlu2 && s.living_trie_stats) tlu2.textContent = (s.living_trie_stats.last_update || '--').toString().slice(0, 19);
+  if (tlu2 && s.living_trie_stats) {
+    const ts = s.living_trie_stats.last_update;
+    tlu2.textContent = ts ? new Date(ts * 1000).toLocaleTimeString() : '--';
+  }
 
   // v0.34.3: Sweep status text in Discovery tab col-2 header
   const sweepStatusText = document.getElementById('sweepStatusText');
@@ -2087,6 +2102,9 @@ async function checkTradingStatus() {
 async function loadTradeHistory() {
   // v0.36.2: Default to first active multi-session symbol instead of BTC/USDT
   // so the trade history matches what the user is actually trading.
+  // v0.38.9: Added source filter (default 'live') so backtest trades from
+  // validation runs don't pollute the live trade view. User can toggle via
+  // the #tradeHistorySource dropdown.
   let symbol = document.getElementById('setupSymbol').value;
   if (!symbol) {
     // Find first active session with a symbol
@@ -2095,8 +2113,10 @@ async function loadTradeHistory() {
     );
     symbol = activeSession ? activeSession.symbol : 'BTC/USDT';
   }
+  const sourceSel = document.getElementById('tradeHistorySource');
+  const source = sourceSel ? sourceSel.value : 'live';
   try {
-    const res = await fetch(`${API}/api/trades?symbol=${encodeURIComponent(symbol)}&limit=50`);
+    const res = await fetch(`${API}/api/trades?symbol=${encodeURIComponent(symbol)}&limit=50&source=${encodeURIComponent(source)}`);
     if (!res.ok) return;
     const data = await res.json();
 
@@ -2104,21 +2124,23 @@ async function loadTradeHistory() {
     renderTradeHistory(tradeHistoryData);
 
     // Load summary
-    loadTradeSummary(symbol);
+    loadTradeSummary(symbol, source);
   } catch (e) {
     console.error('loadTradeHistory error:', e);
   }
 }
 
 // v0.38.6: Clear stale trades/signals from SQLite.
-// Use case: dashboard was showing 434 fake BTC trades at $38,452 from a
-// previous backtest while user was trading XLM/OP/ICP. This clears all
-// stale data so only fresh live trades show up.
-async function clearTradeHistory() {
+// v0.38.9: By default clears only source='backtest' (preserves live trades).
+// Shift+Click clears EVERYTHING (nuclear option for tainted DBs).
+async function clearTradeHistory(ev) {
   // Determine which symbol to clear (current setupSymbol, or ALL if empty)
   let symbol = document.getElementById('setupSymbol').value;
   let scope = symbol ? `for ${symbol}` : 'for ALL symbols';
-  if (!confirm(`Clear all trade and signal history ${scope}?\n\nThis deletes rows from SQLite (~/.ppmt/ppmt.db).\nUse this to remove stale backtest data that pollutes the dashboard.`)) {
+  const nuclear = ev && ev.shiftKey;
+  const sourceFilter = nuclear ? null : 'backtest';
+  const sourceLabel = nuclear ? 'ALL trades (live + backtest)' : 'backtest trades only (live trades preserved)';
+  if (!confirm(`Clear ${sourceLabel} ${scope}?\n\nThis deletes rows from SQLite (~/.ppmt/ppmt.db).\n\nTip: Shift+Click the Clear button to wipe EVERYTHING including live trades.`)) {
     return;
   }
   try {
@@ -2126,7 +2148,8 @@ async function clearTradeHistory() {
       symbol: symbol || null,
       older_than_days: 0,
       clear_trades: true,
-      clear_signals: true,
+      clear_signals: !nuclear ? false : true,  // only clear signals in nuclear mode
+      source: sourceFilter,
     };
     const res = await fetch(`${API}/api/clear-history`, {
       method: 'POST',
@@ -2232,9 +2255,10 @@ async function viewSweepDetail(scanId) {
   }
 }
 
-async function loadTradeSummary(symbol) {
+async function loadTradeSummary(symbol, source) {
   try {
-    const res = await fetch(`${API}/api/trade-summary?symbol=${encodeURIComponent(symbol)}`);
+    const srcParam = source ? `&source=${encodeURIComponent(source)}` : '';
+    const res = await fetch(`${API}/api/trade-summary?symbol=${encodeURIComponent(symbol)}${srcParam}`);
     if (!res.ok) return;
     const data = await res.json();
 
@@ -3011,16 +3035,20 @@ async function pollSweepStatus() {
       document.getElementById('btnTradeSelected').style.display = hasPass ? 'block' : 'none';
     }
 
-    // v0.35.0: Update the Sweep Results panel status text
+    // v0.35.0 / v0.38.9: Update the Sweep Results panel status text.
+    // v0.38.9 fix: `passed` now includes cached PASS (was 9, now 36 in user's
+    // case). `skipped` is now only INSUFFICIENT_DATA (was 103 incl. cached,
+    // now 76). `cached_pass` shown separately for clarity.
     const sweepStatusEl = document.getElementById('sweepStatusText');
     if (sweepStatusEl) {
       const total = s.total || 0;
       const done = s.done || 0;
+      const cachedTag = s.cached_pass ? ` (${s.cached_pass} cached)` : '';
       if (s.running) {
-        sweepStatusEl.textContent = `Running: ${done}/${total} (${s.passed} PASS / ${s.failed} FAIL)`;
+        sweepStatusEl.textContent = `Running: ${done}/${total} (${s.passed} PASS${cachedTag} / ${s.failed} FAIL)`;
         sweepStatusEl.style.color = 'var(--accent)';
       } else if (s.finished_at > 0) {
-        sweepStatusEl.textContent = `Done: ${s.passed} PASS / ${s.failed} FAIL / ${s.skipped} skipped — ${total} total`;
+        sweepStatusEl.textContent = `Done: ${s.passed} PASS${cachedTag} / ${s.failed} FAIL / ${s.skipped} insufficient — ${total} total`;
         sweepStatusEl.style.color = 'var(--text3)';
       } else {
         sweepStatusEl.textContent = 'No sweep yet';
@@ -3038,8 +3066,9 @@ async function pollSweepStatus() {
       if (btnAll) { btnAll.disabled = false; btnAll.textContent = 'Sweep All Groups'; }
       btnCancel.style.display = 'none';
 
-      // Final summary line
-      const final = `\u2713 Sweep done: ${s.passed} PASS / ${s.failed} FAIL / ${s.skipped} skipped`;
+      // Final summary line — v0.38.9: matches the actual list count
+      const cachedStr = s.cached_pass ? ` (${s.cached_pass} cached)` : '';
+      const final = `\u2713 Sweep done: ${s.passed} PASS${cachedStr} / ${s.failed} FAIL / ${s.skipped} insufficient`;
       document.getElementById('sweepCurrent').textContent = final;
       document.getElementById('sweepCurrent').style.color = 'var(--green)';
 
@@ -3223,6 +3252,16 @@ function renderActiveTradeTokens() {
   const rows = _activeTradeTokens.map((t, idx) => {
     const pnl = Number(t.pnl_pct || 0);
     const pnlCls = pnl > 0 ? 'text-green' : pnl < 0 ? 'text-red' : 'text-muted';
+    // v0.38.9: Realized P&L (sum of closed live trades from SQLite).
+    // Shown alongside unrealized P&L so the user can see if the bot is
+    // actually making money, not just "0.00% because position is flat".
+    const rpnl = Number(t.realized_pnl || 0);
+    const rpnlPct = Number(t.realized_pnl_pct || 0);
+    const rpnlCls = rpnl > 0 ? 'text-green' : rpnl < 0 ? 'text-red' : 'text-muted';
+    const rpnlSign = rpnl > 0 ? '+' : '';
+    const rpnlStr = rpnl !== 0
+      ? `${rpnlSign}${rpnl.toFixed(2)} (${rpnlSign}${rpnlPct.toFixed(2)}%)`
+      : '0.00';
     // v0.36.2: Status color mapping for new states (RUNNING/CONNECTING/WARMING_UP/STALE/VALIDATING/VALIDATION_FAILED)
     const statusCls = (t.status === 'RUNNING' || t.status === 'LIVE') ? 'text-green' :
                       (t.status === 'CONNECTING' || t.status === 'WARMING_UP' || t.status === 'VALIDATING' || t.status === 'STARTING' || t.status === 'STARTING_TRADER') ? 'text-yellow' :
@@ -3254,7 +3293,8 @@ function renderActiveTradeTokens() {
       <td style="padding:3px 6px;text-align:center">${(t.exchange || '').toUpperCase()}</td>
       <td style="padding:3px 6px;text-align:center" class="${statusCls}">${t.status}${staleWarning}</td>
       <td style="padding:3px 6px;text-align:right">${t.last_price ? '$' + Number(t.last_price).toFixed(4) : '--'}</td>
-      <td style="padding:3px 6px;text-align:right" class="${pnlCls}">${pnl.toFixed(2)}%</td>
+      <td style="padding:3px 6px;text-align:right" class="${pnlCls}" title="Unrealized P&L of current open position">${pnl.toFixed(2)}%</td>
+      <td style="padding:3px 6px;text-align:right" class="${rpnlCls}" title="Realized P&L: sum of pnl from closed live trades (from SQLite)">${rpnlStr}</td>
       <td style="padding:3px 6px;text-align:right" class="${regimeCls}" style="font-size:9px">${regime}</td>
       <td style="padding:3px 6px;text-align:center">${pat}</td>
       <td style="padding:3px 6px;text-align:right">${t.candles_processed || 0}</td>
@@ -3276,7 +3316,8 @@ function renderActiveTradeTokens() {
           <th style="padding:4px 6px;text-align:center;border-bottom:1px solid var(--border);font-size:9px;color:var(--text3);text-transform:uppercase">Exch</th>
           <th style="padding:4px 6px;text-align:center;border-bottom:1px solid var(--border);font-size:9px;color:var(--text3);text-transform:uppercase">Status</th>
           <th style="padding:4px 6px;text-align:right;border-bottom:1px solid var(--border);font-size:9px;color:var(--text3);text-transform:uppercase">Price</th>
-          <th style="padding:4px 6px;text-align:right;border-bottom:1px solid var(--border);font-size:9px;color:var(--text3);text-transform:uppercase">P&L</th>
+          <th style="padding:4px 6px;text-align:right;border-bottom:1px solid var(--border);font-size:9px;color:var(--text3);text-transform:uppercase" title="Unrealized P&L of current open position">P&L</th>
+          <th style="padding:4px 6px;text-align:right;border-bottom:1px solid var(--border);font-size:9px;color:var(--text3);text-transform:uppercase" title="Realized P&L from closed live trades">R-P&L</th>
           <th style="padding:4px 6px;text-align:center;border-bottom:1px solid var(--border);font-size:9px;color:var(--text3);text-transform:uppercase">Regime</th>
           <th style="padding:4px 6px;text-align:center;border-bottom:1px solid var(--border);font-size:9px;color:var(--text3);text-transform:uppercase">Pattern</th>
           <th style="padding:4px 6px;text-align:right;border-bottom:1px solid var(--border);font-size:9px;color:var(--text3);text-transform:uppercase">Cand</th>

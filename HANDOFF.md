@@ -2,7 +2,7 @@
 
 > **Read this file FIRST when joining the project.**
 > Última actualización: 2026-06-17
-> Versión actual: **v0.38.8**
+> Versión actual: **v0.38.9**
 > Repositorio: https://github.com/coverdraft/ppmt
 
 ---
@@ -242,7 +242,7 @@ sqlite3 ~/.ppmt/ppmt.db "SELECT symbol, timeframe, COUNT(*) FROM trades GROUP BY
 
 ## ✅ Estado final al momento del handoff
 
-- **Versión**: v0.38.8
+- **Versión**: v0.38.9
 - **Branch**: main (commit `be1da58`)
 - **Sistema**: OPERATIVO — paper trading ejecuta trades en multi-token
 - **Usuario**: conforme con el resultado, quiere continuar en otro chat

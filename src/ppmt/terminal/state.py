@@ -100,7 +100,15 @@ class TerminalState:
     # Living Trie (v0.20.0)
     # ------------------------------------------------------------------ #
     living_trie_stats: dict = field(default_factory=dict)
-    """Living Trie stats: pattern_count, total_observations, last_update."""
+    """Living Trie stats: pattern_count, max_depth, trading_observations, last_update.
+
+    v0.38.9: Field names corrected to match PPMTTrie properties. Previously
+    the docstring claimed `total_observations` (which doesn't exist) and the
+    frontend used `nodes`/`patterns`/`depth` (also non-existent), so the
+    Patterns tab and Trading tab "Living Trie Stats" widgets always showed
+    "--". Now populated by RealtimeTrader._update_terminal_state() after
+    each trie.insert_with_observations() call.
+    """
 
     # ------------------------------------------------------------------ #
     # Trade History (v0.31.0)

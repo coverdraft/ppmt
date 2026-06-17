@@ -4397,3 +4397,152 @@ ppmt terminal                               # dashboard :8420
 # respeta trending_up=0.45).
 ```
 
+
+---
+
+## v0.38.9 — Fase 2A: Bug fixes operativos del dashboard (2026-06-18)
+
+### Problema
+El usuario reportó 5 bugs operativos graves mientras usaba v0.38.8 con 22
+sesiones paper trading activas:
+
+1. **Sweep count mentía**: Resumen decía "9 PASS / 49 FAIL / 103 skipped"
+   pero la lista mostraba 36 PASS (27 cached + 9 fresh). Los PASS cached
+   se contaban en `skipped` en vez de `passed`.
+2. **Trade History duplicados**: 16 trades mostrados pero solo 8 únicos.
+   `save_trade()` no deduplicaba, y cada sweep re-validaba BTC/USDT
+   guardando los mismos trades otra vez.
+3. **Trade History mostraba backtest data**: Precios $27k-$92k (BTC
+   backtest) aparecían aunque el usuario estaba tradeando ZIL/MANA. No
+   había forma de separar backtest de live.
+4. **Patterns & History tab vacío**: "Current Regime --" y
+   "No data yet — start a trading session" pese a 22 sesiones activas.
+   `living_trie_stats` nunca se poblaba, y los field names del frontend
+   no matcheaban el backend.
+5. **P&L siempre 0.00%**: La columna P&L solo muestra unrealized de la
+   posición abierta. Cuando está FLAT, es 0. No hay realized P&L
+   acumulado visible.
+
+### Verificación previa
+- `rg "sweep.*done|sweep.*pass" src/ppmt/terminal/` → confirmó
+  `_sweep_state["skipped"] = len(skipped)` en server.py:2069 contaba
+  PASS cached como skipped.
+- `rg "save_trade\(" src/` → único callsite en realtime.py:1338, pero
+  sin dedup. Mismos trades guardados N veces a lo largo de N sweeps.
+- `rg "living_trie_stats" src/` → `state.py` inicializaba `{}` y nunca
+  se poblaba. Frontend usaba `nodes`/`patterns`/`depth` que no existen
+  en `PPMTTrie` (las properties reales son `pattern_count`/`max_depth`/
+  `trading_observations`).
+- `rg "pnl_pct|portfolio_value" src/ppmt/terminal/server.py` →
+  multi_status devuelve `pnl_pct` (unrealized) pero no realized P&L.
+
+### Solución — 5 fixes en un único commit
+
+**Fix 1: Sweep count (server.py:2049-2097)**
+- Track `cached_pass_count` separadamente en skip-check
+- Reset block ahora siembra `passed = cached_pass_count`, `skipped = 0`
+- `total = original_symbol_count` (incluye cached, matching DB row)
+- `done` empieza en `cached_pass_count` (cached ya está "done")
+- Log message: `"X PASS (Y cached + Z fresh), N FAIL, M INSUFFICIENT_DATA"`
+- Frontend muestra `(N cached)` tag cuando aplica
+
+**Fix 2: Trade History dedup + source (storage.py:165-216, 565-639)**
+- Nuevo campo `source TEXT NOT NULL DEFAULT 'backtest'` en tabla `trades`
+- Migration `ALTER TABLE trades ADD COLUMN source` para DBs existentes
+  (default 'backtest' asume que data pre-v0.38.9 es de validación)
+- `save_trade()` ahora deduplica por (symbol, entry_time, exit_time,
+  entry_price, exit_price, source) — skip si ya existe
+- `get_trades()` y `get_trade_summary()` aceptan `source` filter
+- `clear_trades()` acepta `source` filter (clear solo backtest, preserva live)
+
+**Fix 3: Backend source wiring (realtime.py:1293-1361, server.py:1165-1272)**
+- `_close_trade( source: str = "live")` parámetro nuevo
+- `run_replay()` callsites (4) → `source="backtest"`
+- `process_new_candle()` + `run_live()` callsites → default `"live"`
+- `/api/trades?source=live` (default), `?source=backtest`, `?source=all`
+- `/api/clear-history` acepta `source` en body
+
+**Fix 4: Frontend source filter (index.html:852-859, 2092-2165)**
+- Nuevo `<select id="tradeHistorySource">` con opciones Live/Backtest/All
+- `loadTradeHistory()` pasa `source` al endpoint
+- `loadTradeSummary()` pasa `source` al endpoint
+- `clearTradeHistory(ev)` ahora:
+  - Click normal → clear solo backtest (preserva live)
+  - Shift+Click → clear todo (nuclear)
+- Confirm dialog explica la diferencia
+
+**Fix 5: Living Trie stats + Patterns tab (realtime.py:2697-2713, state.py:99-111, index.html:1369-1395, 1482-1495)**
+- `_living_trie_update()` (module-level fn) ahora llama
+  `_terminal_state.update_sync(living_trie_stats={...})` después de cada
+  `trie.insert_with_observations()`
+- Stats pobladas: `pattern_count`, `max_depth`, `trading_observations`,
+  `last_update` (unix timestamp)
+- Frontend Trading tab: arreglado field names
+  (`nodes` → `pattern_count`, `patterns` → `trading_observations`)
+- Frontend Patterns tab: arreglado field names
+  (`depth` → `max_depth`, `total_observations` → `trading_observations`)
+- `last_update` formateado con `new Date(ts * 1000).toLocaleTimeString()`
+- state.py docstring corregido
+
+**Fix 6: Realized P&L per session (server.py:1062-1144, 917-943, index.html:3252-3330)**
+- `/api/multi-status` ahora bulk-fetch realized P&L por (symbol, timeframe)
+  desde SQLite (`SELECT symbol, timeframe, SUM(pnl) FROM trades WHERE
+  source='live' GROUP BY symbol, timeframe`)
+- Cada session devuelve `realized_pnl` (absoluto) + `realized_pnl_pct`
+  (porcentaje del initial_capital) + `initial_capital`
+- `session_state` ahora guarda `initial_capital = per_capital`
+- Frontend Trading tab: nueva columna "R-P&L" entre P&L y Regime
+  - P&L = unrealized (current open position)
+  - R-P&L = realized (sum of closed live trades, con tooltip)
+- Color-coded: verde si >0, rojo si <0, gris si =0
+
+### Archivos modificados
+- `src/ppmt/terminal/server.py` — sweep count fix, /api/trades source filter,
+  /api/clear-history source filter, /api/multi-status realized_pnl fields,
+  session_state.initial_capital
+- `src/ppmt/data/storage.py` — `source` column + migration, dedup in
+  save_trade, source filter in get_trades/get_trade_summary/clear_trades
+- `src/ppmt/engine/realtime.py` — `_close_trade(source=)` param,
+  run_replay callsites source="backtest", _living_trie_update populates
+  living_trie_stats
+- `src/ppmt/terminal/state.py` — docstring fix
+- `src/ppmt/terminal/static/index.html` — source dropdown, R-P&L column,
+  Living Trie Stats field names fixed (both tabs), sweep summary shows
+  cached count
+- `pyproject.toml`, `src/ppmt/cli/main.py`, `src/ppmt/terminal/server.py`,
+  `src/ppmt/terminal/static/index.html`, `HANDOFF.md`, `TRAZABILIDAD.md`
+  — bump 0.38.8 → 0.38.9
+
+### Riesgo
+**Bajo**. Los valores numéricos de thresholds no se tocan. La única
+"policy change" es que los trades de backtest ahora se guardan con
+`source='backtest'` y el dashboard por defecto los oculta. El usuario
+puede verlos cambiando el dropdown a "Backtest only" o "All sources".
+Los trades live existentes en la DB se marcan como `source='backtest'`
+por el default del ALTER TABLE (no hay forma de distinguirlos
+retroactivamente), pero el botón Clear (modo normal) los borra en
+un click.
+
+### Cómo verificar
+```bash
+cd ~/ppmt
+git pull origin main
+pip install -e . --quiet
+ppmt --version                              # debe decir 0.38.9
+ppmt terminal                               # dashboard :8420
+# 1. Sweep → el resumen debe mostrar "X PASS (Y cached + Z fresh) /
+#    N FAIL / M insufficient — TOTAL total" (no más "9 PASS / 103 skipped")
+# 2. History tab → Trade History ahora muestra solo live trades por
+#    default. Dropdown cambia entre Live/Backtest/All. Clear borra
+#    solo backtest; Shift+Click borra todo.
+# 3. Patterns & History tab → Living Trie Stats ya no muestra "--".
+#    Pattern buffer se llena con sesiones activas.
+# 4. Trading tab → nueva columna "R-P&L" entre P&L y Regime muestra
+#    realized P&L acumulado por sesión (verde/rojo/gris).
+```
+
+### Próximos pasos sugeridos
+- **Fase 2B**: Chart entry/exit markers para token activo seleccionado
+  (mostrar dónde entró y dónde salió cada trade en el candlestick chart)
+- **Fase 2C**: UI/UX redesign completo del dashboard (jerarquía visual,
+  agrupación lógica, mejor feedback)

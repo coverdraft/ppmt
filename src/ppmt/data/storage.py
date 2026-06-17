@@ -162,6 +162,11 @@ class PPMTStorage:
         """)
 
         # v0.31.0: Trade history table
+        # v0.38.9: Added `source` column ('backtest' | 'live') so the dashboard
+        # can show only live trades by default and hide backtest noise from
+        # validation runs. Existing rows (pre-v0.38.9) get migrated to
+        # source='backtest' since the vast majority of old data came from
+        # validate_token() backtest runs, not from live/paper trading.
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS trades (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -186,9 +191,29 @@ class PPMTStorage:
                 matched_pattern TEXT,
                 node_id TEXT DEFAULT '',
                 session_id TEXT DEFAULT '',
+                source TEXT NOT NULL DEFAULT 'backtest',
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        # v0.38.9: Migration for existing DBs — add `source` column if missing.
+        # SQLite doesn't support IF NOT EXISTS on ALTER TABLE, so we check
+        # pragma_table_info first. Default 'backtest' assumes pre-v0.38.9 data
+        # came from validation runs (which was the case for the user reporting
+        # 434 fake BTC trades at backtest prices polluting the live view).
+        cursor.execute("PRAGMA table_info(trades)")
+        existing_cols = {row[1] for row in cursor.fetchall()}
+        if 'source' not in existing_cols:
+            cursor.execute(
+                "ALTER TABLE trades ADD COLUMN source TEXT NOT NULL DEFAULT 'backtest'"
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_trades_source ON trades(source)"
+            )
+        else:
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_trades_source ON trades(source)"
+            )
 
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_trades_symbol
@@ -540,29 +565,59 @@ class PPMTStorage:
     def save_trade(self, trade_dict: dict) -> int:
         """Save a closed trade to the history log.
 
+        v0.38.9: Added deduplication + source field. If a row with the same
+        (symbol, entry_time, exit_time, entry_price, exit_price, source)
+        already exists, the insert is skipped. This prevents the same backtest
+        trade from being saved multiple times when a token is re-validated in
+        successive sweeps (the original cause of the "16 trades shown but only
+        8 unique" bug).
+
         Args:
-            trade_dict: Dict with trade fields (symbol, direction, entry_price, etc.)
+            trade_dict: Dict with trade fields (symbol, direction, entry_price,
+                etc.). Optional `source` field ('live' | 'backtest', default
+                'backtest' for backward compat with validation callers).
 
         Returns:
-            Row ID of the inserted trade.
+            Row ID of the inserted trade (or the existing row ID if dedup hit).
         """
         cursor = self._ensure_conn().cursor()
+        source = trade_dict.get("source", "backtest")
+        symbol = trade_dict.get("symbol", "")
+        entry_time = trade_dict.get("entry_time", "")
+        exit_time = trade_dict.get("exit_time", "")
+        entry_price = trade_dict.get("entry_price", 0)
+        exit_price = trade_dict.get("exit_price", 0)
+
+        # v0.38.9: Dedup — skip if same trade already saved. Match on the
+        # immutable trade signature (symbol + times + prices + source). PnL
+        # is excluded since it's derived from prices.
+        cursor.execute(
+            """SELECT id FROM trades
+               WHERE symbol = ? AND entry_time = ? AND exit_time = ?
+                 AND entry_price = ? AND exit_price = ? AND source = ?
+               LIMIT 1""",
+            (symbol, entry_time, exit_time, entry_price, exit_price, source),
+        )
+        existing = cursor.fetchone()
+        if existing:
+            return existing[0]
+
         cursor.execute(
             """INSERT INTO trades
                (symbol, timeframe, direction, entry_price, exit_price,
                 entry_time, exit_time, size, pnl, pnl_pct,
                 confidence, exit_reason, regime, leverage,
                 kelly_fraction, position_size_pct, sl_price, tp_price,
-                matched_pattern, node_id, session_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                matched_pattern, node_id, session_id, source)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                trade_dict.get("symbol", ""),
+                symbol,
                 trade_dict.get("timeframe", "1h"),
                 trade_dict.get("direction", ""),
-                trade_dict.get("entry_price", 0),
-                trade_dict.get("exit_price", 0),
-                trade_dict.get("entry_time", ""),
-                trade_dict.get("exit_time", ""),
+                entry_price,
+                exit_price,
+                entry_time,
+                exit_time,
                 trade_dict.get("size", 0),
                 trade_dict.get("pnl", 0),
                 trade_dict.get("pnl_pct", 0),
@@ -577,6 +632,7 @@ class PPMTStorage:
                 json.dumps(trade_dict.get("matched_pattern", [])),
                 trade_dict.get("node_id", ""),
                 trade_dict.get("session_id", ""),
+                source,
             ),
         )
         self._ensure_conn().commit()
@@ -588,14 +644,19 @@ class PPMTStorage:
         timeframe: Optional[str] = None,
         limit: int = 100,
         node_id: Optional[str] = None,
+        source: Optional[str] = None,
     ) -> list[dict]:
         """Get closed trade history, most recent first.
+
+        v0.38.9: Added `source` filter. Pass 'live' to see only live/paper
+        trades, 'backtest' for validation runs, or None for all.
 
         Args:
             symbol: Filter by symbol (optional)
             timeframe: Filter by timeframe (optional)
             limit: Max trades to return
             node_id: Filter by node ID (optional)
+            source: Filter by source ('live' | 'backtest' | None for all)
         """
         cursor = self._ensure_conn().cursor()
         conditions = []
@@ -610,6 +671,9 @@ class PPMTStorage:
         if node_id:
             conditions.append("node_id = ?")
             params.append(node_id)
+        if source:
+            conditions.append("source = ?")
+            params.append(source)
 
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         params.append(limit)
@@ -622,14 +686,28 @@ class PPMTStorage:
         columns = [desc[0] for desc in cursor.description]
         return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
-    def get_trade_summary(self, symbol: Optional[str] = None) -> dict:
+    def get_trade_summary(
+        self,
+        symbol: Optional[str] = None,
+        source: Optional[str] = None,
+    ) -> dict:
         """Get aggregate trade statistics.
+
+        v0.38.9: Added `source` filter (default None = all sources).
+        Pass 'live' to compute stats only on live/paper trades.
 
         Returns total trades, win rate, P&L, etc.
         """
         cursor = self._ensure_conn().cursor()
-        condition = "WHERE symbol = ?" if symbol else ""
-        params = [symbol] if symbol else []
+        conditions = []
+        params = []
+        if symbol:
+            conditions.append("symbol = ?")
+            params.append(symbol)
+        if source:
+            conditions.append("source = ?")
+            params.append(source)
+        condition = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
         cursor.execute(
             f"""SELECT COUNT(*) as total_trades,
@@ -665,18 +743,28 @@ class PPMTStorage:
             "profit_factor": gross_profit / gross_loss if gross_loss > 0 else 0,
         }
 
-    def clear_trades(self, symbol: Optional[str] = None, older_than_days: int = 0) -> int:
+    def clear_trades(
+        self,
+        symbol: Optional[str] = None,
+        older_than_days: int = 0,
+        source: Optional[str] = None,
+    ) -> int:
         """Delete trade history rows.
 
         v0.37.0: Added so users can clear stale/backtest trades that pollute
         the dashboard's Trade History panel (e.g. 434 fake BTC trades at
         $38,452 from a previous backtest, shown while trading XLM/OP/ICP).
+        v0.38.9: Added `source` filter — pass 'backtest' to clear only
+        backtest data while preserving live trades, or 'live' for the
+        reverse.
 
         Args:
             symbol: If provided, only delete trades for this symbol.
                     If None, delete ALL trades (use with caution).
             older_than_days: If >0, only delete trades older than N days
                              (based on created_at). 0 = delete all matching.
+            source: If provided, only delete trades with this source
+                    ('live' | 'backtest'). None = delete all sources.
 
         Returns:
             Number of rows deleted.
@@ -693,6 +781,9 @@ class PPMTStorage:
                 "created_at < datetime('now', ?)"
             )
             params.append(f"-{older_than_days} days")
+        if source:
+            conditions.append("source = ?")
+            params.append(source)
 
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 

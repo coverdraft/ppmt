@@ -797,7 +797,8 @@ class RealtimeTrader:
                                 unrealized_loss = (current_price - pos.entry_price) / pos.entry_price * 100
                             if unrealized_loss >= cfg.catastrophic_loss_pct:
                                 self._close_trade(risk_mgr, current_position, current_price,
-                                                  current_time, "catastrophic_stop", result)
+                                                  current_time, "catastrophic_stop", result,
+                                                  source="backtest")
                                 catastrophic_close = True
                                 position_state = PositionState.FLAT
                                 current_position = None
@@ -837,7 +838,8 @@ class RealtimeTrader:
                         if sl_hit:
                             exit_reason = "trailing_stop" if current_position.trailing_activated else "stop_loss"
                             self._close_trade(risk_mgr, current_position, current_price,
-                                              current_time, exit_reason, result)
+                                              current_time, exit_reason, result,
+                                              source="backtest")
                             position_state = PositionState.FLAT
                             current_position = None
                             consecutive_breaks = 0
@@ -845,7 +847,8 @@ class RealtimeTrader:
 
                         elif tp_hit:
                             self._close_trade(risk_mgr, current_position, current_price,
-                                              current_time, "take_profit", result)
+                                              current_time, "take_profit", result,
+                                              source="backtest")
                             position_state = PositionState.FLAT
                             current_position = None
                             consecutive_breaks = 0
@@ -1249,7 +1252,8 @@ class RealtimeTrader:
         if current_position is not None:
             last_price = float(df["close"].iloc[-1])
             self._close_trade(risk_mgr, current_position, last_price,
-                              "end_of_data", "end_of_data", result)
+                              "end_of_data", "end_of_data", result,
+                              source="backtest")
 
         # Compute final statistics
         duration = time.time() - start_time
@@ -1292,8 +1296,14 @@ class RealtimeTrader:
 
     def _close_trade(self, risk_mgr: RiskManager, trade: RealtimeTrade,
                      exit_price: float, exit_time: str, exit_reason: str,
-                     result: RealtimeResult) -> None:
-        """Close a trade and record the result."""
+                     result: RealtimeResult, source: str = "live") -> None:
+        """Close a trade and record the result.
+
+        v0.38.9: Added `source` parameter ('live' | 'backtest') so the storage
+        layer can deduplicate + filter trades by origin. `run_replay` passes
+        'backtest' (historical validation runs), `process_new_candle` and
+        `run_live` pass 'live' (real-time paper/live trading).
+        """
         _, pnl = risk_mgr.close_position(trade.symbol, exit_price)
         trade.exit_price = exit_price
         trade.exit_time = str(exit_time)
@@ -1333,6 +1343,7 @@ class RealtimeTrader:
                 pass
 
         # v0.31.0: Save trade to persistent storage
+        # v0.38.9: Pass `source` so storage can deduplicate + filter
         try:
             trade_storage = PPMTStorage()
             trade_storage.save_trade({
@@ -1351,6 +1362,7 @@ class RealtimeTrader:
                 "regime": trade.regime,
                 "leverage": getattr(self.config, 'leverage', 1),
                 "matched_pattern": trade.matched_pattern,
+                "source": source,
             })
             trade_storage.close()
         except Exception:
@@ -2681,6 +2693,24 @@ def _living_trie_update(
                 )
             except Exception:
                 pass  # Non-critical — Living Trie is best-effort
+
+            # v0.38.9: Push living trie stats to the dashboard so the Patterns
+            # tab and Trading tab "Living Trie Stats" widget stop showing "--".
+            # Previously this was never populated, leaving both tabs empty.
+            # NOTE: _living_trie_update is a module-level function, so we use
+            # the global _terminal_state directly instead of self._update_terminal_state.
+            if _terminal_state is not None:
+                try:
+                    _terminal_state.update_sync(
+                        living_trie_stats={
+                            "pattern_count": trie.pattern_count,
+                            "max_depth": trie.max_depth,
+                            "trading_observations": trie.trading_observations,
+                            "last_update": time.time(),
+                        },
+                    )
+                except Exception:
+                    pass
 
     # Periodically re-propagate metadata (every 50 updates)
     if stream_buf.symbols_produced % (cfg.pattern_length * 50) == 0:
