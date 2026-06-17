@@ -42,7 +42,7 @@ CONFIG_DIR = os.path.expanduser("~/.ppmt")
 # ------------------------------------------------------------------ #
 # FastAPI application
 # ------------------------------------------------------------------ #
-app = FastAPI(title="PPMT Terminal", version="0.38.1")
+app = FastAPI(title="PPMT Terminal", version="0.38.2")
 
 # Global terminal state (shared with engine)
 terminal_state: TerminalState = get_terminal_state()
@@ -982,7 +982,12 @@ async def multi_start(req: MultiStartRequest) -> dict:
                         s["candles_processed"] = int(kwargs["candles_processed"] or 0)
                     if "total_trades" in kwargs:
                         s["trades"] = int(kwargs["total_trades"] or 0)
-                    if "sax_symbols_produced" in kwargs:
+                    # v0.38.2: Prefer real signals_generated (actual trading signals)
+                    # over sax_symbols_produced (raw SAX symbol count, which is much larger).
+                    if "signals_generated" in kwargs:
+                        s["signals"] = int(kwargs["signals_generated"] or 0)
+                    elif "sax_symbols_produced" in kwargs:
+                        # Legacy fallback — only used by older engine versions
                         s["signals"] = int(kwargs["sax_symbols_produced"] or 0)
                     if "regime" in kwargs and kwargs["regime"]:
                         s["regime"] = kwargs["regime"]

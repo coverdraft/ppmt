@@ -47,6 +47,7 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.text import Text
 from rich.table import Table
+from rich.markup import escape as _rich_escape
 
 import numpy as np
 import pandas as pd
@@ -1719,16 +1720,16 @@ class RealtimeTrader:
                             f"TP=${tp_price:.4f} | pattern={''.join(current_symbols)}"
                         )
                     else:
-                        # v0.38.1: Log rejection reason so user can see WHY trades don't happen.
-                        # Without this, signals > 0 but trades = 0 was a silent mystery.
-                        # Throttle to 1-in-10 to avoid spamming the console.
-                        if result.signals_generated % 10 == 0 or result.signals_generated <= 3:
-                            console.print(
-                                f"[yellow]Signal #{result.signals_generated} rejected:[/yellow] "
-                                f"{reason} | conf={weighted_confidence:.2f} "
-                                f"quality={signal.quality_score:.2f} "
-                                f"RR={signal.risk_reward_ratio:.2f}"
-                            )
+                        # v0.38.2: Log EVERY rejection (removed throttle) so user
+                        # can see WHY Trades=0 even with Signals > 0.
+                        # Previously throttled to 1-in-10 which hid critical info
+                        # when only 2-3 signals were generated per token.
+                        console.print(
+                            f"[yellow]Signal #{result.signals_generated} rejected:[/yellow] "
+                            f"{reason} | conf={weighted_confidence:.2f} "
+                            f"quality={signal.quality_score:.2f} "
+                            f"RR={signal.risk_reward_ratio:.2f}"
+                        )
 
         # Record equity
         result.candles_processed += 1
@@ -1989,7 +1990,26 @@ class RealtimeTrader:
         )
 
         try:
-            with Live(console=console, refresh_per_second=2) as live_display:
+            # v0.38.2 FIX: When state_callback is provided (server-side multi-token
+            # mode via /api/multi-start), run HEADLESS — skip Live panel rendering.
+            # Why: each parallel token spawned its own Live() writing to stdout,
+            # causing 25+ panels to overlap and duplicate (PHA appearing 8+ times).
+            # Headless mode still calls _update_terminal_state + state_callback so
+            # the dashboard gets live updates via the API, just no stdout noise.
+            headless = self._state_callback is not None
+
+            if headless:
+                console.print(f"[dim]Headless mode: {cfg.symbol} ({cfg.timeframe}) — updates via state_callback only[/dim]")
+
+            class _NullLive:
+                """No-op Live replacement for headless mode."""
+                def __enter__(self): return self
+                def __exit__(self, *a): return False
+                def update(self, *a, **kw): pass
+
+            live_ctx = Live(console=console, refresh_per_second=2) if not headless else _NullLive()
+
+            with live_ctx as live_display:
 
                 if use_websocket:
                     # === WEBSOCKET MODE (v0.12.0 → v0.13.0 with StreamingPatternBuffer) ===
@@ -2118,6 +2138,8 @@ class RealtimeTrader:
                         # of actual SAX symbols (a, b, c, ...).
                         # Now we pass the full pattern_buffer snapshot directly. The state's
                         # setattr replaces the list wholesale (no append, no "None" pollution).
+                        # v0.38.2: Also pass signals_generated so dashboard "signals" reflects
+                        # actual trading signals (not sax_symbols_produced count).
                         self._update_terminal_state(
                             current_price=recent_prices[-1] if recent_prices else 0,
                             candles_processed=result.candles_processed,
@@ -2132,6 +2154,7 @@ class RealtimeTrader:
                             sax_symbols_produced=stream_buf.symbols_produced,
                             entropy=stream_buf.entropy,
                             regime=current_regime,
+                            signals_generated=result.signals_generated,
                         )
 
                         # v0.20.0: Update money manager positions
@@ -2257,6 +2280,26 @@ class RealtimeTrader:
                             if ohlcv:
                                 candle_data = ohlcv[-1]
                                 candle_ts = candle_data[0]
+                                # v0.38.2 FIX: ALWAYS update recent_prices with the
+                                # latest close price on every poll (every 5s), even
+                                # when candle_ts hasn't changed. Previously, price
+                                # would stay stale until the next candle CLOSE — could
+                                # be up to 1h on 1h TF. This made "real-time" feel dead.
+                                # Now the displayed Price and dashboard last_price
+                                # reflect the latest tick within the forming candle.
+                                live_price = float(candle_data[4]) if len(candle_data) > 4 else 0.0
+                                if live_price > 0:
+                                    recent_prices.append(live_price)
+                                    if len(recent_prices) > 200:
+                                        recent_prices.pop(0)
+                                    # Keep recent_highs/lows fresh too
+                                    if len(candle_data) > 4:
+                                        recent_highs.append(float(candle_data[2]))
+                                        recent_lows.append(float(candle_data[3]))
+                                        if len(recent_highs) > 200:
+                                            recent_highs.pop(0)
+                                        if len(recent_lows) > 200:
+                                            recent_lows.pop(0)
 
                                 if candle_ts != last_candle_ts:
                                     last_candle_ts = candle_ts
@@ -2299,37 +2342,36 @@ class RealtimeTrader:
                                         stream_buf._symbols_produced = result.sax_symbols_produced
                                         stream_buf._trim()
 
-                                    # v0.38.0 FIX: REST polling mode NEVER updated
-                                    # terminal_state with pattern_buffer / entropy,
-                                    # so dashboard showed Pattern: [] empty.
-                                    # Now mirror WebSocket mode's update calls.
-                                    self._update_terminal_state(
-                                        current_price=recent_prices[-1] if recent_prices else 0,
-                                        candles_processed=result.candles_processed,
-                                        portfolio_value=money_mgr.total_value,
-                                        cash=money_mgr.cash,
-                                        unrealized_pnl=money_mgr.unrealized_pnl,
-                                        realized_pnl=money_mgr.realized_pnl,
-                                        total_trades=result.total_trades,
-                                        winning_trades=result.winning_trades,
-                                        exposure_pct=money_mgr.exposure_pct,
-                                        pattern_buffer=list(stream_buf.pattern_buffer)[-30:],
-                                        sax_symbols_produced=stream_buf.symbols_produced,
-                                        entropy=stream_buf.entropy,
-                                        regime=current_regime,
-                                        is_running=True,
-                                        websocket_status="polling",
-                                        win_rate=(result.winning_trades / result.total_trades * 100.0) if result.total_trades > 0 else 0.0,
-                                    )
-                                    # v0.20.0: Update money manager positions
-                                    if current_position is not None and recent_prices:
-                                        try:
-                                            money_mgr.update_position(cfg.symbol, recent_prices[-1])
-                                        except Exception:
-                                            pass
-                                    _update_live_display(live_display, cfg, result, position_state,
-                                                         current_position, current_regime, recent_prices,
-                                                         risk_mgr, stream_buf)
+                                # v0.38.2: Push state EVERY poll (not only on new candle close)
+                                # so the dashboard's last_price updates in real time.
+                                self._update_terminal_state(
+                                    current_price=recent_prices[-1] if recent_prices else 0,
+                                    candles_processed=result.candles_processed,
+                                    portfolio_value=money_mgr.total_value,
+                                    cash=money_mgr.cash,
+                                    unrealized_pnl=money_mgr.unrealized_pnl,
+                                    realized_pnl=money_mgr.realized_pnl,
+                                    total_trades=result.total_trades,
+                                    winning_trades=result.winning_trades,
+                                    exposure_pct=money_mgr.exposure_pct,
+                                    pattern_buffer=list(stream_buf.pattern_buffer)[-30:],
+                                    sax_symbols_produced=stream_buf.symbols_produced,
+                                    entropy=stream_buf.entropy,
+                                    regime=current_regime,
+                                    is_running=True,
+                                    websocket_status="polling",
+                                    signals_generated=result.signals_generated,
+                                    win_rate=(result.winning_trades / result.total_trades * 100.0) if result.total_trades > 0 else 0.0,
+                                )
+                                # v0.20.0: Update money manager positions
+                                if current_position is not None and recent_prices:
+                                    try:
+                                        money_mgr.update_position(cfg.symbol, recent_prices[-1])
+                                    except Exception:
+                                        pass
+                                _update_live_display(live_display, cfg, result, position_state,
+                                                     current_position, current_regime, recent_prices,
+                                                     risk_mgr, stream_buf)
 
                             # Poll every 5 seconds for low-timeframe responsiveness (v0.38.0)
                             await asyncio.sleep(5)
@@ -2496,8 +2538,13 @@ def _update_live_display(
     # Buffer info
     buf_str = ""
     if stream_buf is not None:
+        # v0.38.2 FIX: Rich was eating the `[]` brackets as markup tags when
+        # pat was non-empty (e.g. "[a]" — single-letter tag → silently dropped,
+        # leaving "Pattern:  | Entropy" with brackets vanished).
+        # Escape BOTH the brackets AND the pat content so they render literally.
         pat = " -> ".join(stream_buf.get_pattern()) if stream_buf.has_pattern() else "..."
-        buf_str = f" | Pattern: [{pat}] | Entropy: {stream_buf.entropy:.1f}b"
+        pat_display = _rich_escape(f"[{pat}]")
+        buf_str = f" | Pattern: {pat_display} | Entropy: {stream_buf.entropy:.1f}b"
 
     live_display.update(Panel(
         f"  Price: ${current_price:,.2f} | "

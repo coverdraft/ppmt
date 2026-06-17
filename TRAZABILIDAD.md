@@ -1,7 +1,7 @@
 # TRAZABILIDAD PPMT — Estado del Proyecto
 
 > Última actualización: 2026-06-17
-> Versión actual: v0.38.1 — Fix Pattern vacío (sync buffer roto) + Trades=0 (umbrales risk muy altos)
+> Versión actual: v0.38.2 — Fix paneles duplicados (headless mode) + Pattern vacío (rich markup bug) + precio tiempo real en cada poll
 > Repositorio: https://github.com/coverdraft/ppmt
 > Idioma: Español
 
@@ -3639,3 +3639,158 @@ Después de lanzar tokens, deberías ver:
 - `Trades: N` con N > 0 después de ~30-50 candles
 - Mensajes `TRADE #1 LONG XLM/USDT @ $0.2300 | conf=0.15 | SL=$0.2240 TP=$0.2415 | pattern=abcde`
 - Mensajes `Signal #N rejected: Quality too low: 0.05 | conf=0.10 quality=0.05 RR=1.5` (cada 10 señales rechazadas)
+
+---
+
+## v0.38.2 — 2026-06-17 — Fix paneles duplicados (headless) + Pattern vacío (rich markup bug) + precio tiempo real en cada poll
+
+### Problemas reportados por el usuario
+
+Después de v0.38.1, el usuario reportó en su último mensaje:
+
+1. **Paneles duplicados**: el panel `PPMT Live: PHA/USDT (DRY RUN)` aparecía 3-8+ veces en stdout, todos compitiendo por la misma pantalla.
+2. **Pattern vacío sigue**: a pesar del fix v0.38.1 del sync autoritativo, el display seguía mostrando `Pattern:  | Entropy: 1.8b` (sin brackets, sin símbolos).
+3. **"no esta funcionando"**: 25 tokens en ACTIVE TRADING, algunos con Signals 1-2 pero Trades 0. Usuario no sabe por qué no se ejecutan más trades.
+4. **Candles atascados en 201**: datos parecían no fluir en tiempo real (aunque el polling estaba corriendo).
+5. **Dudas sobre si precios son tiempo real**: usuario pregunta si los precios son reales o stale.
+
+### Diagnóstico profundo
+
+#### Bug 1: Paneles duplicados en CLI
+
+**Root cause**: Cuando se lanza multi-token trading desde el dashboard (`/api/multi-start`), cada token ejecuta `RealtimeTrader.run_live()` en su propia asyncio task. Cada llamada a `run_live()` crea un `Live(console=console, refresh_per_second=2)` context manager que escribe directamente a stdout.
+
+Con 25 tokens corriendo en paralelo, hay 25 instancias de `Live` escribiendo al mismo stdout al mismo tiempo → los paneles se sobreescriben y duplican visualmente.
+
+**Fix**: Modo headless — cuando `state_callback` está presente (modo servidor/multi-token), `run_live()` ahora crea un `_NullLive()` (no-op) en lugar de un `Live()` real. El trader sigue procesando candles y llamando `_update_terminal_state()` que a su vez invoca `state_callback()`, así que el dashboard recibe actualizaciones en tiempo real vía la API. Solo se elimina el ruido visual en stdout.
+
+```python
+headless = self._state_callback is not None
+live_ctx = Live(console=console, refresh_per_second=2) if not headless else _NullLive()
+with live_ctx as live_display:
+    ...
+```
+
+#### Bug 2: Pattern vacío a pesar de Entropy > 0 (definitivo)
+
+**Root cause definitivo**: Rich interpreta `[name]` como markup tags. Cuando `pat = "a"` (un símbolo SAX), el string `Pattern: [a]` es parseado por Rich como un intento de aplicar estilo `a` (que no existe) → silenciosamente dropeado. Resultado: el display muestra `Pattern:  |` (vacío).
+
+El fix v0.38.1 creía que el problema era el sync del buffer. Pero el buffer estaba bien — el problema era **puramente de rendering**.
+
+**Fix**: Usar `rich.markup.escape()` para escapar los brackets `[]` y el contenido de `pat`:
+
+```python
+from rich.markup import escape as _rich_escape
+pat = " -> ".join(stream_buf.get_pattern()) if stream_buf.has_pattern() else "..."
+pat_display = _rich_escape(f"[{pat}]")
+buf_str = f" | Pattern: {pat_display} | Entropy: {stream_buf.entropy:.1f}b"
+```
+
+`_rich_escape("[a -> b]")` produce `\[a -> b\]` que Rich renderiza literalmente como `[a -> b]`.
+
+#### Bug 3: Signals > 0 pero Trades = 0 en algunos tokens
+
+**Diagnóstico**: En v0.38.1 ya se redujeron los umbrales (`min_quality_score: 0.10 → 0.03`, `min_risk_reward: 1.0 → 0.5`) y se añadió logging de rechazo. PERO el log estaba throttled a 1-in-10 (`if result.signals_generated % 10 == 0 or result.signals_generated <= 3:`), así que para tokens con solo 1-2 señales, el log aparecía pero el usuario no lo veía claro.
+
+**Fix**: Quitar el throttle — loguear TODOS los rechazos:
+
+```python
+console.print(
+    f"[yellow]Signal #{result.signals_generated} rejected:[/yellow] "
+    f"{reason} | conf={weighted_confidence:.2f} "
+    f"quality={signal.quality_score:.2f} "
+    f"RR={signal.risk_reward_ratio:.2f}"
+)
+```
+
+Ahora el usuario verá cada signal rechazada con la razón exacta (quality too low, RR too low, etc.).
+
+#### Bug 4: Candles atascados en 201 (precio no tiempo real)
+
+**Root cause**: El REST polling solo procesaba un candle cuando `candle_ts != last_candle_ts`, es decir, solo cuando se cerraba una vela nueva. Para 1h TF, eso significa que el precio visible quedaba stale hasta la próxima hora.
+
+El polling sí hacía `fetch_ohlcv(limit=1)` cada 5s (desde v0.38.0), pero solo usaba el candle si su timestamp cambiaba. La vela en formación tiene el mismo timestamp durante toda la hora, así que el precio en `recent_prices[-1]` no se actualizaba.
+
+**Fix**: Siempre actualizar `recent_prices` con el último close price en cada poll (cada 5s), independientemente de si el candle cerró o no:
+
+```python
+live_price = float(candle_data[4]) if len(candle_data) > 4 else 0.0
+if live_price > 0:
+    recent_prices.append(live_price)
+    if len(recent_prices) > 200:
+        recent_prices.pop(0)
+    # También actualizar recent_highs/lows
+```
+
+Y mover `_update_terminal_state(...)` y `_update_live_display(...)` FUERA del bloque `if candle_ts != last_candle_ts:` para que se ejecuten en cada poll:
+
+```python
+if candle_ts != last_candle_ts:
+    last_candle_ts = candle_ts
+    # ... process_new_candle (SAX + signal + trade)
+# Siempre: actualizar estado con el precio más reciente
+self._update_terminal_state(current_price=recent_prices[-1], ...)
+_update_live_display(...)
+```
+
+Ahora el precio mostrado en CLI y en dashboard `last_price` se actualiza cada 5s con el último trade de Binance, dentro de la vela en formación.
+
+#### Bug 5: Dashboard "signals" mostraba sax_symbols_produced (cientos) en vez de signals_generated (1-8)
+
+**Root cause**: En `_state_cb` (server.py), el campo `signals` se mapeaba a `sax_symbols_produced`:
+
+```python
+if "sax_symbols_produced" in kwargs:
+    s["signals"] = int(kwargs["sax_symbols_produced"] or 0)
+```
+
+Pero `sax_symbols_produced` es el conteo de símbolos SAX producidos (cientos), no el conteo de señales de trading reales (`signals_generated`, típicamente 1-8).
+
+**Fix**: Preferir `signals_generated` cuando esté disponible:
+
+```python
+if "signals_generated" in kwargs:
+    s["signals"] = int(kwargs["signals_generated"] or 0)
+elif "sax_symbols_produced" in kwargs:
+    s["signals"] = int(kwargs["sax_symbols_produced"] or 0)  # legacy fallback
+```
+
+Y añadir `signals_generated=result.signals_generated` a las llamadas `_update_terminal_state()` en WS mode y REST polling mode.
+
+### Archivos modificados
+
+- `src/ppmt/engine/realtime.py`
+  - Import `rich.markup.escape as _rich_escape` (Fix 2)
+  - `_update_live_display()`: usar `_rich_escape` en pattern display (Fix 2)
+  - `run_live()`: detectar `headless = self._state_callback is not None` y usar `_NullLive()` (Fix 1)
+  - Logging de rechazo sin throttle (Fix 3)
+  - REST polling: siempre actualizar `recent_prices` con último close (Fix 4)
+  - REST polling: mover `_update_terminal_state` y `_update_live_display` fuera del bloque `if candle_ts !=` (Fix 4)
+  - WS mode + REST mode: añadir `signals_generated=result.signals_generated` al state_callback (Fix 5)
+- `src/ppmt/terminal/server.py`
+  - `_state_cb`: preferir `signals_generated` sobre `sax_symbols_produced` (Fix 5)
+  - version 0.38.2
+- `src/ppmt/cli/main.py` — banner v0.38.2, `--version` 0.38.2
+- `pyproject.toml` — version 0.38.2
+
+### Cómo actualizar en Mac
+
+```bash
+cd ~/ppmt
+git pull origin main       # trae v0.38.2
+source .venv/bin/activate
+pip install -e .
+ppmt --version             # debe decir: ppmt, version 0.38.2
+ppmt terminal
+open http://localhost:8420
+```
+
+Después de lanzar tokens desde el dashboard, deberías ver:
+
+1. **No más paneles duplicados** — solo un log por token diciendo `Headless mode: BTC/USDT (1h) — updates via state_callback only`. Toda la info visible está en el dashboard.
+2. **Pattern visible** en el dashboard: `Pattern: [a -> c -> b -> d -> e]` con símbolos reales.
+3. **Precio tiempo real** en el dashboard `last_price`: cambia cada 5s dentro de la vela en formación.
+4. **Signals reales** (1-8) en el dashboard, no cientos de SAX symbols.
+5. **Logs de rechazo claros** en stdout del servidor: `Signal #2 rejected: Quality too low: 0.05 | conf=0.10 quality=0.05 RR=1.5` — verás por qué no se ejecuta cada signal.
+6. **Logs de trade ejecutado**: `TRADE #1 LONG XLM/USDT @ $0.2300 | conf=0.15 | SL=$0.2240 TP=$0.2415 | pattern=abcde`
+
