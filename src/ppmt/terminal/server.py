@@ -42,7 +42,7 @@ CONFIG_DIR = os.path.expanduser("~/.ppmt")
 # ------------------------------------------------------------------ #
 # FastAPI application
 # ------------------------------------------------------------------ #
-app = FastAPI(title="PPMT Terminal", version="0.39.2")
+app = FastAPI(title="PPMT Terminal", version="0.39.3")
 
 # Global terminal state (shared with engine)
 terminal_state: TerminalState = get_terminal_state()
@@ -1153,6 +1153,12 @@ async def multi_start(req: MultiStartRequest) -> dict:
                         s["win_rate"] = float(kwargs["win_rate"] or 0)
                     if "exposure_pct" in kwargs:
                         s["exposure_pct"] = float(kwargs["exposure_pct"] or 0)
+                    # v0.39.3: Capture engine errors (e.g., "No Trie") so
+                    # the dashboard can show WHY a session died instead of
+                    # just flipping to STOPPED with no reason.
+                    if "error" in kwargs and kwargs["error"]:
+                        s["error"] = str(kwargs["error"])[:300]
+                        s["status"] = "ERROR"
                     # v0.39.2: Capture `signal=` kwarg forwarded by the engine
                     # via _update_terminal_state(signal={...}) (realtime.py:1217
                     # in run_replay, used by backtest path). Without this the
@@ -1649,6 +1655,36 @@ async def validate_token(req: ValidateRequest) -> dict:
                                "percent": 60}
         )
         from ppmt.engine.realtime import RealtimeTrader, ReplayConfig
+
+        # v0.39.3: Wire on_signal so backtest signals persist to SQLite
+        # (source='backtest'). Previously validate_token created ReplayConfig
+        # WITHOUT on_signal, so the signals table was always empty even after
+        # successful backtests that generated 30+ signals. The dashboard's
+        # Signals panel therefore showed "No signals" forever, which the user
+        # perceived as "bot not operating".
+        _bt_storage = PPMTStorage()
+        def _bt_on_signal(signal, prediction, _sym=req.symbol, _tf=req.timeframe):
+            try:
+                sig_dict = {
+                    "symbol": _sym,
+                    "signal_type": getattr(getattr(signal, "signal_type", None), "value", "UNKNOWN"),
+                    "confidence": float(getattr(signal, "confidence", 0) or 0),
+                    "quality_score": float(getattr(signal, "quality_score", 0) or 0),
+                    "sizing_multiplier": float(getattr(signal, "sizing_multiplier", 0) or 0),
+                    "entry_price": float(getattr(signal, "entry_price", 0) or 0),
+                    "sl_price": float(getattr(signal, "sl_price", 0) or 0),
+                    "tp_price": float(getattr(signal, "tp_price", 0) or 0),
+                    "expected_move_pct": float(getattr(signal, "expected_move_pct", 0) or 0),
+                    "win_rate": float(getattr(signal, "win_rate", 0) or 0),
+                    "remaining_candles": int(getattr(signal, "remaining_candles", 0) or 0),
+                    "matched_pattern": list(getattr(signal, "matched_pattern", []) or []),
+                    "predicted_path": [],
+                    "timestamp": time.time(),
+                }
+                _bt_storage.save_signal(sig_dict)
+            except Exception:
+                pass
+
         config = ReplayConfig(
             symbol=req.symbol,
             timeframe=req.timeframe,
@@ -1660,9 +1696,15 @@ async def validate_token(req: ValidateRequest) -> dict:
             # threshold. Without this, Bayesian shrinkage + regime filters reject
             # almost all signals in short (30-day) backtests → 0-2 trades → FAIL.
             validation_mode=True,
+            # v0.39.3: Wire on_signal so backtest signals persist to SQLite
+            on_signal=_bt_on_signal,
         )
         trader = RealtimeTrader(config=config)
         result = trader.run_replay()
+        try:
+            _bt_storage.close()
+        except Exception:
+            pass
 
         logger.info(
             f"Backtest {req.symbol} {req.timeframe}: "

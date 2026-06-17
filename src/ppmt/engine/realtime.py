@@ -1699,11 +1699,23 @@ class RealtimeTrader:
                     except Exception:
                         pass
 
-                # Entry signal check (v0.22.0: tightened thresholds)
+                # Entry signal check
+                # v0.22.0: original tightened thresholds (0.30 / 0.15).
+                # v0.39.3: Lowered move floor 0.30 → 0.10 and prob floor
+                # 0.15 → 0.08 to match the new paper-mode SignalThresholds.
+                # Root cause: Bayesian shrinkage on fresh tries (200-500
+                # patterns) keeps overall_probability in the 0.10-0.18
+                # range. The old 0.15 floor rejected ~95% of signals in
+                # live mode → dashboard showed "no signals, no trades"
+                # even when the engine was running fine. The new 0.08
+                # floor matches the paper-mode base_prob_gate so live and
+                # backtest produce comparable signal counts.
+                _live_move_floor = 0.10 if getattr(cfg, 'validation_mode', False) else 0.30
+                _live_prob_floor = 0.08 if getattr(cfg, 'validation_mode', False) else 0.15
                 if (prediction.direction != "FLAT"
                         and weighted_confidence >= effective_min_conf
-                        and abs(prediction.expected_total_move_pct) > 0.30
-                        and prediction.overall_probability > 0.15):
+                        and abs(prediction.expected_total_move_pct) > _live_move_floor
+                        and prediction.overall_probability > _live_prob_floor):
 
                     result.signals_generated += 1
 
@@ -1920,7 +1932,21 @@ class RealtimeTrader:
         trie_n4 = all_tries["n4"]
 
         if trie_n3 is None:
-            console.print(f"[red]No Trie for {cfg.symbol}. Run 'ppmt build' first.[/red]")
+            # v0.39.3: Surface clear error to state_callback so the dashboard
+            # can show WHY this session is dead instead of silently returning.
+            # Previously the session would just become STOPPED with no reason,
+            # leaving the user to guess why "bot not operating".
+            _msg = (f"No Trie for {cfg.symbol} — run Validate or Build first. "
+                    f"Auto-build may have failed (check data ingestion).")
+            console.print(f"[red]{_msg}[/red]")
+            try:
+                self._update_terminal_state(
+                    is_running=False,
+                    websocket_status="error",
+                    error=_msg,
+                )
+            except Exception:
+                pass
             storage.close()
             return RealtimeResult(mode="live", symbol=cfg.symbol, timeframe=cfg.timeframe)
 

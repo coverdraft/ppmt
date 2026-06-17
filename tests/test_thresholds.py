@@ -16,11 +16,15 @@ from ppmt.core.thresholds import SignalThresholds, RegimeThresholds
 
 class TestSignalThresholdsPaper:
     def test_paper_prob_gates(self):
+        # v0.39.3: Lowered from 0.15/0.20/0.25/0.25 to 0.08/0.12/0.15/0.15
+        # to fix 'bot not operating' bug. Fresh tries with Bayesian
+        # shrinkage produce overall_probability in 0.10-0.20 range, so
+        # the old paper gates rejected ~95% of signals.
         t = SignalThresholds.paper()
-        assert t.base_prob_gate == 0.15
-        assert t.ranging_prob_gate == 0.20
-        assert t.volatile_prob_gate == 0.25
-        assert t.counter_trend_gate == 0.25
+        assert t.base_prob_gate == 0.08
+        assert t.ranging_prob_gate == 0.12
+        assert t.volatile_prob_gate == 0.15
+        assert t.counter_trend_gate == 0.15
 
     def test_paper_move_floors(self):
         t = SignalThresholds.paper()
@@ -78,8 +82,9 @@ class TestSignalThresholdsReal:
 
 class TestSignalThresholdsFactory:
     def test_for_mode_paper(self):
+        # v0.39.3: paper base_prob_gate lowered 0.15 → 0.08
         t = SignalThresholds.for_mode(True)
-        assert t is SignalThresholds.paper() or t.base_prob_gate == 0.15
+        assert t is SignalThresholds.paper() or t.base_prob_gate == 0.08
 
     def test_for_mode_real(self):
         t = SignalThresholds.for_mode(False)

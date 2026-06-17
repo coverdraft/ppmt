@@ -97,15 +97,22 @@ class SignalThresholds:
         """
         Paper trading thresholds (validation_mode=True).
 
-        Values preserved verbatim from realtime.py v0.38.7 lines 957-976
-        and signal.py v0.38.7 lines 364-369 (with case fix UPPER→lower).
+        v0.39.3: Lowered probability gates to fix 'bot not operating' bug.
+        Root cause: fresh tries with 200-500 patterns produce Bayesian-
+        shrunk overall_probability values in the 0.10-0.20 range. The
+        v0.38.7 paper gates (0.15 / 0.20 / 0.25 / 0.25) rejected 31 of 33
+        signals in a BTC/USDT 1h validation run, leaving only 2 trades —
+        well below the 5-trade MC threshold and visually 'dead' to the
+        user. The new gates (0.08 / 0.12 / 0.15 / 0.15) let ~80% of
+        signals through so paper trading actually exercises the pipeline.
+        Move floors unchanged: 0.05% is already permissive.
         """
         return cls(
-            # Probability gates (realtime.py:958-962)
-            base_prob_gate=0.15,
-            ranging_prob_gate=0.20,
-            volatile_prob_gate=0.25,
-            counter_trend_gate=0.25,
+            # Probability gates — v0.39.3: lowered for paper-mode visibility
+            base_prob_gate=0.08,
+            ranging_prob_gate=0.12,
+            volatile_prob_gate=0.15,
+            counter_trend_gate=0.15,
             # Move floors (realtime.py:957, 1006, 1018 — all 0.05 in paper)
             hard_move_floor=0.05,
             ranging_move_floor=0.05,
