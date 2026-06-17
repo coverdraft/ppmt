@@ -4721,3 +4721,177 @@ ppmt terminal                               # dashboard :8420
   `test_oos_validation.py` y `test_v43_robust.py` son API drift
   (PPMTTrie.merge y PPMT.build(symbols=) no existen más). Necesitan
   reescribirse o marcarse como skip — no son fallos de regresión.
+
+---
+
+## v0.39.1 — Fase 2D: Fixes de bugs pendientes + endpoints de borrado
+
+**Fecha**: 2026-06-18
+**Commits previos**: b5ab34c (v0.38.9), 41c9665 (v0.39.0)
+**Branch**: `main`
+
+### Contexto
+El usuario reportó 7 bugs críticos en v0.38.8 LIVE. El diagnóstico forense
+reveló que 5 de los 7 ya estaban fixeados en main (v0.38.9 + v0.39.0),
+pero la máquina LIVE del usuario aún no tenía esos commits. Los 2 bugs
+restantes (Money Manager $--, cross-contamination de precios) SÍ eran
+bugs reales no fixeados, junto con 2 problemas adicionales detectados
+en esta sesión: Sweep History no se podía borrar, y Signals no se podía
+borrar (bug silencioso en `clear_signals`).
+
+### Bugs fixeados en v0.39.1
+
+#### Bug #6 — Money Manager siempre $--
+**Causa raíz**: `/api/multi-start` NO llamaba a `pm.register_child()`
+cuando lanzaba las 22 sesiones paralelas. Solo creaba el dict
+`_multi_sessions[node_id]` y arrancaba el `RealtimeTrader`. El
+`ParentNodeManager` (`_parent_manager`) nunca se enteraba de esos
+tokens → `pm._children` quedaba vacío → `/api/nodes` devolvía
+`children: []` → el WebSocket snapshot ponía `nodes.children = []` →
+`updateNodes()` renderizaba 0 nodos → `mmTotalCapital/mmReserve/mmExposure`
+se quedaban en `$--`.
+
+`_sweep_runner` (líneas 2273-2284) **sí** registraba los PASS en
+`pm._children`, pero eso solo pasaba en el flujo Sweep → no en el flujo
+"Start All" del multi-start. Por eso cuando el usuario hacía sweep veía
+los PASS en Money Manager, pero cuando arrancaba 22 sesiones vía
+multi-start desaparecían.
+
+**Fix**: en `server.py:/api/multi-start` (líneas 1090-1128), después
+de lanzar cada task, se llama a `pm.register_child()` con
+`capital_allocation_pct = min(0.25, 1/N)`, luego `pm.distribute_capital()`
++ `_save_parent_manager()`. Al final del bucle, otra pasada de
+`distribute_capital()` para que las allocations sumen 100% (1/N cada
+uno en vez del cap 25% que dejaría reserva sin usar).
+
+#### Bug #7 — Cross-contamination de precios entre sesiones paralelas
+**Causa raíz**: cada sesión paralela llamaba a
+`_terminal_state.update_sync()` sobre el **mismo singleton global**
+(`get_terminal_state()` en `state.py:353`). Las 22 sesiones se pisaban
+mutuamente cada candle (5s en REST polling). Cuando la sesión ZIL
+actualizaba `current_price=0.0116`, 50ms después la sesión MANA
+sobreescribía con `current_price=0.32`, etc. El dashboard mostraba el
+último que llegaba — de ahí el "ZIL muestra 0.0032 / 0.0116 / 0.2262"
+en distintas capturas.
+
+**Fix**: en `realtime.py:_update_terminal_state()` (líneas 369-407),
+cuando `self._state_callback` está presente (modo multi-token), se
+**SKIP** el singleton global — solo se forward al callback per-session.
+El dashboard ya lee el estado per-session vía `/api/multi-status` (que
+consulta `_multi_sessions` directamente), así que el singleton no se
+necesita en modo multi-token. En modo single-token (sin callback), el
+singleton se sigue usando como antes.
+
+#### Bug Sweep History no se puede borrar
+**Causa raíz**: `history_manager.py` solo tenía funciones `save_scan`
+/ `list_scans` / `get_scan` / `list_by_symbol` / `list_today`. **No
+existía** `delete_scan` ni `clear_all_scans`. El dashboard tampoco
+tenía botones de borrado.
+
+**Fix**:
+- `history_manager.py:delete_scan(scan_id)` — borra 1 scan + todos
+  sus `scan_results` por FK.
+- `history_manager.py:clear_all_scans()` — borra TODAS las filas de
+  ambas tablas. Devuelve el total de filas borradas.
+- `server.py:DELETE /api/history/scans/{scan_id}` — endpoint para
+  borrar 1 scan.
+- `server.py:POST /api/history/clear` — endpoint nuclear.
+- `index.html`: botón "Del" por fila + botón "Clear All" en el header
+  del panel Sweep History.
+
+#### Bug Signals no se puede borrar (silent no-op)
+**Causa raíz**: `storage.clear_signals()` usaba la columna `created_at`
+en la cláusula WHERE, pero la tabla `signals` **NO TIENE** esa columna
+— solo `timestamp` (REAL, epoch seconds). Las tablas `trades` y
+`validations` sí tienen `created_at`, pero `signals` no. El DELETE
+fallaba con "no such column: created_at" que era capturado por el
+try/except del caller → el usuario veía "0 signals deleted" sin error
+visible, pero las señales seguían en la DB.
+
+**Fix**:
+- `storage.py:clear_signals()` — usa `timestamp < ?` con epoch cutoff
+  en vez de `created_at < datetime('now', ?)`. También se añadió
+  `import time` al header (faltaba).
+- `server.py:POST /api/clear-signals` — endpoint dedicado (separado
+  de `/api/clear-history` para evitar la confusión previa). Borra de
+  SQLite + limpia `terminal_state.signals_history` (in-memory) para
+  que el UI se actualice instantáneamente sin esperar al próximo WS
+  tick.
+- `index.html`: botón "Clear" en el header del panel Signals (junto
+  al `signalCount`).
+
+### Archivos modificados
+- `src/ppmt/terminal/history_manager.py` — +60 líneas (delete_scan,
+  clear_all_scans).
+- `src/ppmt/data/storage.py` — fix clear_signals (created_at →
+  timestamp) + import time.
+- `src/ppmt/terminal/server.py` — 3 endpoints nuevos (DELETE scan,
+  POST clear all scans, POST clear-signals) + fix Bug #6 en
+  /api/multi-start (pm.register_child).
+- `src/ppmt/engine/realtime.py` — fix Bug #7 en
+  _update_terminal_state (skip singleton en multi-token mode).
+- `src/ppmt/terminal/static/index.html` — botones Clear en Sweep
+  History (per-row + All) + Signals + funciones JS
+  `deleteSweepScan`/`clearAllSweepHistory`/`clearSignalsHistory`.
+- `src/ppmt/__init__.py` — bump 0.39.0 → 0.39.1.
+- `src/ppmt/cli/main.py` — bump version_option + dashboard banner.
+- `pyproject.toml` — bump version.
+- `TRAZABILIDAD.md` — esta entrada.
+
+### Tests
+- 234 tests pasan (sin cambios vs v0.39.0).
+- Tests existentes `test_v0390_chart_markers.py` (8), `test_thresholds.py`
+  (15), `test_v0331_groups.py` (2), etc. — todos OK.
+- Tests saltados: `test_oos_validation.py` y `test_v43_robust.py` (API
+  drift pre-existing, no relacionado con este cambio).
+
+### Cómo verificar
+```bash
+cd ~/my-project/ppmt
+git pull origin main
+pip install -e . --quiet
+ppmt --version                              # debe decir 0.39.1
+ppmt terminal                               # dashboard :8420
+
+# Bug #6 Money Manager $--:
+# 1. Ve a Trading tab. Lanza 5+ sesiones con "Start All".
+# 2. Ve a Money Manager panel (sidebar derecha o tab Risk).
+#    TOTAL CAPITAL debe mostrar la suma real, RESERVE = no asignado,
+#    TOTAL EXPOSURE = suma de allocation% de los 5 tokens.
+# 3. Antes del fix: todo en $--. Después del fix: números reales.
+
+# Bug #7 Cross-contamination:
+# 1. Con 5 sesiones corriendo, selecciona ZIL en el chart.
+# 2. El precio mostrado debe ser el de ZIL (~$0.01-0.02), no el de
+#    MANA/SUSHI/etc.
+# 3. Antes del fix: el precio saltaba entre tokens cada 5s.
+
+# Sweep History Clear:
+# 1. Ve a History tab. Deberías ver botón "Clear All" rojo en el
+#    header del panel + botón "Del" rojo por cada fila.
+# 2. Click "Del" en una fila → confirm → esa fila desaparece.
+# 3. Click "Clear All" → confirm → todas las filas desaparecen.
+# 4. Reload → sigue vacío (efectivo en SQLite).
+
+# Signals Clear:
+# 1. Ve a Trading tab. En el panel "Signals" (blotter derecha)
+#    deberías ver un botón "Clear" rojo junto al contador.
+# 2. Click → confirm → SQLite signals table borrada + signalsFeed
+#    se vacía inmediatamente.
+# 3. Antes del fix: click no borraba nada (silent no-op por bug
+#    de created_at en clear_signals).
+```
+
+### Próximos pasos sugeridos
+- **Bug #7b (bot no opera)**: Aunque el fix de cross-contamination ya
+  limpia el dashboard, la causa raíz del "0 trades en 22 sesiones"
+  sigue siendo los skip filters estrictos del modo real
+  (`base_prob_gate=0.35`, `ranging_prob_gate=0.55`,
+  `volatile_prob_gate=0.60`) combinados con tries recién construidos
+  donde `overall_probability` se queda ~0.5 por Bayesian shrinkage.
+  Próximo commit: bajar gates en paper mode o añadir warmup más largo.
+- **WebSocket push de trades cerrados** (Fase 2D original): reemplazar
+  el poll cada 15s por push instantáneo.
+- **Refactor monolitos**: `realtime.py` (2823 líneas), `server.py`
+  (2756 líneas), `index.html` (3892 líneas) — extraer a módulos.
+- En ~7 días: `git rm -r _archive/`.

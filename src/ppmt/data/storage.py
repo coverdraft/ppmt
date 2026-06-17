@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import time
 from typing import Optional
 
 import pandas as pd
@@ -796,6 +797,12 @@ class PPMTStorage:
         """Delete signal history rows.
 
         v0.37.0: Companion to clear_trades() for clearing stale signals.
+        v0.39.1 FIX: Previously used `created_at` which DOES NOT EXIST
+        on the signals table (only on trades/validations). The DELETE
+        silently failed with "no such column: created_at" caught by
+        the outer try/except in callers → user saw signals never being
+        cleared. Now uses `timestamp` (epoch seconds, REAL) with the
+        equivalent datetime cutoff.
 
         Args:
             symbol: If provided, only delete signals for this symbol.
@@ -812,10 +819,11 @@ class PPMTStorage:
             conditions.append("symbol = ?")
             params.append(symbol)
         if older_than_days > 0:
-            conditions.append(
-                "created_at < datetime('now', ?)"
-            )
-            params.append(f"-{older_than_days} days")
+            # signals.timestamp is REAL (epoch seconds).
+            # Compute the cutoff as epoch and compare numerically.
+            cutoff_epoch = (time.time()) - (older_than_days * 86400.0)
+            conditions.append("timestamp < ?")
+            params.append(cutoff_epoch)
 
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 

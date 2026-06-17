@@ -836,6 +836,7 @@ tr:hover td{background:rgba(95,168,245,.07)}
         <div style="display:flex;gap:4px;align-items:center">
           <span style="font-family:var(--mono);font-size:9px;color:var(--text3)" id="sweepHistoryCount">0 scans</span>
           <button class="btn btn-ghost btn-sm" onclick="loadSweepHistory()">Reload</button>
+          <button class="btn btn-ghost btn-sm" onclick="clearAllSweepHistory()" title="v0.39.1: Delete ALL scans from SQLite" style="color:var(--red)">Clear All</button>
         </div>
       </div>
       <div class="panel-body" style="max-height:220px;overflow-y:auto">
@@ -893,6 +894,7 @@ tr:hover td{background:rgba(95,168,245,.07)}
         <div class="panel-header" style="margin-bottom:4px;flex-shrink:0">
           <div class="panel-title">Signals</div>
           <span style="font-family:var(--mono);font-size:9px;color:var(--text3)" id="signalCount">0 signals</span>
+          <button class="btn btn-ghost btn-sm" onclick="clearSignalsHistory()" title="v0.39.1: Clear signals from SQLite + in-memory state" style="color:var(--red)">Clear</button>
         </div>
         <div class="panel-body" style="flex:1;overflow:hidden">
           <div id="signalsFeed" style="overflow-y:auto;height:100%">
@@ -2393,7 +2395,10 @@ async function loadSweepHistory() {
         <td style="padding:3px 6px;text-align:right" class="text-yellow">${s.tokens_insuficientes || 0}</td>
         <td style="padding:3px 6px;text-align:right">${score}</td>
         <td style="padding:3px 6px;text-align:right;font-size:9px">${tiempo}</td>
-        <td style="padding:3px 6px"><button class="btn btn-ghost btn-sm" onclick="viewSweepDetail(${s.id})">View</button></td>
+        <td style="padding:3px 6px;white-space:nowrap">
+          <button class="btn btn-ghost btn-sm" onclick="viewSweepDetail(${s.id})" title="View details">View</button>
+          <button class="btn btn-ghost btn-sm" onclick="deleteSweepScan(${s.id})" title="Delete this scan" style="color:var(--red)">Del</button>
+        </td>
       </tr>`;
     }).join('');
   } catch (e) {
@@ -2434,6 +2439,75 @@ async function viewSweepDetail(scanId) {
   } catch (e) {
     console.error('viewSweepDetail error:', e);
     alert('Error loading scan: ' + e.message);
+  }
+}
+
+// v0.39.1: Delete a single sweep scan from SQLite.
+async function deleteSweepScan(scanId) {
+  if (!confirm(`Delete scan #${scanId} from SQLite?\nThis removes the scan and all its per-token results.`)) {
+    return;
+  }
+  try {
+    const res = await fetch(`${API}/api/history/scans/${scanId}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (data.ok) {
+      loadSweepHistory();  // refresh list
+    } else {
+      alert('Delete failed: ' + (data.error || 'unknown error'));
+    }
+  } catch (e) {
+    alert('Delete failed: ' + e.message);
+  }
+}
+
+// v0.39.1: Nuclear — wipe ALL sweep history from SQLite.
+async function clearAllSweepHistory() {
+  if (!confirm('Delete ALL sweep scans from SQLite?\nThis is irreversible.')) {
+    return;
+  }
+  try {
+    const res = await fetch(`${API}/api/history/clear`, { method: 'POST' });
+    const data = await res.json();
+    if (data.ok) {
+      alert(`Cleared ${data.rows_deleted} rows from sweep history.`);
+      loadSweepHistory();
+    } else {
+      alert('Clear failed: ' + (data.error || 'unknown error'));
+    }
+  } catch (e) {
+    alert('Clear failed: ' + e.message);
+  }
+}
+
+// v0.39.1: Clear signals from SQLite + in-memory state.
+// Split from clearTradeHistory because signals need a dedicated endpoint
+// (the old clear_signals used a non-existent created_at column).
+async function clearSignalsHistory() {
+  let symbol = document.getElementById('setupSymbol').value;
+  const scope = symbol ? `for ${symbol}` : 'for ALL symbols';
+  if (!confirm(`Clear signals ${scope}?\nThis deletes rows from SQLite (~/.ppmt/ppmt.db signals table) AND clears the in-memory signals_history buffer.`)) {
+    return;
+  }
+  try {
+    const body = { symbol: symbol || null, older_than_days: 0 };
+    const res = await fetch(`${API}/api/clear-signals`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      alert(data.message || `Cleared ${data.signals_deleted} signals`);
+      // Force UI refresh — next WS tick will show empty signals list
+      const feedEl = document.getElementById('signalsFeed');
+      if (feedEl) feedEl.innerHTML = '<div class="empty-state">No signals</div>';
+      const cntEl = document.getElementById('signalCount');
+      if (cntEl) cntEl.textContent = '0 signals';
+    } else {
+      alert('Clear failed: ' + (data.error || 'unknown error'));
+    }
+  } catch (e) {
+    alert('Clear failed: ' + e.message);
   }
 }
 

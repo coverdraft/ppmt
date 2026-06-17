@@ -399,6 +399,67 @@ def list_today() -> List[Dict[str, Any]]:
 
 
 # ============================================================
+# Delete (v0.39.1)
+# ============================================================
+def delete_scan(scan_id: int) -> bool:
+    """Delete a single scan and all its per-token results.
+
+    v0.39.1: Added so the dashboard can clear individual scans or all
+    scans from the History tab. Previously the user could only read
+    scans but never delete them, so the list grew indefinitely with
+    stale sweeps from days ago.
+    """
+    conn = _get_conn()
+    if conn is None:
+        return False
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM scan_results WHERE scan_id = ?", (scan_id,))
+        cur.execute("DELETE FROM historical_scan WHERE id = ?", (scan_id,))
+        conn.commit()
+        return cur.rowcount > 0
+    except Exception as e:
+        logger.warning(f"delete_scan failed: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        _close_quietly(conn)
+
+
+def clear_all_scans() -> int:
+    """Delete ALL scans and results. Returns total rows deleted.
+
+    v0.39.1: Nuclear option — wipes the entire sweep history. Used by
+    the dashboard's "Clear All" button on the Sweep History panel.
+    """
+    conn = _get_conn()
+    if conn is None:
+        return 0
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM scan_results")
+        n_results = cur.fetchone()[0] or 0
+        cur.execute("SELECT COUNT(*) FROM historical_scan")
+        n_scans = cur.fetchone()[0] or 0
+        cur.execute("DELETE FROM scan_results")
+        cur.execute("DELETE FROM historical_scan")
+        conn.commit()
+        return n_results + n_scans
+    except Exception as e:
+        logger.warning(f"clear_all_scans failed: {e}")
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return 0
+    finally:
+        _close_quietly(conn)
+
+
+# ============================================================
 # CLI entry point
 # ============================================================
 def cli_history(args) -> int:

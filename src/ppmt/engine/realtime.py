@@ -374,17 +374,37 @@ class RealtimeTrader:
 
         v0.36.2: Also forwards the same kwargs to the per-session state_callback
         (if provided) so multi-token sessions can track their own state.
+
+        v0.39.1 FIX (Bug #7 cross-contamination of prices/signals between
+        parallel sessions): when a state_callback is provided (multi-token
+        mode via /api/multi-start), we SKIP the global _terminal_state
+        singleton entirely. Previously all 22 parallel traders wrote to
+        the SAME singleton, so ZIL's current_price was overwritten 50ms
+        later by MANA's, then by SUSHI's, etc. The dashboard showed the
+        last writer's price for whatever symbol was selected — leading
+        to the "ZIL shows 0.0032 / 0.0116 / 0.2262" cross-contamination
+        the user reported.
+        Now: in multi-token mode the dashboard reads per-session state
+        via /api/multi-status (which queries _multi_sessions directly),
+        and the global singleton is left alone so it doesn't get
+        polluted. In single-token mode (no state_callback) the singleton
+        is still used as before.
         """
-        if _terminal_state is not None:
-            try:
-                _terminal_state.update_sync(**kwargs)
-            except Exception:
-                pass  # Never let dashboard updates crash the engine
-        if self._state_callback is not None:
-            try:
-                self._state_callback(**kwargs)
-            except Exception:
-                pass  # Never let callback errors crash the engine
+        # v0.39.1: In multi-token mode, skip the global singleton.
+        if self._state_callback is None:
+            # Single-token mode — update the global singleton as before.
+            if _terminal_state is not None:
+                try:
+                    _terminal_state.update_sync(**kwargs)
+                except Exception:
+                    pass  # Never let dashboard updates crash the engine
+            return
+
+        # Multi-token mode — only forward to per-session callback.
+        try:
+            self._state_callback(**kwargs)
+        except Exception:
+            pass  # Never let callback errors crash the engine
 
     def _setup_token_profile(self, cfg, info, storage, df=None):
         """

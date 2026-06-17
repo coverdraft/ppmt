@@ -42,7 +42,7 @@ CONFIG_DIR = os.path.expanduser("~/.ppmt")
 # ------------------------------------------------------------------ #
 # FastAPI application
 # ------------------------------------------------------------------ #
-app = FastAPI(title="PPMT Terminal", version="0.38.9")
+app = FastAPI(title="PPMT Terminal", version="0.39.1")
 
 # Global terminal state (shared with engine)
 terminal_state: TerminalState = get_terminal_state()
@@ -1086,6 +1086,46 @@ async def multi_start(req: MultiStartRequest) -> dict:
         task = asyncio.create_task(_run_one_token())
         _multi_sessions[node_id] = {**session_state, "task": task, "config": config}
         launched.append({"node_id": node_id, "symbol": sym, "status": "LAUNCHED"})
+
+        # v0.39.1 FIX (Bug #6 Money Manager $--):
+        # Previously /api/multi-start did NOT call pm.register_child(), so the
+        # ParentNodeManager never knew about the 22 parallel sessions →
+        # /api/nodes returned children: [] → mmTotalCapital/mmReserve/mmExposure
+        # stayed at "$--" forever, even with 22 sessions RUNNING.
+        # Now we register the child node here (idempotent if already present
+        # from a previous sweep), redistribute capital, and persist state.
+        try:
+            pm = _get_parent_manager()
+            if node_id not in pm._children:
+                from ppmt.risk.money_manager import ChildNodeConfig
+                # Split capital evenly across all tokens (matches per_capital
+                # logic above). Cap at 25% per token to avoid over-allocation
+                # when the user launches very few tokens.
+                alloc_pct = min(0.25, 1.0 / max(len(tokens), 1))
+                child_cfg = ChildNodeConfig(
+                    node_id=node_id,
+                    symbol=sym,
+                    timeframe=tf,
+                    capital_allocation_pct=alloc_pct,
+                    leverage=req.leverage,
+                    auto_mode=req.auto_mode,
+                )
+                pm.register_child(child_cfg)
+            # Always redistribute + save so the dashboard sees fresh totals
+            pm.distribute_capital()
+            _save_parent_manager()
+        except Exception as e:
+            logger.warning(f"multi-start: register_child({node_id}) failed: {e}")
+
+    # v0.39.1: After launching all tokens, do a final distribute_capital()
+    # so allocations sum to 100% (each token gets 1/N instead of all getting
+    # the same 25% cap which would leave reserve capital unused).
+    try:
+        pm = _get_parent_manager()
+        pm.distribute_capital()
+        _save_parent_manager()
+    except Exception:
+        pass
 
     return {
         "ok": True,
@@ -2415,6 +2455,99 @@ async def history_today() -> dict:
         return {"ok": True, "scans": rows}
     except Exception as e:
         return {"ok": False, "error": str(e), "scans": []}
+
+
+# v0.39.1: Sweep History DELETE endpoints.
+# Previously the user could read scans but never delete them, so the list
+# grew indefinitely with stale sweeps from days ago. These two endpoints
+# let the dashboard's "Clear" button (per-row) and "Clear All" button
+# (panel header) actually remove rows from SQLite.
+
+
+@app.delete("/api/history/scans/{scan_id}")
+async def history_delete_scan(scan_id: int) -> dict:
+    """Delete a single scan and all its per-token results.
+
+    v0.39.1: Wired to the per-row "Clear" button in the Sweep History table.
+    """
+    try:
+        from ppmt.terminal.history_manager import delete_scan
+        ok = delete_scan(scan_id)
+        if not ok:
+            return {"ok": False, "error": f"scan_id {scan_id} not found"}
+        return {"ok": True, "deleted_scan_id": scan_id}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/history/clear")
+async def history_clear_all() -> dict:
+    """Delete ALL scans and results from the history DB.
+
+    v0.39.1: Nuclear option — wipes the entire sweep history. Used by
+    the "Clear All" button on the Sweep History panel header.
+    """
+    try:
+        from ppmt.terminal.history_manager import clear_all_scans
+        total = clear_all_scans()
+        return {"ok": True, "rows_deleted": total}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+# ------------------------------------------------------------------ #
+# REST endpoint — Clear Signals (v0.39.1)
+# ------------------------------------------------------------------ #
+
+
+class ClearSignalsRequest(BaseModel):
+    """v0.39.1: Dedicated signal-clear endpoint.
+
+    Previously /api/clear-history tried to clear signals but the
+    underlying storage.clear_signals() used a non-existent `created_at`
+    column on the signals table → silent no-op. This dedicated endpoint
+    also clears the in-memory terminal_state.signals_history so the
+    dashboard's Signals panel and Recent Signals widget clear
+    immediately without waiting for the next WS tick.
+    """
+    symbol: Optional[str] = None  # None = clear ALL symbols
+    older_than_days: int = 0      # 0 = clear all matching
+
+
+@app.post("/api/clear-signals")
+async def clear_signals(req: ClearSignalsRequest) -> dict:
+    """Clear signal history from SQLite AND in-memory state.
+
+    v0.39.1: Split out from /api/clear-history because (a) signals need
+    a dedicated storage.clear_signals() call that uses the correct
+    `timestamp` column, and (b) the dashboard needs to also wipe
+    terminal_state.signals_history (the in-memory ring buffer the WS
+    broadcasts) so the UI clears instantly without a 5s lag.
+    """
+    try:
+        storage = PPMTStorage()
+        deleted = storage.clear_signals(
+            symbol=req.symbol, older_than_days=req.older_than_days,
+        )
+        storage.close()
+
+        # Also clear in-memory signals_history so the dashboard's Signals
+        # panel + Recent Signals widget clear immediately.
+        try:
+            terminal_state.signals_history = []
+            terminal_state.latest_signal = None
+        except Exception:
+            pass
+
+        sym_label = f" for {req.symbol}" if req.symbol else " (all symbols)"
+        age_label = f" older than {req.older_than_days} days" if req.older_than_days > 0 else ""
+        return {
+            "ok": True,
+            "signals_deleted": deleted,
+            "message": f"Cleared {deleted} signals{sym_label}{age_label}",
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
 
 
 # ------------------------------------------------------------------ #

@@ -404,3 +404,25 @@ Próximos pasos sugeridos:
   regime, R:R, full P&L).
 - Investigar los 13 tests pre-existing failures (test_oos_validation.py,
   test_v43_robust.py) — API drift en PPMTTrie.merge y PPMT.build(symbols=).
+
+---
+Task ID: v0.39.1
+Agent: main
+Task: Fixes de 4 bugs pendientes (Money Manager $--, cross-contamination, Sweep History no borrable, Signals no borrable) + endpoints de borrado.
+
+Work Log:
+- Diagnóstico forense: 5/7 bugs ya fixeados en v0.38.9+v0.39.0; 2 reales pendientes.
+- history_manager.py: añadidas delete_scan() y clear_all_scans().
+- storage.py: fix clear_signals (created_at inexistente → timestamp epoch).
+- server.py: 3 endpoints nuevos (DELETE /api/history/scans/{id}, POST /api/history/clear, POST /api/clear-signals) + fix Bug #6 (pm.register_child en /api/multi-start).
+- realtime.py: fix Bug #7 (_update_terminal_state skip singleton en multi-token mode).
+- index.html: botones Clear en Sweep History (per-row + All) + Signals + 3 funciones JS.
+- Bump v0.39.0 → v0.39.1 en __init__.py, cli/main.py, server.py, pyproject.toml.
+- TRAZABILIDAD.md: entrada v0.39.1 con detalles de cada bug + cómo verificar.
+- Tests: 234 pasan (sin regresiones vs v0.39.0).
+
+Stage Summary:
+- 4 bugs críticos fixeados: Money Manager $--, cross-contamination de precios, Sweep History no borrable, Signals no borrable (silent no-op).
+- 3 endpoints nuevos + 2 funciones nuevas en storage/history_manager.
+- Frontend: 4 botones nuevos (Clear All + Del per-row en Sweep History, Clear en Signals).
+- Lista para commit + push a GitHub.
