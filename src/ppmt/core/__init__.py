@@ -6,6 +6,7 @@ from ppmt.core.trie import PPMTTrie, TrieNode
 from ppmt.core.encoder import DeltaEncoder
 from ppmt.core.matcher import FuzzyMatcher
 from ppmt.core.regime import RegimeDetector, RegimeInfo
+from ppmt.core.thresholds import SignalThresholds, RegimeThresholds
 
 __all__ = [
     "BlockLifecycleMetadata",
@@ -16,4 +17,6 @@ __all__ = [
     "FuzzyMatcher",
     "RegimeDetector",
     "RegimeInfo",
+    "SignalThresholds",
+    "RegimeThresholds",
 ]
