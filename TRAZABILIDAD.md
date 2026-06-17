@@ -4895,3 +4895,167 @@ ppmt terminal                               # dashboard :8420
 - **Refactor monolitos**: `realtime.py` (2823 líneas), `server.py`
   (2756 líneas), `index.html` (3892 líneas) — extraer a módulos.
 - En ~7 días: `git rm -r _archive/`.
+
+---
+
+## v0.39.2 — Fase 2E: Fix "Bot not operating" (Bug #7b root cause)
+
+**Fecha:** 2026-06-18
+**Commit:** próximo a crear
+**Bump:** v0.39.1 → v0.39.2
+
+### Problema
+
+El usuario reportó "bot not operating" — 22 sesiones paralelas RUNNING
+pero el dashboard's Signals panel siempre mostraba "No signals" y el
+contador `signals: 0` por sesión. El bot parecía no estar generando
+ninguna operación.
+
+**Hipótesis inicial (documentada en v0.39.1):** skip filters demasiado
+estrictos (`base_prob_gate=0.35`, `ranging_prob_gate=0.55`,
+`volatile_prob_gate=0.60`) rechazaban todas las signals con
+`overall_probability ~0.5`.
+
+**Causa raíz real (encontrada en v0.39.2):** El bot SÍ estaba operando
+y generando signals, pero éstas se perdían silenciosamente en el camino
+al dashboard. Tres bugs encadenados:
+
+1. **`storage.save_signal()` nunca se llamaba desde el engine.** La
+   tabla `signals` en SQLite estaba SIEMPRE vacía. Ningún caller en
+   `realtime.py` invocaba `storage.save_signal()`. Como consecuencia,
+   `/api/clear-signals` (v0.39.1) no tenía nada que borrar — el "Signals
+   no se puede borrar" reportado por el usuario era en realidad "no hay
+   signals para borrar".
+
+2. **`cfg.on_signal` nunca se registraba en `/api/multi-start`.** El
+   hook existía en `LiveConfig` (línea 274) y se disparaba en el engine
+   (realtime.py:1185 y 1782), pero el handler nunca se conectaba al
+   iniciar sesiones multi-token. Las signals se generaban internamente
+   pero el callback era `None` → se descartaban.
+
+3. **`_state_cb` en `/api/multi-start` ignoraba el kwarg `signal=`.**
+   El engine forwarda signals vía
+   `self._update_terminal_state(signal={...})` (realtime.py:1217 en
+   run_replay). El `_state_cb` solo manejaba campos escalares
+   (`current_price`, `pnl_pct`, etc.) — el kwarg `signal=` se ignoraba.
+   Y tras el fix v0.39.1 de cross-contamination, el singleton global
+   también se skipea en multi-token mode, así que la signal se perdía
+   por completo.
+
+**Resultado neto:** signals generadas por el engine → 0 signals en
+SQLite → 0 signals en `_multi_sessions[node_id]["signals_history"]` →
+0 signals en `/api/signals` → 0 signals en el WS broadcast → dashboard
+muestra "No signals" → usuario percibe "bot not operating".
+
+### Solución
+
+Cuatro cambios en `server.py`:
+
+1. **`session_state` inicializado con `signals_history: []`** (línea 958):
+   nuevo campo en el dict por sesión, cap 50 (mismo tamaño que el
+   singleton `_MAX_SIGNALS` en `state.py`).
+
+2. **`config.on_signal = _on_signal_hook`** (líneas 990-1059): callback
+   que:
+   - Convierte el objeto `TradingSignal` a dict (symbol, signal_type,
+     confidence, entry/sl/tp prices, expected_move_pct, win_rate,
+     matched_pattern, timestamp).
+   - Persiste a SQLite vía `storage.save_signal()`. Best-effort: si
+     falla, loguea a debug y continúa (nunca bloquea el engine).
+   - Append al ring buffer per-session (`signals_history`, cap 50).
+   - Bump del counter `signals` (defensivo — el engine también lo
+     reporta vía `_state_cb`).
+
+3. **`_state_cb` ahora maneja `signal=` kwarg** (líneas 1142-1161):
+   cuando el engine forwarda una signal vía
+   `_update_terminal_state(signal={...})`, se append al ring buffer
+   per-session. Dedup por (timestamp ± 0.5s, symbol) para evitar
+   doble-counting cuando ambos paths (on_signal AND
+   _update_terminal_state) disparan para la misma signal.
+
+4. **`/api/multi-status` retorna `signals_history` por sesión** (línea
+   1323): nuevo field en cada session object, last 50 signals.
+
+5. **`/api/signals` fallback a per-session** (líneas 167-184): cuando
+   `terminal_state.signals_history` está vacío (multi-token mode),
+   mergea signals de todas las sesiones activas, cap 50.
+
+6. **WS broadcast enriquecido** (líneas 2848-2919): el snapshot que se
+   envía cada 1s a los WS clients ahora incluye:
+   - `signals_history`: merge de todas las sesiones (cap 50) cuando el
+     singleton está vacío.
+   - `multi_signals_by_symbol`: dict symbol → signals (cap 50) para
+     que el frontend pueda elegir las del token actualmente visible
+     en el chart (sin tener que esperar al próximo WS tick).
+   - Campos del header (`symbol`, `timeframe`, `current_price`,
+     `regime`, `is_running`, `candles_processed`, `total_trades`,
+     `websocket_status`, `portfolio_value`, `win_rate`,
+     `exposure_pct`) populados desde la sesión más reciente cuando
+     el singleton no tiene datos. Esto hace que el header del
+     dashboard muestre info real en multi-token mode sin necesidad
+     de tocar el frontend.
+
+### Archivos modificados
+
+- `src/ppmt/terminal/server.py` (+170 líneas):
+  - `session_state` init con `signals_history: []`
+  - `_on_signal_hook` callback (SQLite persist + per-session append)
+  - `_state_cb` maneja `signal=` kwarg con dedup
+  - `/api/multi-status` retorna `signals_history` por sesión
+  - `/api/signals` fallback a per-session
+  - WS broadcast enriquecido con merged signals + by_symbol map
+- `src/ppmt/__init__.py`: bump 0.39.1 → 0.39.2
+- `src/ppmt/cli/main.py`: bump en `@click.version_option` + banner
+- `pyproject.toml`: bump 0.39.1 → 0.39.2
+
+### Riesgo
+
+- **Bajo.** Solo cambios en `server.py` (dashboard/WS layer). No se
+  toca `realtime.py` (engine), `signal.py` (signal generation), ni
+  `risk/` (position sizing). Los skip filters siguen intactos.
+- **Perf:** el callback `on_signal` hace un INSERT SQLite por signal
+  (~1ms). Con 22 sesiones generando ~1 signal/min cada una, son ~22
+  INSERTs/min — despreciable. El WS broadcast hace un merge de N
+  sesiones cada 1s — con 22 sesiones × 50 signals cap = 1100 items
+  max, sort O(N log N) — despreciable.
+- **Backward compat:** `/api/signals` y `/api/multi-status` solo
+  AÑADEN fields (signals_history). El frontend existente sigue
+  funcionando sin cambios — los nuevos fields son opcionales y se
+  ignoran si no se usan.
+
+### Cómo verificar
+
+```bash
+cd ~/ppmt
+git pull origin main
+pip install -e . --quiet
+ppmt --version                              # debe decir 0.39.2
+ppmt terminal                               # dashboard :8420
+
+# 1. Lanza 22 sesiones multi-token (botón "Start All" o /api/multi-start).
+# 2. Espera 2-3 minutos a que los skip filters generen signals.
+# 3. Signals panel (derecha del Trading tab) debería poblarce con
+#    signals de los tokens activos.
+# 4. /api/signals debería retornar merged signals.
+# 5. /api/multi-status debería incluir signals_history por sesión.
+# 6. SQLite: SELECT COUNT(*) FROM signals; debería ser > 0.
+# 7. Botón "Clear" en Signals panel ahora borra signals reales
+#    (antes era silent no-op porque no había signals que borrar).
+```
+
+### Próximos pasos sugeridos
+
+- **Bug #7b confirmado no era thresholds.** La hipótesis original de
+  skip filters estrictos se descarta — el bot SÍ generaba signals,
+  solo que no se veían. Si tras v0.39.2 el usuario sigue viendo 0
+  signals en algún token específico, recién ahí investigar thresholds.
+- **Frontend:** Aunque el WS broadcast ya incluye
+  `multi_signals_by_symbol`, el frontend no lo usa aún (sigue
+  leyendo `s.signals_history` del singleton). Para una UX perfecta,
+  el frontend debería preferir `s.multi_signals_by_symbol[chartSym]`
+  cuando está disponible. Backlog Fase 2F.
+- **WebSocket push de trades cerrados** (Fase 2D original): reemplazar
+  el poll cada 15s por push instantáneo.
+- **Refactor monolitos:** `realtime.py` (2844 líneas), `server.py`
+  (~2920 líneas), `index.html` (~3962 líneas) — extraer a módulos.
+- En ~7 días: `git rm -r _archive/`.

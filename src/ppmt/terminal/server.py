@@ -42,7 +42,7 @@ CONFIG_DIR = os.path.expanduser("~/.ppmt")
 # ------------------------------------------------------------------ #
 # FastAPI application
 # ------------------------------------------------------------------ #
-app = FastAPI(title="PPMT Terminal", version="0.39.1")
+app = FastAPI(title="PPMT Terminal", version="0.39.2")
 
 # Global terminal state (shared with engine)
 terminal_state: TerminalState = get_terminal_state()
@@ -166,8 +166,22 @@ async def get_portfolio() -> dict:
 
 @app.get("/api/signals")
 async def get_signals() -> dict:
-    """Recent signals."""
-    return {"signals": terminal_state.signals_history}
+    """Recent signals.
+
+    v0.39.2: In multi-token mode the global terminal_state singleton is
+    intentionally skipped (v0.39.1 cross-contamination fix), so its
+    signals_history stays empty. Fall back to merging per-session
+    signals_history from _multi_sessions so this endpoint keeps working
+    for the dashboard's Signals panel + Recent Signals widget.
+    """
+    sigs = list(terminal_state.signals_history or [])
+    if not sigs and _multi_sessions:
+        # Multi-token mode — merge per-session signals, newest last.
+        for sess in _multi_sessions.values():
+            sigs.extend(sess.get("signals_history", []))
+        # Cap at 50 (matches singleton's _MAX_SIGNALS).
+        sigs = sigs[-50:]
+    return {"signals": sigs}
 
 
 @app.get("/api/performance")
@@ -944,6 +958,18 @@ async def multi_start(req: MultiStartRequest) -> dict:
             # /api/multi-status can expose it to the dashboard chart for an
             # entry-price price-line overlay. Updated by cfg.on_position below.
             "open_position": None,
+            # v0.39.2: per-session signals ring buffer (cap 50). Populated by
+            # cfg.on_signal below. Previously signals were NEVER shown in
+            # multi-token mode because (a) the v0.39.1 cross-contamination
+            # fix skipped the global _terminal_state singleton in multi-token
+            # mode, and (b) _state_cb ignored the `signal=` kwarg that the
+            # engine forwards via _update_terminal_state(signal={...}). As a
+            # result the dashboard's Signals panel always showed "No signals"
+            # even when the bot was actively generating them, which the user
+            # perceived as "bot not operating". This buffer + the
+            # /api/multi-status + WS-broadcast enrichment (see /ws below)
+            # restore visibility without re-introducing cross-contamination.
+            "signals_history": [],
         }
 
         # v0.39.0: Wire on_position callback. The RealtimeTrader fires this
@@ -974,6 +1000,77 @@ async def multi_start(req: MultiStartRequest) -> dict:
             except Exception:
                 pass
         config.on_position = _on_position_hook
+
+        # v0.39.2: Wire on_signal callback. The RealtimeTrader fires this
+        # when a signal passes all skip filters and an entry decision is
+        # made (regardless of whether the risk manager allows the position
+        # to actually open). We use it to:
+        #   1. Persist the signal to SQLite via storage.save_signal() —
+        #      previously the signals table was ALWAYS empty because no
+        #      caller invoked save_signal(), so /api/clear-signals had
+        #      nothing to delete and the dashboard's "Signals" panel was
+        #      permanently empty in multi-token mode.
+        #   2. Append to _multi_sessions[node_id]["signals_history"] so
+        #      /api/multi-status can return the per-session signal list
+        #      (last 50) and the /ws broadcast can enrich its snapshot
+        #      with merged per-session signals when the global singleton
+        #      is empty (which it always is in multi-token mode per the
+        #      v0.39.1 cross-contamination fix).
+        def _on_signal_hook(signal, prediction, _nid=node_id, _sym=sym, _tf=tf):
+            try:
+                # 1. Persist to SQLite (best-effort — never block the engine).
+                sig_dict = {
+                    "symbol": _sym,
+                    "signal_type": getattr(getattr(signal, "signal_type", None), "value", "UNKNOWN"),
+                    "confidence": float(getattr(signal, "confidence", 0) or 0),
+                    "quality_score": float(getattr(signal, "quality_score", 0) or 0),
+                    "sizing_multiplier": float(getattr(signal, "sizing_multiplier", 0) or 0),
+                    "entry_price": float(getattr(signal, "entry_price", 0) or 0),
+                    "sl_price": float(getattr(signal, "sl_price", 0) or 0),
+                    "tp_price": float(getattr(signal, "tp_price", 0) or 0),
+                    "expected_move_pct": float(getattr(signal, "expected_move_pct", 0) or 0),
+                    "win_rate": float(getattr(signal, "win_rate", 0) or 0),
+                    "remaining_candles": int(getattr(signal, "remaining_candles", 0) or 0),
+                    "matched_pattern": list(getattr(signal, "matched_pattern", []) or []),
+                    "predicted_path": [],  # skip serialization — non-critical
+                    "timestamp": time.time(),
+                }
+                try:
+                    _sig_storage = PPMTStorage()
+                    _sig_storage.save_signal(sig_dict)
+                    _sig_storage.close()
+                except Exception as _e:
+                    logger.debug(f"[{_nid}] save_signal failed (non-critical): {_e}")
+
+                # 2. Append to per-session ring buffer (cap 50 — matches
+                # the singleton's _MAX_SIGNALS in state.py).
+                sess_ref = _multi_sessions.get(_nid)
+                if sess_ref is None:
+                    return
+                sig_view = {
+                    "type": sig_dict["signal_type"],
+                    "direction": getattr(signal, "direction", None) or sig_dict["signal_type"],
+                    "confidence": sig_dict["confidence"],
+                    "price": sig_dict["entry_price"],
+                    "entry_price": sig_dict["entry_price"],
+                    "sl": sig_dict["sl_price"],
+                    "tp": sig_dict["tp_price"],
+                    "pattern": sig_dict["matched_pattern"],
+                    "trie_level": getattr(signal, "trie_level", "n3"),
+                    "timestamp": sig_dict["timestamp"],
+                    "symbol": _sym,
+                    "timeframe": _tf,
+                }
+                sess_ref["signals_history"].append(sig_view)
+                if len(sess_ref["signals_history"]) > 50:
+                    sess_ref["signals_history"] = sess_ref["signals_history"][-50:]
+                # Bump aggregate count too (defensive — engine also reports
+                # this via _state_cb, but we ensure it stays monotonic).
+                sess_ref["signals"] = max(sess_ref.get("signals", 0) + 1, len(sess_ref["signals_history"]))
+                sess_ref["last_update_ts"] = time.time()
+            except Exception as _e:
+                logger.debug(f"[{_nid}] on_signal hook failed (non-critical): {_e}")
+        config.on_signal = _on_signal_hook
 
         async def _run_one_token(_sym=sym, _tf=tf, _exch=exch, _cfg=config, _nid=node_id):
             sess = _multi_sessions[_nid]
@@ -1056,6 +1153,26 @@ async def multi_start(req: MultiStartRequest) -> dict:
                         s["win_rate"] = float(kwargs["win_rate"] or 0)
                     if "exposure_pct" in kwargs:
                         s["exposure_pct"] = float(kwargs["exposure_pct"] or 0)
+                    # v0.39.2: Capture `signal=` kwarg forwarded by the engine
+                    # via _update_terminal_state(signal={...}) (realtime.py:1217
+                    # in run_replay, used by backtest path). Without this the
+                    # signal would be silently dropped in multi-token mode
+                    # because the singleton is skipped (v0.39.1 fix). Dedup
+                    # against the most recent entry by timestamp+symbol to
+                    # avoid double-counting when both on_signal AND
+                    # _update_terminal_state fire for the same signal.
+                    if "signal" in kwargs and kwargs["signal"]:
+                        _sig = kwargs["signal"]
+                        if isinstance(_sig, dict):
+                            _sig_ts = float(_sig.get("timestamp") or time.time())
+                            _sig_sym = _sig.get("symbol") or s.get("symbol", "")
+                            _last = s["signals_history"][-1] if s["signals_history"] else None
+                            if not (_last and abs(float(_last.get("timestamp") or 0) - _sig_ts) < 0.5
+                                    and _last.get("symbol") == _sig_sym):
+                                s["signals_history"].append(_sig)
+                                if len(s["signals_history"]) > 50:
+                                    s["signals_history"] = s["signals_history"][-50:]
+                                s["signals"] = max(s.get("signals", 0) + 1, len(s["signals_history"]))
                     s["last_update_ts"] = time.time()
                     # Status transitions driven by what we just learned
                     if kwargs.get("is_running") and s["status"] in ("STARTING_TRADER", "STARTING"):
@@ -1213,6 +1330,11 @@ async def multi_status() -> dict:
             # v0.39.0: currently-open position (None when flat) so the chart
             # can render a price-line at the entry for the selected token.
             "open_position": sess.get("open_position"),
+            # v0.39.2: per-session signals ring buffer (last 50). Populated by
+            # cfg.on_signal in /api/multi-start. Lets the dashboard render the
+            # Signals panel + chart markers in multi-token mode (where the
+            # global singleton is intentionally skipped — see v0.39.1 fix).
+            "signals_history": list(sess.get("signals_history", []))[-50:],
         })
     return {
         "ok": True,
@@ -2722,6 +2844,79 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 }
             except Exception:
                 snapshot["nodes"] = None
+
+            # v0.39.2: Enrich snapshot with per-session signals_history
+            # when the global singleton is empty (multi-token mode). The
+            # singleton is intentionally skipped in multi-token mode per
+            # the v0.39.1 cross-contamination fix, so without this
+            # enrichment the dashboard's Signals panel + Recent Signals
+            # widget would always show "No signals" even when 22 traders
+            # are actively generating them. We also expose
+            # `multi_signals_by_symbol` so the frontend can pick the
+            # signals matching the currently-selected chart symbol (the
+            # dashboard's `updateDashboard` already filters by `s.symbol
+            # === chartSym` for chart markers — see index.html:1598).
+            try:
+                if not snapshot.get("signals_history") and _multi_sessions:
+                    merged: list = []
+                    by_symbol: dict[str, list] = {}
+                    for sess in _multi_sessions.values():
+                        sigs = list(sess.get("signals_history", []))
+                        if not sigs:
+                            continue
+                        merged.extend(sigs)
+                        sym_key = sess.get("symbol", "")
+                        if sym_key:
+                            by_symbol.setdefault(sym_key, []).extend(sigs)
+                    # Sort by timestamp ascending, cap at 50 (matches
+                    # singleton's _MAX_SIGNALS in state.py).
+                    merged.sort(key=lambda x: float(x.get("timestamp") or 0))
+                    snapshot["signals_history"] = merged[-50:]
+                    # Cap each symbol's bucket at 50 too.
+                    snapshot["multi_signals_by_symbol"] = {
+                        k: sorted(v, key=lambda x: float(x.get("timestamp") or 0))[-50:]
+                        for k, v in by_symbol.items()
+                    }
+                    # Also surface the most-recent active symbol so the
+                    # frontend can update the header even when the
+                    # singleton's symbol field is empty.
+                    if not snapshot.get("symbol") and _multi_sessions:
+                        # Pick the session with the most recent update.
+                        _latest = max(
+                            _multi_sessions.values(),
+                            key=lambda s: s.get("last_update_ts", 0),
+                        )
+                        snapshot["symbol"] = _latest.get("symbol", "")
+                        snapshot["timeframe"] = _latest.get("timeframe", "")
+                        if _latest.get("last_price"):
+                            snapshot["current_price"] = float(_latest["last_price"])
+                        if _latest.get("regime"):
+                            snapshot["regime"] = _latest["regime"]
+                        if _latest.get("is_running"):
+                            snapshot["is_running"] = True
+                        snapshot["candles_processed"] = _latest.get("candles_processed", 0)
+                        snapshot["total_trades"] = _latest.get("trades", 0)
+                        snapshot["websocket_status"] = _latest.get("websocket_status", "disconnected")
+                        snapshot["portfolio_value"] = _latest.get("portfolio_value", 0.0)
+                        snapshot["win_rate"] = _latest.get("win_rate", 0.0)
+                        snapshot["exposure_pct"] = _latest.get("exposure_pct", 0.0)
+                else:
+                    # Always expose the by-symbol map so the frontend
+                    # can switch instantly when the user picks a
+                    # different chart symbol.
+                    by_symbol: dict[str, list] = {}
+                    for sess in _multi_sessions.values():
+                        sym_key = sess.get("symbol", "")
+                        if sym_key:
+                            by_symbol.setdefault(sym_key, []).extend(
+                                sess.get("signals_history", [])
+                            )
+                    snapshot["multi_signals_by_symbol"] = {
+                        k: sorted(v, key=lambda x: float(x.get("timestamp") or 0))[-50:]
+                        for k, v in by_symbol.items()
+                    }
+            except Exception as _e:
+                logger.debug(f"WS signal-enrichment failed (non-critical): {_e}")
 
             try:
                 await websocket.send_json(snapshot)
