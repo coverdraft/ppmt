@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>PPMT Terminal v0.39.4</title>
+<title>PPMT Terminal v0.39.5</title>
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -419,6 +419,15 @@ tr:hover td{background:rgba(95,168,245,.07)}
   color:var(--text2);font-variant-numeric:tabular-nums;
 }
 
+/* v0.39.5: Allocation / % of account footer for active cards. */
+.ops-card-alloc{
+  display:flex;justify-content:space-between;align-items:baseline;
+  font-family:var(--mono);font-size:10px;
+  padding:4px 0 2px 0;
+  border-top:1px dashed var(--border);
+  margin-top:2px;
+}
+
 .ops-card-meta{
   display:grid;grid-template-columns:1fr 1fr;gap:8px 14px;
   font-family:var(--mono);font-size:11px;color:var(--text2);
@@ -448,8 +457,8 @@ tr:hover td{background:rgba(95,168,245,.07)}
 }
 .ops-history-row{
   display:grid;
-  grid-template-columns:24px 110px 70px 1fr 1fr 1fr 1fr 110px;
-  gap:14px;align-items:center;padding:12px 18px;
+  grid-template-columns:24px 100px 60px 1fr 1fr 1fr 1fr 1fr 100px;
+  gap:12px;align-items:center;padding:12px 18px;
   border-bottom:1px solid var(--border);cursor:pointer;
   transition:background .12s;
 }
@@ -500,7 +509,8 @@ tr:hover td{background:rgba(95,168,245,.07)}
     grid-template-columns:24px 1fr 1fr 1fr;
     grid-template-areas:
       "dir sym pnl pnl"
-      "dir entry exit reason";
+      "dir entry exit reason"
+      "dir acctpct acctpct reason";
     gap:6px 12px;padding:10px 14px;
   }
 }
@@ -511,7 +521,7 @@ tr:hover td{background:rgba(95,168,245,.07)}
 <!-- ========== HEADER ========== -->
 <header class="header">
   <div class="header-left">
-    <span class="logo">PPMT<span class="logo-ver">v0.39.0</span></span>
+    <span class="logo">PPMT<span class="logo-ver">v0.39.5</span></span>
     <span class="status-dot stopped" id="headerDot"></span>
     <span id="headerStatus" style="font-family:var(--mono);font-size:10px;color:var(--text2)">DETENIDO</span>
   </div>
@@ -1899,16 +1909,27 @@ function updateDashboard(s) {
     }
   }
 
-  // Chart markers — v0.32.6: only show live-trading markers when the chart
-  // is showing the SAME symbol as the running trader. Otherwise we'd overlay
-  // token-A's signals on token-B's chart.
+  // Chart markers — v0.39.5: In multi-token mode, the WS snapshot enriches
+  // itself with `multi_signals_by_symbol` (a dict keyed by symbol, each value
+  // being that session's last-50 signals). We prefer that map when available
+  // so the chart shows signals for the SELECTED token, not just whichever
+  // session happened to update most recently. Falls back to the legacy
+  // `s.signals_history` when `s.symbol === chartSym` (single-token mode or
+  // singleton-mode where the global state still matches the chart).
   const chartSym = document.getElementById('chartSymbol').value;
-  if (s.signals_history && s.symbol === chartSym) {
-    syncChartMarkers(s.signals_history);
-  } else if (s.signals_history && s.symbol && s.symbol !== chartSym) {
-    // v0.39.0: Different symbol — clear signal markers from _chartState
-    // (trade markers are kept since they're scoped to chartSym via /api/trades
-    // and may already match). Old behaviour clobbered trade markers too.
+  let _chartSignals = null;
+  if (s.multi_signals_by_symbol && s.multi_signals_by_symbol[chartSym]) {
+    _chartSignals = s.multi_signals_by_symbol[chartSym];
+  } else if (s.signals_history && s.symbol === chartSym) {
+    _chartSignals = s.signals_history;
+  }
+  if (_chartSignals) {
+    syncChartMarkers(_chartSignals);
+  } else if (s.signals_history && s.symbol && s.symbol !== chartSym
+             && !(s.multi_signals_by_symbol && s.multi_signals_by_symbol[chartSym])) {
+    // v0.39.0: Different symbol AND no by-symbol entry for chartSym — clear
+    // signal markers from _chartState (trade markers are kept since they're
+    // scoped to chartSym via /api/trades and may already match).
     _chartState.signals = [];
     _refreshChartMarkers();
   }
@@ -4353,6 +4374,16 @@ function renderOpsHero(sessions) {
 
   // Portfolio Value display (prefer sum of portfolio_value; fallback to initial + realized)
   const portfolioValue = portfolioSum > 0 ? portfolioSum : (initialSum + realizedPnL);
+  // v0.39.5: Stash the computed portfolio value on _opsSummaryCache so
+  // renderOpsActiveCards and renderOpsHistory can use it to compute
+  // "% of account" per operation (allocation for open positions, gain
+  // as % of total account for closed trades). Without this, the cards
+  // only show pnl_pct vs entry capital, not vs total account.
+  if (_opsSummaryCache) {
+    _opsSummaryCache.portfolio_value = portfolioValue;
+  } else {
+    _opsSummaryCache = { portfolio_value: portfolioValue };
+  }
   const portEl = document.getElementById('opsPortfolioValue');
   if (portEl) portEl.textContent = '$' + portfolioValue.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
 
@@ -4456,6 +4487,21 @@ function renderOpsActiveCards(sessions) {
     const pnlSign = pnlAbs > 0 ? '+' : '';
     const pnlCls = pnlAbs > 0 ? 'positive' : pnlAbs < 0 ? 'negative' : 'neutral';
 
+    // v0.39.5: Allocation = position notional value vs total portfolio.
+    // Answers the user's "que porcentaje tiene de la cuenta" for OPEN
+    // positions — i.e., how much of the total account is currently
+    // committed to this trade. For FLAT sessions we instead show the
+    // session's realized P&L as a % of the total account (gain/loss
+    // contribution). Falls back to '--' when portfolio is unknown.
+    const _portfolio = (_opsSummaryCache && _opsSummaryCache.portfolio_value) || 0;
+    let allocAbs = 0, allocPct = 0;
+    if (hasPos) {
+      allocAbs = Number(pos.entry_price || 0) * Number(pos.size || 0);
+    } else {
+      allocAbs = Math.abs(pnlAbs);
+    }
+    allocPct = _portfolio > 0 ? (allocAbs / _portfolio * 100) : 0;
+
     // Status pill
     const status = s.status || 'STOPPED';
     let statusCls = 'stopped';
@@ -4482,6 +4528,10 @@ function renderOpsActiveCards(sessions) {
       <div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px">
         <div class="ops-card-pnl ${pnlCls}">${pnlSign}$${Math.abs(pnlAbs).toFixed(2)}</div>
         <div class="ops-card-pnl-pct">${pnlSign}${pnlPct.toFixed(2)}%</div>
+      </div>
+      <div class="ops-card-alloc" title="${hasPos ? 'Capital allocated to this position vs total portfolio' : 'Realized P&L magnitude vs total portfolio'}">
+        <span style="color:var(--text3)">${hasPos ? 'Allocated' : 'Acct impact'}</span>
+        <span style="color:var(--text2);font-variant-numeric:tabular-nums">$${allocAbs.toFixed(2)} · ${allocPct.toFixed(2)}% of account</span>
       </div>
       <div class="ops-card-meta">
         ${hasPos ? `
@@ -4569,8 +4619,15 @@ function renderOpsHistory() {
       <div style="text-align:right">Exit</div>
       <div style="text-align:right">P&amp;L</div>
       <div style="text-align:right">P&amp;L %</div>
+      <div style="text-align:right">% Acct</div>
       <div style="text-align:right">Reason</div>
     </div>`;
+
+  // v0.39.5: Total portfolio value (from _opsSummaryCache, populated by
+  // renderOpsHero) — used to express each closed trade's P&L as a % of
+  // the total account, not just vs entry capital. This directly answers
+  // the user's "que porcentaje tiene de la cuenta" for closed trades.
+  const _portfolioHist = (_opsSummaryCache && _opsSummaryCache.portfolio_value) || 0;
 
   const rows = trades.map(t => {
     const dir = (t.direction || 'LONG').toUpperCase();
@@ -4579,6 +4636,7 @@ function renderOpsHistory() {
     const pnlPct = Number(t.pnl_pct || 0);
     const pnlSign = pnl > 0 ? '+' : '';
     const pnlCls = pnl > 0 ? 'positive' : pnl < 0 ? 'negative' : '';
+    const acctPct = _portfolioHist > 0 ? (pnl / _portfolioHist * 100) : 0;
     const fmtPrice = (p) => p > 0 ? '$' + Number(p).toLocaleString('en-US', {minimumFractionDigits: p < 1 ? 6 : 2, maximumFractionDigits: p < 1 ? 6 : 4}) : '--';
     const reason = (t.exit_reason || '').toLowerCase();
     let reasonCls = '';
@@ -4596,6 +4654,7 @@ function renderOpsHistory() {
         <div class="ops-history-cell ops-mono-accent" style="text-align:right">${fmtPrice(t.exit_price)}</div>
         <div class="ops-history-cell ops-history-pnl ${pnlCls}" style="text-align:right">${pnlSign}$${Math.abs(pnl).toFixed(2)}</div>
         <div class="ops-history-cell ops-history-pnl ${pnlCls}" style="text-align:right">${pnlSign}${pnlPct.toFixed(2)}%</div>
+        <div class="ops-history-cell ops-history-pnl ${pnlCls}" style="text-align:right">${pnlSign}${acctPct.toFixed(2)}%</div>
         <div class="ops-history-reason ${reasonCls}">${reasonLabel}</div>
       </div>`;
   }).join('');

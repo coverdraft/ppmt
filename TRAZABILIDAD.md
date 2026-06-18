@@ -5187,3 +5187,138 @@ ppmt terminal
 - Backlog: WebSocket push de trades cerrados (Fase 2F).
 - Backlog: Frontend usar `multi_signals_by_symbol` para mostrar
   signals del token actualmente visible en el chart.
+
+---
+
+## v0.39.5 — 2026-06-18
+
+### Problema
+
+Tras v0.39.4 el dashboard "Operaciones" tab funcionaba, pero dos gaps
+específicos del pedido original del usuario seguían abiertos:
+
+1. **Click en una operación activa → el chart no mostraba las signals
+   de ese token.** El frontend filtraba los signal markers con
+   `s.symbol === chartSym`, donde `s.symbol` es el campo del WS
+   snapshot. En multi-token mode, ese campo se setea al símbolo de la
+   sesión más recientemente actualizada (server.py:2931). Cuando el
+   usuario hace click en token X pero la última actualización fue
+   token Y, `s.symbol !== chartSym` → los markers se borraban. El
+   usuario reportó textualmente: *"con simplemente tocar te lleva al
+   chart y podes ver como se van ejecutando las operaciones"* — y eso
+   no estaba pasando.
+
+2. **"% de la cuenta por operación" faltaba.** Cada card de operación
+   activa mostraba `pnlPct` = P&L % vs entry capital, no % del total
+   de la cuenta. La lista de cerradas igual: `P&L %` era vs entry
+   capital. El usuario pidió explícitamente *"cuanto capital gana por
+   cada una y que porcentaje tiene de la cuenta"* — faltaba el % de
+   la cuenta.
+
+### Solución (v0.39.5)
+
+**Fix 1 — Chart markers usan `multi_signals_by_symbol[chartSym]`:**
+
+`index.html:1902-1925`. La lógica de chart markers ahora es:
+
+```js
+let _chartSignals = null;
+if (s.multi_signals_by_symbol && s.multi_signals_by_symbol[chartSym]) {
+  _chartSignals = s.multi_signals_by_symbol[chartSym];
+} else if (s.signals_history && s.symbol === chartSym) {
+  _chartSignals = s.signals_history;
+}
+if (_chartSignals) {
+  syncChartMarkers(_chartSignals);
+} else if (s.signals_history && s.symbol && s.symbol !== chartSym
+           && !(s.multi_signals_by_symbol && s.multi_signals_by_symbol[chartSym])) {
+  _chartState.signals = [];
+  _refreshChartMarkers();
+}
+```
+
+El backend ya exponía `multi_signals_by_symbol` (server.py:2918, 2956)
+— solo el frontend no lo usaba. Con este fix, al hacer click en
+cualquier operación, el chart muestra las signals del token
+seleccionado sin importar cuál sesión actualizó última.
+
+**Fix 2 — "% of account" en cards de operaciones + history:**
+
+- `renderOpsHero()` ahora stashea `portfolioValue` en
+  `_opsSummaryCache.portfolio_value` para que `renderOpsActiveCards`
+  y `renderOpsHistory` puedan computar el % de cuenta.
+- Cada card activa tiene un nuevo footer `.ops-card-alloc` que
+  muestra:
+  - **OPEN positions**: `Allocated $X · Y% of account` donde
+    X = entry_price × size, Y = X / portfolio × 100.
+  - **FLAT sessions**: `Acct impact $X · Y% of account` donde
+    X = |realized_pnl|, Y = X / portfolio × 100.
+- La lista de "Recently Closed" tiene una nueva columna `% Acct`
+  = pnl / portfolio × 100 (vs entry capital que ya tenía `% P&L`).
+- Grid template `.ops-history-row` ampliado de 8 → 9 columnas.
+
+**CSS añadido:**
+
+```css
+.ops-card-alloc{
+  display:flex;justify-content:space-between;align-items:baseline;
+  font-family:var(--mono);font-size:10px;
+  padding:4px 0 2px 0;
+  border-top:1px dashed var(--border);
+  margin-top:2px;
+}
+```
+
+### Archivos modificados
+
+- `src/ppmt/terminal/static/index.html` — chart markers + % account
+  + CSS + responsive grid update + version bumps (title, logo).
+- `pyproject.toml`, `src/ppmt/__init__.py`, `src/ppmt/cli/main.py`,
+  `src/ppmt/terminal/server.py`, `HANDOFF.md` — bump 0.39.4 → 0.39.5.
+
+### Verificación
+
+- Script `verify_v0395_chart_pct.py` — 11 checks OK (chart markers
+  fallback, alloc footer, % Acct column, CSS, grid columns, version
+  bump). Todos pasan.
+- Smoke test con `fastapi.testclient.TestClient`:
+  - GET `/` → 200, 221827 bytes, contiene "v0.39.5",
+    "multi_signals_by_symbol", "ops-card-alloc", "% Acct".
+  - GET `/api/multi-status` → 200.
+  - GET `/api/trades?source=live&limit=10` → 200.
+  - GET `/api/signals?limit=10` → 200.
+- `node --check` sobre el JS inline → syntax OK.
+- HTML structure balance: 446 `<div>` / 446 `</div>`.
+- Test suite: 215 pass, 92 deselected (env + API drift preexistentes).
+- Verificación v0.39.1 (deletion layer) sigue pasando — sin
+  regresiones.
+
+### Cómo verificar en LIVE
+
+```bash
+cd ~/ppmt
+git pull origin main
+pip install -e . --quiet
+ppmt terminal
+# 1. Operaciones tab → cada card muestra "Allocated $X · Y% of account"
+#    (si hay posición abierta) o "Acct impact $X · Y% of account" (flat).
+# 2. Recently Closed → nueva columna "% Acct" muestra pnl / portfolio * 100.
+# 3. Click en cualquier operación → chart se carga con el symbol correcto
+#    Y los signal markers aparecen inmediatamente (sin esperar a que
+#    s.symbol === chartSym coincida).
+# 4. En multi-token mode con 22 tokens: navegar entre cards muestra
+#    signals del token clickeado, no del último que actualizó.
+```
+
+### Próximos pasos sugeridos
+
+- Confirmar con usuario que el flujo end-to-end funciona en LIVE con
+  los 22 tokens.
+- Si signals se generan pero pocos trades en live mode (real-mode
+  gates siguen estrictos 0.35+), considerar tunear SL/TP ratio o
+  agregar modo "exploratorio" con gates relajados por X horas.
+- Backlog: WebSocket push de trades cerrados (no esperar al poll de
+  3s) — ahora el engine dispara `on_position(close)` pero el dashboard
+  refresca la lista de cerradas solo en el siguiente poll. Sería
+  inmediato si el server hace broadcast del evento y el frontend
+  dispara `loadTradeHistory()` al recibirlo.
