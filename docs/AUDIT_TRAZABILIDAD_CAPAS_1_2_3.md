@@ -387,7 +387,72 @@ La mejora en TP rate (+9pts) y SL rate (-10pts) muestra que el motor está mejor
 
 ## PENDIENTES
 
-- **FIX-1**: diferenciar 4 tries en build() (N4 con regime partitioning) — ataca la raíz estructural
 - **FIX-5**: recalibrar confidence con logistic regression (más investigación)
 - **CAPA 4 AUDIT**: Living Trie feedback loop
 - **Fixear terminal**: después de que el motor funcione completamente
+
+---
+
+# RESULTADOS POST-FIX-1 (v0.40.2)
+
+**Fecha**: 2026-06-18
+**Versión**: PPMT v0.40.2 (post FIX-1 + FIX-2 + FIX-3 + FIX-4)
+
+## FIX-1 — Diferenciar 4 tries en build() con N4 RegimePartitionedTrie
+
+**Cambio**: N4 ya no es un PPMTTrie plano — es un `RegimePartitionedTrie` wrapper que mantiene 4 sub-tries internos (trending_up, trending_down, ranging, volatile). Cada observación se inserta SOLO en el sub-trie correspondiente a su regime. En match time, `set_regime()` enruta la búsqueda al sub-trie correcto.
+
+**Archivos modificados**:
+- `src/ppmt/core/trie.py`: nueva clase `RegimePartitionedTrie` (wrapper duck-typed)
+- `src/ppmt/engine/ppmt.py`: `__init__` crea N4 como RegimePartitionedTrie; `set_regime()` propaga al wrapper; `build()` inserta en N4 solo el patrón del regime correspondiente
+- `scripts/layer2_audit.py` + `scripts/layer3_audit.py`: agregado `set_regime()` antes de cada match
+
+### Verificación estructural (CAPA 1)
+
+| Métrica | ANTES | DESPUÉS |
+|---------|-------|---------|
+| N1 == N4 in all runs | True | **False** ✅ |
+| N3 == N4 in all runs | True | **False** ✅ |
+| ALL 4 IDENTICAL | True | **False** ✅ |
+
+**Smoke test**: N1/N2/N3=29 patrones cada uno, N4=15(trending_up)+9(trending_down)+9(ranging)+0(volatile)=33 patrones. N3 ≠ N4 ✅.
+
+### Resultados CAPA 2 (matching)
+
+| Métrica | Pre-FIX-1 | Post-FIX-1 | Cambio |
+|---------|-----------|------------|--------|
+| Rescue rate (N4 rescata N3 no-match) | 0% | **0.05%** (11 trades) ✅ | N4 aporta |
+| Corr conf→PnL | +0.0927 | **+0.1132** ✅ | subió 22% |
+| 1-edit sum PnL | -5.52% | **+4.45%** ✅ | de perder a ganar |
+| Exact sum PnL | -27.13% | -23.07% ✅ | ligeramente mejor |
+| Prefix sum PnL | +4.06% | +3.88% | similar |
+| 2-edit sum PnL | -79.76% | -82.35% | similar |
+
+### Resultados CAPA 3 (signal generation)
+
+| Métrica | Pre-FIX-1 | Post-FIX-1 | Cambio |
+|---------|-----------|------------|--------|
+| signal.py approve | 231 | 235 ✅ | estable |
+| TP rate | 39.1% | 38.7% | similar |
+| LONG sum PnL | -173.57% | -187.70% | ligeramente peor |
+| SHORT sum PnL | +34.79% | +29.20% | ligeramente peor |
+| EM→PnL corr | -0.035 | -0.104 | empeoró |
+
+## VEREDICTO FIX-1
+
+✅ **Logró su objetivo arquitectural**: N4 ahora es diferenciado (no decorativo), rescue rate > 0, 1-edit pasó de perdedor a ganador, conf→PnL correlation subió 22%.
+
+⚠️ **EM→PnL corr empeoró** (-0.035 → -0.104). El motor ahora usa metadata regime-specific de N4 que puede estar overfitteada a un regime. Cuando el regime cambia, las predicciones pueden ser contraproducentes.
+
+⚠️ **LONG/SHORT sum PnL marginalmente peor**. Posible overfitting al regime del momento.
+
+## TESTS
+
+- 282 tests pasan ✅
+- 2 pre-existing failures (test_oos_validation, test_trie_merge) — confirmado con `git stash` que ya fallaban antes
+
+## PRÓXIMOS PASOS
+
+1. **CAPA 4 AUDIT** — Living Trie feedback loop (cómo realtime.py actualiza el trie con resultados reales)
+2. **FIX-5** — Recalibrar confidence con logistic regression sobre (count, win_rate, regime, expected_move, drawdown) → P(win)
+3. **Fixear terminal** después de que el motor esté sólido

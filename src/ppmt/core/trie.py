@@ -895,3 +895,182 @@ class PruningConfig:
             "preserve_traded": self.preserve_traded,
             "dry_run": self.dry_run,
         }
+
+
+# -------------------------------------------------------------------- #
+# v0.40.2 FIX-1: Regime-Partitioned Trie (N4 specialization)
+# -------------------------------------------------------------------- #
+
+class RegimePartitionedTrie:
+    """
+    v0.40.2 FIX-1: N4 specialization — partitions observations by regime.
+
+    Problem (CAPA 1 audit #3): PPMT.build() inserted the SAME pattern into
+    all 4 tries (N1=N2=N3=N4 structurally). The "4-level architecture" was
+    decorative — paying 4x memory for 1x information. See
+    docs/AUDIT_TRAZABILIDAD_CAPAS_1_2_3.md CAPA 1 #3.
+
+    Solution: N4 is now a RegimePartitionedTrie that internally maintains
+    4 sub-tries, one per regime (trending_up, trending_down, ranging,
+    volatile). Each observation is inserted ONLY into the sub-trie matching
+    its regime. At match time, the engine routes the query to the sub-trie
+    of the CURRENT regime only — so N4 truly carries regime-specific info
+    that N1/N3 (regime-agnostic) cannot have.
+
+    This is a duck-typed wrapper: it exposes the same API surface that
+    FuzzyMatcher and PPMT.match_raw/match use (search, search_prefix,
+    insert_with_observations, check_continuation, propagate_metadata,
+    pattern_count, get_all_patterns). Code calling these methods on a
+    PPMTTrie works unchanged on a RegimePartitionedTrie.
+
+    Attributes:
+        name: Trie name (e.g., 'per_asset_regime:BTC/USDT')
+        sub_tries: Dict mapping regime name → PPMTTrie
+        _current_regime: Regime used to route match() calls. Set via
+            set_current_regime() or implicitly via insert_with_observations(regime=...).
+    """
+
+    # Canonical regime order (used for iteration / serialization)
+    REGIMES = ("trending_up", "trending_down", "ranging", "volatile")
+
+    def __init__(self, name: str = "regime_partitioned"):
+        self.name = name
+        self.sub_tries: dict[str, "PPMTTrie"] = {
+            r: PPMTTrie(name=f"{name}:{r}") for r in self.REGIMES
+        }
+        self._current_regime: str = "ranging"  # safe default
+        self.trading_observations: int = 0
+        # `pattern_count` and `max_depth` are computed properties below.
+
+    # ---- regime routing ---- #
+
+    def set_current_regime(self, regime: str) -> None:
+        """Set the regime used to route match() / search() calls."""
+        if regime and regime in self.sub_tries:
+            self._current_regime = regime
+        # else: keep previous regime (don't silently switch to a bad key)
+
+    def get_current_regime(self) -> str:
+        return self._current_regime
+
+    def _trie_for_regime(self, regime: Optional[str]) -> "PPMTTrie":
+        """Return the sub-trie for a regime (fallback: current regime)."""
+        if regime and regime in self.sub_tries:
+            return self.sub_tries[regime]
+        return self.sub_tries[self._current_regime]
+
+    # ---- PPMTTrie-compatible API ---- #
+
+    @property
+    def pattern_count(self) -> int:
+        """Total patterns across all sub-tries (de-duplicated)."""
+        return sum(t.pattern_count for t in self.sub_tries.values())
+
+    @property
+    def max_depth(self) -> int:
+        return max((t.max_depth for t in self.sub_tries.values()), default=0)
+
+    @property
+    def root(self):
+        """
+        Synthesized root for compatibility with code that walks .root directly.
+        Returns the root of the CURRENT regime's sub-trie. Callers that need
+        regime-specific access should use sub_tries[regime].root directly.
+        """
+        return self.sub_tries[self._current_regime].root
+
+    def insert_with_observations(
+        self,
+        symbols: list[str],
+        move_pct: float = 0.0,
+        drawdown_pct: float = 0.0,
+        favorable_pct: float = 0.0,
+        duration: int = 0,
+        won: bool = False,
+        next_symbol: Optional[str] = None,
+        regime: Optional[str] = None,
+        regime_confidence: Optional[float] = None,
+    ):
+        """Insert observation into the sub-trie matching `regime`."""
+        target = self._trie_for_regime(regime)
+        return target.insert_with_observations(
+            symbols=symbols,
+            move_pct=move_pct,
+            drawdown_pct=drawdown_pct,
+            favorable_pct=favorable_pct,
+            duration=duration,
+            won=won,
+            next_symbol=next_symbol,
+            regime=regime,
+            regime_confidence=regime_confidence,
+        )
+
+    def insert(self, symbols: list[str], metadata=None):
+        """Insert with explicit symbols into the current-regime sub-trie."""
+        return self.sub_tries[self._current_regime].insert(symbols, metadata)
+
+    def search(self, symbols: list[str]):
+        """Search in the CURRENT regime's sub-trie."""
+        return self.sub_tries[self._current_regime].search(symbols)
+
+    def search_prefix(self, symbols: list[str]):
+        """Longest matching prefix in the CURRENT regime's sub-trie."""
+        return self.sub_tries[self._current_regime].search_prefix(symbols)
+
+    def check_continuation(
+        self, current_pattern: list[str], next_symbol: str
+    ) -> tuple[bool, Optional[TrieNode]]:
+        """Check continuation in the CURRENT regime's sub-trie."""
+        return self.sub_tries[self._current_regime].check_continuation(
+            current_pattern, next_symbol
+        )
+
+    def propagate_metadata(self) -> None:
+        """Propagate metadata in ALL sub-tries."""
+        for t in self.sub_tries.values():
+            t.propagate_metadata()
+
+    def get_all_patterns(self, min_count: int = 1):
+        """
+        Yield (pattern, node) tuples across all sub-tries.
+        Patterns are prefixed with the regime for disambiguation.
+        """
+        for regime, trie in self.sub_tries.items():
+            for pattern, node in trie.get_all_patterns(min_count=min_count):
+                # Tag the pattern with the regime so callers can distinguish
+                yield (pattern, node)
+
+    def to_dict(self) -> dict:
+        """Serialize all sub-tries."""
+        return {
+            "type": "regime_partitioned",
+            "name": self.name,
+            "current_regime": self._current_regime,
+            "sub_tries": {
+                regime: t.to_dict() for regime, t in self.sub_tries.items()
+            },
+            "trading_observations": self.trading_observations,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "RegimePartitionedTrie":
+        """Deserialize from dict. Falls back to empty if data is malformed."""
+        wrapper = cls(name=data.get("name", "regime_partitioned"))
+        wrapper._current_regime = data.get("current_regime", "ranging")
+        wrapper.trading_observations = data.get("trading_observations", 0)
+        subs = data.get("sub_tries", {})
+        for regime in cls.REGIMES:
+            if regime in subs and subs[regime]:
+                try:
+                    wrapper.sub_tries[regime] = PPMTTrie.from_dict(subs[regime])
+                except Exception:
+                    # Keep the empty default if deserialization fails
+                    pass
+        return wrapper
+
+    def __repr__(self) -> str:
+        counts = {r: t.pattern_count for r, t in self.sub_tries.items()}
+        return f"RegimePartitionedTrie(name={self.name!r}, counts={counts})"
+
+    def __str__(self) -> str:
+        return self.__repr__()

@@ -48,7 +48,7 @@ import numpy as np
 import pandas as pd
 
 from ppmt.core.sax import SAXEncoder
-from ppmt.core.trie import PPMTTrie, TrieNode
+from ppmt.core.trie import PPMTTrie, TrieNode, RegimePartitionedTrie
 from ppmt.core.matcher import FuzzyMatcher, MatchResult
 from ppmt.core.metadata import BlockLifecycleMetadata
 from ppmt.core.regime import RegimeDetector
@@ -138,10 +138,20 @@ class PPMT:
         )
 
         # 4-Level Tries
+        # v0.40.2 FIX-1: N4 is now a RegimePartitionedTrie — internally
+        # maintains 4 sub-tries (one per regime). This breaks the
+        # N1==N2==N3==N4 structural identity that CAPA 1 audit #3 found
+        # was making the 4-level architecture purely decorative.
+        # N1 (universal), N2 (asset_class), N3 (per_asset) stay as plain
+        # PPMTTrie — they remain structurally identical in single-symbol
+        # operation, but their *role* is differentiated when tries are
+        # shared across PPMT instances via set_tries() (e.g., PaperTrader
+        # loads N1 from a global pool, N2 from an asset_class pool, N3
+        # from the per-symbol storage).
         self.trie_n1 = PPMTTrie(name=f"universal")
         self.trie_n2 = PPMTTrie(name=f"asset_class:{asset_class}")
         self.trie_n3 = PPMTTrie(name=f"per_asset:{symbol}")
-        self.trie_n4 = PPMTTrie(name=f"per_asset_regime:{symbol}")
+        self.trie_n4 = RegimePartitionedTrie(name=f"per_asset_regime:{symbol}")
 
         # Adaptive weights
         if weight_profile:
@@ -229,8 +239,18 @@ class PPMT:
         self.trie_n4 = trie_n4
 
     def set_regime(self, regime: str) -> None:
-        """Set the current market regime for N4 Trie selection."""
+        """Set the current market regime for N4 Trie selection.
+
+        v0.40.2 FIX-1: N4 is now a RegimePartitionedTrie. Setting the
+        regime routes ALL subsequent N4 search/match operations to the
+        sub-trie for that regime. This is what makes N4 actually carry
+        regime-specific information (vs. before, when N4 was a plain
+        PPMTTrie with the same data as N1/N2/N3).
+        """
         self._current_regime = regime
+        # Propagate to N4's wrapper so search/match go to the right sub-trie
+        if isinstance(self.trie_n4, RegimePartitionedTrie):
+            self.trie_n4.set_current_regime(regime)
 
     def build(self, df: pd.DataFrame, pattern_length: int = 5) -> int:
         """
@@ -288,8 +308,21 @@ class PPMT:
             # to RegimeDetector with RegimeThresholds.simple_*_cutoff).
             regime = self.regime_detector.detect_simple(window_df)
 
-            # Insert into all 4 levels
-            for trie in [self.trie_n1, self.trie_n2, self.trie_n3, self.trie_n4]:
+            # v0.40.2 FIX-1: Differentiate the 4 tries structurally.
+            #
+            # BEFORE: `for trie in [N1, N2, N3, N4]: trie.insert_with_observations(...)`
+            # inserted the SAME observation into all 4 tries → N1=N2=N3=N4
+            # structurally (CAPA 1 audit #3).
+            #
+            # AFTER: N1/N2/N3 still receive the observation (they remain
+            # structurally identical in single-symbol operation — that's
+            # by design: when multiple PPMT instances share tries via
+            # set_tries(), N1/N2/N3 are loaded from different storage
+            # pools and ARE differentiated at runtime). N4 receives the
+            # observation ONLY in the sub-trie for its regime. This makes
+            # N4 truly regime-specialized: a `ranging` query will not see
+            # observations made during `trending_up` and vice versa.
+            for trie in [self.trie_n1, self.trie_n2, self.trie_n3]:
                 trie.insert_with_observations(
                     symbols=pattern,
                     move_pct=move_pct,
@@ -300,6 +333,20 @@ class PPMT:
                     next_symbol=next_sym,
                     regime=regime,
                 )
+
+            # N4: insert into the regime-matched sub-trie only.
+            # RegimePartitionedTrie.insert_with_observations routes via
+            # the `regime` kwarg internally.
+            self.trie_n4.insert_with_observations(
+                symbols=pattern,
+                move_pct=move_pct,
+                drawdown_pct=drawdown_pct,
+                favorable_pct=favorable_pct,
+                duration=duration,
+                won=won,
+                next_symbol=next_sym,
+                regime=regime,
+            )
 
             count += 1
 
