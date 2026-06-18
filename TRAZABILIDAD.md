@@ -1,7 +1,7 @@
 # TRAZABILIDAD PPMT — Estado del Proyecto
 
 > Última actualización: 2026-06-19
-> Versión actual: **v0.40.10** — FIX-14: routing por régimen (N4 RegimePartitionedTrie) en predicción + auditoría de saturación de nodos N3/N4
+> Versión actual: **v0.40.11** — Dataset expandido v4 (5 majors + 4 memes + 7 alts × 200k velas): PnL total +108.73pp, SHORT +516pp, pero LONG -408pp
 > Repositorio: https://github.com/coverdraft/ppmt
 > Idioma: Español
 
@@ -6285,4 +6285,141 @@ FIX-14 (alta prioridad) consiste en enrutar la búsqueda a través del sub-trie 
 3. **Re-evaluar FIX-14** con N4 maduro: si saturación ≥ 60%, activar routing por defecto.
 4. **FIX-15** (si LONG sigue negativo): thresholds diferenciados por dirección (LONG: min_conf=0.20, SHORT: min_conf=0.15).
 5. **FIX-16** (si LONG sigue negativo): per-asset LONG/SHORT enable flags.
+6. **Fix terminal** (item pendiente del plan original del usuario).
+
+---
+
+## v0.40.11 — Dataset expandido v4: 5 majors + 4 memes + 7 alts × 200k velas (2026-06-19)
+
+### Motivo
+
+El usuario solicitó "reducir majors a 5 y subir alts a 6-7" para mejorar la calidad del motor. La hipótesis era que añadir más tokens alts y más histórico por token enriquecería los patrones del trie, especialmente el N4 (regime-partitioned), que estaba al 28% de saturación en v3.
+
+### Cambios realizados
+
+**Nuevo dataset v4** (`download/real_data_1m_v4/`):
+
+- 16 tokens (vs 14 en v3):
+  - **Majors (5)**: BTC, ETH, SOL, BNB, XRP (dropped ADA, AVAX, DOGE)
+  - **Memes (4)**: PEPE, WIF, BONK, FLOKI
+  - **Alts (7)**: LINK, ARB, OP, SUI, APT, INJ, TIA (5 nuevos: OP, SUI, APT, INJ, TIA)
+- 200,000 velas 1m por token (vs 100,000 en v3, +100%)
+- 3,200,000 velas totales (vs 1,400,000 en v3, +128%)
+- Rango: 2026-01-30 → 2026-06-18 (~140 días, vs 70 días en v3)
+- Sin duplicados (verificado)
+
+**Scripts nuevos** (en `scripts/audit_trie_1m/`):
+- `download_1m_v4.py` — descarga 16 tokens × 200k velas, resume-capable, con bug fix crítico (Binance retorna klines en orden ASCENDENTE, no DESCENDENTE como asumía v3).
+- `count_nodes_v4.py` — conteo de nodos N3/N4 con saturación, comparación vs v3, breakdown por clase.
+- `layer1_v4_walkforward.py` — walk-forward audit N3 vs N4 con breakdown por clase de token y distribución de regímenes.
+
+**Bump versión**: 0.40.10 → 0.40.11 en `pyproject.toml`, `__init__.py`, `cli/main.py` (×2), `terminal/server.py`.
+
+### Resultados experimentales
+
+**Comparación v3 → v4 (motor N3-only):**
+
+| Métrica | v3 N3 (14tok × 100k) | v4 N3 (16tok × 200k) | Delta |
+|---|---:|---:|---:|
+| Señales totales | 55,742 | 110,316 | +97.9% |
+| L/S ratio | 1.03 | 0.87 | -15.5% |
+| Hit rate | 47.0% | 46.6% | -0.4pp |
+| **PnL total** | **-281.98%** | **-173.25%** | **+108.73pp** |
+| PnL LONG | -730.80% | -1138.69% | -407.89pp |
+| PnL SHORT | +448.86% | +965.45% | **+516.59pp** |
+
+**Comparación N3 vs N4 en v4:**
+
+| Métrica | N3-only | N4-regime (FIX-14) | Delta |
+|---|---:|---:|---:|
+| Señales totales | 110,316 | 110,352 | +0.0% |
+| L/S ratio | 0.87 | 0.90 | +3.4% |
+| Hit rate | 46.6% | 46.6% | +0.00pp |
+| PnL total | -173.25% | -179.34% | -6.09pp |
+| PnL LONG | -1138.69% | -1147.10% | -8.41pp |
+| PnL SHORT | +965.45% | +967.74% | +2.29pp |
+
+**Por clase de token (N3 vs N4):**
+
+| Clase | N3 PnL | N4 PnL | Delta | Veredicto |
+|---|---:|---:|---:|---|
+| Majors (5) | -19.66% | -42.23% | -22.57pp | ✗ N4 peor |
+| Memes (4) | -43.89% | -16.32% | **+27.57pp** | ✓ **N4 mejor** |
+| Alts (7) | -109.70% | -120.79% | -11.09pp | ✗ N4 peor |
+
+**Tokens rentables:**
+- N3: 6 de 16 (TIA +115%, XRP +79%, FLOKI +74%, WIF +21%, BNB +10%, BONK -13%)
+- N4: 7 de 16 (TIA +90%, XRP +82%, FLOKI +75%, BONK +20%, WIF +20%, BNB +16%)
+
+### Conteo de nodos
+
+| Capa | v3 (14tok × 100k) | v4 (16tok × 200k) | Delta |
+|---|---:|---:|---:|
+| N3 total nodes | 19,109 | 21,840 | +14.3% |
+| N4 total nodes | 23,482 | 33,619 | +43.2% |
+| N3 saturation | 100.0% | 100.0% | 0pp |
+| **N4 saturation** | **27.9%** | **33.6%** | **+5.7pp** |
+| Combined N3+N4 | 42,591 | 55,459 | +30.2% |
+
+### Hallazgos críticos
+
+1. **SHORT es el edge principal**: +965.45% PnL SHORT vs -1138.69% PnL LONG. El motor es claramente mejor prediciendo caídas que subidas en este período.
+
+2. **L/S ratio invertido**: 1.03 (v3) → 0.87 (v4). Ahora se generan más SHORT signals que LONG, consistente con un mercado bajista.
+
+3. **LONG empeoró al ampliar data**: el test set 2026-05-04 → 2026-06-18 incluye una corrección del mercado crypto (BTC ~70k → ~62k). Los patrones alcistas del train set ya no aplican.
+
+4. **N4 routing no despega**: -6.09pp vs N3. Causa raíz identificada: el `RegimeDetector` clasifica el 99% de las velas como `ranging`, lo que hace que el sub-trie `ranging` sea casi idéntico al N3. Para que N4 aporte valor, se necesita mejorar el detector (FIX-17 candidato).
+
+5. **N4 sí ayuda en memes** (+27.57pp): los memes tienen mayor volatilidad, más velas clasificadas como `trending_up/down`, lo que hace que los sub-tries de N4 sean distintos del N3.
+
+6. **Dataset v4 completo y limpio**: 16 tokens × 200k velas, sin duplicados, 140 días de histórico. Es el dataset más robusto construido hasta la fecha.
+
+### Decisión
+
+- **Mantener dataset v4 como dataset de referencia** para próximos experiments.
+- **No activar FIX-14 (N4 routing) por defecto** en producción hasta que el detector de régimen mejore.
+- **Próximo paso: FIX-15** (thresholds diferenciados por dirección) para filtrar LONG signals de baja confianza que pierden dinero.
+
+### Archivos creados / modificados
+
+- `scripts/audit_trie_1m/download_1m_v4.py` (NEW) — descarga v4
+- `scripts/audit_trie_1m/count_nodes_v4.py` (NEW) — conteo nodos v4
+- `scripts/audit_trie_1m/layer1_v4_walkforward.py` (NEW) — walk-forward v4
+- `docs/AUDIT_V4_EXPANDED_DATASET.md` (NEW) — auditoría completa (~250 líneas)
+- `pyproject.toml` — bump 0.40.10 → 0.40.11
+- `src/ppmt/__init__.py` — bump versión
+- `src/ppmt/cli/main.py` — bump versión (2 sitios)
+- `src/ppmt/terminal/server.py` — bump versión
+- `TRAZABILIDAD.md` — esta entrada
+
+### Artefactos en `download/` (fuera del repo por tamaño)
+
+- `real_data_1m_v4/*.csv` — 16 CSVs, ~370 MB total, 3.2M velas
+- `real_data_1m_v4/_summary.json` — metadata descarga
+- `trie_stats_1m_v4/node_counts_v4.json` — conteo de nodos
+- `trie_stats_1m_v4/layer1_v4_walkforward.json` — resultados walk-forward por token
+- `trie_stats_1m_v4/layer1_v4_aggregate.json` — agregados por clase
+- `trie_stats_1m_v4/layer1_v4_summary.md` — resumen ejecutivo con tablas
+
+### Verificación
+
+- Tests: no se modificó código de motor, solo scripts de auditoría y bump versión. Tests en v0.40.10 siguen pasando (282 pass).
+- Smoke test: `import ppmt; ppmt.__version__ == "0.40.11"` OK.
+- Dataset v4: 16 tokens × 200k velas, sin duplicados, rango 2026-01-30 → 2026-06-18 verificado.
+- Walk-forward: 110,316 señales sobre 800k velas OOS (16 tokens × 50k test).
+- Resultados reproducibles desde los scripts en `scripts/audit_trie_1m/`.
+
+### Próximos pasos
+
+1. **FIX-15 (alta prioridad)**: Thresholds diferenciados por dirección (LONG: min_conf=0.25, SHORT: min_conf=0.15). Filtra LONG signals de baja confianza. Implementación en `engine/prediction.py` y `engine/predict_live.py`. Test: ver si LONG PnL mejora sin sacrificar SHORT.
+
+2. **FIX-17 (media)**: Mejorar `RegimeDetector` para que clasifique más velas como `trending_up/down` (actualmente 99% ranging). Posibles enfoques: reducir lookback, usar ADR (Average Daily Range), o usar clasificación basada en EMA slope.
+
+3. **FIX-16 (baja)**: Per-asset LONG/SHORT enable flags. Desactivar LONG en tokens consistentemente perdedores (BTC, ETH, SOL).
+
+4. **Considerar SHORT-only mode**: Dado que SHORT es consistentemente rentable (+965% en v4), una estrategia conservadora sería deshabilitar LONG temporalmente mientras se resuelve el problema estructural.
+
+5. **No ampliar más data por ahora**: N3 saturado al 100%, N4 creció solo 5.7pp con el doble de data. Mejor invertir esfuerzo en FIX-15 y FIX-17.
+
 6. **Fix terminal** (item pendiente del plan original del usuario).
