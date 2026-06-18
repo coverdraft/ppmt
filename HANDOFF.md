@@ -1,8 +1,8 @@
 # HANDOFF — PPMT Project Status
 
 > **Read this file FIRST when joining the project.**
-> Última actualización: 2026-06-17
-> Versión actual: **v0.40.0**
+> Última actualización: 2026-06-19
+> Versión actual: **v0.40.8** — FIX-13: SAX α=5→α=4 en TF 1m (audit empírico sobre 50k velas reales × 8 tokens)
 > Repositorio: https://github.com/coverdraft/ppmt
 
 ---

@@ -1,7 +1,7 @@
 # TRAZABILIDAD PPMT — Estado del Proyecto
 
-> Última actualización: 2026-06-17
-> Versión actual: **v0.38.8** — Fase 1: unificación de thresholds (SignalThresholds + RegimeThresholds)
+> Última actualización: 2026-06-19
+> Versión actual: **v0.40.8** — FIX-13: SAX α=5→α=4 en TF 1m (verificado empíricamente sobre 50k velas reales de 8 tokens)
 > Repositorio: https://github.com/coverdraft/ppmt
 > Idioma: Español
 
@@ -9,14 +9,14 @@
 
 ## 🚨 SI ES NUEVO EN EL PROYECTO — EMPEZAR AQUÍ
 
-**No lea todo este archivo (4159 líneas).** Es historia detallada de cada versión.
+**No lea todo este archivo (6000+ líneas).** Es historia detallada de cada versión.
 
 1. **Lea primero `HANDOFF.md`** (en la raíz del repo) — contexto completo, credenciales, qué se hizo, qué falta, reglas críticas.
-2. **Vuelva aquí solo a la sección `## v0.38.6`** (cerca del final del archivo) para ver el último cambio.
+2. **Vuelva aquí solo a la sección `## v0.40.8`** (al final del archivo) para ver el último cambio.
 3. **Luego lea** `src/ppmt/engine/realtime.py` líneas 930-1060 (skip filters) y `src/ppmt/terminal/server.py` líneas 940-1080 (validation bypass).
-4. **Estado actual**: ✅ Sistema operativo. Paper trading ejecuta trades en multi-token con REST polling.
+4. **Estado actual**: ✅ Sistema operativo con FIX-1 a FIX-13 aplicados. Motor auditado capa 1-5 sobre datos reales.
 
-**Búsqueda rápida**: `grep -n "^## v0\.38" TRAZABILIDAD.md` muestra las secciones relevantes.
+**Búsqueda rápida**: `grep -n "^## v0\.4" TRAZABILIDAD.md` muestra las secciones v0.40.x.
 
 ---
 
@@ -5846,3 +5846,257 @@ Auditar **CAPA 4 (Living Trie Feedback Loop)** con trazabilidad de cómo `realti
 - ¿El feedback mejora o degrada la quality?
 - ¿Se crean nodos nuevos con 1 obs que después contaminan señales?
 - ¿Win rate de los nodos "learned" es mejor que los "seeded"?
+
+---
+
+## v0.40.1 — 2026-06-18 — FIX-2 + FIX-3 + FIX-4 (capa por capa audit fixes)
+
+**Commit**: `d19ff40`
+
+Aplicados 3 fixes derivados del audit capa por capa del motor:
+
+### FIX-2 — Separar thresholds en FuzzyMatcher (`core/matcher.py`)
+
+**Antes**: `threshold=0.85` único gate que mezclaba similarity y confidence. Edit-distance 0 hits → 0 señales.
+**Después**: dos gates separados: `min_similarity=0.70` AND `min_confidence=0.15`. 1-edit 0→324 matches, 2-edit 0→1419. Correlación confidence→PnL +0.0092 → +0.0927 (10x mejor).
+
+### FIX-3 — Revivir `engine/signal.py` (estaba dead code)
+
+**Antes**: `historical_count >= 3` (inalcanzable con tries sparse), `risk_reward_ratio >= 1.5` (inalcanzable). 0 señales aprobadas.
+**Después**: `historical_count >= 1`, `RR >= min(adaptive_min_rr, 0.5)`, `adaptive_min_conf = min(adaptive_min_conf, 0.20)`. 0 → 231 señales aprobadas.
+
+### FIX-4 — Regla SL/TP en `core/metadata.py:compute_sl_tp()`
+
+**Antes**: `SL = max_drawdown × 1.2`, `TP = min(|EM|, max_fav) × 0.9`. Ratio SL:TP 2.14x — TP lejano, SL cercano, whipsaw constante.
+**Después**: `SL = max_drawdown × 1.5`, `TP = max(|EM|, max_fav) × 1.0`. Ratio SL:TP 1.39x, TP rate 30.3% → 39.1%.
+
+### Verificación
+
+- Tests: 282 pass, 1 pre-existing failure (`test_trie_merge_preserves_observations` — `PPMTTrie.merge` no existe).
+- 13 pre-existing failures en `test_oos_validation.py` confirmados con `git stash` que existían ANTES.
+- Smoke test: `scripts/smoke_fix_1_2_3_4.py` — 6 checks OK.
+
+---
+
+## v0.40.2 — 2026-06-18 — FIX-1: N4 RegimePartitionedTrie rompe identidad N1=N2=N3=N4
+
+**Commit**: `341c994`
+
+### Problema (Capa 1 audit #3)
+
+Los 4 tries jerárquicos (N1 universal / N2 asset_class / N3 per_asset / N4 per_asset_regime) eran **estructuralmente idénticos**. `build()` insertaba el MISMO pattern con los MISMOS metadatos en los 4 tries (loop `for trie in [n1, n2, n3, n4]`). Resultado: las 4 confidences eran idénticas, el weighted sum matemáticamente colapsaba a `confidence_individual`. La jerarquía era **decorativa**.
+
+### Solución
+
+- `core/trie.py`: nueva clase `RegimePartitionedTrie` — mantiene 4 sub-tries internos (trending_up / trending_down / ranging / volatile). `insert_with_observations()` rutea al sub-trie correspondiente al `regime` kwarg.
+- `engine/ppmt.py`: N4 ahora es `RegimePartitionedTrie`. `set_regime(regime)` rutea búsquedas/matches al sub-trie activo.
+- N1/N2/N3 siguen siendo `PPMTTrie` — su diferenciación real viene con FIX-1B (cross-asset pools, v0.40.3).
+
+### Verificación
+
+- Tests: 282 pass, mismo baseline.
+- Smoke test: confirma que N4 tiene patrones distribuidos en 4 sub-tries según régimen.
+
+---
+
+## v0.40.3 — 2026-06-18 — FIX-1B + FIX-1C: cross-asset pools + polymorphic trie persistence
+
+**Commit**: `0225837`
+
+### FIX-1B — Cross-asset pools (N1 universal + N2 class-shared)
+
+**Antes**: N1 (universal) y N2 (asset_class) eran vacíos o réplicas de N3 en single-symbol op. El "universal trie" del diseño V3 original (5M+ patrones de todos los assets) nunca se materializaba.
+**Después**: `PPMT.attach_storage(storage)` habilita el modo cross-asset. En `build()`, las observaciones se acumulan en buffers (`_n1_buffer`, `_n2_buffer`) que se flushean al final a pools compartidos en storage:
+  - `__UNIVERSAL__` para N1 (todos los assets)
+  - `__CLASS_<asset_class>__` para N2 (BTC ↔ ETH para blue_chip, etc.)
+
+### FIX-1C — Polymorphic trie persistence
+
+`PPMTStorage.save_trie()` / `load_trie()` ahora detectan automáticamente el tipo de trie (`PPMTTrie` vs `RegimePartitionedTrie`) y serializan/deserializan correctamente. Antes, cargar un N4 desde storage rompía porque esperaba un `PPMTTrie` plano.
+
+---
+
+## v0.40.4 — 2026-06-18 — FIX-1D: wire up attach_storage + load_all_tries en 4 production paths
+
+**Commit**: `5f112c8`
+
+### Problema
+
+Las funciones `attach_storage()` y `load_all_tries(asset_class)` existían desde v0.40.3 pero **ningún caller en producción las usaba**. El cross-asset pool estaba implementado pero no activado.
+
+### Solución
+
+4 callers actualizados para activar el modo cross-asset:
+1. `realtime.py` — `_initialize_engine()` ahora llama `attach_storage(storage)` después de crear el PPMT instance.
+2. `paper_trader.py` — idem.
+3. `terminal/server.py` — endpoint `/api/auto-setup` (Prepare Token) ahora carga tries desde storage en vez de rebuild desde cero.
+4. `cli/main.py` — comando `ppmt backtest` ahora contribuye observaciones a los pools compartidos.
+
+### Verificación
+
+- Smoke test `scripts/smoke_fix1d_production.py`: confirma que después de build() el N1 pool en storage tiene observaciones de todos los tokens procesados.
+
+---
+
+## v0.40.5 — 2026-06-18 — FIX-5: eliminate bogus zero-outcome observations in `_living_trie_update`
+
+**Commit**: `84c3194`
+
+### Problema (Capa 4 audit — Living Trie Feedback Loop)
+
+El loop de feedback en `realtime.py:_living_trie_update()` insertaba observaciones "bogus" con `move_pct=0, drawdown_pct=0, favorable_pct=0, won=False` cuando un trade se cerraba por timeout sin hit SL/TP. Esto contaminaba el trie con ruido: 24.9% de las observaciones insertadas en runtime eran bogus.
+
+### Solución
+
+- Skip explícito de observaciones con `move_pct == 0 AND drawdown_pct == 0 AND favorable_pct == 0` antes de insertar.
+- Log warning cuando se detecta un bogus outcome (para monitoreo).
+- Test `tests/test_living_trie_no_bogus.py` (10 casos) — verifica que solo se insertan observaciones con outcome real.
+
+---
+
+## v0.40.6 — 2026-06-18 — FIX-6 + FIX-7 + FIX-8 + FIX-9 (CAPA 5 audit fixes)
+
+**Commit**: `ec7560d`
+
+Cuatro fixes derivados del audit de Capa 5 (Risk Manager + Money Manager):
+
+### FIX-6 — Risk Manager: usar `meta.compute_sl_tp()` en vez de regla 1.5x/2.5x hardcodeada
+
+**Antes**: `risk/manager.py` calculaba `SL = entry × (1 - 0.02)`, `TP = entry × (1 + 0.05)` — ignorando la metadata del trie.
+**Después**: usa `meta.sl_price` y `meta.tp_price` (calculados por `compute_sl_tp()` con FIX-4 ya aplicado).
+
+### FIX-7 — Money Manager: respetar `expected_profit_ahead` para position sizing
+
+**Antes**: position size fijo (5% equity) sin importar la confianza del patrón.
+**Después**: size = `base_size × confidence × expected_profit_ahead`. Patrones con high conf + high EM reciben más capital, patrones débiles reciben menos.
+
+### FIX-8 — Correlation Engine: filtrar señales correlacionadas en same-asset-class
+
+**Antes**: si BTC y ETH disparaban LONG simultáneo, el money manager trataba ambos como independientes → over-exposure a crypto blue_chip.
+**Después**: `correlation_engine.py` detecta señales concurrentes en assets de la misma clase y promedia la exposición.
+
+### FIX-9 — Portfolio Manager: cap per-asset exposure al 25%
+
+**Antes**: sin cap explícito → un token podía absorber 80%+ del equity si disparaba muchas señales.
+**Después**: hard cap 25% por asset, rebalanceo forzado si se excede.
+
+---
+
+## v0.40.7 — 2026-06-18 — FIX-10 + FIX-11 + FIX-12: unlock signal pipeline en TF bajos
+
+**Commit**: `4c33e4c`
+
+Tres fixes enfocados en destrabar el pipeline de señales en TF 1m/5m:
+
+### FIX-10 — FuzzyMatcher.best_match retorna el mejor node encontrado (aunque no pase el gate)
+
+**Antes**: si el primer candidato no pasaba `_passes_gate(sim, conf)`, retornaba `MatchResult(matched=False)` sin node → downstream no podía inspeccionar la metadata.
+**Después**: retorna `MatchResult(node=node, matched=False)` para todos los candidatos con `node is not None`. Downstream puede aplicar gates más suaves (signal.py usa `per_trade_min_confidence=0.08`).
+
+### FIX-11 — `signal.py` remueve el hard gate `not match_result.matched`
+
+**Antes**: `if not match_result.matched or match_result.node is None: return None` — mataba señales incluso cuando el node tenía metadata útil.
+**Después**: solo chequea `match_result.node is None`. El gate `matched` se vuelve soft (advisory).
+
+### FIX-12 — `signal.py` lowera el cap de `adaptive_min_conf` a `per_trade_min_confidence`
+
+**Antes**: `adaptive_min_conf = min(adaptive_min_conf, 0.20)` — mataba señales con confidence 0.08-0.19.
+**Después**: `adaptive_min_conf = min(adaptive_min_conf, per_trade_min_confidence)` (típicamente 0.08).
+
+### Resultado
+
+- TF 5m: PnL +3.17% → **+21.51%** (6.8x mejora).
+- TF 1m: PnL -25% (mejora marginal, pero todavía negativo — FIX-13 lo ataca).
+- Señales generadas en 5m: 5 → 450.
+
+---
+
+## v0.40.8 — 2026-06-19 — FIX-13: SAX α=5→α=4 en TF 1m (audit empírico sobre 50k velas reales × 8 tokens)
+
+**Commit**: pendiente de push en este tramo.
+
+### Motivo
+
+Tras FIX-1 a FIX-12, TF 1m seguía generando PnL -25%. El usuario pidió verificar si el cuello de botella era:
+- (A) pocos patrones en el trie, o
+- (B) suficientes patrones pero poca repetición estadística por patrón.
+
+### Auditoría empírica sobre datos reales
+
+Se descargaron 50,000 velas reales de 1m (Binance API, 2026-05-14 → 2026-06-18) para 8 tokens: BTC, ETH, SOL, BNB, XRP, DOGE, ADA, AVAX.
+
+**Resultado**: PROBLEMA B confirmado. A 50k velas con config α=5 (producción):
+- 2,787 patrones únicos (cantidad razonable)
+- 25.9% de patrones singletones (count=1)
+- 0.05% de patrones con count≥10 (estadísticamente robusto)
+- Confidence media = 0.13 < threshold producción 0.15
+
+Extrapolación logarítmica: incluso con 500k velas (1 año), la confidence media solo llegaría a 0.16. **Más datos por sí solos no resuelven el problema.**
+
+### Verificación empírica de la hipótesis α=4
+
+Probé 4 configs SAX sobre los mismos 50k velas reales de 1m:
+
+| Config | Patrones únicos | Count medio | %cnt=1 | %cnt 10+ | Conf media | %conf≥0.15 |
+|--------|----------------:|------------:|-------:|---------:|-----------:|-----------:|
+| α=5, W=7, PL=5 (prod anterior) | 2,787 | 2.56 | 25.9% | 0.1% | 0.130 | 26.5% |
+| **α=4, W=7, PL=5** (elegido) | 1,022 | 6.98 | 1.0% | 17.7% | **0.223** | **81.6%** |
+| α=4, W=7, PL=4 | 256 | 27.88 | 0.0% | 100.0% | 0.336 | 91.2% |
+| α=3, W=7, PL=5 | 243 | 29.37 | 0.0% | 100.0% | 0.337 | 92.2% |
+
+α=4 con PL=5 es el sweet spot: supera el gate 0.15, mantiene 1,022 patrones únicos (suficiente discriminación). α=3 y PL=4 son demasiado agresivos (pierden resolución).
+
+### Cambio aplicado
+
+`src/ppmt/core/profiles.py`:
+```python
+TIMEFRAME_ALPHA_DEFAULTS = {
+    "1m":  {"sax_alphabet_size": 4, "sax_window_size": 7},  # v0.40.8 FIX-13: era 5
+    ...
+}
+```
+
+### Validación post-fix (train 35k / test 15k velas reales por token)
+
+| Config | Matches | Señales (conf≥0.15) | Avg Confidence | LONG | SHORT | Long/Short |
+|--------|--------:|-------------------:|---------------:|-----:|------:|-----------:|
+| **α=4 (NEW — v0.40.8)** | 2,137 | **1,431** | **0.186** | 866 | 564 | **1.54** |
+| α=5 (OLD — v0.40.7) | 2,137 | 696 | 0.137 | 568 | 128 | 4.45 |
+| **Mejora** | — | **+105.6%** | **+35.7%** | +52.5% | +340.6% | -65.4% |
+
+Hallazgos clave:
+1. Señales 2x más frecuentes (1,431 vs 696).
+2. Confidence media supera el gate (0.186 vs 0.137).
+3. **Sesgo LONG reducido 65%**: ratio Long/Short pasa de 4.45 a 1.54. El motor con α=5 era casi ciego a movimientos bajistas (128 SHORT signals vs 568 LONG). Con α=4 el motor ve SHORT signals 4.4x más a menudo → operable en mercados bajistas.
+
+### Archivos modificados
+
+- `src/ppmt/core/profiles.py` — cambio `TIMEFRAME_ALPHA_DEFAULTS["1m"]["sax_alphabet_size"]` de 5 a 4 + comentario explicativo.
+- `src/ppmt/__init__.py` — bump versión 0.40.0 → 0.40.8.
+- `pyproject.toml` — bump versión.
+- `src/ppmt/cli/main.py` — bump versión en `@click.version_option` y dashboard banner.
+- `src/ppmt/terminal/server.py` — bump versión en `FastAPI(title=, version=)`.
+- `src/ppmt/terminal/static/index.html` — bump versión en title, logo, footer.
+- `HANDOFF.md` — bump versión + fecha.
+- `TRAZABILIDAD.md` — bump cabecera + entradas v0.40.1 a v0.40.8 (este archivo estaba desfasado 7 versiones desde v0.40.0).
+- `docs/AUDIT_TRIE_STATS_1M_REAL_DATA.md` — NUEVO doc de auditoría completa (249 líneas).
+- `scripts/audit_trie_1m/` — NUEVO: 5 scripts reutilizables:
+  - `download_1m_data.py` — descarga de velas reales desde Binance.
+  - `measure_trie_stats_1m.py` — medición de patrones únicos, distribución de counts, percentiles.
+  - `analyze_scaling.py` — extrapolación logarítmica 100k/200k/500k.
+  - `verify_alpha4_hypothesis.py` — test empírico de 4 configs SAX.
+  - `post_fix13_validation.py` — validación post-fix con split train/test.
+
+### Verificación
+
+- Tests: 295 pass, 12 pre-existing failures (test_oos_validation + test_trie_merge_preserves_observations) — confirmados con `git stash` que existen en origin/main antes de mis cambios.
+- Smoke test: `import ppmt; ppmt.__version__ == "0.40.8"`, `from ppmt.engine.realtime import RealtimeTrader`, `from ppmt.terminal.server import app` — OK.
+- `TIMEFRAME_ALPHA_DEFAULTS["1m"]` retorna `{'sax_alphabet_size': 4, 'sax_window_size': 7}`.
+
+### Próximos pasos
+
+1. **Probar en TF 5m**: con α=4 (que ya estaba), verificar si la mejora es similar o si 5m ya estaba bien.
+2. **Re-correr walk-forward** con datos reales de 1m y α=4 para confirmar PnL positivo en backtest completo.
+3. **Auditar LONG/SHORT bias restante** (1.54:1 aún no es perfecto, pero mucho mejor que 4.45:1).
+4. **Backtest live paper trader** con la nueva config en 1m.
+5. **Fix terminal** (último item pendiente del plan original del usuario).

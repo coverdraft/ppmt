@@ -51,9 +51,24 @@ from ppmt.core.trie import PPMTTrie
 # Key finding: alpha MUST scale with timeframe granularity.
 #   - Lower TF = more candles = need more symbols to differentiate patterns
 #   - With alpha=3 at 1m, the system generates ZERO trades (all patterns identical)
-#   - alpha=5/window=7 is the optimal config for 1m, producing 350+ trades
+#   - alpha=5/window=7 was the previous optimal config for 1m, producing 350+ trades
+#
+# v0.40.8 FIX-13 (2026-06-19): lowered 1m alpha from 5 to 4 based on empirical
+# audit on REAL 1m data (50k candles × 8 tokens, see
+# docs/AUDIT_TRIE_STATS_1M_REAL_DATA.md). With alpha=5 the trie had:
+#   - 2,787 unique patterns but 25.9% singletones
+#   - confidence media = 0.13 (BELOW production threshold 0.15)
+#   - only 0.05% of patterns had count>=10 (statistical robustness)
+# With alpha=4:
+#   - 1,022 unique patterns but only 1% singletones
+#   - confidence media = 0.22 (ABOVE production threshold 0.15)
+#   - 81.6% of patterns pass confidence gate (vs 26.5% with alpha=5)
+#   - mean_count per pattern = 6.98 (vs 2.56 with alpha=5)
+# Trade-off: lower pattern discrimination, but more repetitions per pattern
+# gives the metadata real statistical grounding. SL/TP from compute_sl_tp()
+# becomes reliable because it's based on 7+ observations instead of 2.
 TIMEFRAME_ALPHA_DEFAULTS = {
-    "1m":  {"sax_alphabet_size": 5, "sax_window_size": 7},
+    "1m":  {"sax_alphabet_size": 4, "sax_window_size": 7},  # v0.40.8 FIX-13: era 5
     "5m":  {"sax_alphabet_size": 4, "sax_window_size": 7},
     "15m": {"sax_alphabet_size": 4, "sax_window_size": 5},
     "30m": {"sax_alphabet_size": 4, "sax_window_size": 5},
