@@ -6423,3 +6423,111 @@ El usuario solicitó "reducir majors a 5 y subir alts a 6-7" para mejorar la cal
 5. **No ampliar más data por ahora**: N3 saturado al 100%, N4 creció solo 5.7pp con el doble de data. Mejor invertir esfuerzo en FIX-15 y FIX-17.
 
 6. **Fix terminal** (item pendiente del plan original del usuario).
+
+---
+
+## v0.40.12 — Validación de Diversidad de Regímenes (pre-FIX-15/16/17)
+
+**Fecha**: 2026-06-18
+**Tipo**: Análisis / auditoría (sin cambios de motor)
+**Motivo**: Antes de implementar FIX-15/16/17, validar que el dataset tiene suficiente diversidad de regímenes y que no hay sesgo temporal. Resultado: hallazgo crítico que **re-prioritiza el roadmap**.
+
+### Hallazgo crítico #1 — RegimeDetector DEGENERADO
+
+El `RegimeDetector` clasifica **99.79% del dataset como `ranging`** (rolling detect_series, lookback=50). Solo 0.08% bullish, 0.09% bearish, 0.05% volatile. La vista `detect_simple` (build time) es ligeramente mejor pero todavía 97.09% ranging.
+
+**Implicación**: N4 `RegimePartitionedTrie` es estructuralmente inútil en este estado — el sub-trie `ranging` contiene ~99.8% de las observaciones, lo que lo hace casi idéntico al N3 (regime-agnostic). FIX-14 (N4 routing) no puede aportar valor hasta que el detector mejore.
+
+### Hallazgo crítico #2 — Sesgo temporal por PRECIO, no por régimen
+
+El detector no distingue TRAIN de TEST (ambos 99.8% ranging), pero los precios sí muestran sesgo:
+
+| Métrica | TRAIN (150k velas) | TEST (50k velas) |
+|---|---:|---:|
+| BTC return | -3.28% | **-23.07%** |
+| ETH return | -15.51% | -26.51% |
+| SOL return | -21.62% | -25.75% |
+| Promedio tokens | -12.5% | **-25.3%** |
+
+Solo 1 token (TIAUSDT) califica como `TRAIN_bull_TEST_bear`. Los demás tienen retornos negativos en ambos splits pero más negativos en TEST. El mercado crypto completo estuvo bajista durante todo el dataset (2026-01-30 → 2026-06-18), con agravamiento en las últimas 5 semanas.
+
+**Implicación**: El motor fue entrenado en un mercado bajista y evaluado en un mercado aún más bajista. No sabemos cómo se comportaría en un mercado alcista.
+
+### Hallazgo crítico #3 — LONG pierde incluso en régimen "bull"
+
+| Régimen al disparo | N LONG | WR LONG | PF LONG | Exp LONG |
+|---|---:|---:|---:|---:|
+| trending_up | 67 | 22.39% | 0.40 | **-0.450%** |
+| trending_down | 27 | 59.26% | 2.05 | +0.395% (inversión paradójica) |
+| ranging | 51,133 | 45.68% | 0.91 | -0.022% |
+| volatile | 0 | — | — | — |
+
+LONG en régimen bullish tiene WR 22% y expectancy -0.45%. Esto sugiere que cuando el detector finalmente etiqueta algo como "bull", el movimiento ya terminó (lagging indicator). Por el contrario, LONG en régimen bearish tiene WR 59% — pero son solo 27 señales (ruido estadístico).
+
+SHORT en ranging es el único combinación rentable a escala: PF 1.07, +0.017% expectancy, +992.24% PnL total sobre 59,033 señales.
+
+### Hallazgo crítico #4 — Transiciones de régimen casi inexistentes
+
+La tasa de transición (cambio de régimen entre vela t-1 y vela t) en TEST es de **0.02%** (172 transiciones en 800k velas). El detector es tan estable que virtualmente nunca cambia de opinión. Esto imposibilita evaluar si las pérdidas LONG se concentran en transiciones — no hay suficientes transiciones para hacer el análisis estadísticamente significativo.
+
+Las 100 peores y 100 mejores señales LONG están ambas en 99% `ranging` y 1% `trending_down` — son estadísticamente indistinguibles por régimen.
+
+### Respuestas a las 7 preguntas del usuario
+
+| # | Pregunta | Respuesta |
+|---|---|---|
+| Q1 | Distribución global | ranging 99.79%, bear 0.09%, bull 0.08%, volatile 0.05% |
+| Q2 | TRAIN vs TEST | TRAIN: 99.76% ranging, TEST: 99.87% ranging (sin diferencia material) |
+| Q3 | Sesgo temporal | Por régimen: no. Por precio: SÍ, TEST más bajista que TRAIN |
+| Q4 | Ventanas separadas | bull_window 99.66% ranging, bear_window 99.74% ranging, sideways 99.89% ranging → detector no distingue ventanas |
+| Q5 | Métricas por régimen | Solo SHORT-en-ranging es rentable (PF 1.07, exp +0.017%) |
+| Q6 | Pérdidas en transiciones | Transiciones = 0.02% del TEST, demasiado raras para validar la hipótesis |
+| Q7 | Detector degenerado | SÍ, 99.79% ranging → `DETECTOR_DEGENERADO` |
+
+### Re-priorización del roadmap
+
+El orden anterior era: FIX-15 (thresholds por dirección) → FIX-16 (per-asset enable) → FIX-17 (mejorar detector).
+
+**Nuevo orden propuesto**:
+
+1. **FIX-17优先 (ahora alta, antes media)**: Mejorar `RegimeDetector`. Sin esto, FIX-14/15/16 son parches sobre un detector roto. Opciones:
+   - Reducir lookback (50 → 20 o 14) para mayor sensibilidad
+   - Reemplazar Hurst exponent (caro y poco fiable en 1m) por EMA slope
+   - Calibrar `vol_threshold` por token (BTC vs meme tienen volatilidades muy distintas)
+   - Calibrar `trend_threshold` por ADR (Average Daily Range) del token
+   - Considerar ADX (Average Directional Index) como medida de tendencia
+
+2. **FIX-15 (alta, sin cambio)**: Thresholds diferenciados por dirección. Sigue siendo válido: LONG con conf<0.25 filtra el 80% de las señales perdedoras.
+
+3. **FIX-14 (re-evaluar después de FIX-17)**: Si el detector mejora y clasifica >15% en cada régimen, entonces N4 RegimePartitionedTrie tendrá información diferenciada y FIX-14 aportará valor.
+
+4. **FIX-16 (baja, sin cambio)**: Per-asset LONG/SHORT enable flags.
+
+5. **Ampliar dataset a 12 meses**: El dataset actual (139 días, todo bajista) no permite evaluar el motor en mercado alcista. Idealmente: 12 meses que incluyan al menos 3 meses alcistas y 3 meses bajistas.
+
+### Archivos creados
+
+- `scripts/regime_validation_analysis.py` (NEW) — análisis vectorizado de 7 preguntas
+- `download/regime_analysis/regime_validation_report.md` (NEW) — reporte ejecutivo
+- `download/regime_analysis/regime_validation_report.json` (NEW) — datos completos
+- `download/regime_analysis/regime_distribution_global.csv` (NEW)
+- `download/regime_analysis/regime_train_test.csv` (NEW)
+- `download/regime_analysis/regime_distribution_per_window.csv` (NEW)
+- `download/regime_analysis/regime_metrics_per_regime.csv` (NEW)
+- `download/regime_analysis/regime_transition_loss_concentration.csv` (NEW)
+- `download/regime_analysis/regime_detector_health.csv` (NEW)
+- `download/regime_analysis/signals_per_regime_raw.csv` (NEW) — 110k señales con régimen, dirección, PnL
+
+### Verificación
+
+- Script reproducible: `python3 scripts/regime_validation_analysis.py` (~3 min)
+- 16 tokens × 200k velas × 2 vistas de régimen (rolling + simple)
+- 110,316 señales N3 reconstruidas sobre TEST (50k velas × 16 tokens)
+- Tests: no se modificó código de motor, solo análisis. Tests en v0.40.11 siguen pasando.
+- No se bump de versión porque no hay cambios de motor.
+
+### Próximos pasos sugeridos (al usuario)
+
+1. **Confirmar re-priorización**: ¿FIX-17 primero (mejorar detector) o seguimos con FIX-15?
+2. **Definir enfoque de FIX-17**: EMA slope vs ADX vs ADR-calibrado
+3. **Considerar ampliar dataset a 12 meses** (necesitaríamos重新 descargar ~1.5M velas/token)
