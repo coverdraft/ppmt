@@ -737,3 +737,169 @@ Para el caso de uso del usuario (TF 1m/5m, máxima frecuencia de entradas):
 3. **Re-ejecutar audits CAPA 1-3** con motor v0.40.5 para medir mejora agregada
 4. **Tunear LONG bias** que empeoró post-FIX-1B (cross-asset pools añadieron ruido direccional)
 5. **Fixear terminal** después de que el motor esté sólido en todas las capas
+
+---
+
+# CAPA 5 AUDIT — Risk Management (v0.40.6)
+
+## Motivación
+
+Tras CAPA 1-4 (estructura, matching, signals, living trie), la última capa
+del motor es **Risk Management**: cómo el sistema decide SL/TP, sizing,
+circuit breakers, y stops de emergencia. El usuario pidió "ir capa por capa
+al detalle" sin estirar, así que esta audit cubre 9 hipótesis verificables
+con datos del motor en producción (con FIX-1B+1C+1D+5 ya aplicados).
+
+Walk-forward: 4 tokens × 4 TFs × 4 folds = 64 runs (mismo setup que capas previas).
+
+## Hipótesis y Veredictos
+
+| ID  | Hipótesis | Veredicto | Evidencia |
+|-----|-----------|-----------|-----------|
+| H1  | paper_trader.py usa SL/TP rule HARDCODED (no meta.compute_sl_tp) → FIX-4 bypassed | ✅ BUG | 64/64 folds DISCREPANCY; mean \|SL diff\|=2.57%, mean \|TP diff\|=2.82% |
+| H2  | PaperTrader usa RiskManager (no MoneyManager) → sin circuit breakers | ✅ BUG | RiskManager 0/3 breakers; MoneyManager 3/3 |
+| H3  | max_drawdown_pct=0.80 en PaperTrader → 80% pérdida antes de bloquear | ✅ BUG | 80 trades perdedores @ 1% c/u para bloquear |
+| H4  | AdvancedPositionSizer (Kelly) no se usa en paper_trader.py | ✅ BUG | 0 instantiations en paper_trader; 1 en realtime |
+| H5  | Re-entry cooldown=1 sym insuficiente para TF bajos | ❌ OK | Con W=7 en 5m: cooldown=35 min (>15 min OK) |
+| H6  | Catastrophic protection off por default | ✅ BUG | catastrophic_loss_pct=0.0 default |
+| H7  | SL/TP check solo en SAX boundary → missed intra-window hits | ✅ BUG | 39/64 folds BUG; 175/742 missed (16.82%) |
+| H8  | TP floor SL×1.5 inviabiliza SHORT con EM pequeño | ❌ OK | 0 floored en 182 SHORT trades (floor es dead code pero harmless) |
+| H9  | Daily loss breaker no persiste estado en RiskManager | ✅ BUG | tras reset_daily → can_open=True inmediatamente |
+
+**Total**: 7 BUGS confirmados de 9 hipótesis (78% hit rate).
+
+## Detalle de Hallazgos
+
+### H1 — DISCREPANCIA SL/TP (CRÍTICO)
+
+**Síntoma**: En CAPA 3 aplicamos FIX-4 a `metadata.py:compute_sl_tp()`:
+```
+SL = max_drawdown × 1.5     (más slack para absorber ruido)
+TP = max(|EM|, max_fav) × 1.0  (full predicted move)
+```
+
+Pero `paper_trader.py:1622-1632` usa su propia regla HARDCODED:
+```python
+sl_distance_pct = max(min(expected_move_abs * 1.5, 5.0), 0.5)
+tp_distance_pct = expected_move_abs * 2.5
+if tp_distance_pct < sl_distance_pct * 1.5:
+    tp_distance_pct = sl_distance_pct * 1.5
+```
+
+**Evidencia cuantitativa** (64 folds walk-forward):
+- Mean |SL diff| = 2.57% (paper_trader SL vs meta SL)
+- Mean |TP diff| = 2.82%
+- Mean RR meta = 2.16 (compute_sl_tp con FIX-4)
+- Mean RR hard = 1.80 (regla hardcoded de paper_trader)
+
+**Implicación**: cualquier mejora que hagamos en `metadata.compute_sl_tp()`
+(FIX-4 o futuros) **no se materializa en producción**. El audit CAPA 3
+muestra mejoras porque usa `meta.compute_sl_tp()`, pero el motor real
+(paper_trader) sigue con la regla vieja.
+
+### H2 — CIRCUIT BREAKERS AUSENTES
+
+**Síntoma**: `paper_trader.py:645` instancia `RiskManager` (no `MoneyManager`).
+
+- `RiskManager` NO tiene `_kill_switch_active`, `_daily_loss_breaker_active`,
+  `_drawdown_breaker_active`
+- `MoneyManager` SÍ los tiene (3/3)
+- El método `is_trading_allowed()` que checkea los 3 breakers **solo existe
+  en MoneyManager**
+
+**Implicación**: En paper trading (audits, backtests), el sistema no tiene
+circuit breakers. Solo tiene chequeos puntuales en `can_open()` que se
+resetean con `reset_daily()` (ver H9). En live trading (realtime.py), sí
+se usa MoneyManager, pero como el audit no lo usa, no podemos medir el
+impacto real de los breakers.
+
+### H3 — MAX_DRAWDOWN 80% PERMISIVO
+
+**Síntoma**: `paper_trader.py:653`:
+```python
+self.risk_config = RiskConfig(
+    ...
+    max_drawdown_pct=0.80,        # 80% for paper trading (don't block signals while tuning)
+    ...
+)
+```
+
+**Implicación**: con `base_position_size_pct=0.01` (1% risk/trade), se
+necesitan **80 trades perdedores seguidos** antes de que el sistema bloquee
+nuevas entradas. Para TF 1m/5m con máxima frecuencia, esto puede ocurrir
+en horas. El comentario dice "don't block signals while tuning" — pero ya
+no estamos en tuning, estamos en producción.
+
+### H4 — AdvancedPositionSizer NO USADO EN PAPER_TRADER
+
+**Síntoma**: `position_sizing.py:AdvancedPositionSizer` (Kelly Criterion +
+regime mult + drawdown mult) está instanciado en `realtime.py:2066` (live
+trading) pero NO en `paper_trader.py`.
+
+**Implicación**: El audit no refleja la lógica de sizing de producción.
+Cuando el usuario compara PnL de audit vs PnL live, la diferencia puede
+ser por sizing, no por señales.
+
+### H6 — CATASTROPHIC PROTECTION OFF
+
+**Síntoma**: `PaperTraderConfig.catastrophic_loss_pct = 0.0` default.
+
+El código en `paper_trader.py:1173` solo checkea intra-window si
+`catastrophic_loss_pct > 0`. Con default=0.0, **nunca** se checkea
+intra-window.
+
+**Implicación**: Un flash crash dentro del SAX window (5 candles de 1m =
+5 min) no se detecta hasta el final del window. Para TF 1m/5m, esto es
+crítico — movimientos de 5-10% pueden ocurrir en segundos.
+
+### H7 — SL/TP CHECK SOLO EN SAX BOUNDARY
+
+**Síntoma**: `paper_trader.py:1256-1295` chequea SL/TP solo al final del
+SAX window (close price), no en cada candle.
+
+**Evidencia cuantitativa**:
+- 742 trades checked en 64 folds
+- 175 missed intra-window hits (16.82%)
+- 39/64 folds tuvieron >10% missed (verdict BUG)
+
+**Implicación**: En 17% de los trades, el HIGH o LOW dentro del SAX window
+habría tocado SL o TP, pero el close price del final del window no lo
+reflejó. El trade queda abierto más tiempo del debido, expuesto a mayor
+volatilidad.
+
+### H9 — DAILY LOSS BREAKER SIN ESTADO
+
+**Síntoma**: `RiskManager.reset_daily()` solo hace `self._daily_pnl = 0.0`.
+No existe `_daily_loss_breaker_active` en RiskManager.
+
+**Test**: 
+```python
+rm = RiskManager(config=RiskConfig(max_daily_loss_pct=0.05))
+rm._daily_pnl = -550  # 5.5% loss
+can_open_1 = rm.can_open(...)  # → False, "Daily loss limit reached"
+rm.reset_daily()
+can_open_2 = rm.can_open(...)  # → True, "OK"  ← BUG!
+```
+
+**Implicación**: Tras un reset diario, el sistema puede abrir trades
+inmediatamente sin recordar que acaba de tener un día malo. MoneyManager
+sí persiste el breaker state, pero no se usa.
+
+## FIXES PROPUESTOS (prioridad P0/P1/P2)
+
+| FIX  | Prioridad | Descripción |
+|------|-----------|-------------|
+| FIX-6 | P0 | Unificar SL/TP rule: paper_trader.py usa `meta.compute_sl_tp()` (FIX-4 ya aplicado) |
+| FIX-7 | P0 | PaperTrader usa MoneyManager en lugar de RiskManager (activa circuit breakers) |
+| FIX-8 | P1 | Bajar max_drawdown_pct a 0.20 en paper_trader (de 0.80) |
+| FIX-9 | P1 | Catastrophic protection default ON (3% para TF 1m/5m) |
+| FIX-10 | P1 | RiskManager con breaker state persistente (no solo chequeo puntual) |
+| FIX-11 | P2 | Intra-window SL/TP check (además del catastrophic check) |
+
+## PRÓXIMOS PASOS
+
+1. Implementar FIX-6, FIX-7 (P0 críticos)
+2. Implementar FIX-8, FIX-9, FIX-10 (P1)
+3. Re-ejecutar audits CAPA 1-5 con motor v0.40.6
+4. Commit a GitHub
+5. CAPA 6 AUDIT (si hay más capas): Terminal/UI/Realtime

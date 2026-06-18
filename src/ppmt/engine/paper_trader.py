@@ -650,7 +650,12 @@ class PaperTrader:
             min_position_size_pct=0.005,
             min_risk_reward=1.0,         # v0.2.9: lowered from 1.5 to allow SHORT R:R=1.5
             max_daily_loss_pct=0.10,      # 10% daily loss limit
-            max_drawdown_pct=0.80,        # 80% for paper trading (don't block signals while tuning)
+            # v0.40.6 FIX-8 (CAPA 5 audit): lowered from 0.80 to 0.20.
+            # 0.80 allowed losing 80% of capital before blocking new trades
+            # (80 trades @ 1% loss each). 0.20 is still generous for paper
+            # trading but prevents catastrophic drawdowns from going unblocked.
+            # For real trading, recommend 0.15 (15%).
+            max_drawdown_pct=0.20,        # 20% max drawdown (was 0.80)
             min_quality_score=0.0,        # Checked in paper_trader, not RiskManager
             # min_confidence is checked in PaperTrader.run(), not RiskManager
         )
@@ -857,6 +862,17 @@ class PaperTrader:
 
             if cfg.catastrophic_loss_pct == 0.0:
                 cfg.catastrophic_loss_pct = 8.0  # safe default
+
+        # v0.40.6 FIX-9 (CAPA 5 audit): Guarantee catastrophic protection
+        # is at least 3.0% when not explicitly disabled. Previously when
+        # use_token_profile=False and catastrophic_loss_pct defaulted to 0.0,
+        # the system had NO intra-window protection — a flash crash within
+        # a SAX window (5 candles of 1m = 5 min) would not be detected
+        # until the window closed. For TF 1m/5m with maximum entry frequency,
+        # this is critical. 3.0% is conservative — production should tune
+        # per asset class via TokenProfile.
+        if cfg.catastrophic_loss_pct < 3.0:
+            cfg.catastrophic_loss_pct = 3.0
 
         # Try to load existing Tries, or build new ones
         # v0.10.0: Load all 4 levels for GAP-1 4-level matching
@@ -1612,20 +1628,44 @@ class PaperTrader:
                     #   After fix:  BTC -11.81%, WR 38.1%, PF 0.88
                     #   After fix:  ETH  -6.79%, WR 42.2%, PF 0.99
                     #
-                    # New approach: Scale SL/TP to PREDICTED move, not ATR.
-                    #   SL = 1.5x expected move (room for noise)
-                    #   TP = 2.5x expected move (R:R = 1.67)
-                    #   Floor: 0.5% SL, Cap: 5% SL
-                    # This ensures TP is REACHABLE when prediction is correct.
+                    # v0.40.6 FIX-6 (CAPA 5 audit): Unify SL/TP rule with
+                    # metadata.compute_sl_tp(). CAPA 5 H1 showed 100% of folds
+                    # had DISCREPANCY between paper_trader.py hardcoded rule
+                    # and meta.compute_sl_tp() (which had FIX-4 applied).
+                    # This meant FIX-4 was bypassed in production.
+                    # Now we use the metadata-driven rule, with the old
+                    # hardcoded rule as fallback only when no node metadata
+                    # is available.
                     expected_move_abs = abs(prediction.expected_total_move_pct)
-                    
-                    if prediction.direction == "LONG":
-                        sl_distance_pct = max(min(expected_move_abs * 1.5, 5.0), 0.5)
-                        tp_distance_pct = expected_move_abs * 2.5  # R:R = 1.67
-                        # Ensure minimum R:R of 1.5
-                        if tp_distance_pct < sl_distance_pct * 1.5:
-                            tp_distance_pct = sl_distance_pct * 1.5
-                    else:  # SHORT
+
+                    # v0.40.6 FIX-6: Use meta.compute_sl_tp() when available
+                    matched_node_for_sltp = None
+                    try:
+                        matched_node_for_sltp = trie.search(current_symbols)
+                    except Exception:
+                        pass
+
+                    if matched_node_for_sltp and matched_node_for_sltp.metadata:
+                        meta_for_sltp = matched_node_for_sltp.metadata
+                        meta_for_sltp.compute_sl_tp(current_price)
+                        if meta_for_sltp.sl_price and meta_for_sltp.tp_price:
+                            sl_distance_pct = abs(
+                                ((meta_for_sltp.sl_price - current_price) / current_price) * 100.0
+                            )
+                            tp_distance_pct = abs(
+                                ((meta_for_sltp.tp_price - current_price) / current_price) * 100.0
+                            )
+                            # Safety floor: ensure SL/TP are at least 0.1% away
+                            sl_distance_pct = max(sl_distance_pct, 0.1)
+                            tp_distance_pct = max(tp_distance_pct, 0.1)
+                        else:
+                            # compute_sl_tp returned None — fallback
+                            sl_distance_pct = max(min(expected_move_abs * 1.5, 5.0), 0.5)
+                            tp_distance_pct = expected_move_abs * 2.5
+                            if tp_distance_pct < sl_distance_pct * 1.5:
+                                tp_distance_pct = sl_distance_pct * 1.5
+                    else:
+                        # Fallback to old hardcoded rule if no metadata
                         sl_distance_pct = max(min(expected_move_abs * 1.5, 5.0), 0.5)
                         tp_distance_pct = expected_move_abs * 2.5
                         if tp_distance_pct < sl_distance_pct * 1.5:

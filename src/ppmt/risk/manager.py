@@ -116,6 +116,15 @@ class RiskManager:
         self._peak_capital: float = capital
         self._last_reset_day: Optional[int] = None
 
+        # v0.40.6 FIX-7 (CAPA 5 audit): Persistent breaker state.
+        # Previously RiskManager only had point-in-time checks in can_open()
+        # that reset with reset_daily(). MoneyManager had persistent state
+        # but wasn't used by PaperTrader. Now both have it.
+        self._kill_switch_active: bool = False
+        self._daily_loss_breaker_active: bool = False
+        self._drawdown_breaker_active: bool = False
+        self._kill_switch_triggered_at: Optional[float] = None
+
     @property
     def open_positions(self) -> list[Position]:
         return list(self._positions.values())
@@ -140,7 +149,21 @@ class RiskManager:
 
         v0.19.1: Now enforces max_correlated_positions — rejects if too many
         positions already exist in the same asset class.
+
+        v0.40.6 FIX-7 (CAPA 5 audit): Now checks persistent breaker state
+        FIRST, before any other check. Previously only had point-in-time
+        checks on _daily_pnl that reset with reset_daily() — which meant
+        the system could re-open trades immediately after a daily reset
+        even if it had just had a catastrophic day.
         """
+        # v0.40.6 FIX-7: Check persistent breaker state FIRST
+        if self._kill_switch_active:
+            return False, "Kill switch active (manual reset required)"
+        if self._daily_loss_breaker_active:
+            return False, "Daily loss breaker active (resets on reset_daily)"
+        if self._drawdown_breaker_active:
+            return False, f"Drawdown breaker active: {self.current_drawdown:.2%}"
+
         # Must be an entry signal
         if not signal.is_entry:
             return False, "Not an entry signal"
@@ -179,12 +202,16 @@ class RiskManager:
             if correlated_count >= self.config.max_correlated_positions:
                 return False, f"Max correlated positions ({asset_class}): {correlated_count}"
 
-        # Check daily loss limit
-        if abs(self._daily_pnl) / self.initial_capital >= self.config.max_daily_loss_pct:
-            return False, "Daily loss limit reached"
+        # Check daily loss limit (also activates breaker for future calls)
+        if self.initial_capital > 0:
+            daily_loss_pct = abs(min(0.0, self._daily_pnl)) / self.initial_capital
+            if daily_loss_pct >= self.config.max_daily_loss_pct:
+                self._daily_loss_breaker_active = True
+                return False, f"Daily loss limit reached: {daily_loss_pct:.2%}"
 
-        # Check max drawdown
+        # Check max drawdown (also activates breaker for future calls)
         if self.current_drawdown >= self.config.max_drawdown_pct:
+            self._drawdown_breaker_active = True
             return False, f"Max drawdown reached: {self.current_drawdown:.2%}"
 
         # Check SL is set
@@ -281,6 +308,12 @@ class RiskManager:
 
         Returns:
             Tuple of (closed_position, pnl_amount) or None
+
+        v0.40.6 FIX-7 (CAPA 5 audit): Updates breaker state after close.
+        Previously, breaker state was never set — only point-in-time checks
+        in can_open() that reset with reset_daily(). Now, after a losing
+        trade that pushes daily loss or drawdown over the limit, the
+        breaker is activated for future calls.
         """
         position = self._positions.pop(symbol, None)
         if position is None:
@@ -298,7 +331,46 @@ class RiskManager:
         if self.capital > self._peak_capital:
             self._peak_capital = self.capital
 
+        # v0.40.6 FIX-7: Update breaker state after each close
+        if self.initial_capital > 0:
+            daily_loss_pct = abs(min(0.0, self._daily_pnl)) / self.initial_capital
+            if daily_loss_pct >= self.config.max_daily_loss_pct:
+                self._daily_loss_breaker_active = True
+        if self.current_drawdown >= self.config.max_drawdown_pct:
+            self._drawdown_breaker_active = True
+
         return position, pnl
+
+    def activate_kill_switch(self) -> None:
+        """
+        Manually activate the kill switch.
+
+        v0.40.6 FIX-7 (CAPA 5 audit): Added to RiskManager so PaperTrader
+        has parity with MoneyManager. Once activated, requires manual
+        reset via reset_kill_switch().
+        """
+        import time as _time
+        self._kill_switch_active = True
+        self._kill_switch_triggered_at = _time.time()
+
+    def reset_kill_switch(self) -> None:
+        """Manually reset the kill switch (requires human intervention)."""
+        self._kill_switch_active = False
+        self._kill_switch_triggered_at = None
+
+    def is_trading_allowed(self) -> bool:
+        """
+        Check if trading is currently allowed (no breakers active).
+
+        v0.40.6 FIX-7 (CAPA 5 audit): Mirrors MoneyManager.is_trading_allowed().
+        """
+        if self._kill_switch_active:
+            return False
+        if self._daily_loss_breaker_active:
+            return False
+        if self._drawdown_breaker_active:
+            return False
+        return True
 
     def update_position(self, symbol: str, current_price: float) -> Optional[Position]:
         """Update unrealized P&L for a position."""
@@ -340,8 +412,20 @@ class RiskManager:
             return current_price <= position.tp_price
 
     def reset_daily(self) -> None:
-        """Reset daily P&L tracking (call at start of each day)."""
+        """
+        Reset daily P&L tracking (call at start of each day).
+
+        v0.40.6 FIX-7 (CAPA 5 audit): Also resets daily_loss_breaker_active
+        so trading can resume after a fresh day. Does NOT reset:
+          - kill_switch_active (requires manual reset_kill_switch)
+          - drawdown_breaker_active (only resets when drawdown recovers)
+        """
         self._daily_pnl = 0.0
+        self._daily_loss_breaker_active = False
+
+        # If drawdown has recovered below threshold, reset breaker
+        if self.current_drawdown < self.config.max_drawdown_pct:
+            self._drawdown_breaker_active = False
 
     def get_status(self) -> dict:
         """Get current risk manager status."""
