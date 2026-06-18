@@ -96,10 +96,40 @@ class FuzzyMatcher:
         sax_encoder: SAXEncoder,
         threshold: float = 0.85,
         max_edit_distance: int = 2,
+        min_similarity: float = 0.70,
+        min_confidence: float = 0.15,
     ):
+        """
+        v0.40.1 FIX-2: Separar similarity y confidence thresholds.
+
+        Antes: matched = (similarity × confidence) >= threshold
+          - Con confidence en 0.08-0.20 (CAPA 1), 1-edit/2-edit eran
+            estructuralmente inalcanzables (necesitaban sim >= 4.25).
+          - 1-edit y 2-edit eran DEAD CODE en la práctica.
+
+        Ahora: matched = (similarity >= min_similarity) AND (confidence >= min_confidence)
+          - 1-edit con similarity >= 0.70 se vuelve alcanzable.
+          - Confidence >= 0.15 filtra nodos puramente decorativos.
+          - `threshold` se preserva para backwards compat (composite score
+            still computed, just no longer used as the match gate).
+        """
         self.sax = sax_encoder
         self.threshold = threshold
         self.max_edit_distance = max_edit_distance
+        self.min_similarity = min_similarity
+        self.min_confidence = min_confidence
+
+    def _passes_gate(self, similarity: float, confidence: float) -> bool:
+        """
+        v0.40.1 FIX-2: Combined match gate using SEPARATE thresholds
+        for similarity and confidence instead of a composite score.
+
+        Composite `similarity × confidence >= 0.85` was structurally
+        unreachable for 1-edit and 2-edit matches when confidence
+        was in the 0.08-0.20 range (typical for sparse tries).
+        See docs/AUDIT_TRAZABILIDAD_CAPAS_1_2_3.md CAPA 2 #1.
+        """
+        return bool(similarity >= self.min_similarity and confidence >= self.min_confidence)
 
     def exact_match(self, trie: PPMTTrie, symbols: list[str]) -> MatchResult:
         """
@@ -110,8 +140,12 @@ class FuzzyMatcher:
         node = trie.search(symbols)
         if node is not None:
             conf = node.metadata.confidence if node.metadata else 0.0
+            # v0.40.1 FIX-2: separate gates. For exact match, similarity is 1.0
+            # so the only filter is min_confidence. This still filters nodes
+            # with metadata in the 0.00-0.14 dead zone (purely decorative).
+            matched = self._passes_gate(similarity=1.0, confidence=conf)
             return MatchResult(
-                matched=True,
+                matched=matched,
                 node=node,
                 symbols=symbols,
                 similarity=1.0,
@@ -139,8 +173,11 @@ class FuzzyMatcher:
         conf = node.metadata.confidence if node.metadata else 0.0
         score = similarity * conf
 
+        # v0.40.1 FIX-2: separate gates (was: similarity >= self.threshold)
+        matched = self._passes_gate(similarity=similarity, confidence=conf)
+
         return MatchResult(
-            matched=similarity >= self.threshold,
+            matched=matched,
             node=node,
             symbols=matched_symbols,
             similarity=similarity,
@@ -190,10 +227,11 @@ class FuzzyMatcher:
                     score = similarity * confidence
 
                     # FIX: Compare score against best_score (not against similarity)
+                    # v0.40.1 FIX-2: gate uses separate thresholds, not composite score
                     if score > best_score:
                         best_score = score
                         best_result = MatchResult(
-                            matched=score >= self.threshold,
+                            matched=self._passes_gate(similarity=similarity, confidence=confidence),
                             node=node,
                             symbols=candidate,
                             similarity=similarity,
@@ -258,8 +296,16 @@ class FuzzyMatcher:
 
                             if score > best_score:
                                 best_score = score
+                                # v0.40.1 FIX-2: gate uses separate thresholds.
+                                # Note: 2-edit threshold stays slightly relaxed
+                                # (min_similarity * 0.9) since 2 substitutions
+                                # inherently reduce similarity more.
+                                matched = (
+                                    similarity >= self.min_similarity * 0.9
+                                    and confidence >= self.min_confidence
+                                )
                                 best_result = MatchResult(
-                                    matched=score >= self.threshold * 0.9,  # Slightly lower threshold for 2-edit
+                                    matched=matched,
                                     node=node,
                                     symbols=candidate,
                                     similarity=similarity,
@@ -388,8 +434,10 @@ class FuzzyMatcher:
             if best_sim >= self.threshold and best_sym is not None:
                 fuzzy_node = current_node.get_child(best_sym)
                 score = best_sim * best_conf
+                # v0.40.1 FIX-2: separate gates (was: best_sim >= self.threshold)
+                matched = self._passes_gate(similarity=best_sim, confidence=best_conf)
                 return MatchResult(
-                    matched=True,
+                    matched=matched,
                     node=fuzzy_node,
                     symbols=current_pattern + [best_sym],
                     similarity=best_sim,

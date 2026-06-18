@@ -509,6 +509,12 @@ class SignalGenerator:
 
         V3: Also generates prediction path and quality score.
         V4: Regime-adaptive thresholds — trending markets need lower confidence.
+        v0.40.1 FIX-3: Lowered count and RR thresholds to be reachable with
+          sparse tries (1-2 obs/leaf). Before: count>=3 AND RR>=1.5 →
+          signal.py was DEAD CODE in production (0% approval rate, see
+          docs/AUDIT_TRAZABILIDAD_CAPAS_1_2_3.md CAPA 3 #4).
+          Now: count>=1 (any non-zero observation) AND RR>=0.5
+          (allows symmetric-or-worse RR; SL/TP rule FIX-4 will compensate).
         """
         if not match_result.matched or match_result.node is None:
             return None
@@ -518,12 +524,27 @@ class SignalGenerator:
         # Get regime-adaptive thresholds
         adaptive_min_conf, adaptive_min_rr = self.get_adaptive_thresholds(regime_name)
 
+        # v0.40.1 FIX-3 (part 2): Cap adaptive_min_conf at 0.20 to make it
+        # reachable with current motor output. The SignalThresholds defaults
+        # (0.45 trending, 0.60 ranging, 0.55 volatile) were calibrated for a
+        # mature trie with 10+ obs/leaf producing confidence in 0.40-0.70.
+        # With sparse tries (1-2 obs/leaf), confidence is structurally in
+        # 0.08-0.20 (see CAPA 1 #2). Without this cap, signal.py rejects
+        # 100% of attempts regardless of the count/RR thresholds below.
+        # The cap of 0.20 still filters nodes with confidence < 0.20 (about
+        # 60% of nodes per CAPA 1 distribution).
+        adaptive_min_conf = min(adaptive_min_conf, 0.20)
+
         # Check minimum confidence (regime-adaptive)
         if confidence < adaptive_min_conf:
             return None
 
-        # Check sufficient observations
-        if meta.historical_count < 3:
+        # v0.40.1 FIX-3: was `meta.historical_count < 3` (unreachable with
+        # sparse tries). Lowered to <1 — any observation is acceptable, since
+        # the FuzzyMatcher gate (min_confidence=0.15) already filters the
+        # purely decorative nodes. The signal.py count gate was redundant
+        # with the matcher gate AND structurally unreachable.
+        if meta.historical_count < 1:
             return None
 
         # Determine direction from expected move.
@@ -542,8 +563,14 @@ class SignalGenerator:
         # Compute SL/TP from metadata
         meta.compute_sl_tp(current_price)
 
-        # Check risk:reward (regime-adaptive)
-        if meta.risk_reward_ratio < adaptive_min_rr:
+        # v0.40.1 FIX-3: was `meta.risk_reward_ratio < adaptive_min_rr`
+        # where adaptive_min_rr defaults to 1.5. With sparse tries (1-2 obs),
+        # RR is essentially 1.0 (max_drawdown = the single move). The 1.5
+        # gate made signal.py reject 100% of attempts. Lowered to 0.5 —
+        # this lets signal.py become a real path again (was DEAD CODE).
+        # The SL/TP rule (FIX-4) is now what protects against bad RR.
+        min_rr_effective = min(adaptive_min_rr, 0.5)
+        if meta.risk_reward_ratio < min_rr_effective:
             return None
 
         # Generate prediction path

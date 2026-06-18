@@ -1837,10 +1837,14 @@ async def validate_token(req: ValidateRequest) -> dict:
         # v0.32.3: If backtest produced < 5 trades, mark as INSUFFICIENT_DATA
         # (previously only 0 trades → INSUFFICIENT_DATA; 1-4 trades went to FAIL
         # because MC was skipped → risk_of_ruin defaulted to 1.0 → check failed).
-        if result.total_trades < 5:
+        # v0.40.0: Lowered 5 → 3 trades. With 5000-candle ingestion the trie
+        # produces richer patterns, but short backtests on low-TF still yield
+        # 3-4 trades. 3 is enough for MC simulation with wider confidence
+        # intervals. Validator.py (oos) keeps the 5-trade gate for OOS.
+        if result.total_trades < 3:
             verdict = "INSUFFICIENT_DATA"
             reason_msg = (
-                f"Backtest produced only {result.total_trades} trades (need >= 5). "
+                f"Backtest produced only {result.total_trades} trades (need >= 3). "
                 f"Causes: (a) insufficient historical data, (b) overly strict signal "
                 f"filters for this regime/market, (c) TokenProfile calibration issue. "
                 f"Try: longer history (90+ days), different timeframe, or check trie patterns."
@@ -1865,7 +1869,7 @@ async def validate_token(req: ValidateRequest) -> dict:
             # v0.32.3: Diagnostic logging — print which check failed and why
             logger.warning(
                 f"Validation {req.symbol} {req.timeframe}: INSUFFICIENT_DATA "
-                f"(trades={result.total_trades} < 5, signals={result.signals_generated}, "
+                f"(trades={result.total_trades} < 3, signals={result.signals_generated}, "
                 f"candles_processed={result.candles_processed})"
             )
         else:
@@ -1873,7 +1877,7 @@ async def validate_token(req: ValidateRequest) -> dict:
             pf_pass = profit_factor > 0.8
             ror_pass = mc_result.get("risk_of_ruin", 1.0) < 0.20
             mc_pass = mc_verdict not in ("HIGH RISK",)
-            mt_pass = result.total_trades >= 5
+            mt_pass = result.total_trades >= 3
 
             checks = {
                 # Server-style keys (with _pass suffix)

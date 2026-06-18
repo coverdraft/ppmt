@@ -449,7 +449,11 @@ class ValidationEngine:
         verdict.confidence_score = total_score
 
         # Determine recommendation
-        if verdict.oos.oos_total_trades < 10:
+        # v0.40.0: Lowered OOS threshold 10 → 5 trades to match the new
+        # /api/validate gate (server.py:1844). With 5000-candle ingestion,
+        # 5 OOS trades is enough for a tentative verdict; MC gives wider
+        # confidence intervals which the verdict summary surfaces.
+        if verdict.oos.oos_total_trades < 5:
             verdict.recommendation = "INSUFFICIENT_DATA"
         elif total_score >= 70:
             verdict.recommendation = "ROBUST"

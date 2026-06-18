@@ -1699,23 +1699,72 @@ class RealtimeTrader:
                     except Exception:
                         pass
 
-                # Entry signal check
-                # v0.22.0: original tightened thresholds (0.30 / 0.15).
-                # v0.39.3: Lowered move floor 0.30 → 0.10 and prob floor
-                # 0.15 → 0.08 to match the new paper-mode SignalThresholds.
-                # Root cause: Bayesian shrinkage on fresh tries (200-500
-                # patterns) keeps overall_probability in the 0.10-0.18
-                # range. The old 0.15 floor rejected ~95% of signals in
-                # live mode → dashboard showed "no signals, no trades"
-                # even when the engine was running fine. The new 0.08
-                # floor matches the paper-mode base_prob_gate so live and
-                # backtest produce comparable signal counts.
-                _live_move_floor = 0.10 if getattr(cfg, 'validation_mode', False) else 0.30
-                _live_prob_floor = 0.08 if getattr(cfg, 'validation_mode', False) else 0.15
+                # Entry signal check — v0.40.0: unified with backtest path.
+                # Previous live path used 2 hardcoded floors (0.30/0.15 real,
+                # 0.10/0.08 paper) and skipped the 7 SignalThresholds-sourced
+                # filters that the backtest applies (regime gates, counter-trend,
+                # boost logic). This caused live/backtest asymmetry: live fired
+                # signals that backtest would have rejected, and vice versa.
+                # Now we apply the SAME 7-filter block as run_replay
+                # (realtime.py:992-1085) so live and backtest produce comparable
+                # signal counts and trade decisions.
+                _live_sig = SignalThresholds.for_mode(
+                    getattr(cfg, 'validation_mode', False)
+                )
+                # Filter 1: base probability gate
+                if prediction.overall_probability < _live_sig.base_prob_gate:
+                    result.candles_processed += 1
+                    return (sax_buffer, pattern_buffer, position_state, current_position,
+                            trade_counter, current_regime, peak_capital, last_losing_trade_idx)
+                # Filter 2: hard move floor
+                if abs(prediction.expected_total_move_pct) < _live_sig.hard_move_floor:
+                    result.candles_processed += 1
+                    return (sax_buffer, pattern_buffer, position_state, current_position,
+                            trade_counter, current_regime, peak_capital, last_losing_trade_idx)
+                # Filter 3: ranging regime gate
+                if current_regime == "ranging":
+                    if prediction.overall_probability < _live_sig.ranging_prob_gate:
+                        result.candles_processed += 1
+                        return (sax_buffer, pattern_buffer, position_state, current_position,
+                                trade_counter, current_regime, peak_capital, last_losing_trade_idx)
+                    if abs(prediction.expected_total_move_pct) < _live_sig.ranging_move_floor:
+                        result.candles_processed += 1
+                        return (sax_buffer, pattern_buffer, position_state, current_position,
+                                trade_counter, current_regime, peak_capital, last_losing_trade_idx)
+                # Filter 4: volatile regime gate
+                elif current_regime == "volatile":
+                    if prediction.overall_probability < _live_sig.volatile_prob_gate:
+                        result.candles_processed += 1
+                        return (sax_buffer, pattern_buffer, position_state, current_position,
+                                trade_counter, current_regime, peak_capital, last_losing_trade_idx)
+                    if abs(prediction.expected_total_move_pct) < _live_sig.volatile_move_floor:
+                        result.candles_processed += 1
+                        return (sax_buffer, pattern_buffer, position_state, current_position,
+                                trade_counter, current_regime, peak_capital, last_losing_trade_idx)
+                # Filter 5: counter-trend gates
+                elif current_regime == "trending_down" and prediction.direction == "LONG":
+                    if prediction.overall_probability < _live_sig.counter_trend_gate:
+                        result.candles_processed += 1
+                        return (sax_buffer, pattern_buffer, position_state, current_position,
+                                trade_counter, current_regime, peak_capital, last_losing_trade_idx)
+                elif current_regime == "trending_up" and prediction.direction == "SHORT":
+                    if prediction.overall_probability < _live_sig.counter_trend_gate:
+                        result.candles_processed += 1
+                        return (sax_buffer, pattern_buffer, position_state, current_position,
+                                trade_counter, current_regime, peak_capital, last_losing_trade_idx)
+                # Confidence boost (same as backtest path)
+                _boosted_conf = weighted_confidence
+                if (prediction.overall_probability >= _live_sig.boost_prob_trigger
+                        and abs(prediction.expected_total_move_pct) >= _live_sig.boost_move_trigger):
+                    _boosted_conf = max(
+                        weighted_confidence,
+                        weighted_confidence * (1 + prediction.overall_probability),
+                    )
+                # Final entry gate (mirrors backtest's compound condition)
                 if (prediction.direction != "FLAT"
-                        and weighted_confidence >= effective_min_conf
-                        and abs(prediction.expected_total_move_pct) > _live_move_floor
-                        and prediction.overall_probability > _live_prob_floor):
+                        and _boosted_conf >= effective_min_conf
+                        and abs(prediction.expected_total_move_pct) > _live_sig.move_threshold
+                        and prediction.overall_probability > _live_sig.base_prob_gate):
 
                     result.signals_generated += 1
 

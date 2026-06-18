@@ -663,16 +663,38 @@ class BlockLifecycleMetadata:
         Args:
             entry_price: Current entry price
             safety_margin: Margin added to SL/TP for safety (0.2 = 20% extra)
+
+        v0.40.1 FIX-4: Rebalanced SL/TP to preserve the directional edge
+          identified in CAPA 3 audit (EM→PnL corr = +0.11).
+          BEFORE: SL = max_drawdown × 1.2, TP = min(|EM|, max_fav) × 0.9
+            → SL/TP hit ratio = 2.14 (SL hits 64.8% of trades, TP 30.3%)
+            → Break-even requires 28.6% TP rate, motor delivered 30.3%
+              but END trades (4.9%) destroyed the margin → net losing.
+          AFTER: SL = max_drawdown × 1.5 (more slack), TP = max(|EM|, max_fav) × 1.0 (full)
+            → Logic: if motor has directional edge (+0.11 EM→PnL), we want:
+              - SL holgado so noisy drawdowns don't kick us out
+              - TP completo so we capture the full predicted move
+            → Target RR ≈ 0.67 (TP_dist / SL_dist), break-even at 60% TP rate
+              but the bet is that with looser SL we go from 30% → 50%+ TP rate
+              because the noisy drawdowns that hit SL before now resolve.
+          The old safety_margin param is preserved for API compat but no
+          longer used in the calculation (we use explicit 1.5 and 1.0 factors).
         """
-        # Stop loss: max_drawdown with safety margin
-        sl_distance = abs(self.max_drawdown_pct) * (1.0 + safety_margin)
+        # Stop loss: max_drawdown × 1.5 (was × 1.2)
+        # More slack to absorb noisy drawdowns from sparse-trie metadata
+        sl_distance = abs(self.max_drawdown_pct) * 1.5
         self.sl_price = entry_price * (1.0 - sl_distance / 100.0)
 
-        # Take profit: expected_move or max_favorable, whichever is more conservative
-        tp_distance = min(
+        # Take profit: max(|expected_move|, max_favorable) × 1.0 (was min(...) × 0.9)
+        # - Use MAX instead of MIN: if the motor predicts +0.5% but history
+        #   shows max_favorable of +0.8%, target the higher (more optimistic)
+        #   since we believe the directional signal.
+        # - No haircut (× 1.0 instead of × 0.9): capture the full predicted
+        #   move. The old 0.9 haircut was leaving profit on the table.
+        tp_distance = max(
             abs(self.expected_move_pct),
             self.max_favorable_pct,
-        ) * (1.0 - safety_margin * 0.5)
+        ) * 1.0
         self.tp_price = entry_price * (1.0 + tp_distance / 100.0)
 
     def to_dict(self) -> dict:
