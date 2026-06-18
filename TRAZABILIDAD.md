@@ -5716,3 +5716,133 @@ Auditar **CAPA 3 (Signal Generation)** con trazabilidad de `signal.py` y `predic
 - ¿PredictionEngine.predict() agrega signal o solo amplifica ruido?
 
 > Razón para auditar CAPA 3 antes de fixear 1+2: identificar bugs **independientes** en signal generation (SL/TP, entry/exit) que necesitan fixearse independientemente de la calidad del match upstream.
+
+---
+
+### CAPA 3 — Signal Generation: PredictionEngine + entry/SL/TP logic
+
+**Trazabilidad**: leído `engine/signal.py` (710 líneas, `SignalGenerator.generate_entry_signal`, `generate_continuation_signal`), `engine/prediction.py` (413 líneas, `PredictionEngine.predict`, `_walk_path`, leaf fallback), `core/metadata.py:659-676` (`compute_sl_tp`).
+
+**Métricas agregadas sobre 64 runs / 21,403 predicciones OOS / 697 trades cerrados**:
+
+#### Direction distribution
+
+| Direction | N | % |
+|---|---|---|
+| SHORT | 12,467 | 58.2% |
+| LONG | 7,461 | 34.9% |
+| FLAT | 1,475 | 6.9% |
+
+- **Ratio SHORT/LONG = 1.67x**. El motor es SHORT-biased: predice caída 2/3 del tiempo.
+- Hipótesis: combinación de (a) leaf fallback usando `node.metadata.expected_move_pct` ruidoso, (b) dataset con sesgo bajista.
+
+#### SL/TP execution
+
+| Outcome | N | % |
+|---|---|---|
+| SL hits | 452 | 64.8% |
+| TP hits | 211 | 30.3% |
+| END (close at end) | 34 | 4.9% |
+
+- **SL/TP ratio = 2.14**: por cada TP, se tocan 2.1 SLs.
+- Si el motor impone RR 2.5 (TP 2.5x SL), break-even esperado sería SL/TP = 2.5 → win rate 28.6%.
+- El motor entrega 30.3% TP rate → marginalmente break-even en win rate, pero los 4.9% de trades "END" (no cerrados en SL/TP) pierden y destruyen el margen.
+
+#### LONG vs SHORT outcomes
+
+| Direction | N trades | Sum PnL | Mean PnL |
+|---|---|---|---|
+| LONG | 688 | **−252.66%** | −0.37% |
+| SHORT | 9 | +2.71% | +0.30% |
+
+- El motor hace **76x más LONGs que SHORTs** (porque blue_chip deshabilita SHORT).
+- LONG pierde sistemáticamente. SHORT marginalmente rentable (muy pocos casos).
+
+#### **HALLAZGO CRÍTICO — signal.py es DEAD CODE**
+
+| Path | N approve | % |
+|---|---|---|
+| Path A: `signal.generate_entry_signal()` | **0** | 0.0% |
+| Path B: realtime.SignalThresholds gate | 697 | 3.3% |
+| Both agree | 0 | — |
+| Only A approves, prod rejects | 0 | 0.0% |
+| Only B approves, signal.py rejects | 697 | 3.3% |
+
+- `signal.generate_entry_signal()` rechaza **100%** de las señales que producción acepta.
+- Razón: pide `historical_count >= 3` AND `risk_reward_ratio >= 1.5` (líneas 526 y 546 de signal.py).
+- Con 1-2 obs/hoja (CAPA 1), count rara vez llega a 3, y con 1 obs el RR = |expected_move / max_drawdown| = 1.0 (no llega a 1.5).
+- **Conclusión**: signal.py es arquitectura decorativa. Producción usa exclusivamente `realtime.py:930-1060` con `SignalThresholds` (más permisivo).
+
+#### Risk:Reward ratio — lo que el motor CREE vs lo que HACE
+
+| Métrica | Valor |
+|---|---|
+| Mean `meta.risk_reward_ratio` (lo que el motor CREE) | **0.91** |
+| % runs con RR<1.0 (negative-EV) | **73.4%** |
+| % runs con RR>=1.5 (mínimo requerido por signal.py) | 17.2% |
+| Production rule: TP = 2.5 × expected_move_abs | (impuesto) |
+| Production rule: SL = 1.5 × expected_move_abs | (impuesto) |
+
+- El motor NO usa la metadata para SL/TP. Aplica un rule hardcodeado (1.5x/2.5x) independientemente del drawdown observado.
+- El `meta.compute_sl_tp()` (líneas 659-676) que usa `max_drawdown_pct × 1.2` y `min(|expected_move|, max_favorable) × 0.9` **no se ejecuta en producción**.
+- Es un dead path también: la metadata se calcula pero se ignora.
+
+#### PredictionEngine — leaf fallback domina
+
+| Path length | N | % |
+|---|---|---|
+| 0 (leaf fallback) | 7,689 | 35.9% |
+| 1 (1 step forward) | 7,760 | 36.3% |
+| 2 | 5,385 | 25.2% |
+| 3 | 569 | 2.7% |
+
+- **40% de las predicciones usan leaf fallback** (líneas 258-268 de prediction.py).
+- Leaf fallback = `direction = LONG/SHORT según node.metadata.expected_move_pct`, `overall_prob = node.metadata.win_rate`.
+- Eso significa: la "predicción forward" es en realidad la metadata del nodo proyectada como si fuese el futuro. No hay caminata real del trie en la mayoría de casos.
+
+#### Correlación expected_move → PnL (¿la dirección predicha es correcta?)
+
+- **Weighted global: +0.1103** (positiva débil).
+- 25/64 runs calculables: 13 POS, 8 NEG, 4 ≈0.
+- El motor **TIENE ALGO de signal direccional** pero muy débil.
+- Combinado con SL/TP ratio 2.14x y RR metadata 0.91, ese edge débil se destruye.
+
+### Diagnóstico cruzado CAPA 1 + 2 + 3
+
+| Capa | Problema | Impacto en capa siguiente |
+|---|---|---|
+| **CAPA 1** | 1-2 obs/hoja, 4 tries idénticos, confidence comprimida 0.08-0.20 | count>=3 inalcanzable, RR=1.0 exacto |
+| **CAPA 2** | Fuzzy 1-edit/2-edit dead code, 0% rescue rate, confidence no predice outcome | solo "exact" y "prefix" matchean, ambos con metadata ruidosa |
+| **CAPA 3** | signal.py rechaza 100% (count>=3), meta RR=0.91 negative-EV, leaf fallback 40%, SL/TP rule destruye edge | LONG pierde -252% acumulado, SL hits 2.1x TP hits |
+
+**Causa raíz central**: la fórmula `historical_count >= 3` en `signal.py` Y el `risk_reward_ratio >= 1.5` son **inalcanzables** con la sparse coverage de CAPA 1. El motor "oficial" está diseñado para tries con 10+ obs/hoja, pero produce 1-2. Por eso producción bypasea signal.py.
+
+### 4 bugs nuevos identificados en CAPA 3 (adicionales a los 5 de CAPA 1+2)
+
+| # | Bug | Fix propuesto |
+|---|---|---|
+| **BUG-C3-1** | `signal.py` exige `count>=3` Y `RR>=1.5` — dead code | Bajar a `count>=2` Y `RR>=1.0` para activar signal.py |
+| **BUG-C3-2** | `meta.compute_sl_tp()` se calcula pero producción no lo usa | Usar `meta.sl_price/tp_price` en vez del rule 1.5x/2.5x hardcodeado |
+| **BUG-C3-3** | SHORT bias 1.67x sin justificación estadística | Investigar leaf_fallback; considerar balancear direcciones |
+| **BUG-C3-4** | SL/TP rule 1.5x/2.5x destruye edge de +0.11 EM→PnL | Recalibrar: si EM débil, SL más apretado (1.0x EM) y TP más modesto (1.8x) |
+
+### Update de fixes propuestos (consolidado CAPA 1+2+3)
+
+| # | Fix | Capa | Estado |
+|---|---|---|---|
+| FIX-1 | Diferenciar los 4 tries en `build()` | 1 | Pendiente |
+| FIX-2 | Separar thresholds (sim ≥ 0.7 AND conf ≥ 0.15) | 2 | Pendiente |
+| FIX-3 | Mín `historical_count >= 5` para uso en señales | 1+2 | Pendiente |
+| FIX-4 | Bajar k=5 a k=4 o k=3 | 1 | Pendiente |
+| FIX-5 | Recalibrar confidence con logistic regression | 1 | Pendiente |
+| **FIX-6** | Reconciliar signal.py con producción (count>=2, RR>=1.0) | 3 | Nuevo |
+| **FIX-7** | Usar `meta.sl_price/tp_price` en vez de rule 1.5x/2.5x | 3 | Nuevo |
+| **FIX-8** | Investigar y corregir SHORT bias | 3 | Nuevo |
+| **FIX-9** | Recalibrar SL/TP rule según edge observado (+0.11) | 3 | Nuevo |
+
+### Próximo paso
+
+Auditar **CAPA 4 (Living Trie Feedback Loop)** con trazabilidad de cómo `realtime.py` actualiza el trie con resultados reales de trades cerrados:
+- ¿El feedback mejora o degrada la quality?
+- ¿Se crean nodos nuevos con 1 obs que después contaminan señales?
+- ¿Win rate de los nodos "learned" es mejor que los "seeded"?
