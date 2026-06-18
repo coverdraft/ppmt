@@ -1,7 +1,7 @@
 # TRAZABILIDAD PPMT — Estado del Proyecto
 
 > Última actualización: 2026-06-19
-> Versión actual: **v0.40.8** — FIX-13: SAX α=5→α=4 en TF 1m (verificado empíricamente sobre 50k velas reales de 8 tokens)
+> Versión actual: **v0.40.9** — Auditoría extendida 14 tokens x 100k velas 1m: confirma mejora SHORT coverage, revela nuevo problema LONG signals
 > Repositorio: https://github.com/coverdraft/ppmt
 > Idioma: Español
 
@@ -6100,3 +6100,89 @@ Hallazgos clave:
 3. **Auditar LONG/SHORT bias restante** (1.54:1 aún no es perfecto, pero mucho mejor que 4.45:1).
 4. **Backtest live paper trader** con la nueva config en 1m.
 5. **Fix terminal** (último item pendiente del plan original del usuario).
+
+---
+
+## v0.40.9 — Auditoría extendida 14 tokens x 100k velas 1m (2026-06-19)
+
+### Motivo
+
+El usuario planteó verificar si ampliar datos (más tiempo + más tipos de tokens: memes y altcoins) mejoraría el análisis estadístico, la cobertura de SHORT signals y la eficiencia de los nodos del trie. La auditoría v0.40.8 usó solo 8 tokens majors x 50k velas (35 días).
+
+### Setup experimental
+
+- **Dataset**: 14 tokens x 100k velas 1m = 1,400,000 velas totales
+- **Rango temporal**: 2026-04-10 → 2026-06-18 (~70 días, el doble que antes)
+- **Tokens nuevos añadidos**: PEPEUSDT, WIFUSDT, BONKUSDT, FLOKIUSDT (memes), LINKUSDT, ARBUSDT (alts)
+- **Config motor**: α=4, W=7, PL=5 (FIX-13, sin cambios)
+- **Escalas medidas**: 25k, 50k, 100k velas por token
+
+### Resultados clave
+
+**Estadísticas del trie @ 100k velas:**
+- Patrones únicos: 1,024 (avg, saturado a 4^5)
+- Mean count por patrón: 13.95 (vs 2.56 baseline α=5/50k)
+- % patrones con count≥10: 80.4% (vs 0.05% baseline)
+- Confidence media: 0.288 (vs 0.130 baseline, +121%)
+- L/S ratio: 0.92 (vs 4.45 baseline, -79%)
+
+**Walk-forward (train 70k / test 30k por token):**
+- 55,742 señales totales (LONG=28,263, SHORT=27,479, L/S=1.03)
+- PnL total: -281.98%
+- **PnL SHORT: +448.86%** (rentable en TODAS las categorías)
+- **PnL LONG: -730.80%** (perdedor en TODAS las categorías)
+- 6 de 14 tokens rentables: AVAX (+96%), XRP (+28%), BNB (+20%), BONK (+15%), WIF (+11%), FLOKI (+7%)
+
+### Hallazgos críticos
+
+1. **SHORT coverage RESUELTA**: el motor ahora genera tantas SHORT signals como LONG, y son rentables (+449%). El problema histórico del sesgo LONG era artifact de la muestra, no del motor.
+
+2. **Eficiencia de nodos SUSTANCIALMENTE MEJORADA**: 80% de patrones tienen count≥10 (suficiente evidencia estadística). El trie ahora es estadísticamente robusto, no anecdótico.
+
+3. **Nuevo problema detectado: LONG signals pierden dinero sistemáticamente** (-731% agregado). Aparece en majors, memes y alts. Causa probable: regime mismatch (el motor N3 no consulta el régimen actual antes de disparar LONG; los patrones alcistas del train set ya no son válidos en un test set predominantemente bajista).
+
+4. **6 de 14 tokens rentables** — el motor TIENE edge positivo en una porción significativa del universo, pero el edge se pierde al agregar tokens donde LONG consistently pierde.
+
+### Respuesta a las preguntas del usuario
+
+| Pregunta | Respuesta |
+|---|---|
+| ¿Necesitamos más datos (más tiempo)? | **SÍ**: confidence +33%, count≥10 de 18% a 80%, SHORT signals +103% al pasar de 50k a 100k |
+| ¿Necesitamos más tipos de tokens? | **SÍ, específicamente memes y alts**: aportan regímenes bajistas que enriquecen el trie N4 |
+| ¿Mejora SHORT coverage? | **ROTUNDAMENTE SÍ**: L/S 4.45 → 1.03, PnL SHORT +449% |
+| ¿Mejora eficiencia de nodos? | **SÍ**: mean count 2.56 → 13.95, %count≥10 0.05% → 80.4% |
+
+### Recomendaciones para siguiente iteración
+
+- **FIX-14 (alta prioridad)**: Usar N4 (RegimePartitionedTrie) en predicción, no solo N3. Consultar régimen actual y buscar solo en el sub-trie correcto. Esperado: filtrar LONG signals en regímenes bajistas, recuperar edge positivo.
+- **FIX-15 (media)**: Thresholds diferenciados por dirección (LONG: min_conf=0.20, SHORT: min_conf=0.15).
+- **FIX-16 (baja)**: Per-asset LONG/SHORT enable flags (desactivar LONG en tokens consistentemente perdedores como ADA, ARB).
+
+### Archivos creados / modificados
+
+- `docs/AUDIT_TRIE_EXTENDED_14TOK_100K.md` (NEW) — auditoría completa ~250 líneas
+- `scripts/audit_trie_1m/download_1m_extended.py` (NEW) — descarga 14 tokens x 100k velas
+- `scripts/audit_trie_1m/measure_trie_extended.py` (NEW) — mide stats con LONG/SHORT breakdown
+- `scripts/audit_trie_1m/layer1_walkforward_14tok.py` (NEW) — walk-forward audit capa 1
+- `TRAZABILIDAD.md` — bump v0.40.8 → v0.40.9 + esta entrada
+
+### Dataset y artefactos (fuera del repo por tamaño)
+
+- CSVs: `/home/z/my-project/download/real_data_1m_extended/*.csv` (~190 MB, 14 archivos)
+- JSONs: `/home/z/my-project/download/trie_stats_1m_extended/*.json`
+- Markdown: `/home/z/my-project/download/trie_stats_1m_extended/*.md`
+
+### Verificación
+
+- 14 tokens x 100k velas descargadas correctamente desde Binance API (rango 2026-04-10 → 2026-06-18).
+- Trie building: 1,024 patrones únicos por token (esperado: 4^5 = 1,024 combinaciones posibles con α=4, PL=5).
+- Walk-forward: 55,742 señales generadas sobre 420k velas OOS (14 tokens x 30k test).
+- Resultados reproducibles desde los scripts en `scripts/audit_trie_1m/`.
+
+### Próximos pasos
+
+1. **FIX-14**: implementar uso de N4 (regime-partitioned trie) en `engine/prediction.py` y `engine/predict_live.py`.
+2. **Re-auditar capa 1** post-FIX-14 con mismo dataset extendido para validar que LONG signals recuperan edge.
+3. **Re-auditar capas 2-5** con data extendida + α=4 + N4 en predicción.
+4. **Backtest live paper trader** con nueva config.
+5. **Fix terminal** (item pendiente del plan original del usuario).
