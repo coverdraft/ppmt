@@ -1,0 +1,45 @@
+{
+  "tf": "15m",
+  "n_candles": 5000,
+  "pattern_length": 5,
+  "sax_alpha": 4,
+  "sax_window": 5,
+  "layer1": {
+    "patterns_built": 695,
+    "trie_n1_size": 0,
+    "trie_n2_size": 0,
+    "trie_n3_size": 494,
+    "trie_n4_size": 0,
+    "avg_confidence": 0.10035451674421032,
+    "avg_count": 1.4068825910931173,
+    "avg_win_rate": 0.539642375168691
+  },
+  "layer2": {
+    "queries": 295,
+    "matched": 183,
+    "match_rate": 0.6203389830508474,
+    "edit_distance_dist": {
+      "2": 111,
+      "1": 44,
+      "0": 28
+    },
+    "avg_matched_confidence": 0.1333887251691213,
+    "conf_pnl_correlation": -0.006778096121425224,
+    "avg_actual_pnl": 0.2055161175317166
+  },
+  "layer3": {
+    "signals_long": 18,
+    "signals_short": 0,
+    "signals_rejected": 277,
+    "approval_rate": 0.061016949152542375,
+    "closed_sl": 15,
+    "closed_tp": 3,
+    "win_rate": 0.16666666666666666,
+    "avg_sl_distance": 1.3276207496239492,
+    "avg_tp_distance": 3.39486331363681,
+    "sl_tp_ratio": 0.391067511994087,
+    "pnl_long_sum": -9.21785342513496,
+    "pnl_short_sum": 0.0,
+    "pnl_total": -9.21785342513496
+  }
+}

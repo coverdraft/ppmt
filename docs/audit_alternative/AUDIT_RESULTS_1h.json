@@ -1,0 +1,43 @@
+{
+  "tf": "1h",
+  "n_candles": 5000,
+  "pattern_length": 5,
+  "sax_alpha": 3,
+  "sax_window": 7,
+  "layer1": {
+    "patterns_built": 495,
+    "trie_n1_size": 0,
+    "trie_n2_size": 0,
+    "trie_n3_size": 213,
+    "trie_n4_size": 0,
+    "avg_confidence": 0.126375508374949,
+    "avg_count": 2.323943661971831,
+    "avg_win_rate": 0.5448803934719427
+  },
+  "layer2": {
+    "queries": 209,
+    "matched": 90,
+    "match_rate": 0.430622009569378,
+    "edit_distance_dist": {
+      "0": 90
+    },
+    "avg_matched_confidence": 0.1843988064919176,
+    "conf_pnl_correlation": -0.11815168686986781,
+    "avg_actual_pnl": 3.1583983195487417
+  },
+  "layer3": {
+    "signals_long": 1,
+    "signals_short": 0,
+    "signals_rejected": 208,
+    "approval_rate": 0.004784688995215311,
+    "closed_sl": 1,
+    "closed_tp": 0,
+    "win_rate": 0.0,
+    "avg_sl_distance": 6.936738816094401,
+    "avg_tp_distance": 8.056988350202062,
+    "sl_tp_ratio": 0.8609592709564281,
+    "pnl_long_sum": -6.936738816094401,
+    "pnl_short_sum": 0.0,
+    "pnl_total": -6.936738816094401
+  }
+}
