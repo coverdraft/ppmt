@@ -5562,3 +5562,157 @@ ppmt terminal
   o solo shorts).
 - Backlog: gráfico de equity curve en Operaciones tab (línea de
   portfolio value over time).
+
+---
+
+## AUDITORÍA HONESTA DEL MOTOR — v0.40.0 (17 jun 2026)
+
+> **Motivación**: El usuario detectó que una auditoría previa con motor reducido
+> mostraba edge negativo y exigió "auditar con el motor completo" capa por capa
+> con trazabilidad estricta. Esta sección documenta los hallazgos honestos,
+> métrica por métrica, sin minimizar.
+
+### Configuración de auditoría
+
+- **Walk-forward estricto 4×4×4**: 4 tokens × 4 TFs × 4 folds = **64 runs**
+- **Tokens**: BTCUSDT (blue_chip), ETHUSDT (blue_chip), SOLUSDT (large_cap), DOGEUSDT (meme)
+- **TFs**: 5m, 15m, 30m, 1h
+- **Folds**: F1 (train 0-1000, test 1000-2000), F2 (0-2000, 2000-3000), F3 (0-3000, 3000-4000), F4 (0-4000, 4000-5000)
+- **Datos**: 5000 candles OHLCV por token+TF, cacheados en `/scripts/audit_cache/`
+- **Motor completo**: 4 tries + FuzzyMatcher + PredictionEngine + RegimeDetector + production SL/TP + Living Trie feedback
+- **Pattern length**: 5
+- **Min confidence**: 0.08 (default producción)
+
+### Scripts de auditoría (persistidos en `/scripts/`)
+
+| Script | Propósito | Output JSON |
+|---|---|---|
+| `layer1_audit.py` | CAPA 1 — Construcción de patrones + 4 tries + metadata | `layer1_audit_results.json` |
+| `layer2_audit.py` | CAPA 2 — FuzzyMatcher / matching OOS + correlación confidence→PnL | `layer2_audit_results.json` |
+| `ppmt_full_engine_audit.py` | v3 — Auditoría completa previa (motor completo) | `ppmt_full_engine_audit_results.json` |
+
+---
+
+### CAPA 1 — Construcción de patrones + 4 Tries + Metadata por nodo
+
+**Trazabilidad**: leído `core/trie.py`, `core/metadata.py`, `engine/ppmt.py` (`build()`).
+
+**Hallazgos clave (16 runs: 4 tokens × 4 TFs, fold F2 train)**:
+
+| Métrica | Valor observado | Problema |
+|---|---|---|
+| Patrones únicos por trie | 200-300 | Espacio teórico: α^k = 4^5 = 1024 → cobertura ~25% |
+| Obs/hoja (media) | 1.2-1.8 | Insuficiente para inferencia estadística |
+| Obs/hoja ≥ 10 | **0%** | Ninguna hoja llega al mínimo para "nodo independiente" |
+| Confidence media | 0.08-0.20 | Comprimida por Bayesian shrinkage + dependency_penalty |
+| Confidence > 0.30 | <1% | El filtro `min_conf=0.08` no filtra NADA |
+| Win rate medio hojas | 0.50-0.52 | ≈ azar |
+| Expected move medio | +0.04% a +0.12% | Cercano a 0 |
+| **N1 == N2 == N3 == N4 (estructural)** | **SÍ en 16/16 runs** | build() inserta MISMO patrón en los 4 tries |
+| Pattern count N1/N2/N3/N4 | 280 / 280 / 280 / 280 | Idénticos |
+| Signatures (patrón+count+WR+move) | idénticas | Decorativos |
+| Regime dominante | `ranging` 60-90% | `volatile` <10% excepto 1h |
+
+**Veredicto CAPA 1**: 3 problemas estructurales
+1. **Sparse coverage** — 1-2 obs/hoja; el trie cataloga, no aprende
+2. **Confidence comprimida** en 0.08-0.20; el filtro `min_conf=0.08` no filtra
+3. **4 tries idénticos** — pagar 4x memoria, 0x información diferenciada
+
+---
+
+### CAPA 2 — FuzzyMatcher / Búsqueda de patrones OOS
+
+**Trazabilidad**: leído `core/matcher.py` (453 líneas), `engine/weights.py` (`AdaptiveWeights.compute_weighted_confidence`), `engine/ppmt.py` (`match_raw` y `match`).
+
+**Métricas agregadas sobre 64 runs / 19,041 signal attempts OOS / 593 trades cerrados**:
+
+| Estrategia | N intentos | % | N trades | Sum PnL | Mean PnL | Win Rate |
+|---|---|---|---|---|---|---|
+| no-match | 9,719 | 51.0% | 0 | — | — | — |
+| exact | 6,800 | 35.7% | 428 | **−172.97%** | −0.40% | 13.1% |
+| prefix | 2,522 | 13.2% | 165 | +9.76% | +0.06% | 17.0% |
+| 1-edit | **0** | 0.0% | 0 | — | — | — |
+| 2-edit | **0** | 0.0% | 0 | — | — | — |
+
+**Calidad del match por estrategia (N3)**:
+
+| Estrategia | mean_confidence | mean_historical_count | mean_win_rate | mean_expected_move |
+|---|---|---|---|---|
+| exact | 0.0995 | 1.57 | 0.3541 | −0.4229% |
+| prefix | 0.1053 | 1.82 | 0.3336 | −0.6734% |
+| no-match | 0.0000 | 0.00 | 0.0000 | 0.0000% |
+
+**Correlación confidence → PnL** (50/64 runs calculables):
+- Weighted Pearson: **+0.0092** (≈ cero)
+- Distribución: 19 positivas (>0.1), 18 negativas (<−0.1), 13 nulas
+- **Veredicto**: la confidence del motor NO predice outcome
+
+**No-match rescue rate (¿N1/N2/N4 rescata a N3?)**:
+- Total no-match attempts: 9,719
+- Trades generados vía fallback: **0**
+- Rescue rate: **0.00%**
+- **Causa**: los 4 tries son estructuralmente idénticos → cuando N3 falla, todos fallan
+
+**Trade rate por token+TF** (todas las TFs pierden excepto 2):
+
+| Token | TF | Attempts | Trades | Rate% | Sum PnL |
+|---|---|---|---|---|---|
+| BTCUSDT | 5m | 1,692 | 11 | 0.65 | −2.13 |
+| BTCUSDT | 15m | 1,393 | 38 | 2.73 | −14.70 |
+| BTCUSDT | 30m | 1,147 | 24 | 2.09 | −7.40 |
+| BTCUSDT | 1h | 1,240 | 47 | 3.79 | −7.33 |
+| ETHUSDT | 5m | 1,324 | 17 | 1.28 | −2.57 |
+| ETHUSDT | 15m | 1,396 | 31 | 2.22 | −18.33 |
+| ETHUSDT | 30m | 1,812 | 34 | 1.88 | −11.65 |
+| ETHUSDT | 1h | 1,378 | 42 | 3.05 | −26.21 |
+| SOLUSDT | 5m | 1,437 | 25 | 1.74 | +6.83 |
+| SOLUSDT | 15m | 911 | 56 | 6.15 | −9.40 |
+| SOLUSDT | 30m | 899 | 63 | 7.01 | −1.93 |
+| SOLUSDT | 1h | 1,072 | 38 | 3.54 | −24.21 |
+| DOGEUSDT | 5m | 1,050 | 24 | 2.29 | −11.65 |
+| DOGEUSDT | 15m | 520 | 46 | 8.85 | −21.05 |
+| DOGEUSDT | 30m | 660 | 43 | 6.52 | **+30.69** |
+| DOGEUSDT | 1h | 1,110 | 54 | 4.86 | −42.17 |
+
+**Veredicto CAPA 2 — 6 hallazgos**:
+
+1. **El "exact match" pierde sistemáticamente**: 428 trades, −173% acumulado, WR 13%. La hipótesis central del motor —"encontrar un patrón histórico idéntico predice el futuro"— es **FALSA** en este dataset.
+
+2. **Confidence → PnL correlation = +0.0092 (≈ cero)**: la fórmula bayesiana de confidence (BlockLifecycleMetadata) no distingue señales buenas de malas. Matemáticamente elegante, empíricamente inútil.
+
+3. **Fuzzy matching 1-edit/2-edit JAMÁS se ejecuta**: el threshold compuesto `similarity × confidence ≥ 0.85` es inalcanzable cuando confidence es 0.08-0.20 (lo que produce CAPA 1). El "v0.6.5 best_match evalúa todas las estrategias" es ilusorio.
+
+4. **Los 4 tries son decorativos** (heredado de CAPA 1): distribución idéntica de estrategias en N1, N2, N3, N4. Rescue rate = 0%.
+
+5. **Prefix match es lo único marginalmente rentable**: +9.76% acumulado, WR 17%. Hipótesis: las raíces más cortas del patrón agrupan más observaciones → más estadística → algo de signal.
+
+6. **Trade rate 3.11% (593/19,041)**: de los matches, solo 6.4% pasan todos los filtros. Pero el resultado neto es −163% acumulado → los filtros no están aportando selectividad positiva.
+
+### Causa raíz cruzada CAPA 1 → CAPA 2
+
+Los 3 problemas estructurales de CAPA 1 explican **todos** los problemas de CAPA 2:
+
+| Problema CAPA 1 | Síntoma CAPA 2 |
+|---|---|
+| Sparse coverage (1-2 obs/hoja) | Exact matches casuales → overfitting → −173% en exact |
+| Confidence comprimida 0.08-0.20 | Fuzzy 1-edit/2-edit inalcanzable (sim×conf < threshold) |
+| 4 tries idénticos | 0% rescue rate — fallback N1/N2/N4 no aporta nada |
+
+### Fixes propuestos (priorizados, no aplicados todavía)
+
+| # | Fix | Capa | Impacto esperado |
+|---|---|---|---|
+| FIX-1 | Diferenciar los 4 tries en `build()` — N2 asset-class, N3 per-asset, N4 asset+regime | 1 | AdaptiveWeights funciona como dice la teoría |
+| FIX-2 | Separar thresholds: `similarity ≥ 0.7` AND `confidence ≥ 0.15` en lugar de `sim×conf ≥ 0.85` | 2 | Activa 1-edit/2-edit (hoy dead code) |
+| FIX-3 | Mínimo `historical_count ≥ 5` para uso en señales | 1+2 | Elimina overfitting del exact match |
+| FIX-4 | Bajar k=5 a k=4 o k=3 (más agrupamiento, más obs/hoja) | 1 | Más estadística por nodo |
+| FIX-5 | Recalibrar confidence con logistic regression sobre (count, wr, regime) | 1 | Hacer que `min_conf` filtre de verdad |
+
+### Próximo paso
+
+Auditar **CAPA 3 (Signal Generation)** con trazabilidad de `signal.py` y `prediction.py`:
+- ¿Cómo se transforma match_result → entry/SL/TP?
+- ¿El SL/TP rule (1.5x expected_move, 2.5x TP) es consistente con la metadata?
+- ¿PredictionEngine.predict() agrega signal o solo amplifica ruido?
+
+> Razón para auditar CAPA 3 antes de fixear 1+2: identificar bugs **independientes** en signal generation (SL/TP, entry/exit) que necesitan fixearse independientemente de la calidad del match upstream.
