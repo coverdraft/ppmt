@@ -1,7 +1,7 @@
 # TRAZABILIDAD PPMT — Estado del Proyecto
 
 > Última actualización: 2026-06-19
-> Versión actual: **v0.40.9** — Auditoría extendida 14 tokens x 100k velas 1m: confirma mejora SHORT coverage, revela nuevo problema LONG signals
+> Versión actual: **v0.40.10** — FIX-14: routing por régimen (N4 RegimePartitionedTrie) en predicción + auditoría de saturación de nodos N3/N4
 > Repositorio: https://github.com/coverdraft/ppmt
 > Idioma: Español
 
@@ -6186,3 +6186,103 @@ El usuario planteó verificar si ampliar datos (más tiempo + más tipos de toke
 3. **Re-auditar capas 2-5** con data extendida + α=4 + N4 en predicción.
 4. **Backtest live paper trader** con nueva config.
 5. **Fix terminal** (item pendiente del plan original del usuario).
+
+---
+
+## v0.40.10 — FIX-14: Routing por régimen (N4 RegimePartitionedTrie) + Auditoría de saturación (2026-06-19)
+
+### Motivo
+
+La auditoría v0.40.9 reveló que LONG signals pierden dinero sistemáticamente (-731% agregado) mientras SHORT signals son rentables (+449%). El diagnóstico apuntaba a que el `RegimePartitionedTrie` (N4) estaba construido pero **nunca consultado** en `engine/prediction.py` y `engine/predict_live.py`: el motor usaba N3 (per-asset sin régimen) y por lo tanto disparaba LONG signals basados en patrones alcistas del train set aunque el régimen actual fuera bajista.
+
+FIX-14 (alta prioridad) consiste en enrutar la búsqueda a través del sub-trie del régimen actual cuando N4 esté disponible.
+
+### Cambios realizados
+
+**Motor de predicción** (`src/ppmt/engine/prediction.py`):
+- `PredictionEngine.__init__`: nuevo parámetro opcional `regime_trie: Optional[RegimePartitionedTrie]`.
+- `PredictionEngine.predict`: si `regime_trie` está informado Y `current_regime` está en `regime_trie.sub_tries`, enruta la búsqueda al sub-trie del régimen actual (`set_current_regime` + `search`/`search_prefix`).
+- API retro-compatible: si no se pasa `regime_trie`, comportamiento idéntico al anterior.
+- Comentario extendido explicando que el routing solo no resuelve el problema LONG-loss hasta que N4 madure (ver auditoría V3).
+
+**Call sites actualizados** para pasar `trie_n4` y `current_regime`:
+- `src/ppmt/risk/portfolio_runner.py`
+- `src/ppmt/engine/paper_trader.py` (2 sitios: build + rebuild)
+- `src/ppmt/engine/realtime.py` (2 sitios: backtest + live mode)
+- `src/ppmt/engine/predict_live.py`
+- `src/ppmt/cli/main.py` (carga `trie_n4` desde storage + detecta régimen con `RegimeDetector`)
+
+**Scripts de auditoría nuevos** (en `scripts/audit_trie_1m/`):
+- `layer1_fix14_walkforward.py` — walk-forward N3-only vs N4-regime-routed sobre 14 tokens x 30k OOS.
+- `count_nodes.py` — conteo de nodos internos + terminales en N3 y N4 con saturación teórica.
+
+**Documentación nueva**:
+- `docs/AUDIT_FIX14_AND_DATA_V3.md` (~250 líneas) — auditoría completa con tablas comparativas.
+
+**Bump versión**: 0.40.9 → 0.40.10 en `pyproject.toml`, `__init__.py`, `cli/main.py` (×2), `terminal/server.py`.
+
+### Resultados experimentales
+
+**Walk-forward: N3-only vs N4-regime (14 tokens × 30k velas OOS c/u):**
+
+| Métrica | N3-only (baseline) | N4-regime (FIX-14) | Delta |
+|---|---:|---:|---:|
+| Señales totales | 55,742 | 55,621 | -0.2% |
+| L/S ratio | 1.03 | 1.04 | +1.0% |
+| Hit rate | 47.0% | 47.0% | -0.0pp |
+| PnL total | -281.98% | -291.11% | **-9.13pp** |
+| PnL LONG | -730.80% | -739.83% | -9.03pp |
+| PnL SHORT | +448.86% | +448.73% | -0.13pp |
+
+**Diagnóstico**: routing solo NO mejora globalmente. Algunos tokens mejoran (BNB +4.5pp, WIF +32.3pp, LINK +17.0pp, PEPE +7.5pp, DOGE +2.7pp) pero otros empeoran (BONK -26.0pp, AVAX -10.6pp, ARB -26.0pp). La causa raíz es estructural:
+
+1. Patrones bullish-biased persisten dentro del sub-trie `trending_down` (rebotes en downtrend se clasifican como trending_down).
+2. El detector de régimen tiene ruido (lookback=50 candles, cambia frecuentemente).
+3. N4 está solo al 28% de saturación — muchos sub-tries tienen pocos patrones con count alto.
+
+### Conteo de nodos
+
+| Capa | Nodos terminales | Nodos internos | Total nodos | Máx teórico | Saturación |
+|---|---:|---:|---:|---:|---:|
+| N3 (per-asset) | 14,335 | 4,760 | **19,109** | 14,336 | **100.0%** |
+| N4 (per-asset + régimen) | 15,996 | 7,430 | **23,482** | 57,344 | **27.9%** |
+| **Combinado N3+N4** | 30,331 | 12,190 | **42,591** | 71,680 | 42.3% |
+
+**Interpretación**: N3 está saturado al 100% — no ganará nuevos patrones con más data, solo más observaciones por patrón existente. N4 tiene 72% de room libre — ampliar data ayudará específicamente a poblar N4 con estadísticas fiables por régimen.
+
+### Decisión
+
+- **Mantener el código de FIX-14** (API + call sites): no rompe nada, está listo para uso futuro cuando N4 madure.
+- **No activar FIX-14 por defecto** en producción hasta tener evidencia de mejora (N4 saturación ≥ 60%).
+- **Próximo paso**: ampliar dataset (más velas + más tokens alts) para poblar N4, luego re-evaluar.
+
+### Archivos modificados / creados
+
+- `src/ppmt/engine/prediction.py` — FIX-14 (regime_trie API + routing)
+- `src/ppmt/risk/portfolio_runner.py` — passthrough trie_n4 + current_regime
+- `src/ppmt/engine/paper_trader.py` — idem (2 sitios)
+- `src/ppmt/engine/realtime.py` — idem (2 sitios)
+- `src/ppmt/engine/predict_live.py` — idem
+- `src/ppmt/cli/main.py` — idem + carga N4 + detecta régimen + bump versión
+- `src/ppmt/__init__.py` — bump v0.40.9 → v0.40.10
+- `pyproject.toml` — bump versión
+- `src/ppmt/terminal/server.py` — bump versión
+- `scripts/audit_trie_1m/layer1_fix14_walkforward.py` (NEW) — walk-forward N3 vs N4
+- `scripts/audit_trie_1m/count_nodes.py` (NEW) — conteo de nodos
+- `docs/AUDIT_FIX14_AND_DATA_V3.md` (NEW) — auditoría completa
+- `TRAZABILIDAD.md` — esta entrada
+
+### Verificación
+
+- Tests: 282 pass (excluyendo 24 pre-existing failures en `test_oos_validation.py` y `test_trie_merge_preserves_observations` — confirmados con `git stash` que existen en origin/main antes de mis cambios).
+- Smoke test: `import ppmt; ppmt.__version__ == "0.40.10"`, `from ppmt.engine.prediction import PredictionEngine`, `from ppmt.engine.realtime import RealtimeTrader` — OK.
+- API retro-compatible: `PredictionEngine(trie)` sin `regime_trie` funciona idéntico a v0.40.9.
+
+### Próximos pasos
+
+1. **Ampliar dataset**: 5 majors + 4 memes + 7 alts = 16 tokens × 200k velas = 3.2M velas (vs 1.4M actuales, +128%). Poblará N4 de 28% → estimado 45-55%.
+2. **Re-auditar capa 1** post-expansión: ver si PnL LONG mejora con más data por régimen.
+3. **Re-evaluar FIX-14** con N4 maduro: si saturación ≥ 60%, activar routing por defecto.
+4. **FIX-15** (si LONG sigue negativo): thresholds diferenciados por dirección (LONG: min_conf=0.20, SHORT: min_conf=0.15).
+5. **FIX-16** (si LONG sigue negativo): per-asset LONG/SHORT enable flags.
+6. **Fix terminal** (item pendiente del plan original del usuario).

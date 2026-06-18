@@ -47,7 +47,7 @@ def load_config() -> dict:
 
 
 @click.group()
-@click.version_option(version="0.40.8")
+@click.version_option(version="0.40.10")
 def cli():
     """PPMT Terminal - Autonomous Pattern-Based Trading Terminal"""
     pass
@@ -281,6 +281,9 @@ def predict(symbol: str, timeframe: str, depth: int, price: float):
         console.print(f"[red]No Trie built for {symbol}. Run 'ppmt build' first.[/red]")
         return
 
+    # FIX-14 (v0.40.10): also load N4 for regime-aware prediction
+    trie_n4 = storage.load_trie(symbol, "n4")
+
     # Encode recent data to SAX symbols
     sax_config = config.get("sax", {})
     from ppmt.core.sax import SAXEncoder
@@ -307,13 +310,25 @@ def predict(symbol: str, timeframe: str, depth: int, price: float):
     # Timeframe to hours
     tf_hours = {"1m": 1/60, "5m": 5/60, "15m": 15/60, "1h": 1, "4h": 4, "1d": 24}.get(timeframe, 1)
 
+    # Detect current regime for FIX-14 N4 routing
+    from ppmt.core.regime import RegimeDetector
+    regime_detector = RegimeDetector(lookback=50)
+    close_prices = df["close"].values.astype(float)
+    regime_info = regime_detector.detect(close_prices)
+    current_regime = regime_info.name if hasattr(regime_info, 'name') else str(regime_info)
+
     # Generate prediction
-    pred_engine = PredictionEngine(trie, prediction_depth=depth)
+    # FIX-14 (v0.40.10): pass regime_trie (N4) and current_regime
+    pred_engine = PredictionEngine(
+        trie, prediction_depth=depth,
+        regime_trie=trie_n4,
+    )
     prediction = pred_engine.predict(
         current_symbols=current_symbols,
         entry_price=current_price,
         timeframe_hours=tf_hours,
         symbol=symbol,
+        current_regime=current_regime,
     )
 
     # Display
@@ -1010,7 +1025,7 @@ def terminal(host: str, port: int, open_browser: bool):
       ppmt terminal -p 9000             # Custom port
       ppmt terminal --open-browser      # Auto-open in browser
     """
-    console.print("[bold cyan]PPMT Terminal Dashboard v0.40.8[/bold cyan]")
+    console.print("[bold cyan]PPMT Terminal Dashboard v0.40.10[/bold cyan]")
 
     if open_browser:
         import webbrowser

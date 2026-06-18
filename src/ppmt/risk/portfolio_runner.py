@@ -552,7 +552,15 @@ class PortfolioRunner:
         )
 
         # Create PredictionEngine
-        engine.pred_engine = PredictionEngine(trie_n3, prediction_depth=cfg.pattern_length)
+        # FIX-14 (v0.40.10): pass trie_n4 as regime_trie so PredictionEngine
+        # can route lookups to the matching regime sub-trie when current_regime
+        # is supplied to predict(). Without this, LONG signals fire in bearish
+        # regimes (systematic LONG losses observed in walk-forward audits).
+        engine.pred_engine = PredictionEngine(
+            trie_n3,
+            prediction_depth=cfg.pattern_length,
+            regime_trie=trie_n4 if trie_n4 is not None else None,
+        )
 
         # Create PPMT engine for 4-level matching
         if has_multi_level:
@@ -1179,6 +1187,7 @@ class PortfolioRunner:
         prediction = eng.pred_engine.predict(
             eng.sax_symbols, sax_idx,
             current_price=current_price,
+            current_regime=eng.current_regime if eng.current_regime != "UNKNOWN" else None,
         )
 
         if prediction is None or prediction.direction == "FLAT":

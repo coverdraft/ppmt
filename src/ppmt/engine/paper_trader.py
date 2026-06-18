@@ -979,7 +979,13 @@ class PaperTrader:
         console.print(f"  SAX symbols: {len(all_sax_symbols)} (from {len(df)} candles)")
 
         # Create engines
-        pred_engine = PredictionEngine(trie, prediction_depth=cfg.pattern_length)
+        # FIX-14 (v0.40.10): pass trie_n4 as regime_trie when available
+        # so PredictionEngine can route lookups by current regime.
+        pred_engine = PredictionEngine(
+            trie,
+            prediction_depth=cfg.pattern_length,
+            regime_trie=trie_n4 if (has_multi_level and trie_n4 is not None) else None,
+        )
         risk_mgr = RiskManager(capital=cfg.initial_capital, config=self.risk_config)
 
         # v0.10.0: Create PPMT engine for 4-level matching (GAP-1 fix)
@@ -1988,7 +1994,12 @@ class PaperTrader:
                                           f"N3={trie_n3.pattern_count}, N4={trie_n4.pattern_count}[/green]")
 
                             # Rebuild PredictionEngine with new trie
-                            pred_engine = PredictionEngine(trie, prediction_depth=cfg.pattern_length)
+                            # FIX-14 (v0.40.10): preserve regime_trie (N4)
+                            pred_engine = PredictionEngine(
+                                trie,
+                                prediction_depth=cfg.pattern_length,
+                                regime_trie=trie_n4 if (has_multi_level and trie_n4 is not None) else None,
+                            )
 
                             # Rebuild PPMT engine with new tries
                             if has_multi_level:

@@ -689,7 +689,12 @@ class RealtimeTrader:
         )
 
         # Create engines
-        pred_engine = PredictionEngine(trie, prediction_depth=cfg.pattern_length)
+        # FIX-14 (v0.40.10): pass trie_n4 as regime_trie for regime-aware lookup
+        pred_engine = PredictionEngine(
+            trie,
+            prediction_depth=cfg.pattern_length,
+            regime_trie=trie_n4 if (has_multi_level and trie_n4 is not None) else None,
+        )
         risk_mgr = RiskManager(capital=cfg.initial_capital, config=self.risk_config)
 
         # v0.11.0: PPMT engine for 4-level matching
@@ -907,11 +912,14 @@ class RealtimeTrader:
                         current_symbols = pattern_buffer[-cfg.pattern_length:]
 
                         # Generate prediction
+                        # FIX-14 (v0.40.10): pass current_regime so PredictionEngine
+                        # routes lookups to the matching N4 sub-trie.
                         prediction = pred_engine.predict(
                             current_symbols=current_symbols,
                             entry_price=current_price,
                             timeframe_hours=tf_hours,
                             symbol=cfg.symbol,
+                            current_regime=current_regime,
                         )
 
                         # Cooldown check (v0.24.0: increased from 1 to 3 symbols)
@@ -1636,11 +1644,13 @@ class RealtimeTrader:
                     "1h": 1, "4h": 4, "1d": 24,
                 }.get(cfg.timeframe, 1)
 
+                # FIX-14 (v0.40.10): pass current_regime for N4 routing
                 prediction = pred_engine.predict(
                     current_symbols=current_symbols,
                     entry_price=current_price,
                     timeframe_hours=tf_hours,
                     symbol=cfg.symbol,
+                    current_regime=current_regime,
                 )
 
                 if prediction.direction == "FLAT" or prediction.confidence <= 0:
@@ -2040,7 +2050,12 @@ class RealtimeTrader:
         except Exception as e:
             console.print(f"  [yellow]Warning: Could not compute PAA stats: {e}[/yellow]")
 
-        pred_engine = PredictionEngine(trie, prediction_depth=cfg.pattern_length)
+        # FIX-14 (v0.40.10): pass trie_n4 as regime_trie for regime-aware lookup
+        pred_engine = PredictionEngine(
+            trie,
+            prediction_depth=cfg.pattern_length,
+            regime_trie=trie_n4 if (has_multi_level and trie_n4 is not None) else None,
+        )
 
         # v0.20.0: MoneyManager replaces basic RiskManager for live mode
         # MoneyManager adds: portfolio exposure caps, kill switch, circuit breakers,

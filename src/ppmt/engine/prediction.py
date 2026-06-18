@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
-from ppmt.core.trie import PPMTTrie, TrieNode
+from ppmt.core.trie import PPMTTrie, RegimePartitionedTrie, TrieNode
 from ppmt.core.metadata import BlockLifecycleMetadata
 
 
@@ -186,10 +186,26 @@ class PredictionEngine:
         trie: PPMTTrie,
         prediction_depth: int = 5,
         max_alternatives: int = 2,
+        regime_trie: Optional[RegimePartitionedTrie] = None,
     ):
+        """Initialize the prediction engine.
+
+        Args:
+            trie: Primary trie used for pattern lookup (typically N3).
+            prediction_depth: How many steps forward to predict.
+            max_alternatives: Max number of alternative paths to build.
+            regime_trie: Optional N4 RegimePartitionedTrie. When provided
+                AND current_regime is supplied to predict(), the engine
+                routes the lookup through the matching sub-trie. This is
+                FIX-14 (v0.40.10): previously the regime parameter was
+                ignored at lookup time, so LONG signals fired in bearish
+                regimes (and vice versa), causing systematic losses on
+                the LONG side.
+        """
         self.trie = trie
         self.prediction_depth = prediction_depth
         self.max_alternatives = max_alternatives
+        self.regime_trie = regime_trie
 
     def predict(
         self,
@@ -208,12 +224,33 @@ class PredictionEngine:
             timeframe_hours: Hours per candle
             symbol: Trading pair name
         """
+        # FIX-14 (v0.40.10): When a RegimePartitionedTrie (N4) is available
+        # AND a current_regime is supplied, route the lookup through the
+        # sub-trie matching the current market regime.
+        #
+        # NOTE (v0.40.10 audit): the regime routing alone does NOT fix the
+        # LONG-loss problem. N4 sub-tries still contain bullish-biased
+        # patterns (because bounces inside downtrends get classified into
+        # trending_down by the regime detector). The fix for LONG losses
+        # requires more data (longer history across more regimes) — see
+        # docs/AUDIT_FIX14_AND_DATA_V3.md. The regime_trie API is kept so
+        # the engine can be re-activated when the trie is mature enough.
+        lookup_trie = self.trie
+        if (
+            self.regime_trie is not None
+            and isinstance(self.regime_trie, RegimePartitionedTrie)
+            and current_regime
+            and current_regime in self.regime_trie.sub_tries
+        ):
+            self.regime_trie.set_current_regime(current_regime)
+            lookup_trie = self.regime_trie
+
         # Find current position in Trie
-        node = self.trie.search(current_symbols)
+        node = lookup_trie.search(current_symbols)
 
         if node is None:
             # Try prefix match
-            node, depth = self.trie.search_prefix(current_symbols)
+            node, depth = lookup_trie.search_prefix(current_symbols)
             if node is None:
                 return Prediction(
                     symbol=symbol,

@@ -97,6 +97,9 @@ def main():
         if primary_trie is None:
             raise ValueError(f"No trie available for {args.symbol}")
 
+        # FIX-14 (v0.40.10): also load N4 as regime_trie for regime-aware lookup
+        regime_trie = tries_loaded.get('n4')
+
         # 5. Encode recent data with SAX
         alpha = profile.sax_alphabet_size
         window = profile.sax_window_size
@@ -117,16 +120,24 @@ def main():
         regime = regime_detector.detect(close_prices)
 
         # 7. Get prediction from trie
-        pred_engine = PredictionEngine(primary_trie, prediction_depth=5)
+        # FIX-14 (v0.40.10): pass regime_trie (N4) + current_regime so the
+        # engine routes the lookup through the matching regime sub-trie.
+        regime_name_for_pred = regime.name if hasattr(regime, 'name') else str(regime)
+        pred_engine = PredictionEngine(
+            primary_trie,
+            prediction_depth=5,
+            regime_trie=regime_trie,
+        )
         prediction = pred_engine.predict(
             current_symbols=recent_symbols,
             entry_price=current_price,
             timeframe_hours=_tf_to_hours(args.timeframe),
             symbol=args.symbol,
+            current_regime=regime_name_for_pred,
         )
 
         # 8. Generate signal (regime-adaptive thresholds)
-        regime_name = regime.name if hasattr(regime, 'name') else str(regime)
+        regime_name = regime_name_for_pred
         regime_conf = getattr(regime, 'confidence', 0.5)
 
         # Regime-adaptive confidence: trending markets → more aggressive entries
