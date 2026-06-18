@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -42,7 +43,21 @@ CONFIG_DIR = os.path.expanduser("~/.ppmt")
 # ------------------------------------------------------------------ #
 # FastAPI application
 # ------------------------------------------------------------------ #
-app = FastAPI(title="PPMT Terminal", version="0.39.5")
+# v0.39.6: Use the modern lifespan pattern (instead of deprecated
+# `@app.on_event("startup")`) to capture the running event loop.
+# Worker threads (engine callbacks like `_on_position_hook`) need a
+# reference to the main loop so they can schedule async broadcasts
+# via `asyncio.run_coroutine_threadsafe`.
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    try:
+        app.state.loop = asyncio.get_running_loop()
+        logger.debug("Captured running event loop on startup")
+    except Exception as _e:
+        logger.debug("Could not capture event loop on startup: %s", _e)
+    yield
+
+app = FastAPI(title="PPMT Terminal", version="0.39.6", lifespan=_lifespan)
 
 # Global terminal state (shared with engine)
 terminal_state: TerminalState = get_terminal_state()
@@ -977,6 +992,10 @@ async def multi_start(req: MultiStartRequest) -> dict:
         # update _multi_sessions[node_id]["open_position"] in real time so
         # /api/multi-status can return the entry price to the chart, which
         # renders a horizontal price line at the entry for the active token.
+        # v0.39.6: On close, we also broadcast an out-of-band WS event
+        # `{"type": "trade_event", "event": "trade_closed", "payload": {...}}`
+        # so the frontend can immediately refresh the "Recently Closed" list
+        # + Hero KPIs without waiting for the next 3s poll.
         def _on_position_hook(payload, _nid=node_id):
             try:
                 sess_ref = _multi_sessions.get(_nid)
@@ -997,6 +1016,49 @@ async def multi_start(req: MultiStartRequest) -> dict:
                     }
                 else:  # action == "close"
                     sess_ref["open_position"] = None
+                    # v0.39.6: Fire-and-forget broadcast so the dashboard
+                    # updates Recently Closed + Hero KPIs instantly. The
+                    # engine calls this hook from a worker thread (asyncio
+                    # loop is in the main thread), so we use
+                    # run_coroutine_threadsafe to schedule the broadcast.
+                    try:
+                        evt = {
+                            "type": "trade_event",
+                            "event": "trade_closed",
+                            "payload": {
+                                "node_id": _nid,
+                                "symbol": payload.get("symbol", ""),
+                                "timeframe": sess_ref.get("timeframe", ""),
+                                "direction": payload.get("direction", ""),
+                                "entry_price": payload.get("entry_price", 0.0),
+                                "exit_price": payload.get("exit_price", 0.0),
+                                "entry_time": payload.get("entry_time", ""),
+                                "exit_time": payload.get("exit_time", ""),
+                                "pnl_pct": payload.get("pnl_pct", 0.0),
+                                "exit_reason": payload.get("exit_reason", ""),
+                                "trade_id": payload.get("trade_id", 0),
+                                "ts": time.time(),
+                            },
+                        }
+                        _loop = getattr(app.state, "loop", None)
+                        if _loop is None:
+                            # Fallback: try to grab the running loop. This
+                            # works during normal uvicorn operation.
+                            _loop = asyncio.get_event_loop()
+                        if _loop and _loop.is_running():
+                            asyncio.run_coroutine_threadsafe(
+                                _broadcast_event(evt), _loop
+                            )
+                        else:
+                            # No loop available — best-effort log only.
+                            logger.debug(
+                                "[_on_position_hook] no running loop; "
+                                "trade_closed event dropped"
+                            )
+                    except Exception as _e:
+                        logger.debug(
+                            "[_on_position_hook] broadcast failed (non-critical): %s", _e
+                        )
             except Exception:
                 pass
         config.on_position = _on_position_hook
@@ -2985,6 +3047,40 @@ async def _broadcast_state() -> None:
             stale.append(ws)
     for ws in stale:
         _ws_clients.discard(ws)
+
+
+# v0.39.6: Out-of-band event broadcast. Distinct from `_broadcast_state`
+# (which pushes the periodic snapshot), this pushes a one-shot event
+# message `{"type": "trade_event", "event": "...", "payload": {...}}`
+# so the frontend can react immediately to discrete events (e.g., a
+# trade closing) instead of waiting for the next 3s poll. Used by
+# `_on_position_hook` when the engine fires `action == "close"`.
+async def _broadcast_event(event: dict) -> None:
+    """Broadcast a discrete event to all connected WS clients.
+
+    The message schema is intentionally distinct from the snapshot so
+    the frontend can dispatch on `msg.type === "trade_event"` vs the
+    default snapshot path. Non-critical: if a client is dead it's
+    pruned from `_ws_clients` (next snapshot loop will catch stragglers).
+    """
+    if not _ws_clients:
+        return
+    stale: list[WebSocket] = []
+    for ws in list(_ws_clients):
+        try:
+            await ws.send_json(event)
+        except Exception:
+            stale.append(ws)
+    for ws in stale:
+        _ws_clients.discard(ws)
+
+
+# v0.39.6: The running event loop is now captured at startup via the
+# `_lifespan` context manager above (modern FastAPI pattern). The
+# `@app.on_event("startup")` decorator was deprecated in FastAPI
+# 0.93+ in favor of lifespan handlers. Worker threads (engine
+# callbacks like `_on_position_hook`) read `app.state.loop` to
+# schedule async broadcasts via `asyncio.run_coroutine_threadsafe`.
 
 
 # ------------------------------------------------------------------ #

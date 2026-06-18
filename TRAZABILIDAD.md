@@ -5322,3 +5322,109 @@ ppmt terminal
   refresca la lista de cerradas solo en el siguiente poll. Sería
   inmediato si el server hace broadcast del evento y el frontend
   dispara `loadTradeHistory()` al recibirlo.
+
+---
+
+## v0.39.6 — 2026-06-18
+
+### Problema
+
+Tras v0.39.5, las cards de Operaciones y el chart ya funcionaban
+correctamente, pero la lista de "Recently Closed" solo se refrescaba
+en el poll de 3s de `pollMultiStatus`. Cuando un trade cerraba, el
+usuario tenía que esperar hasta 3s para verlo en la UI —
+especialmente molesto cuando estaba mirando el dashboard y quería
+"ver como se van ejecutando las operaciones" en tiempo real.
+
+El engine ya disparaba `cfg.on_position(action='close', ...)` pero
+el dashboard solo usaba eso para limpiar el `open_position` de la
+sesión. El evento del trade cerrado no llegaba al frontend.
+
+### Solución (v0.39.6)
+
+**Fix — WebSocket push de trades cerrados:**
+
+- **Server (`server.py`):**
+  - Nuevo helper async `_broadcast_event(event: dict)` que pushéa
+    un mensaje arbitrario a todos los WS clients conectados.
+    Distinto de `_broadcast_state` (que manda snapshots periódicas),
+    este manda eventos discretos.
+  - `_on_position_hook` ahora, cuando `action == "close"`, arma un
+    evento `{"type": "trade_event", "event": "trade_closed",
+    "payload": {symbol, direction, entry_price, exit_price, pnl_pct,
+    exit_reason, ...}}` y lo schedulea vía
+    `asyncio.run_coroutine_threadsafe(_broadcast_event(evt), loop)`.
+    Esto es necesario porque el hook corre en un worker thread del
+    engine, no en el loop async principal.
+  - Capturamos el running loop al startup usando el patrón modern
+    `lifespan` de FastAPI (en vez del deprecated
+    `@app.on_event("startup")`).
+
+- **Frontend (`index.html`):**
+  - `ws.onmessage` ahora dispatchea en `msg.type`:
+    - `'trade_event'` → `handleTradeEvent(msg)`
+    - cualquier otra cosa → `updateDashboard(msg)` (snapshot, como
+      antes)
+  - `handleTradeEvent`:
+    1. Loguea al activity feed: "Trade closed: LONG BTC/USDT
+       +1.23% (tp)".
+    2. Debounce 200ms (si múltiples trades cierran simultáneamente,
+       solo un refresh burst).
+    3. Trigerea `refreshOperationsTab()` → Hero KPIs + Recently
+       Closed se actualizan.
+    4. Trigerea `loadTradeHistory()` → tabla legacy de Trading tab
+       se actualiza.
+    5. Si el chart está mostrando el symbol del trade cerrado,
+       trigerea `loadTradeMarkers()` para que el marker de exit
+       aparezca sin hacer Reload manual.
+
+### Archivos modificados
+
+- `src/ppmt/terminal/server.py` — `_broadcast_event` helper +
+  `_on_position_hook` close branch broadcast + `_lifespan` context
+  manager + version bump.
+- `src/ppmt/terminal/static/index.html` — `ws.onmessage` dispatch
+  + `handleTradeEvent` function + version bumps (title, logo).
+- `pyproject.toml`, `src/ppmt/__init__.py`, `src/ppmt/cli/main.py`,
+  `HANDOFF.md` — bump 0.39.5 → 0.39.6.
+
+### Verificación
+
+- Script `verify_v0396_ws_push.py` — 16 checks OK:
+  - Server: `_broadcast_event` exists, `_on_position_hook` schedules
+    it on close, event schema correct, lifespan pattern used.
+  - Frontend: `ws.onmessage` dispatches on type, `handleTradeEvent`
+    defined + calls all 3 refresh functions, 200ms debounce.
+  - **Functional end-to-end test:** TestClient conecta WS client,
+    schedulea `_broadcast_event` vía `run_coroutine_threadsafe`
+    (mimicking el path worker-thread del engine), y verifica que
+    el WS client recibe el evento con payload correcto.
+- HTML structure balanced: 446 `<div>` / 446 `</div>`.
+- `node --check` sobre JS inline → syntax OK.
+- Test suite: 215 pass, 92 deselected. Sin DeprecationWarning de
+  `@app.on_event` (resuelto al migrar a lifespan).
+- Smoke test: GET / sirve 225073 bytes con "v0.39.6",
+  "trade_event", "handleTradeEvent".
+
+### Cómo verificar en LIVE
+
+```bash
+cd ~/ppmt
+git pull origin main
+pip install -e . --quiet
+ppmt terminal
+# 1. Abrir dashboard con varios tokens activos.
+# 2. Esperar a que un trade cierre (o forzarSL/TP manualmente).
+# 3. Recently Closed list + Hero KPIs se actualizan en <500ms
+#    (sin esperar al poll de 3s).
+# 4. Activity feed muestra "Trade closed: LONG BTC/USDT +1.23% (tp)".
+# 5. Si el chart está en el symbol del trade cerrado, el marker de
+#    exit aparece sin hacer Reload.
+```
+
+### Próximos pasos sugeridos
+
+- Confirmar con usuario que el real-time refresh funciona OK.
+- Backlog: similar WS push para `signal_generated` (ya hay polling
+  de signals pero podría ser instantáneo).
+- Backlog: tunear SL/TP ratio si en live mode hay pocos trades.

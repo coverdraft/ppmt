@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>PPMT Terminal v0.39.5</title>
+<title>PPMT Terminal v0.39.6</title>
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -521,7 +521,7 @@ tr:hover td{background:rgba(95,168,245,.07)}
 <!-- ========== HEADER ========== -->
 <header class="header">
   <div class="header-left">
-    <span class="logo">PPMT<span class="logo-ver">v0.39.5</span></span>
+    <span class="logo">PPMT<span class="logo-ver">v0.39.6</span></span>
     <span class="status-dot stopped" id="headerDot"></span>
     <span id="headerStatus" style="font-family:var(--mono);font-size:10px;color:var(--text2)">DETENIDO</span>
   </div>
@@ -1661,8 +1661,21 @@ function connectWS() {
 
   ws.onmessage = (event) => {
     try {
-      const state = JSON.parse(event.data);
-      updateDashboard(state);
+      const msg = JSON.parse(event.data);
+      // v0.39.6: The server can send two kinds of WS messages:
+      //   1. Periodic snapshot (default — has no `type` field, or `type`
+      //      is something other than "trade_event"). Routed to
+      //      `updateDashboard` like before.
+      //   2. Out-of-band event `{type: "trade_event", event: "...", payload: {...}}`
+      //      fired by the engine when a trade closes. We trigger an
+      //      immediate refresh of the Operations tab + trade history so
+      //      the user sees the new closed trade in <100ms instead of
+      //      waiting for the next 3s poll.
+      if (msg && msg.type === 'trade_event') {
+        handleTradeEvent(msg);
+      } else {
+        updateDashboard(msg);
+      }
     } catch (e) {
       console.error('WS parse error:', e);
     }
@@ -1684,6 +1697,63 @@ function updateWsStatus(status) {
   const el = document.getElementById('btmWs');
   el.textContent = status;
   el.className = 'value' + (status === 'CONECTADO' ? ' live' : status === 'ERROR' ? ' error' : '');
+}
+
+// v0.39.6: Handle out-of-band trade_event messages pushed by the server
+// when a position closes. We trigger an immediate refresh of (a) the
+// Operations tab (Hero KPIs + Recently Closed list) and (b) the legacy
+// trade history table on the Trading tab. Without this, the dashboard
+// only refreshes on the 3s poll interval, so a freshly closed trade
+// would take up to 3s to appear in the UI — annoying when the user is
+// actively watching the dashboard.
+//
+// We debounce with a 200ms timer so that if multiple trades close in
+// quick succession (e.g., SL hit on 3 tokens simultaneously), we only
+// fire one refresh burst rather than N.
+let _tradeEventRefreshTimer = null;
+function handleTradeEvent(msg) {
+  try {
+    const ev = msg.event || '';
+    const p = msg.payload || {};
+    // Log to the activity feed so the user sees a visible trace.
+    if (typeof logActivity === 'function') {
+      const dir = (p.direction || '').toUpperCase();
+      const sym = p.symbol || '?';
+      const pnlPct = Number(p.pnl_pct || 0).toFixed(2);
+      const reason = p.exit_reason || '';
+      const sign = Number(p.pnl_pct || 0) >= 0 ? '+' : '';
+      logActivity('info', `Trade closed: ${dir} ${sym} ${sign}${pnlPct}% (${reason})`);
+    }
+    // Debounce the refresh burst.
+    if (_tradeEventRefreshTimer) clearTimeout(_tradeEventRefreshTimer);
+    _tradeEventRefreshTimer = setTimeout(() => {
+      // Operations tab — refresh Hero + Recently Closed immediately.
+      if (typeof refreshOperationsTab === 'function') {
+        refreshOperationsTab();
+      }
+      // Trading tab — refresh the legacy trade history table if it
+      // exists on the page. Some tabs hide it; the function checks.
+      if (typeof loadTradeHistory === 'function') {
+        loadTradeHistory();
+      }
+      // Also refresh the chart markers — if the user is currently
+      // viewing the closed trade's symbol, the new exit marker
+      // should appear without a manual Reload click.
+      if (typeof loadChart === 'function' && typeof _chartState !== 'undefined') {
+        const chartSym = (document.getElementById('chartSymbol') || {}).value;
+        if (chartSym && chartSym === p.symbol) {
+          // Only re-fetch trades markers — full chart reload would
+          // reset the user's zoom. Just refresh the trade markers.
+          if (typeof loadTradeMarkers === 'function') {
+            loadTradeMarkers();
+          }
+        }
+      }
+      _tradeEventRefreshTimer = null;
+    }, 200);
+  } catch (e) {
+    console.warn('handleTradeEvent error:', e);
+  }
 }
 
 // ============================================================
