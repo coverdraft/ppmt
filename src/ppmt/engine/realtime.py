@@ -2826,54 +2826,63 @@ def _living_trie_update(
     current_regime: str,
 ) -> None:
     """
-    Update the Living Trie with recent pattern observations.
+    Update the Living Trie stats and periodically re-propagate metadata.
 
-    The Living Trie adapts to market changes by inserting new pattern
-    observations as they occur in real-time. This keeps the Trie
-    synchronized with current market dynamics without full rebuilds.
+    v0.40.5 FIX-5: This function NO LONGER inserts bogus zero-outcome
+    observations into the trie. The previous implementation called
+    `trie.insert_with_observations(symbols=..., move_pct=0.0, won=False,
+    drawdown=0, favorable=0, duration=0)` for every pattern produced,
+    which:
+      1. Added observations with bogus zero outcomes (move_pct=0, won=False).
+      2. These were never updated with real outcomes (no exit handler existed).
+      3. They diluted real observations: a node with 1 real obs + 5 bogus
+         had win_rate=1/6=16.7% (instead of 100%) and
+         expected_move_pct=real_move/6 (drastically reduced).
+      4. Paradoxically, count_bonus grew with more obs, so confidence
+         INCREASED while |EM| DECREASED — engine reported high confidence
+         in a near-zero move → many false signals.
+      5. The bogus obs persisted to storage via periodic save_trie (line 2347),
+         contaminating future sessions.
 
-    Only updates every N symbols to avoid excessive writes.
+    See scripts/layer4_audit_results.json CAPA 4 H1/H2/H3 for evidence.
+
+    The trie still learns from:
+      - build() at startup (uses real prices)
+      - _record_observation() in paper_trader.py when trades close (uses real
+        pnl, actual_move_pct, sl_price, tp_price, duration)
+
+    This function now only:
+      - Pushes current trie stats to the dashboard (so the "Living Trie Stats"
+        widget continues to show real data).
+      - Periodically re-propagates metadata (every 50 pattern cycles) so
+        intermediate node stats stay fresh even without new observations.
     """
     # Only update every pattern_length symbols (1 update per full pattern cycle)
     if stream_buf.symbols_produced % cfg.pattern_length != 0:
         return
 
-    observations = stream_buf.get_recent_observations(n=5)
-    if not observations:
-        return
+    # FIX-5: NO bogus insertion. The trie learns only from real trade outcomes
+    # via _record_observation (paper_trader.py / portfolio_runner.py) and from
+    # build() at startup. Inserting observations with move_pct=0 just to "have
+    # data" poisoned the trie — see CAPA 4 audit.
 
-    for obs in observations[-1:]:  # Only insert the most recent
-        symbols = obs["symbols"]
-        if len(symbols) == cfg.pattern_length:
-            try:
-                trie.insert_with_observations(
-                    symbols=symbols,
-                    direction=None,  # Unknown at insertion time
-                    move_pct=0.0,    # Will be updated on exit
-                    regime=current_regime,
-                )
-            except Exception:
-                pass  # Non-critical — Living Trie is best-effort
+    # Push current trie stats to the dashboard so the Patterns tab and Trading
+    # tab "Living Trie Stats" widget continue to show real data (v0.38.9).
+    if _terminal_state is not None:
+        try:
+            _terminal_state.update_sync(
+                living_trie_stats={
+                    "pattern_count": trie.pattern_count,
+                    "max_depth": trie.max_depth,
+                    "trading_observations": trie.trading_observations,
+                    "last_update": time.time(),
+                },
+            )
+        except Exception:
+            pass
 
-            # v0.38.9: Push living trie stats to the dashboard so the Patterns
-            # tab and Trading tab "Living Trie Stats" widget stop showing "--".
-            # Previously this was never populated, leaving both tabs empty.
-            # NOTE: _living_trie_update is a module-level function, so we use
-            # the global _terminal_state directly instead of self._update_terminal_state.
-            if _terminal_state is not None:
-                try:
-                    _terminal_state.update_sync(
-                        living_trie_stats={
-                            "pattern_count": trie.pattern_count,
-                            "max_depth": trie.max_depth,
-                            "trading_observations": trie.trading_observations,
-                            "last_update": time.time(),
-                        },
-                    )
-                except Exception:
-                    pass
-
-    # Periodically re-propagate metadata (every 50 updates)
+    # Periodically re-propagate metadata (every 50 updates) — keeps
+    # intermediate node stats fresh even without new observations.
     if stream_buf.symbols_produced % (cfg.pattern_length * 50) == 0:
         try:
             trie.propagate_metadata()
