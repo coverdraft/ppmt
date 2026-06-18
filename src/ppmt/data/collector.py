@@ -30,6 +30,11 @@ from urllib.error import URLError, HTTPError
 import pandas as pd
 
 from ppmt.data.storage import PPMTStorage
+from ppmt import __version__ as _PPMT_VERSION
+
+# v0.40.0: Single source of truth for User-Agent (was hardcoded "PPMT/0.6.6"
+# in 4 places — stale by 30+ minor versions).
+_USER_AGENT = f"PPMT/{_PPMT_VERSION}"
 
 logger = logging.getLogger(__name__)
 
@@ -255,7 +260,7 @@ class DataCollector:
 
             try:
                 req = Request(url)
-                req.add_header("User-Agent", "PPMT/0.6.6")
+                req.add_header("User-Agent", _USER_AGENT)
                 with urlopen(req, timeout=30) as response:
                     data = json.loads(response.read().decode())
             except (HTTPError, URLError) as e:
@@ -352,7 +357,7 @@ class DataCollector:
 
             try:
                 req = Request(url)
-                req.add_header("User-Agent", "PPMT/0.6.6")
+                req.add_header("User-Agent", _USER_AGENT)
                 with urlopen(req, timeout=30) as response:
                     data = json.loads(response.read().decode())
             except (HTTPError, URLError) as e:
@@ -445,7 +450,7 @@ class DataCollector:
 
             try:
                 req = Request(url)
-                req.add_header("User-Agent", "PPMT/0.6.6")
+                req.add_header("User-Agent", _USER_AGENT)
                 with urlopen(req, timeout=30) as response:
                     data = json.loads(response.read().decode())
             except (HTTPError, URLError) as e:
@@ -543,7 +548,7 @@ class DataCollector:
 
             try:
                 req = Request(url)
-                req.add_header("User-Agent", "PPMT/0.6.6")
+                req.add_header("User-Agent", _USER_AGENT)
                 with urlopen(req, timeout=30) as response:
                     data = json.loads(response.read().decode())
             except (HTTPError, URLError) as e:

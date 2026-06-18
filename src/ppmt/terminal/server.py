@@ -57,7 +57,7 @@ async def _lifespan(app: FastAPI):
         logger.debug("Could not capture event loop on startup: %s", _e)
     yield
 
-app = FastAPI(title="PPMT Terminal", version="0.39.7", lifespan=_lifespan)
+app = FastAPI(title="PPMT Terminal", version="0.40.0", lifespan=_lifespan)
 
 # Global terminal state (shared with engine)
 terminal_state: TerminalState = get_terminal_state()
@@ -1149,7 +1149,17 @@ async def multi_start(req: MultiStartRequest) -> dict:
                 storage.close()
 
                 _is_paper = getattr(_cfg, "dry_run", True)
-                if latest_val is None or latest_val.get("verdict") != "PASS":
+                # v0.40.0: Don't re-validate INSUFFICIENT_DATA tokens — it's
+                # deterministic for the same data/trie/filters, so re-running
+                # wastes 10-30s per token AND creates a duplicate DB row.
+                # Only re-validate when there's no row OR the verdict was FAIL
+                # (FAIL may turn into PASS if user added more OHLCV history).
+                _existing_verdict = latest_val.get("verdict") if latest_val else None
+                _needs_validation = (
+                    latest_val is None
+                    or _existing_verdict not in ("PASS", "INSUFFICIENT_DATA")
+                )
+                if _needs_validation:
                     sess["status"] = "VALIDATING"
                     val_result = await validate_token(ValidateRequest(
                         symbol=_sym, timeframe=_tf, exchange=_exch, capital=_cfg.initial_capital,
@@ -1172,6 +1182,13 @@ async def multi_start(req: MultiStartRequest) -> dict:
                             sess["status"] = "VALIDATION_FAILED"
                             sess["error"] = _reason
                             return
+                else:
+                    # Reuse existing verdict (PASS or INSUFFICIENT_DATA)
+                    sess["validation_verdict"] = _existing_verdict
+                    if _existing_verdict == "INSUFFICIENT_DATA" and not _is_paper:
+                        sess["status"] = "VALIDATION_FAILED"
+                        sess["error"] = "Validation: INSUFFICIENT_DATA (real-money gate)"
+                        return
 
                 # v0.36.2: Per-session state callback — bridges trader updates to
                 # this session's dict so /api/multi-status returns real values
@@ -1774,10 +1791,12 @@ async def validate_token(req: ValidateRequest) -> dict:
             f"PnL={result.total_pnl_pct:+.2f}%, DD={result.max_drawdown:.2%}"
         )
 
-        # Compute profit factor
+        # Compute profit factor (v0.40.0: shared helper, was `else 0` which
+        # failed profitable-only tokens — mathematically PF = ∞ when no losses)
         gross_profit = sum(t.pnl_pct for t in result.trades if t.pnl_pct > 0)
         gross_loss = abs(sum(t.pnl_pct for t in result.trades if t.pnl_pct < 0))
-        profit_factor = gross_profit / gross_loss if gross_loss > 0 else 0
+        from ppmt.data.storage import compute_profit_factor
+        profit_factor = compute_profit_factor(gross_profit, gross_loss)
 
         # Step 4: Run Monte Carlo
         mc_result = {}

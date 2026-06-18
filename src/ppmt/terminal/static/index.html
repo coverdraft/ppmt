@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>PPMT Terminal v0.39.7</title>
+<title>PPMT Terminal v0.40.0</title>
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -580,7 +580,7 @@ tr:hover td{background:rgba(95,168,245,.07)}
 <!-- ========== HEADER ========== -->
 <header class="header">
   <div class="header-left">
-    <span class="logo">PPMT<span class="logo-ver">v0.39.7</span></span>
+    <span class="logo">PPMT<span class="logo-ver">v0.40.0</span></span>
     <span class="status-dot stopped" id="headerDot"></span>
     <span id="headerStatus" style="font-family:var(--mono);font-size:10px;color:var(--text2)">DETENIDO</span>
   </div>
@@ -640,10 +640,8 @@ tr:hover td{background:rgba(95,168,245,.07)}
   <div class="tab-bar" role="tablist">
     <button class="tab-btn active" data-tab="operations" onclick="switchTab('operations')">Operaciones</button>
     <button class="tab-btn" data-tab="discovery" onclick="switchTab('discovery')">Discovery</button>
-    <button class="tab-btn" data-tab="validation" onclick="switchTab('validation')">Validation</button>
     <button class="tab-btn" data-tab="trading" onclick="switchTab('trading')">Trading</button>
     <button class="tab-btn" data-tab="portfolio" onclick="switchTab('portfolio')">Portfolio</button>
-    <button class="tab-btn" data-tab="patterns" onclick="switchTab('patterns')">Patterns</button>
     <button class="tab-btn" data-tab="history" onclick="switchTab('history')">History &amp; Signals</button>
   </div>
 
@@ -1187,38 +1185,9 @@ tr:hover td{background:rgba(95,168,245,.07)}
     </div><!-- /tab-grid-2 (portfolio) -->
   </div><!-- /tab-portfolio -->
 
-  <!-- ========== TAB: PATTERNS (Regime + Living Trie) ========== -->
-  <div class="tab-content" id="tab-patterns">
-    <div class="tab-single">
-      <div class="panel" id="panelRegime2" style="border-bottom:none;height:100%;overflow-y:auto">
-        <div class="panel-header" style="margin-bottom:4px">
-          <div class="panel-title">Regime &amp; Pattern</div>
-        </div>
-        <div class="panel-body">
-          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
-            <span style="font-family:var(--mono);font-size:11px;color:var(--text2)">Current Regime</span>
-            <span class="badge" id="regimeBadge2" style="font-size:12px;padding:4px 12px">--</span>
-          </div>
-          <div style="font-family:var(--mono);font-size:9px;color:var(--text3);margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px">Pattern Buffer (SAX) — last 30 symbols</div>
-          <div class="pattern-buffer" id="patternBuffer2" style="margin-bottom:8px">
-            <span class="text-muted" style="font-size:10px">No data yet — start a trading session to see live SAX symbols</span>
-          </div>
-          <div style="margin-top:8px">
-            <div style="font-family:var(--mono);font-size:9px;color:var(--text3);margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px">Living Trie Stats</div>
-            <div class="stats-grid">
-              <div class="stat-card"><div class="stat-label">Nodes</div><div class="stat-value" id="trieNodes2">--</div></div>
-              <div class="stat-card"><div class="stat-label">Depth</div><div class="stat-value" id="trieDepth2">--</div></div>
-              <div class="stat-card"><div class="stat-label">Patterns</div><div class="stat-value" id="triePatterns2">--</div></div>
-              <div class="stat-card"><div class="stat-label">Last Update</div><div class="stat-value" id="trieLastUpdate2" style="font-size:10px">--</div></div>
-            </div>
-          </div>
-          <div style="margin-top:8px;padding:6px;background:var(--bg);border:1px solid var(--border);border-radius:2px;font-family:var(--mono);font-size:9px;color:var(--text3)">
-            <strong style="color:var(--accent)">How it works:</strong> Each closed candle is encoded into a SAX symbol based on its OHLCV shape. The buffer shows the last 30 symbols. Symbols are matched against the Living Trie to detect recurring patterns and predict the next move.
-          </div>
-        </div>
-      </div>
-    </div>
-  </div><!-- /tab-patterns -->
+  <!-- v0.40.0: Removed tab-patterns (was a duplicate of Portfolio's Regime &
+       Pattern panel). The unique "How it works" explainer was a tooltip-style
+       info box; if needed, add it to the Portfolio tab as a collapsible section. -->
 
   <!-- ========== TAB: HISTORY & SIGNALS ========== -->
   <div class="tab-content" id="tab-history">
@@ -1312,14 +1281,14 @@ tr:hover td{background:rgba(95,168,245,.07)}
     <div class="status-item" style="margin-left:12px"><span id="statusMessage" style="color:var(--text3)">Listo.</span></div>
   </div>
   <div class="status-right">
-    <span>PPMT v0.38.9</span>
+    <span>PPMT v0.40.0</span>
     <div class="status-item"><span class="label">Uptime:</span><span class="value" id="btmUptime">00:00:00</span></div>
   </div>
 </footer>
 
 <script>
 // ============================================================
-// PPMT Terminal v0.38.6 — Trading Dashboard
+// PPMT Terminal v0.40.0 — Trading Dashboard
 // ============================================================
 
 const API = '';
@@ -4291,29 +4260,8 @@ setTimeout(() => {
   }
 }, 2000);
 
-// v0.35.0: pollActiveTokensLive — actualiza precios y P&L de los tokens activos
-// cada 5s llamando a /api/price?symbols=...
-let _activeTokensPollHandle = null;
-async function pollActiveTokensLive() {
-  if (_activeTradeTokens.length === 0) return;
-  const symbols = _activeTradeTokens.map(t => t.symbol).join(',');
-  try {
-    const res = await fetch(`${API}/api/market/symbols?exchange=binance`);
-    // Try a simple price fetch via the chart-load endpoint instead
-    for (const t of _activeTradeTokens) {
-      try {
-        const r = await fetch(`${API}/api/price?symbol=${encodeURIComponent(t.symbol)}&exchange=${t.exchange}`);
-        if (r.ok) {
-          const data = await r.json();
-          if (data && data.price) {
-            t.last_price = data.price;
-          }
-        }
-      } catch (e) { /* skip */ }
-    }
-    renderActiveTradeTokens();
-  } catch (e) { /* skip */ }
-}
+// v0.40.0: pollActiveTokensLive was REMOVED — dead code superseded by
+// pollMultiStatus() since v0.36.0. The function was never called.
 
 // ============================================================
 // v0.35.0: PIPELINE ACTIVITY LOG
@@ -4401,16 +4349,8 @@ pollSweepStatus = async function() {
   } catch (e) { /* skip */ }
 };
 
-// Log WS status changes
-let _lastWsStatus = '';
-function logWsStatus(status) {
-  if (status !== _lastWsStatus) {
-    _lastWsStatus = status;
-    const level = status === 'streaming' ? 'OK' : status === 'connected' ? 'INFO' :
-                  status === 'reconnecting' || status === 'error' ? 'WARN' : 'INFO';
-    logActivity(level, `WebSocket: ${status}`);
-  }
-}
+// v0.40.0: logWsStatus was REMOVED — dead code, never called. Only
+// updateWsStatus() is used.
 
 // Log autoSetup milestones
 const _origAutoSetup = autoSetup;

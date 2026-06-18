@@ -30,6 +30,34 @@ DB_DIR = os.path.expanduser("~/.ppmt")
 DB_PATH = os.path.join(DB_DIR, "ppmt.db")
 
 
+def compute_profit_factor(gross_profit: float, gross_loss: float, cap: float = 99.0) -> float:
+    """Compute profit factor with a safe cap.
+
+    v0.40.0: Shared formula used by both storage.get_trade_summary and
+    server.validate_token. Previously two formulas existed:
+      - server.py:1780 returned 0 when gross_loss == 0 (fails profitable tokens)
+      - storage.py:744 floored gross_loss to 0.01, inflating PF to gross_profit/0.01
+        (e.g. 100.0 when gross_profit=1.0)
+    Both were wrong. Mathematically PF = ∞ when there are no losing trades.
+    We cap at 99.0 so the value is JSON-safe and `pf_pass = PF > 0.8` succeeds
+    for profitable-only tokens (as it should).
+
+    Args:
+        gross_profit: Sum of positive PnL (already positive).
+        gross_loss:   Sum of |negative PnL| (already positive).
+        cap:          Maximum returned value (default 99.0).
+
+    Returns:
+        PF in [0, cap]. Returns 0.0 when both gross_profit and gross_loss are 0
+        (no trades at all). Returns cap when gross_profit > 0 and gross_loss == 0.
+    """
+    if gross_loss > 0:
+        return min(gross_profit / gross_loss, cap)
+    if gross_profit > 0:
+        return cap
+    return 0.0
+
+
 class PPMTStorage:
     """
     Local SQLite storage for PPMT data.
@@ -730,7 +758,7 @@ class PPMTStorage:
         total = row[0] or 0
         wins = row[1] or 0
         gross_profit = row[7] or 0
-        gross_loss = row[8] or 0.01
+        gross_loss = row[8] or 0  # v0.40.0: don't floor to 0.01 anymore
 
         return {
             "total_trades": total,
@@ -741,7 +769,7 @@ class PPMTStorage:
             "avg_pnl_pct": row[4] or 0,
             "best_trade_pct": row[5] or 0,
             "worst_trade_pct": row[6] or 0,
-            "profit_factor": gross_profit / gross_loss if gross_loss > 0 else 0,
+            "profit_factor": compute_profit_factor(gross_profit, gross_loss),
         }
 
     def clear_trades(
@@ -835,8 +863,23 @@ class PPMTStorage:
     # === Validation Results (v0.31.0) ===
 
     def save_validation(self, val_dict: dict) -> int:
-        """Save a validation result."""
+        """Save a validation result.
+
+        v0.40.0: UPSERT on (symbol, timeframe) — previously a plain INSERT
+        which produced duplicated rows when _run_one_token re-validated
+        INSUFFICIENT_DATA tokens. Now we delete older rows for the same
+        (symbol, timeframe) before inserting, keeping only the latest.
+        """
         cursor = self._ensure_conn().cursor()
+        symbol = val_dict.get("symbol", "")
+        timeframe = val_dict.get("timeframe", "1h")
+        # v0.40.0: Delete older rows for same (symbol, timeframe) BEFORE insert.
+        # Simpler than ON CONFLICT because the existing table has no UNIQUE
+        # constraint; this avoids a migration.
+        cursor.execute(
+            "DELETE FROM validations WHERE symbol = ? AND timeframe = ?",
+            (symbol, timeframe),
+        )
         cursor.execute(
             """INSERT INTO validations
                (symbol, timeframe, verdict, win_rate, profit_factor,
@@ -844,8 +887,8 @@ class PPMTStorage:
                 mc_probability_profit, mc_verdict, details)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                val_dict.get("symbol", ""),
-                val_dict.get("timeframe", "1h"),
+                symbol,
+                timeframe,
                 val_dict.get("verdict", "UNKNOWN"),
                 val_dict.get("win_rate", 0),
                 val_dict.get("profit_factor", 0),
