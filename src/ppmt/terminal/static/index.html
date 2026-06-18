@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>PPMT Terminal v0.39.6</title>
+<title>PPMT Terminal v0.39.7</title>
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -399,12 +399,13 @@ tr:hover td{background:rgba(95,168,245,.07)}
   background:var(--bg3);padding:2px 6px;border-radius:4px;
 }
 .ops-card-dir{
-  font-family:var(--sans);font-size:11px;font-weight:700;
-  padding:3px 9px;border-radius:5px;letter-spacing:0.5px;text-transform:uppercase;
+  font-family:var(--sans);font-size:13px;font-weight:800;
+  padding:5px 12px;border-radius:6px;letter-spacing:0.8px;text-transform:uppercase;
+  border:1px solid transparent;
 }
-.ops-card-dir.long{color:var(--green);background:rgba(52,211,153,0.12)}
-.ops-card-dir.short{color:var(--red);background:rgba(248,113,113,0.12)}
-.ops-card-dir.flat{color:var(--text3);background:var(--bg3)}
+.ops-card-dir.long{color:var(--green);background:rgba(52,211,153,0.15);border-color:rgba(52,211,153,0.35)}
+.ops-card-dir.short{color:var(--red);background:rgba(248,113,113,0.15);border-color:rgba(248,113,113,0.35)}
+.ops-card-dir.flat{color:var(--text3);background:var(--bg3);border-color:var(--border2)}
 
 /* P&L display — large, color-coded */
 .ops-card-pnl{
@@ -457,7 +458,9 @@ tr:hover td{background:rgba(95,168,245,.07)}
 }
 .ops-history-row{
   display:grid;
-  grid-template-columns:24px 100px 60px 1fr 1fr 1fr 1fr 1fr 100px;
+  /* v0.39.7: added Duration column (between % Acct and Reason).
+     Total = 10 columns: dir-badge | symbol | tf | entry | exit | pnl | pnl% | acct% | duration | reason */
+  grid-template-columns:64px 100px 56px 1fr 1fr 1fr 1fr 1fr 80px 90px;
   gap:12px;align-items:center;padding:12px 18px;
   border-bottom:1px solid var(--border);cursor:pointer;
   transition:background .12s;
@@ -465,8 +468,10 @@ tr:hover td{background:rgba(95,168,245,.07)}
 .ops-history-row:last-child{border-bottom:none}
 .ops-history-row:hover{background:var(--bg3)}
 .ops-history-dir{
-  font-family:var(--sans);font-size:10px;font-weight:700;text-align:center;
-  padding:3px 0;border-radius:4px;text-transform:uppercase;
+  /* v0.39.7: full LONG/SHORT word (was just L/S letter). Bigger
+     font + bold weight so direction is scannable at a glance. */
+  font-family:var(--sans);font-size:11px;font-weight:800;text-align:center;
+  padding:4px 6px;border-radius:5px;text-transform:uppercase;letter-spacing:0.5px;
 }
 .ops-history-dir.long{color:var(--green);background:rgba(52,211,153,0.12)}
 .ops-history-dir.short{color:var(--red);background:rgba(248,113,113,0.12)}
@@ -500,11 +505,65 @@ tr:hover td{background:rgba(95,168,245,.07)}
   font-family:var(--sans);font-size:12px;color:var(--text3);max-width:340px;
 }
 
+/* v0.39.7: By-Direction summary panel — answers "qué tipo de operaciones
+   hizo largas cortas" at the aggregate level. Two columns (Long | Short),
+   each showing count, win rate, total P&L. */
+.ops-direction{
+  display:grid;grid-template-columns:1fr 1fr;gap:14px;
+  margin-bottom:6px;
+}
+.ops-direction-card{
+  background:var(--bg2);border:1px solid var(--border2);border-radius:12px;
+  padding:16px 18px;display:flex;flex-direction:column;gap:8px;
+}
+.ops-direction-card.long{border-left:3px solid var(--green)}
+.ops-direction-card.short{border-left:3px solid var(--red)}
+.ops-direction-head{
+  display:flex;justify-content:space-between;align-items:baseline;gap:8px;
+}
+.ops-direction-label{
+  font-family:var(--sans);font-size:13px;font-weight:700;
+  text-transform:uppercase;letter-spacing:0.6px;
+}
+.ops-direction-label.long{color:var(--green)}
+.ops-direction-label.short{color:var(--red)}
+.ops-direction-count{
+  font-family:var(--mono);font-size:11px;color:var(--text3);
+  font-variant-numeric:tabular-nums;
+}
+.ops-direction-stats{
+  display:grid;grid-template-columns:1fr 1fr;gap:10px;
+}
+.ops-direction-stat{
+  display:flex;flex-direction:column;gap:2px;
+}
+.ops-direction-stat-label{
+  font-family:var(--mono);font-size:9px;color:var(--text3);
+  text-transform:uppercase;letter-spacing:0.5px;font-weight:600;
+}
+.ops-direction-stat-val{
+  font-family:var(--sans);font-size:14px;font-weight:600;color:var(--text);
+  font-variant-numeric:tabular-nums;letter-spacing:-0.2px;
+}
+.ops-direction-stat-val.positive{color:var(--green)}
+.ops-direction-stat-val.negative{color:var(--red)}
+.ops-direction-empty{
+  font-family:var(--sans);font-size:12px;color:var(--text3);
+  padding:8px 0;text-align:center;
+}
+
+/* v0.39.7: Duration cell in Recently Closed — tabular nums for alignment */
+.ops-history-duration{
+  font-family:var(--mono);font-size:11px;color:var(--text3);
+  font-variant-numeric:tabular-nums;text-align:right;
+}
+
 /* === RESPONSIVE === */
 @media (max-width:900px){
   .ops-hero{grid-template-columns:1fr;gap:18px}
   .ops-hero-grid{grid-template-columns:repeat(2,1fr)}
   .ops-cards{grid-template-columns:1fr}
+  .ops-direction{grid-template-columns:1fr}
   .ops-history-row{
     grid-template-columns:24px 1fr 1fr 1fr;
     grid-template-areas:
@@ -521,7 +580,7 @@ tr:hover td{background:rgba(95,168,245,.07)}
 <!-- ========== HEADER ========== -->
 <header class="header">
   <div class="header-left">
-    <span class="logo">PPMT<span class="logo-ver">v0.39.6</span></span>
+    <span class="logo">PPMT<span class="logo-ver">v0.39.7</span></span>
     <span class="status-dot stopped" id="headerDot"></span>
     <span id="headerStatus" style="font-family:var(--mono);font-size:10px;color:var(--text2)">DETENIDO</span>
   </div>
@@ -641,6 +700,23 @@ tr:hover td{background:rgba(95,168,245,.07)}
             <div class="ops-empty-title">No active operations</div>
             <div class="ops-empty-sub">Run a sweep in Discovery, then select tokens and Start.</div>
           </div>
+        </div>
+      </div>
+
+      <!-- v0.39.7: By Direction summary — aggregate stats per LONG/SHORT.
+           Directly answers the user's "qué tipo de operaciones hizo largas
+           cortas" at the aggregate level: count, win rate, total P&L per
+           direction. Populated by renderOpsDirection(). -->
+      <div class="ops-section">
+        <div class="ops-section-header">
+          <h2 class="ops-section-title">By Direction</h2>
+          <div class="ops-section-actions">
+            <span class="ops-count-badge" id="opsDirBadge">0 closed</span>
+          </div>
+        </div>
+        <div class="ops-direction" id="opsDirectionPanel">
+          <!-- Populated by renderOpsDirection() — empty state shown when no closed trades -->
+          <div class="ops-direction-empty">No closed trades yet — stats will appear here once the bot closes its first trade.</div>
         </div>
       </div>
 
@@ -4403,10 +4479,113 @@ async function refreshOperationsTab() {
 
     renderOpsHero(sessions);
     renderOpsActiveCards(sessions);
+    renderOpsDirection();  // v0.39.7: aggregate LONG/SHORT stats
     renderOpsHistory();
   } catch (e) {
     console.error('refreshOperationsTab error:', e);
   }
+}
+
+/**
+ * v0.39.7: Render the "By Direction" summary panel.
+ * Splits closed live trades by direction (LONG vs SHORT) and shows:
+ *   - Count (n trades)
+ *   - Win rate (wins / total * 100)
+ *   - Total P&L ($)
+ *   - Avg P&L % per trade
+ * Empty state when no closed live trades exist.
+ *
+ * Data source: _opsTradesCache (already filtered by source=live in
+ * refreshOperationsTab — see fetch URL above).
+ */
+function renderOpsDirection() {
+  const container = document.getElementById('opsDirectionPanel');
+  if (!container) return;
+
+  const liveTrades = _opsTradesCache.filter(t => (t.source || 'live') === 'live');
+
+  const badge = document.getElementById('opsDirBadge');
+  if (badge) badge.textContent = `${liveTrades.length} closed`;
+
+  if (liveTrades.length === 0) {
+    container.innerHTML = `
+      <div class="ops-direction-empty">No closed trades yet — stats will appear here once the bot closes its first trade.</div>`;
+    return;
+  }
+
+  // Partition by direction.
+  const longs = liveTrades.filter(t => (t.direction || 'LONG').toUpperCase() === 'LONG');
+  const shorts = liveTrades.filter(t => (t.direction || 'LONG').toUpperCase() === 'SHORT');
+
+  // Per-direction stats helper.
+  const statsFor = (arr) => {
+    if (arr.length === 0) return null;
+    const wins = arr.filter(t => Number(t.pnl || 0) > 0).length;
+    const totalPnl = arr.reduce((s, t) => s + Number(t.pnl || 0), 0);
+    const avgPct = arr.reduce((s, t) => s + Number(t.pnl_pct || 0), 0) / arr.length;
+    return {
+      count: arr.length,
+      wins,
+      winRate: (wins / arr.length) * 100,
+      totalPnl,
+      avgPct,
+    };
+  };
+
+  const longStats = statsFor(longs);
+  const shortStats = statsFor(shorts);
+
+  // Card renderer — shows "—" when no trades of that direction.
+  const card = (dir, stats) => {
+    if (!stats) {
+      return `
+        <div class="ops-direction-card ${dir}">
+          <div class="ops-direction-head">
+            <span class="ops-direction-label ${dir}">${dir}</span>
+            <span class="ops-direction-count">0 trades</span>
+          </div>
+          <div class="ops-direction-empty" style="padding:6px 0">No ${dir.toLowerCase()} trades yet.</div>
+        </div>`;
+    }
+    const pnlSign = stats.totalPnl > 0 ? '+' : '';
+    const pnlCls = stats.totalPnl > 0 ? 'positive' : stats.totalPnl < 0 ? 'negative' : '';
+    const avgSign = stats.avgPct > 0 ? '+' : '';
+    return `
+      <div class="ops-direction-card ${dir}">
+        <div class="ops-direction-head">
+          <span class="ops-direction-label ${dir}">${dir}</span>
+          <span class="ops-direction-count">${stats.count} trades · ${stats.wins}W / ${stats.count - stats.wins}L</span>
+        </div>
+        <div class="ops-direction-stats">
+          <div class="ops-direction-stat">
+            <span class="ops-direction-stat-label">Win Rate</span>
+            <span class="ops-direction-stat-val">${stats.winRate.toFixed(1)}%</span>
+          </div>
+          <div class="ops-direction-stat">
+            <span class="ops-direction-stat-label">Total P&amp;L</span>
+            <span class="ops-direction-stat-val ${pnlCls}">${pnlSign}$${Math.abs(stats.totalPnl).toFixed(2)}</span>
+          </div>
+          <div class="ops-direction-stat">
+            <span class="ops-direction-stat-label">Avg P&amp;L %</span>
+            <span class="ops-direction-stat-val ${pnlCls}">${avgSign}${stats.avgPct.toFixed(2)}%</span>
+          </div>
+          <div class="ops-direction-stat">
+            <span class="ops-direction-stat-label">Best / Worst</span>
+            <span class="ops-direction-stat-val" style="font-size:12px">
+              ${(() => {
+                const pnls = (dir === 'LONG' ? longs : shorts).map(t => Number(t.pnl_pct || 0));
+                if (pnls.length === 0) return '--';
+                const best = Math.max(...pnls);
+                const worst = Math.min(...pnls);
+                return `<span style="color:var(--green)">+${best.toFixed(2)}%</span> / <span style="color:var(--red)">${worst.toFixed(2)}%</span>`;
+              })()}
+            </span>
+          </div>
+        </div>
+      </div>`;
+  };
+
+  container.innerHTML = card('long', longStats) + card('short', shortStats);
 }
 
 /**
@@ -4682,14 +4861,15 @@ function renderOpsHistory() {
   // Header row
   const header = `
     <div class="ops-history-row" style="cursor:default;background:var(--bg3);font-family:var(--mono);font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:0.6px;font-weight:600">
-      <div></div>
-      <div>Symbol</div>
       <div style="text-align:center">Dir</div>
+      <div>Symbol</div>
+      <div style="text-align:center">TF</div>
       <div style="text-align:right">Entry</div>
       <div style="text-align:right">Exit</div>
       <div style="text-align:right">P&amp;L</div>
       <div style="text-align:right">P&amp;L %</div>
       <div style="text-align:right">% Acct</div>
+      <div style="text-align:right">Duration</div>
       <div style="text-align:right">Reason</div>
     </div>`;
 
@@ -4699,6 +4879,29 @@ function renderOpsHistory() {
   // the user's "que porcentaje tiene de la cuenta" for closed trades.
   const _portfolioHist = (_opsSummaryCache && _opsSummaryCache.portfolio_value) || 0;
 
+  // v0.39.7: Helper to format trade duration (entry→exit) as a compact
+  // human-readable string. Returns e.g. "3h 24m", "12m 5s", "2d 4h".
+  // Falls back to '--' when either timestamp is missing or invalid.
+  const fmtDuration = (entryTime, exitTime) => {
+    try {
+      const t1 = new Date(entryTime).getTime();
+      const t2 = new Date(exitTime).getTime();
+      if (!isFinite(t1) || !isFinite(t2) || t2 < t1) return '--';
+      const diffMs = t2 - t1;
+      const sec = Math.floor(diffMs / 1000);
+      const days = Math.floor(sec / 86400);
+      const hours = Math.floor((sec % 86400) / 3600);
+      const mins = Math.floor((sec % 3600) / 60);
+      const secs = sec % 60;
+      if (days > 0) return `${days}d ${hours}h`;
+      if (hours > 0) return `${hours}h ${mins}m`;
+      if (mins > 0) return `${mins}m ${secs}s`;
+      return `${secs}s`;
+    } catch (_e) {
+      return '--';
+    }
+  };
+
   const rows = trades.map(t => {
     const dir = (t.direction || 'LONG').toUpperCase();
     const dirCls = dir === 'LONG' ? 'long' : 'short';
@@ -4707,6 +4910,7 @@ function renderOpsHistory() {
     const pnlSign = pnl > 0 ? '+' : '';
     const pnlCls = pnl > 0 ? 'positive' : pnl < 0 ? 'negative' : '';
     const acctPct = _portfolioHist > 0 ? (pnl / _portfolioHist * 100) : 0;
+    const duration = fmtDuration(t.entry_time, t.exit_time);
     const fmtPrice = (p) => p > 0 ? '$' + Number(p).toLocaleString('en-US', {minimumFractionDigits: p < 1 ? 6 : 2, maximumFractionDigits: p < 1 ? 6 : 4}) : '--';
     const reason = (t.exit_reason || '').toLowerCase();
     let reasonCls = '';
@@ -4717,7 +4921,7 @@ function renderOpsHistory() {
 
     return `
       <div class="ops-history-row" onclick="opsOpenChart('${t.symbol}','${t.timeframe || '1h'}')">
-        <div class="ops-history-dir ${dirCls}">${dir === 'LONG' ? 'L' : 'S'}</div>
+        <div class="ops-history-dir ${dirCls}">${dir}</div>
         <div class="ops-history-sym">${t.symbol}</div>
         <div class="ops-history-cell" style="text-align:center;font-size:10px;color:var(--text3)">${t.timeframe || '--'}</div>
         <div class="ops-history-cell ops-mono-accent" style="text-align:right">${fmtPrice(t.entry_price)}</div>
@@ -4725,6 +4929,7 @@ function renderOpsHistory() {
         <div class="ops-history-cell ops-history-pnl ${pnlCls}" style="text-align:right">${pnlSign}$${Math.abs(pnl).toFixed(2)}</div>
         <div class="ops-history-cell ops-history-pnl ${pnlCls}" style="text-align:right">${pnlSign}${pnlPct.toFixed(2)}%</div>
         <div class="ops-history-cell ops-history-pnl ${pnlCls}" style="text-align:right">${pnlSign}${acctPct.toFixed(2)}%</div>
+        <div class="ops-history-duration">${duration}</div>
         <div class="ops-history-reason ${reasonCls}">${reasonLabel}</div>
       </div>`;
   }).join('');

@@ -57,7 +57,7 @@ async def _lifespan(app: FastAPI):
         logger.debug("Could not capture event loop on startup: %s", _e)
     yield
 
-app = FastAPI(title="PPMT Terminal", version="0.39.6", lifespan=_lifespan)
+app = FastAPI(title="PPMT Terminal", version="0.39.7", lifespan=_lifespan)
 
 # Global terminal state (shared with engine)
 terminal_state: TerminalState = get_terminal_state()

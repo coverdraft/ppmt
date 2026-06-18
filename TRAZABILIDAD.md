@@ -5428,3 +5428,137 @@ ppmt terminal
 - Backlog: similar WS push para `signal_generated` (ya hay polling
   de signals pero podría ser instantáneo).
 - Backlog: tunear SL/TP ratio si en live mode hay pocos trades.
+
+---
+
+## v0.39.7 — 2026-06-18
+
+### Problema
+
+Usuario pidió: *"en operaciones quiero que de el dato tambien por
+operacion si es long o short... ademas de eso continua con otras
+cosas que falten"*.
+
+Auditoría del estado actual:
+1. **Active cards** ya mostraban un badge LONG/SHORT, pero era chico
+   (11px, padding mínimo, sin borde) → fácil de mirar por encima sin
+   notar la dirección.
+2. **Recently Closed list** mostraba solo "L" o "S" en una columna
+   estrecha de 24px — el usuario no veía la palabra completa y
+   tenía que inferir el color.
+3. **No había vista agregada por dirección** — el usuario no podía
+   ver de un vistazo "hice 10 longs y 3 shorts, los longs ganaron
+   $X y los shorts perdieron $Y".
+4. **No había duración de operaciones** — el usuario no podía ver
+   cuánto tiempo estuvo abierta cada operación cerrada.
+
+### Solución (v0.39.7)
+
+**Mejora 1 — Active card direction badge más prominente:**
+
+`.ops-card-dir` CSS bumped:
+- Font-size: 11px → 13px
+- Font-weight: 700 → 800
+- Padding: 3px 9px → 5px 12px
+- Border-radius: 5px → 6px
+- Letter-spacing: 0.5px → 0.8px
+- Nuevo: border 1px solid (long: green tint, short: red tint, flat: gray)
+- Background opacity bumped 0.12 → 0.15
+
+**Mejora 2 — Recently Closed list: full LONG/SHORT word + Duration column:**
+
+- Cada row ahora muestra "LONG" o "SHORT" completo (era "L"/"S")
+  en una columna de 64px (era 24px).
+- Nueva columna "Duration" entre "% Acct" y "Reason" muestra el
+  tiempo entry→exit en formato compacto:
+  - `< 60s` → `45s`
+  - `< 1h` → `12m 5s`
+  - `< 1d` → `3h 24m`
+  - `>= 1d` → `2d 4h`
+- Helper `fmtDuration(entryTime, exitTime)` con try/catch para
+  invalid timestamps (retorna '--').
+- Grid template `.ops-history-row` ampliado 9 → 10 columnas.
+
+**Mejora 3 — Nuevo panel "By Direction" (LONG | SHORT aggregate stats):**
+
+Nuevo `<div class="ops-section">` entre Active Operations y Recently
+Closed con dos cards lado a lado:
+
+- **LONG card** (border-left verde):
+  - Count + wins/losses: "12 trades · 8W / 4L"
+  - Win Rate: 66.7%
+  - Total P&L: +$23.45 (color-coded)
+  - Avg P&L %: +1.85% (color-coded)
+  - Best / Worst: +5.23% / -2.10%
+- **SHORT card** (border-left rojo):
+  - Mismos stats pero para shorts.
+
+Cuando no hay trades de una dirección, muestra "No long/short
+trades yet." en lugar de stats vacíos.
+
+Función `renderOpsDirection()` parte `_opsTradesCache` (filtrado
+live) por dirección, computa stats con helper `statsFor(arr)`, y
+renderiza dos cards. Wired en `refreshOperationsTab()`.
+
+### Archivos modificados
+
+- `src/ppmt/terminal/static/index.html` — todo el CSS nuevo +
+  markup HTML del panel + función `renderOpsDirection()` + full
+  LONG/SHORT word + Duration column + `fmtDuration` helper + bump
+  active card badge + grid template 9→10 columns + responsive
+  update + version bumps (title, logo).
+- `pyproject.toml`, `src/ppmt/__init__.py`, `src/ppmt/cli/main.py`,
+  `src/ppmt/terminal/server.py`, `HANDOFF.md` — bump 0.39.6 → 0.39.7.
+
+### Verificación
+
+- Script `verify_v0397_direction_duration.py` — 26 checks OK:
+  - Recently Closed: full LONG/SHORT word, Duration column,
+    fmtDuration helper with days/hours/minutes/seconds formats.
+  - By Direction panel: container, badge, renderOpsDirection fn,
+    wired into refreshOperationsTab, all 4 stats (Win Rate, Total
+    P&L, Avg P&L %, Best/Worst).
+  - CSS: .ops-direction grid, .ops-direction-card with long/short
+    left borders.
+  - Active card badge font-size bumped to 13px.
+  - Grid template .ops-history-row has 10 columns.
+  - Title + logo bumped to v0.39.7.
+  - **Functional smoke test**: GET / serves 233732 bytes with all
+    new elements (opsDirectionPanel, renderOpsDirection,
+    fmtDuration, Duration). GET /api/multi-status → 200. GET
+    /api/trades?source=live&limit=50 → 200.
+- HTML structure balanced: 464 `<div>` / 464 `</div>`.
+- `node --check` sobre JS inline → syntax OK.
+- Test suite: 215 pass, 92 deselected. Sin regresiones.
+- **Functional regression check v0.39.5 + v0.39.6 features**: 9/9 OK
+  (chart markers per-token, % of account, _broadcast_event,
+  handleTradeEvent, lifespan pattern — todo sigue intacto).
+
+### Cómo verificar en LIVE
+
+```bash
+cd ~/ppmt
+git pull origin main
+pip install -e . --quiet
+ppmt terminal
+# 1. Operaciones tab → "By Direction" panel aparece entre Active
+#    Operations y Recently Closed.
+# 2. Cuando cierren trades, cada card LONG/SHORT muestra count,
+#    win rate, total P&L, avg %, best/worst.
+# 3. Recently Closed list:
+#    - Columna "Dir" ahora muestra "LONG" / "SHORT" completo.
+#    - Nueva columna "Duration" muestra "3h 24m" entre % Acct y Reason.
+# 4. Active cards: el badge LONG/SHORT es más grande y con borde
+#    color-coded.
+```
+
+### Próximos pasos sugeridos
+
+- Confirmar con usuario que la visibilidad de LONG/SHORT + el panel
+  By Direction + Duration son lo que pidió.
+- Backlog: similar aggregate view por symbol (top 5 símbolos por
+  P&L, win rate per symbol).
+- Backlog: filtro por dirección en Recently Closed (ver solo longs
+  o solo shorts).
+- Backlog: gráfico de equity curve en Operaciones tab (línea de
+  portfolio value over time).
