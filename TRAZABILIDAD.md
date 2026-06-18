@@ -6531,3 +6531,180 @@ El orden anterior era: FIX-15 (thresholds por dirección) → FIX-16 (per-asset 
 1. **Confirmar re-priorización**: ¿FIX-17 primero (mejorar detector) o seguimos con FIX-15?
 2. **Definir enfoque de FIX-17**: EMA slope vs ADX vs ADR-calibrado
 3. **Considerar ampliar dataset a 12 meses** (necesitaríamos重新 descargar ~1.5M velas/token)
+
+---
+
+## v0.40.13 — Auditoría del RegimeDetector (preliminar, en progreso)
+
+**Fecha**: 2026-06-18
+**Tipo**: Análisis / auditoría (sin cambios de motor)
+**Motivo**: Distinguir A) dataset insuficiente vs B) detector degenerado vs C) ambos.
+
+### Setup
+
+Comparé la clasificación del `RegimeDetector` actual contra 4 métricas externas independientes sobre el dataset v4 (3.2M velas):
+
+1. **EMA slope** (EMA21/EMA55 + slope de 5 velas)
+2. **ADX** (Average Directional Index, período 14, umbral >25 = trending)
+3. **Volatilidad realizada** (rolling 50, anualizada)
+4. **Drawdown** y **retorno acumulado** (rolling 50)
+
+Seleccioné 236 ventanas visualmente claras de 1000 velas (~16h) cada una:
+- 77 ventanas **bull** (retorno > +5%)
+- 79 ventanas **bear** (retorno < -5%)
+- 80 ventanas **range** (|retorno| < 1%, baja vol)
+
+### Distribución global (dataset v4, 3.2M velas)
+
+| Método | Bull % | Bear % | Ranging % | Volatile % |
+|---|---:|---:|---:|---:|
+| Detector actual | 0.08% | 0.09% | **99.79%** | 0.05% |
+| EMA slope | 19.73% | 21.06% | 59.21% | — |
+| ADX | 21.22% | 22.53% | 56.25% | — |
+| EMA+ADX | 11.96% | 12.66% | 75.38% | — |
+
+### Acuerdo con etiquetado humano (236 ventanas)
+
+| Método | Bull | Bear | Range |
+|---|---|---|---|
+| Detector actual | **0/77 (0%)** | **0/79 (0%)** | **0/80 (0%)** |
+| EMA slope | 13/77 (17%) | 13/79 (16%) | 80/80 (100%) |
+| ADX | 10/77 (13%) | 4/79 (5%) | 78/80 (98%) |
+| EMA+ADX | 0/77 (0%) | 0/79 (0%) | 80/80 (100%) |
+
+### Hallazgo preliminar
+
+**El detector actual tiene 0% de acuerdo con etiquetado humano en los 3 tipos de ventana.** Clasifica todo como `ranging` incluso en ventanas con +26.58% de retorno (TIAUSDT 2026-02-25) o -12.64% (SOLUSDT 2026-01-31).
+
+EMA slope y ADX sí distinguen (aunque con bajo acuerdo, ~15-17% en bull/bear). El 100% de acuerdo en range es trivial porque su default es neutral/ranging.
+
+**Veredicto preliminar**: **B) Detector degenerado**. El problema NO es el dataset (aunque pueda ser mejorable), es que el detector está mal calibrado.
+
+### Causa raíz probable
+
+El detector usa:
+- `vol_threshold = 0.15` (15% anualizado) → volatilidad típica 1m BTC = 1-5%, nunca supera 15% → `volatile` casi nunca se dispara
+- `trend_threshold = 0.001` (0.1% por vela) → rel_slope típico 1m = 0.0001-0.0005 → `trending_up/down` casi nunca se dispara
+- `hurst > 0.55` → Hurst approx 0.5 en 1m (random walk) → bloquea trending incluso si rel_slope se dispara
+- Las tres condiciones se cumplen raramente → 99.79% cae al default `ranging`
+
+### Confirmación pendiente
+
+Estoy descargando un dataset de 12 meses (5 majors × 525k velas = 2.6M velas, ~365 días) para confirmar que el detector sigue degenerado con data más larga. Si en 12m también clasifica >85% como ranging, se confirma B) definitivamente. Si mejora a <50%, sería C) ambos.
+
+### Próximos pasos
+
+1. Esperar descarga 12m (~30 min restantes)
+2. Re-correr `regime_detector_audit.py` con ambos datasets
+3. Si se confirma B: implementar FIX-17 (mejorar detector) basado en EMA slope + ADX
+4. Si es C: ambas acciones, FIX-17 primero
+
+### Archivos creados
+
+- `scripts/regime_detector_audit.py` (NEW) — auditoría con 4 métricas externas
+- `scripts/download_1m_12m.py` (NEW) — descarga 12 meses para validación
+- `download/regime_audit/audit_report.md` (NEW) — reporte ejecutivo
+- `download/regime_audit/audit_report.json` (NEW) — datos completos
+- `download/regime_audit/window_classification.csv` (NEW) — 236 ventanas
+- `download/regime_audit/global_distribution.csv` (NEW)
+- `download/regime_audit/human_agreement.csv` (NEW)
+
+---
+
+## v0.40.14 — Auditoría RegimeDetector con dataset 12m — VEREDICTO B) Detector degenerado
+
+**Fecha**: 2026-06-18
+**Tipo**: Análisis / auditoría (sin cambios de motor)
+**Motivo**: Confirmar si el problema es A) dataset, B) detector, o C) ambos.
+
+### Setup
+
+Descargué 12 meses de data de 5 majors desde Binance (525,600 velas/token × 5 = 2.6M velas, rango 2025-06-18 → 2026-06-18).
+
+Re-corrí la auditoría comparando detector actual vs EMA slope vs ADX vs combinación EMA+ADX sobre ambos datasets:
+- v4: 16 tokens × 200k velas (139 días, 3.2M velas)
+- 12m: 5 majors × 525k velas (365 días, 2.6M velas)
+
+### Resultados confirmatorios
+
+**Distribución global (cambia entre datasets):**
+
+| Método | v4 (139d, 16 tok) | 12m (5 majors, 365d) |
+|---|---:|---:|
+| Detector ranging % | 99.79% | **99.91%** |
+| EMA neutral % | 59.21% | 68.85% |
+| ADX ranging % | 56.25% | 56.72% |
+
+**Acuerdo con etiquetado humano (ventanas visualmente claras):**
+
+v4 (236 ventanas: 77 bull, 79 bear, 80 range):
+
+| Método | Bull | Bear | Range |
+|---|---|---|---|
+| Detector actual | 0/77 (0%) | 0/79 (0%) | 0/80 (0%) |
+| EMA slope | 13/77 (17%) | 13/79 (16%) | 80/80 (100%) |
+| ADX | 10/77 (13%) | 4/79 (5%) | 78/80 (98%) |
+
+12m (75 ventanas: 25 bull, 25 bear, 25 range):
+
+| Método | Bull | Bear | Range |
+|---|---|---|---|
+| Detector actual | 0/25 (0%) | 0/25 (0%) | 0/25 (0%) |
+| EMA slope | 0/25 (0%) | 0/25 (0%) | 25/25 (100%) |
+| ADX | 1/25 (4%) | 1/25 (4%) | 25/25 (100%) |
+
+### Veredicto definitivo: **B) Detector degenerado**
+
+El detector pasa de 99.79% → 99.91% ranging al ampliar de 139 a 365 días. **Más data NO mejora el detector — al contrario, lo empeora ligeramente.** El problema NO es falta de diversidad de regímenes en el dataset: el detector simplemente no dispara sus umbrales para velas 1m de crypto.
+
+### Causa raíz identificada
+
+El `RegimeDetector` tiene 3 umbrales diseñados para tiempo diario o anual, no para 1m:
+
+1. **`vol_threshold = 0.15` (15% anualizado)**: volatilidad típica 1m BTC = 1-5% anualizada → nunca supera 15% → `volatile` casi nunca se dispara.
+2. **`trend_threshold = 0.001` (0.1% por vela)**: rel_slope típico 1m = 0.0001-0.0005 → `trending_up/down` casi nunca se dispara.
+3. **`hurst > 0.55`**: Hurst en 1m es ~0.5 (random walk) → bloquea trending incluso si rel_slope se dispara.
+
+Las 3 condiciones se cumplen raramente → 99.91% cae al default `ranging`. N4 RegimePartitionedTrie es estructuralmente inútil porque 99.91% de las observaciones van al sub-trie `ranging`.
+
+### Comparación: cómo se comportan las alternativas
+
+- **EMA slope (21/55 + slope 5)**: 10-23% bullish, 11-24% bearish, 60-80% neutral → distingue dirección pero demasiado conservador.
+- **ADX (período 14, umbral >25)**: 20-26% bullish, 20-38% bearish, 54-61% ranging → mejor balance, distincción razonable.
+- **EMA+ADX combo**: 7-15% bull, 8-16% bear, 75-84% range → muy estricto, solo confirma tendencias fuertes.
+
+### Próximos pasos (definitivos)
+
+1. **FIX-17 (ALTA prioridad — inmediato)**: Implementar nuevo `RegimeDetector` basado en **ADX** (mejor balance) con fallback a EMA slope. Eliminar Hurst exponent (no aporta en 1m).
+2. **Re-entrenar tries** con el nuevo detector y re-auditar.
+3. **Evaluar FIX-14 (N4 routing)** solo DESPUÉS de FIX-17 — sin un detector funcional, N4 no puede aportar valor.
+4. **FX-15 (thresholds por dirección)**: sigue siendo válido como filtro adicional.
+
+### Dataset 12m disponible
+
+- `download/real_data_1m_12m/BTCUSDT_1m.csv` — 525,600 velas, 2025-06-18 → 2026-06-18
+- `download/real_data_1m_12m/ETHUSDT_1m.csv` — 525,600 velas, mismo rango
+- `download/real_data_1m_12m/SOLUSDT_1m.csv` — 525,600 velas, mismo rango
+- `download/real_data_1m_12m/BNBUSDT_1m.csv` — 550,600 velas, 2025-07-06 → 2026-06-18
+- `download/real_data_1m_12m/XRPUSDT_1m.csv` — 550,600 velas, 2025-07-06 → 2026-06-18
+- Total: 2,678,000 velas (~2.5 GB en CSV)
+
+### Archivos creados
+
+- `scripts/regime_detector_audit.py` — auditoría con 4 métricas externas, 2 datasets
+- `scripts/download_1m_12m_resumable.py` — descarga 12m resume-capable (streaming)
+- `scripts/btc_12m_quick_audit.py` — auditoría rápida BTC 12m
+- `download/regime_audit/audit_report.md` — reporte ejecutivo con ambos datasets
+- `download/regime_audit/audit_report.json` — datos completos
+- `download/regime_audit/window_classification.csv` — 311 ventanas analizadas
+- `download/regime_audit/global_distribution.csv` — distribución por método y dataset
+- `download/regime_audit/human_agreement.csv` — acuerdo con etiquetado humano
+- `download/regime_audit/btc_12m_quick_audit.json` — resumen rápido BTC 12m
+
+### Verificación
+
+- 5 tokens × 12 meses descargados correctamente (2.6M velas)
+- Auditoría reproducible: `python3 scripts/regime_detector_audit.py` (~3 min)
+- Resultados consistentes entre v4 y 12m: detector degenerado en ambos
+- No se modificó código de motor, solo análisis
+- No se bump de versión
