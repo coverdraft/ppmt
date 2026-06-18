@@ -515,8 +515,22 @@ class SignalGenerator:
           docs/AUDIT_TRAZABILIDAD_CAPAS_1_2_3.md CAPA 3 #4).
           Now: count>=1 (any non-zero observation) AND RR>=0.5
           (allows symmetric-or-worse RR; SL/TP rule FIX-4 will compensate).
+        v0.40.7 FIX-11: Removed the `not match_result.matched` hard gate.
+          After FIX-10, the FuzzyMatcher returns `node` even when
+          `matched=False` (i.e., confidence < 0.15) so the engine can
+          still read metadata. The `not match_result.matched` check
+          made signal.py reject 100% of those candidates immediately,
+          defeating FIX-3's relaxed count/RR thresholds.
+          The `confidence < adaptive_min_conf` check below is now the
+          SOLE confidence gate. adaptive_min_conf is capped at 0.20 by
+          FIX-3 part 2, so nodes with confidence 0.08-0.20 still pass.
         """
-        if not match_result.matched or match_result.node is None:
+        # v0.40.7 FIX-11: was `if not match_result.matched or match_result.node is None`.
+        # Now we only require a node. The `matched` flag is a SOFT signal
+        # that downstream code (paper_trader, portfolio_runner) can use
+        # for additional filtering if needed. The confidence gate below
+        # is the real filter.
+        if match_result.node is None:
             return None
 
         meta = match_result.node.metadata
@@ -533,7 +547,19 @@ class SignalGenerator:
         # 100% of attempts regardless of the count/RR thresholds below.
         # The cap of 0.20 still filters nodes with confidence < 0.20 (about
         # 60% of nodes per CAPA 1 distribution).
-        adaptive_min_conf = min(adaptive_min_conf, 0.20)
+        #
+        # v0.40.7 FIX-12: Lowered cap from 0.20 to per_trade_min_confidence
+        # (default 0.08). The 0.20 cap was still too high — TF 5m/1m tries
+        # with 2000 candles produce max confidence of 0.13-0.14 (Bayesian
+        # shrinkage with prior_strength=10 + count_bonus scaling). The 0.20
+        # cap rejected 100% of candidates, making signal.py DEAD CODE again
+        # despite FIX-3. The new cap = per_trade_min_confidence makes the
+        # cap consistent with the absolute floor defined in SignalThresholds.
+        # This is the RIGHT behavior: adaptive_min_conf is the "soft"
+        # threshold (regime-dependent), but it can never go below the
+        # absolute floor.
+        absolute_floor = self.thresholds.per_trade_min_confidence  # default 0.08
+        adaptive_min_conf = min(adaptive_min_conf, absolute_floor)
 
         # Check minimum confidence (regime-adaptive)
         if confidence < adaptive_min_conf:

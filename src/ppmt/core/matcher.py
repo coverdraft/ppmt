@@ -325,30 +325,48 @@ class FuzzyMatcher:
         (waterfall), we now evaluate all strategies and return the one
         with the highest score. This ensures we never miss a better match.
 
+        v0.40.7 FIX-10: best_match ahora RETORNA el mejor node encontrado
+        aunque `matched=False`. Antes, si TODAS las leaves tenían confidence
+        < min_confidence (0.15) — común en tries sparse de TF bajos — el
+        método descartaba los nodes y devolvía `node=None`. Esto hacía que
+        match() computara weighted_confidence=0.0 y jamás generara señales,
+        aún cuando el patrón EXISTÍA en el trie.
+
+        Ahora: el node se retorna junto con `matched` como flag soft.
+        El engine usa `n3_match.node` para leer metadata.confidence y pasa
+        el weighted_confidence al signal_generator, que aplica sus propios
+        thresholds (per_trade_min_confidence=0.08).
+
         Strategy priority (by computational cost):
         1. Exact match — O(k) — always try first
         2. 1-edit match — O(k * a)
         3. Prefix match — O(k) — partial matches
         4. 2-edit match — O(k^2 * a^2) — only if enabled
 
-        Returns the MatchResult with the highest score.
+        Returns the MatchResult with the highest score (or with node set
+        even if matched=False, so downstream can still read metadata).
         """
-        # Step 1: Exact match — if found, it's always the best
+        # Step 1: Exact match — if found, return it (matched may be False
+        # if confidence is below gate, but node is still useful).
         exact = self.exact_match(trie, symbols)
-        if exact.matched:
+        if exact.node is not None:
             return exact
 
-        # Step 2: Collect candidates from all strategies
+        # Step 2: Collect candidates from all strategies. We collect any
+        # candidate with `node is not None`, not just `matched=True`. The
+        # `matched` flag becomes a SOFT signal that downstream code can
+        # use to apply stricter filtering (e.g., signal_generator's
+        # per_trade_min_confidence).
         candidates = []
 
         # 1-edit match
         one_edit = self.one_edit_match(trie, symbols)
-        if one_edit.matched:
+        if one_edit.node is not None:
             candidates.append(one_edit)
 
         # Prefix match (partial)
         prefix = self.prefix_match(trie, symbols)
-        if prefix.matched:
+        if prefix.node is not None:
             candidates.append(prefix)
 
         # 2-edit match (only if enabled and no good candidates yet)
@@ -357,15 +375,17 @@ class FuzzyMatcher:
             best_one_edit_score = max((c.score for c in candidates), default=0.0)
             if best_one_edit_score < self.threshold:
                 two_edit = self.two_edit_match(trie, symbols)
-                if two_edit.matched:
+                if two_edit.node is not None:
                     candidates.append(two_edit)
 
-        # Step 3: Return the best-scoring candidate
+        # Step 3: Return the best-scoring candidate (regardless of matched).
+        # Downstream code reads node.metadata.confidence and applies its
+        # own thresholds via signal_generator.
         if candidates:
             best = max(candidates, key=lambda c: c.score)
             return best
 
-        # No good match found
+        # No node found at all — true unknown block.
         return MatchResult(matched=False, symbols=symbols, unknown_block=True)
 
     def check_continuation(

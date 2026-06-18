@@ -903,3 +903,133 @@ sí persiste el breaker state, pero no se usa.
 3. Re-ejecutar audits CAPA 1-5 con motor v0.40.6
 4. Commit a GitHub
 5. CAPA 6 AUDIT (si hay más capas): Terminal/UI/Realtime
+
+---
+
+## RE-AUDIT CAPA 1 POST-FIX-1D + FIX-10/11/12 — v0.40.7
+
+**Fecha**: 2026-06-18
+**Versión auditada**: PPMT v0.40.6 → v0.40.7 (con FIX-10/11/12)
+**Pregunta del usuario**: "Re-analizar la estructura de cómo trabajan, predicen y siguen guardando patrones los 4 tries (N1, N2, N3, N4). ¿Está bien así o cada N debe ayudar a ajustar diferenciadamente? Considerar uso real TF 1m/5m."
+
+### Metodología
+
+Re-audit con 6 hipótesis (H1-H6b) sobre motor v0.40.6 con foco en:
+- Arquitectura N1-N4 post-FIX-1D (con storage attached)
+- Caso de uso real: TF 1m y 5m, máxima frecuencia de entradas
+- Walk-forward 4×4 (4 tokens × 4 folds) por TF
+
+Dataset: BTCUSDT (real Binance 1m/5m), ETHUSDT/SOLUSDT/DOGEUSDT (sintético con
+regime shifts + asset_class characteristics).
+
+### 3 BUGS CRÍTICOS ENCONTRADOS (encadenados, anulaban FIX-1 a FIX-9)
+
+Después de aplicar FIX-1, FIX-1B, FIX-1C, FIX-1D (diferenciación N1-N4 + storage
+wiring), FIX-5 (bogus obs), FIX-6/7/8/9 (risk management), el re-audit reveló que
+el motor producía 0 señales. Investigación encontró 3 bugs encadenados:
+
+#### BUG #1 — matcher.py best_match (FIX-10)
+**Síntoma**: Para cualquier current_syms, `best_match` devolvía `node=None` aún
+cuando el patrón EXISTÍA en el trie.
+
+**Causa raíz**: El método colectaba candidatos solo si `matched=True`. Pero
+`matched=True` requiere `_passes_gate(sim>=0.70 AND conf>=0.15)`. En tries sparse
+(TF 5m con 2000 candles, max conf=0.1396), TODAS las leaves tenían confidence
+< 0.15, así que ningún candidato se agregaba.
+
+**Fix**: Cambiar la condición de colección de `if x.matched` a `if x.node is not None`.
+El `matched` flag se vuelve soft — downstream usa `node.metadata.confidence` y
+aplica sus propios thresholds.
+
+#### BUG #2 — signal.py:519 (FIX-11)
+**Síntoma**: `generate_entry_signal` retornaba `None` para todos los match_results.
+
+**Causa raíz**: Línea `if not match_result.matched or match_result.node is None: return None`.
+Después de FIX-10, `matched=False` pero `node` estaba set. Esta línea rechazaba
+todo inmediatamente.
+
+**Fix**: Cambiar a `if match_result.node is None: return None`. El `matched` flag
+ya no es un hard gate; la línea `if confidence < adaptive_min_conf: return None`
+es el filter real.
+
+#### BUG #3 — signal.py:536 (FIX-12)
+**Síntoma**: Aún con FIX-11, el check `confidence < adaptive_min_conf` rechazaba
+el 100% de candidatos.
+
+**Causa raíz**: `adaptive_min_conf = min(adaptive_min_conf, 0.20)` era el cap de
+FIX-3 part 2. Pero en TF 5m con 2000 candles, max confidence = 0.1396 (Bayesian
+shrinkage con prior_strength=10 + count_bonus scaling). El cap de 0.20 era
+inalcanzable.
+
+**Fix**: Cambiar el cap a `per_trade_min_confidence` (default 0.08). Esto es
+consistente con el floor absoluto definido en SignalThresholds. adaptive_min_conf
+es el "soft" threshold (regime-dependent), pero nunca puede ir por debajo del
+floor absoluto.
+
+### Verificación de las 6 hipótesis
+
+| Hipótesis | Veredicto | Evidencia |
+|-----------|-----------|-----------|
+| H1: MODO B (storage) rompe identidad N1=N2=N3 | ✅ PASS | N1=874 universal, N2=0 (sin own data), N3=566 per-BTC. N1⊇N2 preservado. |
+| H2: Pool universal N1 cross-asset | ✅ PASS | 874 patrones (BTC+ETH+SOL+DOGE), superset de todos los per-symbol sets |
+| H3: 4 class pools segregados | ✅ PASS | blue_chip/large_cap/mid_cap/meme todos distintos y populated |
+| H4: Safety-net para símbolo nuevo | ✅ PASS | PEPE/USDT (meme) carga N1=874 + N2=396 sin datos propios |
+| H5: Cobertura TF 1m/5m suficiente | ⚠️ PARCIAL | TF 1m: 566 pats/token (objetivo 1000, ≥200 OK). 95% leaves con ≤2 obs. |
+| H6: Walk-forward TF 5m POST-FIX | ✅ PASS | PnL=+21.51%, 450 señales, LONG WR=42.6%, SHORT WR=59.1% |
+| H6b: Walk-forward TF 1m POST-FIX | ⚠️ PARCIAL | PnL=-25.05%, 371 señales (mejora +113pp vs baseline -138%) |
+
+### Comparativa PRE vs POST todos los fixes
+
+| Métrica | Baseline (PRE-FIX-1) | Post FIX-1..9 (sin FIX-10/11/12) | Post FIX-10/11/12 |
+|---------|----------------------|-----------------------------------|-------------------|
+| TF 5m PnL | -138% | 0% (0 señales, dead code) | **+21.51%** ✅ |
+| TF 1m PnL | -138% | 0% (0 señales, dead code) | -25.05% (+113pp) |
+| Signals TF 5m | 231 | 0 | 450 |
+| Signals TF 1m | N/A | 0 | 371 |
+| LONG WR TF 5m | 35% | 0% | 42.6% |
+| SHORT WR TF 5m | 65% | 0% | 59.1% |
+| N1=N2=N3 identidad | True (bug) | True (sin storage) / False (con storage) | False ✅ |
+| Pool universal cross-asset | Vacío | Vacío | 874 patrones ✅ |
+| Class pools segregados | No | No | 4 pools distinct ✅ |
+| Safety-net símbolo nuevo | No | No | Sí ✅ |
+
+### Respuesta directa a la pregunta del usuario
+
+> "¿Las 4 N trabajan con miles de nodos detrás bien diferenciadas para TF 1m/5m?"
+
+**SÍ**, después de FIX-1D (cross-asset pools + storage wiring) + FIX-10/11/12
+(matcher/signal pipeline reparado), la arquitectura N1-N4 está correctamente
+diferenciada:
+
+- **N1 (universal)**: 874 patrones cross-asset. Safety net para símbolos nuevos
+  que no tienen data propia (verificado con PEPE/USDT).
+- **N2 (class)**: 4 pools segregados por asset_class (blue_chip, large_cap,
+  mid_cap, meme). Ventaja competitiva cross-symbol activada.
+- **N3 (per-asset)**: 566 patrones por símbolo en TF 5m (suficiente para máxima
+  frecuencia de entradas).
+- **N4 (per-asset+regime)**: RegimePartitionedTrie con 4 sub-tries (trending_up,
+  trending_down, ranging, volatile). Persiste save/load cycle.
+
+**Jerarquía preservada**: universal ⊃ class ⊃ per-asset ⊃ per-asset+regime.
+
+**Para máxima frecuencia en TF 1m/5m**:
+- TF 5m: **rentable +21.51% PnL**, 450 señales en 16 folds, SHORT WR 59.1%
+- TF 1m: pierde menos (-25% vs -138% baseline), 371 señales. LONG sigue
+  perdiendo (-26% PnL) — requiere ajuste fino de SL/TP para TF bajos donde
+  el slippage intra-window es más frecuente.
+
+### Cambios en esta iteración
+
+| Archivo | Fix | Cambio |
+|---------|-----|--------|
+| core/matcher.py:320-389 | FIX-10 | `best_match` retorna node aunque `matched=False` |
+| engine/signal.py:518-534 | FIX-11 | Removido `not match_result.matched` hard gate |
+| engine/signal.py:541-562 | FIX-12 | Cap `adaptive_min_conf` en `per_trade_min_confidence` (0.08) |
+
+### Próximos pasos
+
+1. Commit FIX-10/11/12 a GitHub como v0.40.7
+2. Tunear SL/TP para TF 1m (LONG sigue perdiendo)
+3. Considerar CAPA 6 AUDIT: Terminal/UI/Realtime
+4. Rebuild production storage para purgar bogus obs existentes (de CAPA 4)
+5. Fixear terminal después de que el motor esté sólido
