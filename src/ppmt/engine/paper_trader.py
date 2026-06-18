@@ -860,7 +860,8 @@ class PaperTrader:
 
         # Try to load existing Tries, or build new ones
         # v0.10.0: Load all 4 levels for GAP-1 4-level matching
-        all_tries = storage.load_all_tries(cfg.symbol)
+        # v0.40.4 FIX-1D: pass asset_class so N1/N2 load from cross-asset pools.
+        all_tries = storage.load_all_tries(cfg.symbol, asset_class=info.asset_class)
         trie_n1 = all_tries["n1"]
         trie_n2 = all_tries["n2"]
         trie_n3 = all_tries["n3"]
@@ -890,9 +891,14 @@ class PaperTrader:
                 fuzzy_threshold=fuzzy_threshold,
                 weight_profile=info.weight_profile,
             )
+            # FIX-1D: contribute to universal N1 + class N2 pools
+            engine.attach_storage(storage)
             engine.build(df, pattern_length=cfg.pattern_length)
-            trie_n1 = engine.trie_n1
-            trie_n2 = engine.trie_n2
+            # Reload N1/N2 from cross-asset pools (engine.trie_n1/2 are empty
+            # in storage mode)
+            all_tries = storage.load_all_tries(cfg.symbol, asset_class=info.asset_class)
+            trie_n1 = all_tries["n1"] or engine.trie_n1
+            trie_n2 = all_tries["n2"] or engine.trie_n2
             trie_n3 = engine.trie_n3
             trie_n4 = engine.trie_n4
             has_multi_level = True

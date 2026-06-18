@@ -482,7 +482,8 @@ class PortfolioRunner:
         fuzzy_threshold = token_profile.fuzzy_threshold if token_profile else 0.80
 
         # Load/build tries
-        all_tries = self.storage.load_all_tries(symbol)
+        # v0.40.4 FIX-1D: pass asset_class so N1/N2 load from cross-asset pools.
+        all_tries = self.storage.load_all_tries(symbol, asset_class=info.asset_class)
         trie_n1 = all_tries["n1"]
         trie_n2 = all_tries["n2"]
         trie_n3 = all_tries["n3"]
@@ -505,9 +506,13 @@ class PortfolioRunner:
                 fuzzy_threshold=fuzzy_threshold,
                 weight_profile=info.weight_profile,
             )
+            # FIX-1D: contribute to universal N1 + class N2 pools
+            ppmt_build.attach_storage(self.storage)
             ppmt_build.build(df, pattern_length=cfg.pattern_length)
-            trie_n1 = ppmt_build.trie_n1
-            trie_n2 = ppmt_build.trie_n2
+            # Reload N1/N2 from cross-asset pools
+            all_tries = self.storage.load_all_tries(symbol, asset_class=info.asset_class)
+            trie_n1 = all_tries["n1"] or ppmt_build.trie_n1
+            trie_n2 = all_tries["n2"] or ppmt_build.trie_n2
             trie_n3 = ppmt_build.trie_n3
             trie_n4 = ppmt_build.trie_n4
             has_multi_level = True

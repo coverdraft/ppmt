@@ -603,8 +603,9 @@ class RealtimeTrader:
         token_profile, cfg = self._setup_token_profile(cfg, info, storage, df)
 
         # Load or build tries (v0.11.0: all 4 levels)
+        # v0.40.4 FIX-1D: pass asset_class so N1/N2 load from cross-asset pools.
         from ppmt.engine.ppmt import PPMT
-        all_tries = storage.load_all_tries(cfg.symbol)
+        all_tries = storage.load_all_tries(cfg.symbol, asset_class=info.asset_class)
         trie_n1 = all_tries["n1"]
         trie_n2 = all_tries["n2"]
         trie_n3 = all_tries["n3"]
@@ -628,9 +629,14 @@ class RealtimeTrader:
                 fuzzy_threshold=token_profile.fuzzy_threshold if token_profile else 0.80,
                 weight_profile=info.weight_profile,
             )
+            # FIX-1D: contribute to universal N1 + class N2 pools
+            engine.attach_storage(storage)
             engine.build(df, pattern_length=cfg.pattern_length)
-            trie_n1 = engine.trie_n1
-            trie_n2 = engine.trie_n2
+            # Reload N1/N2 from cross-asset pools (engine.trie_n1/2 are empty
+            # in storage mode)
+            all_tries = storage.load_all_tries(cfg.symbol, asset_class=info.asset_class)
+            trie_n1 = all_tries["n1"] or engine.trie_n1
+            trie_n2 = all_tries["n2"] or engine.trie_n2
             trie_n3 = engine.trie_n3
             trie_n4 = engine.trie_n4
             has_multi_level = True
@@ -1973,8 +1979,9 @@ class RealtimeTrader:
         token_profile, cfg = self._setup_token_profile(cfg, info, storage)
 
         # Load tries (v0.12.0: all 4 levels)
+        # v0.40.4 FIX-1D: pass asset_class so N1/N2 load from cross-asset pools.
         from ppmt.engine.ppmt import PPMT
-        all_tries = storage.load_all_tries(cfg.symbol)
+        all_tries = storage.load_all_tries(cfg.symbol, asset_class=info.asset_class)
         trie_n1 = all_tries["n1"]
         trie_n2 = all_tries["n2"]
         trie_n3 = all_tries["n3"]

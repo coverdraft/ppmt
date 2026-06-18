@@ -26,6 +26,7 @@ from pydantic import BaseModel
 from ppmt.terminal.state import TerminalState, get_terminal_state
 from ppmt.data.storage import PPMTStorage
 from ppmt.data.collector import DataCollector
+from ppmt.data.classifier import AssetClassifier
 
 logger = logging.getLogger(__name__)
 
@@ -741,7 +742,9 @@ async def start_trading(req: StartTradingRequest) -> dict:
                 storage = PPMTStorage()
 
         # Step 2: Auto-build Trie if needed
-        all_tries = storage.load_all_tries(req.symbol)
+        # v0.40.4 FIX-1D: pass asset_class so N1/N2 load from shared cross-asset pools.
+        _info = AssetClassifier().classify(req.symbol)
+        all_tries = storage.load_all_tries(req.symbol, asset_class=_info.asset_class)
         if all_tries.get("n3") is None:
             logger.info(f"Auto-building Trie for {req.symbol} {req.timeframe}...")
             try:
@@ -750,16 +753,21 @@ async def start_trading(req: StartTradingRequest) -> dict:
                 if df is not None and not df.empty:
                     builder = PPMTBuilder(
                         symbol=req.symbol,
+                        asset_class=_info.asset_class,
                         sax_strategy="ohlcv",
                     )
-                    # Build all 4 levels in one call
+                    # v0.40.4 FIX-1D: attach storage so build() contributes each
+                    # observation to the universal N1 pool and the class-shared
+                    # N2 pool. Without this, N1/N2 stay empty in production and
+                    # 40% of the weighted confidence is wasted (see audit CAPA 1).
+                    builder.attach_storage(storage)
+                    # Build all 4 levels in one call (persists N1→universal,
+                    # N2→class pool, N3→per-symbol, N4→per-symbol+regime)
                     count = builder.build(df, pattern_length=5)
-                    logger.info(f"Built {count} patterns across all 4 trie levels")
-                    # Save each trie level individually
-                    for level_name, trie_obj in [("n1", builder.trie_n1), ("n2", builder.trie_n2), ("n3", builder.trie_n3), ("n4", builder.trie_n4)]:
-                        storage.save_trie(req.symbol, level_name, trie_obj)
-                        logger.info(f"Saved {level_name} trie: {trie_obj.pattern_count} patterns")
-                    all_tries = storage.load_all_tries(req.symbol)
+                    logger.info(f"Built {count} patterns; N1 universal + N2 class pools updated")
+                    # Reload via load_all_tries so N1/N2 are the cross-asset
+                    # pools (builder.trie_n1/trie_n2 are empty in storage mode).
+                    all_tries = storage.load_all_tries(req.symbol, asset_class=_info.asset_class)
                 else:
                     storage.close()
                     return {"ok": False, "error": f"No data available for {req.symbol} {req.timeframe}. Ingest failed."}
@@ -1704,7 +1712,9 @@ async def validate_token(req: ValidateRequest) -> dict:
                 storage = PPMTStorage()  # fallback: create a fresh instance
 
         # Step 2: Ensure trie exists
-        all_tries = storage.load_all_tries(req.symbol)
+        # v0.40.4 FIX-1D: pass asset_class so N1/N2 load from shared cross-asset pools.
+        _info = AssetClassifier().classify(req.symbol)
+        all_tries = storage.load_all_tries(req.symbol, asset_class=_info.asset_class)
         if all_tries.get("n3") is None:
             terminal_state.update_sync(
                 auto_setup_status={**_status_token,
@@ -1716,10 +1726,13 @@ async def validate_token(req: ValidateRequest) -> dict:
                 from ppmt.engine.ppmt import PPMT as PPMTBuilder
                 df = storage.load_ohlcv(req.symbol, req.timeframe)
                 if df is not None and not df.empty:
-                    builder = PPMTBuilder(symbol=req.symbol, sax_strategy="ohlcv")
+                    builder = PPMTBuilder(symbol=req.symbol, asset_class=_info.asset_class,
+                                          sax_strategy="ohlcv")
+                    # FIX-1D: contribute to universal N1 + class N2 pools
+                    builder.attach_storage(storage)
                     count = builder.build(df, pattern_length=5)
-                    for level_name, trie_obj in [("n1", builder.trie_n1), ("n2", builder.trie_n2), ("n3", builder.trie_n3), ("n4", builder.trie_n4)]:
-                        storage.save_trie(req.symbol, level_name, trie_obj)
+                    # No need to save_trie per level — build() already did it
+                    # to the universal/class/per-symbol/per-symbol+regime keys.
             except Exception as e:
                 storage.close()
                 return {"ok": False, "error": f"Build failed: {str(e)}"}
@@ -2846,16 +2859,20 @@ async def multi_tf_analysis(req: MultiTFRequest) -> dict:
                     pass
 
             # Ensure trie
-            all_tries = storage.load_all_tries(req.symbol)
+            # v0.40.4 FIX-1D: pass asset_class so N1/N2 load from shared pools.
+            _info_tf = AssetClassifier().classify(req.symbol)
+            all_tries = storage.load_all_tries(req.symbol, asset_class=_info_tf.asset_class)
             if all_tries.get("n3") is None:
                 try:
                     from ppmt.engine.ppmt import PPMT as PPMTBuilder
                     df = storage.load_ohlcv(req.symbol, tf)
                     if df is not None and not df.empty:
-                        builder = PPMTBuilder(symbol=req.symbol, sax_strategy="ohlcv")
+                        builder = PPMTBuilder(symbol=req.symbol, asset_class=_info_tf.asset_class,
+                                              sax_strategy="ohlcv")
+                        # FIX-1D: contribute to universal N1 + class N2 pools
+                        builder.attach_storage(storage)
                         builder.build(df, pattern_length=5)
-                        for level_name, trie_obj in [("n1", builder.trie_n1), ("n2", builder.trie_n2), ("n3", builder.trie_n3), ("n4", builder.trie_n4)]:
-                            storage.save_trie(req.symbol, level_name, trie_obj)
+                        # build() already persisted to all 4 storage keys
                 except Exception:
                     pass
 
