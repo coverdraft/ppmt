@@ -54,6 +54,7 @@ from ppmt.core.metadata import BlockLifecycleMetadata
 from ppmt.core.regime import RegimeDetector
 from ppmt.engine.weights import AdaptiveWeights, LevelStats, WEIGHT_PROFILES
 from ppmt.engine.signal import SignalGenerator, Signal, SignalType
+from ppmt.data.storage import UNIVERSAL_POOL_KEY, class_pool_key
 
 
 @dataclass
@@ -174,8 +175,40 @@ class PPMT:
         # the previous _detect_simple_regime static method.
         self.regime_detector = RegimeDetector()
 
+        # v0.40.3 FIX-1B: Optional storage reference for cross-asset pool
+        # contribution. When set via `attach_storage()`, every observation
+        # inserted during build() is also pushed to:
+        #   - universal N1 pool (storage key __UNIVERSAL__, level 'n1')
+        #   - class-shared N2 pool (storage key __CLASS_<asset_class>__, level 'n2')
+        # This realizes the original V3 design (PPMT_Technical_Document_V3.pdf
+        # §3.1-3.4) where N1 is a cross-asset safety net and N2 is the
+        # same-class competitive-advantage pool.
+        self._storage = None
+        # In-memory accumulation buffers — flushed to storage at the end of
+        # build() to amortize the cost of storage round-trips.
+        self._n1_buffer = PPMTTrie(name="universal_buffer")
+        self._n2_buffer = PPMTTrie(name=f"class_buffer:{asset_class}")
+
         # Statistics
         self._total_patterns_built = 0
+
+    def attach_storage(self, storage) -> None:
+        """
+        v0.40.3 FIX-1B: Attach a PPMTStorage instance for cross-asset pool
+        contribution. When attached, `build()` will push each observation
+        to the universal N1 pool and the class-shared N2 pool in addition
+        to the per-symbol N3 and per-symbol+regime N4. This is what makes
+        N1 truly universal (5M+ patterns from all assets, per V3 design)
+        and N2 truly class-shared (BTC ↔ ETH for blue_chip, etc.).
+
+        Without attachment, the engine operates in single-symbol mode
+        (v0.40.2 behavior): N1/N2 are structurally identical to N3, and
+        the cross-asset advantage does not materialize.
+        """
+        self._storage = storage
+        # (Re)initialize buffers in case attach_storage is called between builds
+        self._n1_buffer = PPMTTrie(name="universal_buffer")
+        self._n2_buffer = PPMTTrie(name=f"class_buffer:{self.asset_class}")
 
     @staticmethod
     def _infer_weight_profile(asset_class: str) -> str:
@@ -314,16 +347,19 @@ class PPMT:
             # inserted the SAME observation into all 4 tries → N1=N2=N3=N4
             # structurally (CAPA 1 audit #3).
             #
-            # AFTER: N1/N2/N3 still receive the observation (they remain
-            # structurally identical in single-symbol operation — that's
-            # by design: when multiple PPMT instances share tries via
-            # set_tries(), N1/N2/N3 are loaded from different storage
-            # pools and ARE differentiated at runtime). N4 receives the
-            # observation ONLY in the sub-trie for its regime. This makes
-            # N4 truly regime-specialized: a `ranging` query will not see
-            # observations made during `trending_up` and vice versa.
-            for trie in [self.trie_n1, self.trie_n2, self.trie_n3]:
-                trie.insert_with_observations(
+            # v0.40.3 FIX-1B: When a storage is attached, N1/N2 are NO LONGER
+            # inserted locally. Instead, the observation is accumulated in
+            # in-memory buffers (self._n1_buffer / self._n2_buffer) which are
+            # flushed to storage's cross-asset shared pools ONCE at the end of
+            # build(). The engine's trie_n1 / trie_n2 stay empty in this mode —
+            # they get populated at match-time via set_tries() from storage.
+            #
+            # When no storage is attached (single-symbol backwards-compat mode),
+            # N1/N2 receive the observation locally — same as v0.40.2 — and
+            # remain structurally identical to N3.
+            if self._storage is not None:
+                # FIX-1B: accumulate in in-memory buffers (fast)
+                self._n1_buffer.insert_with_observations(
                     symbols=pattern,
                     move_pct=move_pct,
                     drawdown_pct=drawdown_pct,
@@ -333,6 +369,41 @@ class PPMT:
                     next_symbol=next_sym,
                     regime=regime,
                 )
+                self._n2_buffer.insert_with_observations(
+                    symbols=pattern,
+                    move_pct=move_pct,
+                    drawdown_pct=drawdown_pct,
+                    favorable_pct=favorable_pct,
+                    duration=duration,
+                    won=won,
+                    next_symbol=next_sym,
+                    regime=regime,
+                )
+                # N3 (per-symbol) — local insert only
+                self.trie_n3.insert_with_observations(
+                    symbols=pattern,
+                    move_pct=move_pct,
+                    drawdown_pct=drawdown_pct,
+                    favorable_pct=favorable_pct,
+                    duration=duration,
+                    won=won,
+                    next_symbol=next_sym,
+                    regime=regime,
+                )
+            else:
+                # Backwards-compat (no storage): N1/N2/N3 all receive locally.
+                # They remain structurally identical in single-symbol op.
+                for trie in [self.trie_n1, self.trie_n2, self.trie_n3]:
+                    trie.insert_with_observations(
+                        symbols=pattern,
+                        move_pct=move_pct,
+                        drawdown_pct=drawdown_pct,
+                        favorable_pct=favorable_pct,
+                        duration=duration,
+                        won=won,
+                        next_symbol=next_sym,
+                        regime=regime,
+                    )
 
             # N4: insert into the regime-matched sub-trie only.
             # RegimePartitionedTrie.insert_with_observations routes via
@@ -351,6 +422,73 @@ class PPMT:
             count += 1
 
         self._total_patterns_built += count
+
+        # v0.40.3 FIX-1B: When storage is attached, flush the in-memory N1/N2
+        # buffers to the cross-asset shared pools (one storage round-trip per
+        # pool, not per observation). Also persist N3 (per-symbol) and N4
+        # (per-symbol+regime) so other PPMT instances can load them via
+        # load_all_tries(symbol, asset_class).
+        if self._storage is not None and count > 0:
+            # Load existing pools, merge buffers, save back.
+            def _top_regime(regime_dist) -> Optional[str]:
+                """Return the most common regime from a dict-like, or None."""
+                if not regime_dist:
+                    return None
+                # regime_dist may be a Counter or a plain dict
+                if hasattr(regime_dist, "most_common"):
+                    return regime_dist.most_common(1)[0][0]
+                # plain dict: sort by value
+                return max(regime_dist.items(), key=lambda x: x[1])[0]
+
+            # N1 universal pool
+            existing_n1 = self._storage.load_trie(UNIVERSAL_POOL_KEY, "n1")
+            if existing_n1 is None:
+                merged_n1 = self._n1_buffer
+            else:
+                # Merge: walk our buffer's patterns and insert into existing
+                merged_n1 = existing_n1
+                for pat, node in self._n1_buffer.get_all_patterns(min_count=1):
+                    merged_n1.insert_with_observations(
+                        symbols=list(pat),
+                        move_pct=node.metadata.expected_move_pct,
+                        drawdown_pct=node.metadata.max_drawdown_pct,
+                        favorable_pct=node.metadata.max_favorable_pct,
+                        duration=int(node.metadata.avg_duration),
+                        won=node.metadata.win_rate > 0.5,
+                        next_symbol=None,
+                        regime=_top_regime(node.metadata.regime_distribution),
+                    )
+            self._storage.save_trie(UNIVERSAL_POOL_KEY, "n1", merged_n1)
+
+            # N2 class-shared pool
+            pool_key = class_pool_key(self.asset_class)
+            existing_n2 = self._storage.load_trie(pool_key, "n2")
+            if existing_n2 is None:
+                merged_n2 = self._n2_buffer
+            else:
+                merged_n2 = existing_n2
+                for pat, node in self._n2_buffer.get_all_patterns(min_count=1):
+                    merged_n2.insert_with_observations(
+                        symbols=list(pat),
+                        move_pct=node.metadata.expected_move_pct,
+                        drawdown_pct=node.metadata.max_drawdown_pct,
+                        favorable_pct=node.metadata.max_favorable_pct,
+                        duration=int(node.metadata.avg_duration),
+                        won=node.metadata.win_rate > 0.5,
+                        next_symbol=None,
+                        regime=_top_regime(node.metadata.regime_distribution),
+                    )
+            self._storage.save_trie(pool_key, "n2", merged_n2)
+
+            # N3 (per-symbol) — persist local trie
+            self._storage.save_trie(self.symbol, "n3", self.trie_n3)
+            # N4 (per-symbol + regime) — persist RegimePartitionedTrie
+            self._storage.save_trie(self.symbol, "n4", self.trie_n4)
+
+            # Reset buffers for next build() call
+            self._n1_buffer = PPMTTrie(name="universal_buffer")
+            self._n2_buffer = PPMTTrie(name=f"class_buffer:{self.asset_class}")
+
         return count
 
     def match_raw(

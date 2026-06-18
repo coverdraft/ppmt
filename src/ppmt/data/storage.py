@@ -23,7 +23,25 @@ from typing import Optional
 
 import pandas as pd
 
-from ppmt.core.trie import PPMTTrie
+from ppmt.core.trie import PPMTTrie, RegimePartitionedTrie
+
+
+# v0.40.3 FIX-1C: Special storage keys for cross-asset pools.
+# N1 (universal) is shared across ALL symbols — saved under this pseudo-symbol.
+# N2 (class-shared) is shared across all symbols in the same asset_class —
+# saved under this prefix + asset_class name.
+UNIVERSAL_POOL_KEY = "__UNIVERSAL__"
+CLASS_POOL_PREFIX = "__CLASS_"
+
+
+def class_pool_key(asset_class: str) -> str:
+    """Build the storage key for an asset-class shared pool (N2)."""
+    return f"{CLASS_POOL_PREFIX}{asset_class}"
+
+
+def is_class_pool_key(symbol: str) -> bool:
+    """True if the storage key refers to a class-shared pool."""
+    return symbol.startswith(CLASS_POOL_PREFIX)
 
 
 DB_DIR = os.path.expanduser("~/.ppmt")
@@ -448,12 +466,20 @@ class PPMTStorage:
         """
         Load a serialized Trie from the database.
 
+        v0.40.3 FIX-1C: Polymorphic trie loading. The serialized payload may
+        be a plain PPMTTrie (keys: 'symbol', 'children', 'depth', 'metadata')
+        OR a RegimePartitionedTrie (keys: 'type', 'name', 'sub_tries', ...).
+        We dispatch on the `"type"` marker so N4 survives save/load cycles.
+        Before this fix, N4 (RegimePartitionedTrie) was silently degraded to
+        an empty PPMTTrie on every restart — see
+        docs/AUDIT_TRAZABILIDAD_CAPAS_1_2_3.md H2 (persistence bug).
+
         Args:
-            symbol: Trading pair
+            symbol: Trading pair (or special pool key: __UNIVERSAL__, __CLASS_*__)
             level: Trie level ('n1', 'n2', 'n3', 'n4')
 
         Returns:
-            PPMTTrie instance or None if not found.
+            PPMTTrie / RegimePartitionedTrie instance or None if not found.
         """
         cursor = self._ensure_conn().cursor()
         cursor.execute(
@@ -466,28 +492,136 @@ class PPMTStorage:
 
         try:
             data = json.loads(row[0])
+            # FIX-1C: dispatch on type marker
+            if isinstance(data, dict) and data.get("type") == "regime_partitioned":
+                return RegimePartitionedTrie.from_dict(data)
             return PPMTTrie.from_dict(data)
         except (json.JSONDecodeError, KeyError):
             return None
 
-    def load_all_tries(self, symbol: str) -> dict[str, Optional[PPMTTrie]]:
+    def load_all_tries(
+        self,
+        symbol: str,
+        asset_class: Optional[str] = None,
+    ) -> dict[str, Optional[PPMTTrie]]:
         """
         Load all 4 trie levels for a symbol.
 
         v0.10.0: Convenience method for PaperTrader 4-level integration.
+        v0.40.3 FIX-1B: When `asset_class` is provided, N1 is loaded from the
+        universal pool (`__UNIVERSAL__`, shared across all symbols) and N2 is
+        loaded from the class-shared pool (`__CLASS_<asset_class>__`, shared
+        across all symbols in the same class). N3 and N4 remain per-symbol.
+        This matches the original V3 design (PPMT_Technical_Document_V3.pdf
+        §3.1-3.4) where N1 is the universal safety-net and N2 is the
+        competitive-advantage class pool.
+
+        When `asset_class` is None (backwards compatibility), N1/N2 are loaded
+        from the symbol's own storage key — the v0.40.2 behavior. This is
+        kept so existing callers don't break, but new callers should always
+        pass asset_class.
 
         Args:
             symbol: Trading pair
+            asset_class: Optional asset class ('blue_chip', 'large_cap',
+                'mid_cap', 'defi', 'meme', 'new_launch'). When provided,
+                N1/N2 load from shared pools.
 
         Returns:
             Dict with keys 'n1', 'n2', 'n3', 'n4' mapping to PPMTTrie or None.
         """
+        if asset_class is not None:
+            # FIX-1B: shared pools for N1 (universal) and N2 (class)
+            n1_symbol = UNIVERSAL_POOL_KEY
+            n2_symbol = class_pool_key(asset_class)
+        else:
+            # Backwards-compat: per-symbol N1/N2 (pre-FIX-1B behavior)
+            n1_symbol = symbol
+            n2_symbol = symbol
+
         return {
-            "n1": self.load_trie(symbol, "n1"),
-            "n2": self.load_trie(symbol, "n2"),
+            "n1": self.load_trie(n1_symbol, "n1"),
+            "n2": self.load_trie(n2_symbol, "n2"),
             "n3": self.load_trie(symbol, "n3"),
             "n4": self.load_trie(symbol, "n4"),
         }
+
+    def add_observation_to_universal_n1(
+        self,
+        symbols: list[str],
+        move_pct: float = 0.0,
+        drawdown_pct: float = 0.0,
+        favorable_pct: float = 0.0,
+        duration: int = 0,
+        won: bool = False,
+        next_symbol: Optional[str] = None,
+        regime: Optional[str] = None,
+        regime_confidence: Optional[float] = None,
+    ) -> None:
+        """
+        v0.40.3 FIX-1B: Add a single observation to the universal N1 pool.
+
+        The universal pool is shared across ALL symbols (storage key
+        `__UNIVERSAL__`). Used by PPMT.build() to contribute each new
+        observation to the cross-asset safety net so that even brand-new
+        symbols with no own history have N1 patterns to match against.
+
+        Idempotent: if the pattern already exists, metadata is updated
+        incrementally (same as PPMTTrie.insert_with_observations).
+        """
+        trie = self.load_trie(UNIVERSAL_POOL_KEY, "n1") or PPMTTrie(name="universal")
+        trie.insert_with_observations(
+            symbols=symbols,
+            move_pct=move_pct,
+            drawdown_pct=drawdown_pct,
+            favorable_pct=favorable_pct,
+            duration=duration,
+            won=won,
+            next_symbol=next_symbol,
+            regime=regime,
+            regime_confidence=regime_confidence,
+        )
+        self.save_trie(UNIVERSAL_POOL_KEY, "n1", trie)
+
+    def add_observation_to_class_n2(
+        self,
+        asset_class: str,
+        symbols: list[str],
+        move_pct: float = 0.0,
+        drawdown_pct: float = 0.0,
+        favorable_pct: float = 0.0,
+        duration: int = 0,
+        won: bool = False,
+        next_symbol: Optional[str] = None,
+        regime: Optional[str] = None,
+        regime_confidence: Optional[float] = None,
+    ) -> None:
+        """
+        v0.40.3 FIX-1B: Add a single observation to the class-shared N2 pool.
+
+        The class pool is shared across all symbols in the same asset_class
+        (storage key `__CLASS_<asset_class>__`). Used by PPMT.build() to
+        contribute each new observation so the "competitive advantage" of
+        the V3 design (patterns transfer between same-class assets —
+        BTC ↔ ETH for blue_chip, PEPE ↔ WIF for meme) is finally realized.
+
+        Idempotent: if the pattern already exists, metadata is updated
+        incrementally.
+        """
+        pool_key = class_pool_key(asset_class)
+        trie = self.load_trie(pool_key, "n2") or PPMTTrie(name=f"class:{asset_class}")
+        trie.insert_with_observations(
+            symbols=symbols,
+            move_pct=move_pct,
+            drawdown_pct=drawdown_pct,
+            favorable_pct=favorable_pct,
+            duration=duration,
+            won=won,
+            next_symbol=next_symbol,
+            regime=regime,
+            regime_confidence=regime_confidence,
+        )
+        self.save_trie(pool_key, "n2", trie)
 
     # === Engine State ===
 
