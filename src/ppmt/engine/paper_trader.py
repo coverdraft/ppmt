@@ -188,7 +188,8 @@ def _record_observation(
             drawdown_pct=min(trade.actual_move_pct, 0) if trade.actual_move_pct < 0 else 0,
             favorable_pct=max(trade.actual_move_pct, 0) if trade.actual_move_pct > 0 else 0,
             duration=max(1, exit_sym_idx - trade.entry_sym_idx) if trade.entry_sym_idx > 0 else 1,
-            won=trade.pnl_pct > 0,
+            # v0.40.23 (P7-FaseC): outcome-SL/TP based won (see update above).
+            won=(trade.exit_reason == "take_profit"),
             next_symbol=next_symbol,
             regime=trade.regime if trade.regime else None,
             regime_confidence=trade.regime_confidence if trade.regime_confidence > 0 else None,
@@ -201,7 +202,13 @@ def _record_observation(
 
     # 2. Update the node's metadata with the actual trade outcome
     duration = max(1, exit_sym_idx - trade.entry_sym_idx) if trade.entry_sym_idx > 0 else 1
-    won = trade.pnl_pct > 0
+    # v0.40.23 (P7-FaseC): `won` is now outcome-SL/TP based. The trade already
+    # knows its exit_reason, so we just map it: take_profit → win, anything else
+    # (stop_loss / trailing_stop / pattern_break / end_of_data / catastrophic_stop)
+    # → loss. This replaces the legacy `trade.pnl_pct > 0` check which conflated
+    # "barely positive exit" with "TP touched first" — the two are very different:
+    # a trade that grazed SL before recovering to +0.01% PnL is NOT a clean win.
+    won = (trade.exit_reason == "take_profit")
 
     # Drawdown: SL distance is max drawdown estimate
     if trade.sl_price > 0 and trade.entry_price > 0:

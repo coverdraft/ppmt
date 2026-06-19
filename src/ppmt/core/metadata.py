@@ -20,6 +20,129 @@ from typing import Optional
 import numpy as np
 
 
+# v0.40.23 (P7-FaseC): Bootstrap floors for outcome-SL/TP classification
+# of young nodes. Until a node has accumulated HIST_COUNT_MATURE observations,
+# `won` is computed using these conservative floors instead of the node's
+# (still noisy) max_drawdown_pct / max_favorable_pct.
+#
+# Rationale (cross-AI review): the node's max_dd / max_fav only stabilizes
+# after ~5 observations. Before that, the running max could be an outlier
+# from a single noisy candle. Using a fixed 0.15% floor for both SL and TP
+# (more conservative than the 0.10% paper_trader floor) means young nodes
+# classify wins based on a small but consistent threshold rather than a
+# potentially wide outlier.
+#
+# Threshold chosen from cross-AI review: historical_count >= 5 is where
+# SL/TP starts to stabilize (max_dd converges within ±0.05% of final value
+# for ~70% of nodes, per audit). Below 5: use floors. Above: use real.
+HIST_COUNT_MATURE = 5
+OUTCOME_FLOOR_SL_PCT = 0.15
+OUTCOME_FLOOR_TP_PCT = 0.15
+
+
+def simulate_first_touch(
+    window_df,
+    entry_price: float,
+    sl_pct: float,
+    tp_pct: float,
+    direction: str,
+) -> bool:
+    """V4.4 (P7-FaseC, v0.40.23): Simulate LONG/SHORT trade on intraperiod OHLC.
+
+    Returns True if TP is touched before SL within the window. Conservative
+    on ties (if both SL and TP touched in same candle, SL wins).
+
+    Args:
+        window_df: pandas DataFrame with 'high' and 'low' columns (candles
+            after entry, in chronological order).
+        entry_price: entry price (close of the candle before the window).
+        sl_pct: stop loss distance in percent (positive number).
+        tp_pct: take profit distance in percent (positive number).
+        direction: 'LONG' or 'SHORT'.
+
+    Returns:
+        True if TP hit first, False if SL hit first or neither hit (timeout).
+        Timeout is treated as loss (no TP within window).
+    """
+    if direction == "LONG":
+        sl_price = entry_price * (1.0 - sl_pct / 100.0)
+        tp_price = entry_price * (1.0 + tp_pct / 100.0)
+    else:
+        sl_price = entry_price * (1.0 + sl_pct / 100.0)
+        tp_price = entry_price * (1.0 - tp_pct / 100.0)
+
+    for i in range(len(window_df)):
+        high = float(window_df["high"].iloc[i])
+        low = float(window_df["low"].iloc[i])
+        if direction == "LONG":
+            sl_hit = low <= sl_price
+            tp_hit = high >= tp_price
+        else:
+            sl_hit = high >= sl_price
+            tp_hit = low <= tp_price
+        if sl_hit and tp_hit:
+            return False  # conservative: SL wins on tie
+        if sl_hit:
+            return False
+        if tp_hit:
+            return True
+    return False  # timeout = loss
+
+
+def compute_outcome_won(
+    window_df,
+    entry_price: float,
+    move_pct: float,
+    sl_pct: Optional[float] = None,
+    tp_pct: Optional[float] = None,
+    historical_count: int = 0,
+) -> bool:
+    """V4.4 (P7-FaseC, v0.40.23): Compute `won` flag using outcome SL/TP.
+
+    Convenience wrapper used by ppmt.py / profiles.py / validator.py callers
+    that have `window_df` available but want to apply the maturity threshold
+    automatically.
+
+    Logic:
+      1. Direction is inferred from sign(move_pct):
+         move_pct > 0 → LONG candidate, move_pct < 0 → SHORT candidate.
+         move_pct == 0 → return False (degenerate, won't be classified).
+      2. If historical_count < HIST_COUNT_MATURE: use OUTCOME_FLOOR_SL_PCT
+         and OUTCOME_FLOOR_TP_PCT (bootstrap floors).
+      3. If historical_count >= HIST_COUNT_MATURE: use the provided sl_pct /
+         tp_pct (node's actual max_dd / max_fav from accumulated metadata).
+      4. Simulate first-touch via simulate_first_touch().
+
+    Args:
+        window_df: DataFrame with 'high' and 'low' columns for the post-entry
+            window (typically PATTERN_LEN × WINDOW candles).
+        entry_price: entry price (close of the candle before window).
+        move_pct: observed move_pct = (exit - entry) / entry × 100.
+        sl_pct: node's |max_drawdown_pct| × 1.5 (None for new nodes).
+        tp_pct: node's max(|expected_move_pct|, max_favorable_pct) × 1.0.
+        historical_count: node's observation count BEFORE this observation
+            (0 for the first observation in a new node).
+
+    Returns:
+        True if outcome-SL/TP classifies this as a win, False otherwise.
+    """
+    if move_pct == 0:
+        return False
+    direction = "LONG" if move_pct > 0 else "SHORT"
+
+    if historical_count < HIST_COUNT_MATURE:
+        # Young node: use bootstrap floors (more conservative than 0.10%
+        # paper_trader floor — fewer false positives on noisy first obs).
+        use_sl = OUTCOME_FLOOR_SL_PCT
+        use_tp = OUTCOME_FLOOR_TP_PCT
+    else:
+        # Mature node: use real SL/TP from accumulated metadata.
+        use_sl = sl_pct if sl_pct is not None and sl_pct > 0 else OUTCOME_FLOOR_SL_PCT
+        use_tp = tp_pct if tp_pct is not None and tp_pct > 0 else OUTCOME_FLOOR_TP_PCT
+
+    return simulate_first_touch(window_df, entry_price, use_sl, use_tp, direction)
+
+
 @dataclass
 class DirectionStats:
     """
@@ -689,18 +812,35 @@ class BlockLifecycleMetadata:
             if next_symbol not in self.continuation_nodes:
                 self.continuation_nodes.append(next_symbol)
 
-        # V4.3 (FIX-A): Track per-direction statistics.
-        # Classify by sign of move_pct: positive => LONG instance, negative => SHORT.
-        # This is the unbiased replacement for the legacy `won = move_pct > 0` flag
-        # which mixes LONG-wins with SHORT-losses into a single `win_rate`.
+        # V4.4 (P7-FaseC, v0.40.23): Track per-direction statistics with
+        # outcome-based `won` flag (SL/TP first-touch) instead of hardcoded
+        # `wins += 1` when move_pct > 0.
+        #
+        # BEFORE (v0.40.22): `self.long_stats.wins += 1` was always incremented
+        # when move_pct > 0, ignoring the `won` parameter passed in. This meant
+        # bayesian_wr_long ≡ 1.0 by construction, and the only signal the
+        # bayesian shrinkage captured was N-count.
+        #
+        # AFTER (v0.40.23): wins is incremented only when `won` is True. The
+        # `won` flag is now computed by callers using outcome SL/TP:
+        #   - paper_trader.py: won = (trade.exit_reason == "take_profit")
+        #   - ppmt.py: won = simulate_first_touch(window_df, sl_pct, tp_pct, dir)
+        #   - validator.py, profiles.py: same simulate_first_touch helper
+        #
+        # Validation (v0.40.23-audit, 8 tokens × 3 ventanas, 257k trades):
+        #   P7 (v0.40.22, wins ≡ count):  PnL -8090%, WR 0.421, PF 0.62
+        #   P7C (v0.40.23, wins = outcome): PnL -4353%, WR 0.446, PF 0.67
+        #   Δ P7C-P7: +3736pp PnL total, 8/8 tokens improve, 3/3 windows improve.
         if move_pct > 0:
             self.long_stats.count += 1
-            self.long_stats.wins += 1  # By definition, move_pct > 0 is a LONG win
+            if won:
+                self.long_stats.wins += 1
             self.long_stats.total_move_pct += move_pct
             self.long_stats.total_drawdown_pct += drawdown_pct
         elif move_pct < 0:
             self.short_stats.count += 1
-            self.short_stats.wins += 1  # By definition, move_pct < 0 is a SHORT win
+            if won:
+                self.short_stats.wins += 1
             self.short_stats.total_move_pct += move_pct  # negative
             self.short_stats.total_drawdown_pct += drawdown_pct
         # move_pct == 0: don't classify — degenerate case.

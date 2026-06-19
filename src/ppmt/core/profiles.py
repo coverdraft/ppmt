@@ -43,6 +43,7 @@ import pandas as pd
 
 from ppmt.core.sax import SAXEncoder
 from ppmt.core.trie import PPMTTrie
+from ppmt.core.metadata import compute_outcome_won
 
 
 # === Timeframe-Adaptive Alpha Defaults ===
@@ -510,7 +511,18 @@ class CalibrationEngine:
             favorable_pct = ((high - entry_price) / entry_price) * 100.0
 
             duration = len(window_df)
-            won = move_pct > 0
+            # v0.40.23 (P7-FaseC): outcome-SL/TP based `won`. During calibration
+            # build we don't track an existing node's historical_count (the trie
+            # is being built fresh), so we pass historical_count=0 → the helper
+            # uses bootstrap floors (0.15%). This is the conservative choice:
+            # calibration patterns tend to be young (low N), and using real
+            # SL/TP from a still-unstable max_dd/max_fav would inject noise.
+            won = compute_outcome_won(
+                window_df=window_df,
+                entry_price=entry_price,
+                move_pct=move_pct,
+                historical_count=0,
+            )
 
             trie.insert_with_observations(
                 symbols=pattern,
@@ -943,7 +955,18 @@ class TradingCalibrationEngine:
             favorable_pct = ((high - entry_price) / entry_price) * 100.0
 
             duration = len(window_df)
-            won = move_pct > 0
+            # v0.40.23 (P7-FaseC): outcome-SL/TP based `won`. During calibration
+            # build we don't track an existing node's historical_count (the trie
+            # is being built fresh), so we pass historical_count=0 → the helper
+            # uses bootstrap floors (0.15%). This is the conservative choice:
+            # calibration patterns tend to be young (low N), and using real
+            # SL/TP from a still-unstable max_dd/max_fav would inject noise.
+            won = compute_outcome_won(
+                window_df=window_df,
+                entry_price=entry_price,
+                move_pct=move_pct,
+                historical_count=0,
+            )
 
             trie.insert_with_observations(
                 symbols=pattern,

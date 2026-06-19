@@ -745,6 +745,12 @@ class ValidationEngine:
                 pnl_pct = ((entry_price - exit_price) / entry_price) * 100.0 * cfg.position_size_pct
 
             won = bool(pnl_pct > 0)
+            # NOTE (v0.40.23): This `won` is used for validator reporting
+            # (win_rate stats), NOT for trie metadata. It intentionally stays
+            # `pnl_pct > 0` because the validator answers "was this trade
+            # profitable?" — different question from "did TP touch before SL?".
+            # The trie-building callers (ppmt.py, paper_trader.py, profiles.py)
+            # use outcome-SL/TP based `won` via compute_outcome_won().
 
             # R:R computation from price window
             window_df = price_df.iloc[entry_candle:exit_candle]
