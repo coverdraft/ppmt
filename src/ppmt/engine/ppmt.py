@@ -761,19 +761,28 @@ class PPMT:
             if existing_n1 is None:
                 merged_n1 = self._n1_buffer
             else:
-                # Merge: walk our buffer's patterns and insert into existing
+                # Merge: walk our buffer's patterns and insert into existing.
+                # CRITICAL FIX: Insert historical_count observations (not just 1)
+                # to preserve the observation frequency from the buffer.
+                # Without this, a pattern observed 50 times in the buffer
+                # only contributes 1 observation to the pool, destroying
+                # Bayesian confidence.
                 merged_n1 = existing_n1
                 for pat, node in self._n1_buffer.get_all_patterns(min_count=1):
-                    merged_n1.insert_with_observations(
-                        symbols=list(pat),
-                        move_pct=node.metadata.expected_move_pct,
-                        drawdown_pct=node.metadata.max_drawdown_pct,
-                        favorable_pct=node.metadata.max_favorable_pct,
-                        duration=int(node.metadata.avg_duration),
-                        won=node.metadata.win_rate > 0.5,
-                        next_symbol=None,
-                        regime=_top_regime(node.metadata.regime_distribution),
-                    )
+                    meta = node.metadata
+                    n_obs = meta.historical_count
+                    n_wins = int(meta.win_rate * n_obs)
+                    for obs_i in range(n_obs):
+                        merged_n1.insert_with_observations(
+                            symbols=list(pat),
+                            move_pct=meta.expected_move_pct,
+                            drawdown_pct=meta.max_drawdown_pct,
+                            favorable_pct=meta.max_favorable_pct,
+                            duration=int(meta.avg_duration),
+                            won=obs_i < n_wins,  # Distribute wins first
+                            next_symbol=None,
+                            regime=_top_regime(meta.regime_distribution),
+                        )
             self._storage.save_trie(UNIVERSAL_POOL_KEY, "n1", merged_n1)
 
             # N2 class-shared pool
@@ -782,18 +791,23 @@ class PPMT:
             if existing_n2 is None:
                 merged_n2 = self._n2_buffer
             else:
+                # CRITICAL FIX: Same as N1 — preserve observation counts
                 merged_n2 = existing_n2
                 for pat, node in self._n2_buffer.get_all_patterns(min_count=1):
-                    merged_n2.insert_with_observations(
-                        symbols=list(pat),
-                        move_pct=node.metadata.expected_move_pct,
-                        drawdown_pct=node.metadata.max_drawdown_pct,
-                        favorable_pct=node.metadata.max_favorable_pct,
-                        duration=int(node.metadata.avg_duration),
-                        won=node.metadata.win_rate > 0.5,
-                        next_symbol=None,
-                        regime=_top_regime(node.metadata.regime_distribution),
-                    )
+                    meta = node.metadata
+                    n_obs = meta.historical_count
+                    n_wins = int(meta.win_rate * n_obs)
+                    for obs_i in range(n_obs):
+                        merged_n2.insert_with_observations(
+                            symbols=list(pat),
+                            move_pct=meta.expected_move_pct,
+                            drawdown_pct=meta.max_drawdown_pct,
+                            favorable_pct=meta.max_favorable_pct,
+                            duration=int(meta.avg_duration),
+                            won=obs_i < n_wins,
+                            next_symbol=None,
+                            regime=_top_regime(meta.regime_distribution),
+                        )
             self._storage.save_trie(pool_key, "n2", merged_n2)
 
             # N3 (per-symbol) — persist local trie

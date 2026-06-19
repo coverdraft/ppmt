@@ -27,7 +27,7 @@ TIMEFRAMES = ["1m", "5m", "15m"]
 
 # Binance kline limits
 MAX_CANDLES_PER_REQUEST = 1000  # Binance limit
-REQUEST_DELAY_SECONDS = 0.5  # Rate limiting
+REQUEST_DELAY_SECONDS = 1.0  # Rate limiting (conservative for massive downloads)
 
 
 class BulkDownloader:
@@ -56,7 +56,8 @@ class BulkDownloader:
         return self._exchange_obj
     
     def download_token(self, symbol: str, timeframe: str, 
-                       days: int = 90) -> pd.DataFrame:
+                       days: int = 90,
+                       request_delay: float = None) -> pd.DataFrame:
         """Download OHLCV data for a single token/timeframe.
         
         Uses paginated requests to get all data within the date range.
@@ -91,7 +92,7 @@ class BulkDownloader:
                 current_start = last_ts + 1
                 
                 # Rate limiting
-                time.sleep(REQUEST_DELAY_SECONDS)
+                time.sleep(request_delay if request_delay is not None else REQUEST_DELAY_SECONDS)
                 
             except Exception as e:
                 print(f"  Error fetching {symbol} {timeframe}: {e}")
@@ -110,7 +111,8 @@ class BulkDownloader:
     def download_all(self, days: int = 90, 
                      tokens: dict = None,
                      timeframes: list = None,
-                     storage = None) -> dict:
+                     storage = None,
+                     request_delay: float = None) -> dict:
         """Download all tokens and store in PPMT database.
         
         Args:
@@ -146,7 +148,7 @@ class BulkDownloader:
                     print(f"Downloading {symbol} {tf} ({asset_class})...")
                     
                     try:
-                        df = self.download_token(symbol, tf, days)
+                        df = self.download_token(symbol, tf, days, request_delay=request_delay)
                         if len(df) > 0:
                             stats['total_downloaded'] += 1
                             stats['total_rows'] += len(df)
@@ -168,7 +170,7 @@ class BulkDownloader:
                     except Exception as e:
                         stats['errors'].append(f"{symbol} {tf}: {str(e)}")
                     
-                    time.sleep(REQUEST_DELAY_SECONDS)
+                    time.sleep(request_delay if request_delay is not None else REQUEST_DELAY_SECONDS)
         
         print(f"\n=== Download Summary ===")
         print(f"Requested: {stats['total_requested']}")
