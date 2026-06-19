@@ -58,7 +58,7 @@ async def _lifespan(app: FastAPI):
         logger.debug("Could not capture event loop on startup: %s", _e)
     yield
 
-app = FastAPI(title="PPMT Terminal", version="0.40.30", lifespan=_lifespan)
+app = FastAPI(title="PPMT Terminal", version="0.40.31", lifespan=_lifespan)
 
 # Global terminal state (shared with engine)
 terminal_state: TerminalState = get_terminal_state()
@@ -573,28 +573,41 @@ async def get_market_symbols(exchange: str = "mexc", limit: int = 500) -> dict:
             return {"ok": False, "error": f"Exchange '{exchange}' not found"}
         exc = ex()
         try:
-            markets = exc.load_markets()
-            # v0.32.5: Filter out leveraged/derivative tokens
-            usdt_pairs = []
-            for s in markets.keys():
-                if not s.endswith("/USDT"):
-                    continue
-                if not markets[s].get("active", True):
-                    continue
-
-                base = s[:-5]  # strip "/USDT"
-                # Skip leveraged tokens (MEXC: 1000X, 3L/3S, 5L/5S; Binance: UP/DOWN, BULL/BEAR)
-                if base.startswith(("1000", "10000", "1BULL", "3L", "3S", "5L", "5S")):
-                    continue
-                if base.endswith(("UP", "DOWN", "BULL", "BEAR")) and len(base) > 4:
-                    continue
-                usdt_pairs.append(s)
-
-            usdt_pairs.sort()
-
-            # v0.32.5: Return up to `limit` symbols (was hard-coded 100)
-            return {"ok": True, "exchange": exchange, "symbols": usdt_pairs[:limit],
-                    "total_available": len(usdt_pairs)}
+            # v0.40.31: Skip load_markets() — it times out on some networks.
+            # Use fetch_tickers() instead: lighter endpoint, returns same info.
+            # If fetch_tickers also fails, return a hardcoded fallback list.
+            try:
+                tickers = exc.fetch_tickers()
+                usdt_pairs = []
+                for s in tickers.keys():
+                    if not s.endswith("/USDT"):
+                        continue
+                    base = s[:-5]
+                    if base.startswith(("1000", "10000", "1BULL", "3L", "3S", "5L", "5S")):
+                        continue
+                    if base.endswith(("UP", "DOWN", "BULL", "BEAR")) and len(base) > 4:
+                        continue
+                    usdt_pairs.append(s)
+                usdt_pairs.sort()
+                return {"ok": True, "exchange": exchange, "symbols": usdt_pairs[:limit],
+                        "total_available": len(usdt_pairs)}
+            except Exception as e_tickers:
+                # Hardcoded fallback: top 50 USDT pairs (works on any exchange)
+                _fallback = [
+                    "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT",
+                    "ADA/USDT", "DOGE/USDT", "AVAX/USDT", "DOT/USDT", "LINK/USDT",
+                    "MATIC/USDT", "UNI/USDT", "ATOM/USDT", "LTC/USDT", "BCH/USDT",
+                    "NEAR/USDT", "APT/USDT", "FIL/USDT", "ARB/USDT", "OP/USDT",
+                    "INJ/USDT", "SUI/USDT", "TIA/USDT", "SEI/USDT", "RUNE/USDT",
+                    "AAVE/USDT", "MKR/USDT", "GRT/USDT", "SAND/USDT", "MANA/USDT",
+                    "AXS/USDT", "FTM/USDT", "ALGO/USDT", "EGLD/USDT", "FLOW/USDT",
+                    "THETA/USDT", "GALA/USDT", "IMX/USDT", "LDO/USDT", "STX/USDT",
+                    "PEPE/USDT", "WIF/USDT", "BONK/USDT", "FLOKI/USDT", "SHIB/USDT",
+                    "JUP/USDT", "PYTH/USDT", "RNDR/USDT", "FET/USDT", "GRT/USDT",
+                ]
+                return {"ok": True, "exchange": exchange, "symbols": _fallback[:limit],
+                        "total_available": len(_fallback), "fallback": True,
+                        "note": f"load_markets and fetch_tickers failed ({e_tickers}); using hardcoded top-50 list"}
         finally:
             if hasattr(exc, 'close'):
                 exc.close()

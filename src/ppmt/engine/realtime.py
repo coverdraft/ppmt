@@ -2480,20 +2480,52 @@ class RealtimeTrader:
                     if cfg.testnet:
                         poll_exchange.set_sandbox_mode(True)
 
-                    # v0.40.29: Auto-fallback Binance → MEXC. Some EU/LATAM
-                    # networks block api.binance.com (spot) outright, not just
-                    # fapi.binance.com (futures). Without this fallback, the
-                    # whole session dies with "Exchange connection failed:
-                    # binance GET https://api.binance.com/api/v3/exchangeInfo"
-                    # and the user sees STOPPED + Candles=0 forever.
+                    # v0.40.31: SKIP load_markets() entirely.
+                    # load_markets() descarga TODOS los mercados del exchange
+                    # (3260 para MEXC, 3600 para Binance). Algunas redes/ISPs
+                    # bloquean o timeoutean este endpoint masivo, pero permiten
+                    # endpoints individuales como /ticker/price y /klines.
+                    # Workaround: inyectar manualmente un market stub para
+                    # cfg.symbol. Verificamos con fetch_ticker que el símbolo
+                    # exista. Si OK, fetch_ohlcv va a funcionar.
                     _effective_exchange = cfg.exchange
-                    _fallback_used = False
                     try:
-                        await poll_exchange.load_markets()
-                        console.print(f"[green]Connected to {cfg.exchange} (REST polling)[/green]")
+                        # Verify symbol exists via fetch_ticker (lightweight,
+                        # 1 request instead of 3260)
+                        _ticker = await poll_exchange.fetch_ticker(cfg.symbol)
+                        _ticker_price = _ticker.get('last') or _ticker.get('close')
+                        if _ticker_price is None:
+                            raise RuntimeError(f"fetch_ticker returned no price for {cfg.symbol}")
+                        # Inject minimal market stub
+                        if cfg.symbol not in poll_exchange.markets:
+                            _base, _quote = cfg.symbol.split('/')
+                            poll_exchange.markets[cfg.symbol] = {
+                                'id': cfg.symbol.replace('/', ''),
+                                'symbol': cfg.symbol,
+                                'base': _base,
+                                'quote': _quote,
+                                'active': True,
+                                'type': 'spot',
+                                'spot': True,
+                                'future': False,
+                                'option': False,
+                                'contract': False,
+                                'precision': {'amount': 8, 'price': 8},
+                                'limits': {
+                                    'amount': {'min': 0.00000001, 'max': None},
+                                    'price': {'min': 0.00000001, 'max': None},
+                                    'cost': {'min': 0.00000001, 'max': None},
+                                },
+                            }
+                            poll_exchange.markets_by_id[cfg.symbol.replace('/', '')] = poll_exchange.markets[cfg.symbol]
+                        console.print(f"[green]Connected to {cfg.exchange} (REST polling, symbol-stub mode)[/green]")
+                        console.print(f"  {cfg.symbol} last price: ${_ticker_price}")
                     except Exception as e_primary:
+                        # If fetch_ticker fails too, try ONE fallback to MEXC
+                        # (covers the case where Binance is hardcoded but
+                        # symbol ticker itself doesn't work)
                         if cfg.exchange.lower() == 'binance':
-                            console.print(f"[yellow]Binance connection failed ({e_primary}). Falling back to MEXC…[/yellow]")
+                            console.print(f"[yellow]Binance ticker failed ({e_primary}). Falling back to MEXC…[/yellow]")
                             try:
                                 await poll_exchange.close()
                             except Exception:
@@ -2506,10 +2538,27 @@ class RealtimeTrader:
                                 if cfg.api_secret:
                                     _mexc_config['secret'] = cfg.api_secret
                                 poll_exchange = mexc_class(_mexc_config)
-                                await poll_exchange.load_markets()
+                                _ticker = await poll_exchange.fetch_ticker(cfg.symbol)
+                                _ticker_price = _ticker.get('last') or _ticker.get('close')
+                                if _ticker_price is None:
+                                    raise RuntimeError(f"MEXC fetch_ticker returned no price for {cfg.symbol}")
+                                if cfg.symbol not in poll_exchange.markets:
+                                    _base, _quote = cfg.symbol.split('/')
+                                    poll_exchange.markets[cfg.symbol] = {
+                                        'id': cfg.symbol.replace('/', ''),
+                                        'symbol': cfg.symbol,
+                                        'base': _base,
+                                        'quote': _quote,
+                                        'active': True,
+                                        'type': 'spot',
+                                        'spot': True,
+                                        'precision': {'amount': 8, 'price': 8},
+                                        'limits': {'amount': {'min': 1e-8}, 'price': {'min': 1e-8}, 'cost': {'min': 1e-8}},
+                                    }
+                                    poll_exchange.markets_by_id[cfg.symbol.replace('/', '')] = poll_exchange.markets[cfg.symbol]
                                 _effective_exchange = 'mexc'
-                                _fallback_used = True
-                                console.print(f"[green]Connected to MEXC (fallback from Binance) — REST polling[/green]")
+                                console.print(f"[green]Connected to MEXC (fallback from Binance) — REST polling, symbol-stub mode[/green]")
+                                console.print(f"  {cfg.symbol} last price: ${_ticker_price}")
                             except Exception as e_mexc:
                                 _err_msg = f"Exchange connection failed (binance + mexc fallback): binance={e_primary} | mexc={e_mexc}"
                                 console.print(f"[red]Failed to connect: binance={e_primary} | mexc fallback={e_mexc}[/red]")
@@ -2528,7 +2577,6 @@ class RealtimeTrader:
                                 storage.close()
                                 return result
                         else:
-                            # Non-binance exchange, no fallback. Report and exit.
                             _err_msg = f"Exchange connection failed: {e_primary}"
                             console.print(f"[red]Failed to connect: {e_primary}[/red]")
                             try:
