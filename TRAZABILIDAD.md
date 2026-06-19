@@ -8284,7 +8284,7 @@ Sobre 8 tokens × 3 ventanas × 100k velas:
 
 ### Commits
 
-- `XXX` fix(v0.40.23): FIX-A P7-FaseC — outcome-SL/TP wins integrado al motor
+- `8d9f5ec` fix(v0.40.23): FIX-A P7-FaseC — outcome-SL/TP wins integrado al motor
 - `d227018` docs(trazabilidad): v0.40.22 — FIX-A P7 integrado al motor
 - `ce544f1` fix(v0.40.22): FIX-A P7 — directional_edge policy integrada al motor
 - `b164a8c` audit(v0.40.22-audit): validación P1 vs P6 vs P7 — P7 ROBUSTO y SUPERIOR
