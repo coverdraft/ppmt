@@ -450,3 +450,31 @@ Stage Summary:
 - TRAZABILIDAD.md: entrada v0.40.24-paper-cleanup con contexto, cambios, verificación, rollback, próximos pasos
 - Universo paper_v1: BTC ETH SOL BNB XRP ADA AVAX DOT LINK LTC ATOM NEAR APT ARB OP INJ SUI TIA SEI TON PEPE SHIB DOGE WIF FLOKI
 - Pendiente: usuario ejecuta cleanup_config.sh en su Mac y arranca ppmt terminal con grupo paper_v1
+
+---
+Task ID: v0.40.24-terminal-cleanup
+Agent: main (z-ai)
+Task: Limpieza profunda de UI del terminal + multi-token allocation + saneamiento de TF y defaults
+
+Work Log:
+- Mapeado todo el index.html: 5 tabs, ~15 paneles, 4948 líneas
+- Discutido con usuario la filosofía: separar motor (señales) vs money mgmt (tamaño) vs portfolio (control) vs multi-token
+- Aplicados 8 cambios en src/ppmt/terminal/static/index.html:
+  1. Tab bar reordenada: Operaciones | Trading | Portfolio | Discovery | History (5 tabs visibles)
+  2. setupTimeframe: removidas 10m, 4h, 1d. Solo 1m, 5m (default), 15m, 30m, 1h
+  3. TOKEN GROUPS defaults: Límite=25, VolMin=50M, VolatMin=1.5% (checkeado)
+  4. Eliminado "What is validation?" explainer
+  5. Eliminados Last Trade y Recent Signals de Trading Control (redundantes con Live Feed)
+  6. Leverage: hint visual "(default 1x para paper)", botones 1x-10x conservados
+  7. Eliminado KILL SWITCH (peligroso para paper)
+  8. Child Nodes reformulado como Multi-Token Allocation + Add Token + nodeTF saneado
+- Actualizado scripts/cleanup_config.sh: timeframes cambiado a [1m, 5m, 15m, 30m, 1h]
+- Agregada entrada v0.40.24-terminal-cleanup a TRAZABILIDAD.md (88 líneas)
+- Pendiente: commit + push a GitHub
+
+Stage Summary:
+- index.html: 4948 → 4912 líneas (-36 líneas de ruido eliminadas)
+- UI ahora refleja filosofía profesional: motor genera señales, money mgmt decide tamaño, portfolio controla, multi-token gestiona N posiciones
+- Defaults saneados para paper trading en 1m/5m
+- KILL SWITCH removido (Stop All en Operaciones es suficiente)
+- Pendiente: usuario ejecuta git pull + cleanup_config.sh + reinicia terminal

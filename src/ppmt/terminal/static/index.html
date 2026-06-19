@@ -639,9 +639,9 @@ tr:hover td{background:rgba(95,168,245,.07)}
        'Pro' tabs accessible via the tab bar. -->
   <div class="tab-bar" role="tablist">
     <button class="tab-btn active" data-tab="operations" onclick="switchTab('operations')">Operaciones</button>
-    <button class="tab-btn" data-tab="discovery" onclick="switchTab('discovery')">Discovery</button>
     <button class="tab-btn" data-tab="trading" onclick="switchTab('trading')">Trading</button>
     <button class="tab-btn" data-tab="portfolio" onclick="switchTab('portfolio')">Portfolio</button>
+    <button class="tab-btn" data-tab="discovery" onclick="switchTab('discovery')">Discovery</button>
     <button class="tab-btn" data-tab="history" onclick="switchTab('history')">History &amp; Signals</button>
   </div>
 
@@ -768,14 +768,14 @@ tr:hover td{background:rgba(95,168,245,.07)}
         </div>
         <div class="form-row">
           <label>Límite</label>
-          <div class="field"><input type="number" id="groupLimit" value="50" step="5" min="1" max="500" style="width:60px"></div>
+          <div class="field"><input type="number" id="groupLimit" value="25" step="5" min="1" max="500" style="width:60px"></div>
           <label style="margin-left:6px">VolMin</label>
-          <div class="field"><input type="number" id="filterMinVolume" value="0" step="1000000" min="0" placeholder="USDT" style="width:90px"></div>
+          <div class="field"><input type="number" id="filterMinVolume" value="50000000" step="1000000" min="0" placeholder="USDT" style="width:90px"></div>
         </div>
         <div class="form-row" style="display:flex;flex-wrap:wrap;gap:6px;font-size:9px;color:var(--text2)">
           <label><input type="checkbox" id="filterStablecoins" checked style="margin-right:2px;accent-color:var(--accent)"> No stable</label>
-          <label><input type="checkbox" id="filterVolatility" style="margin-right:2px;accent-color:var(--accent)"> VolatMin</label>
-          <input type="number" id="filterMinVolatility" value="2" step="0.5" min="0" style="width:40px;font-size:9px">%
+          <label><input type="checkbox" id="filterVolatility" checked style="margin-right:2px;accent-color:var(--accent)"> VolatMin</label>
+          <input type="number" id="filterMinVolatility" value="1.5" step="0.5" min="0" style="width:40px;font-size:9px">%
         </div>
         <div style="display:flex;gap:4px;margin-top:4px">
           <button class="btn btn-primary btn-sm" style="flex:1" onclick="loadGroupIntoDropdown()">Load</button>
@@ -793,10 +793,6 @@ tr:hover td{background:rgba(95,168,245,.07)}
         <button class="panel-collapse" onclick="togglePanel('panelSetup')">-</button>
       </div>
       <div class="panel-body">
-        <!-- v0.36.2: What is validation? Explainer for the user -->
-        <div style="background:var(--bg);border:1px solid var(--border);border-radius:3px;padding:6px 8px;margin-bottom:8px;font-family:var(--mono);font-size:9px;color:var(--text3);line-height:1.4">
-          <strong style="color:var(--accent)">What is validation?</strong> Before trading a token, PPMT runs a backtest + Monte Carlo simulation to verify the strategy is profitable &amp; safe. <strong style="color:var(--text2)">PASS</strong> = tradeable. <strong style="color:var(--red)">FAIL</strong> = skip (win_rate &gt; 40%, profit_factor &gt; 0.8, risk_of_ruin &lt; 20%, min 5 trades). Use <em>Sweep</em> to validate many tokens at once.
-        </div>
         <div class="form-row">
           <label>Token</label>
           <div class="field"><select id="setupSymbol"></select></div>
@@ -806,13 +802,10 @@ tr:hover td{background:rgba(95,168,245,.07)}
           <div class="field">
             <select id="setupTimeframe">
               <option value="1m">1m</option>
-              <option value="5m">5m</option>
-              <option value="10m">10m</option>
+              <option value="5m" selected>5m</option>
               <option value="15m">15m</option>
               <option value="30m">30m</option>
-              <option value="1h" selected>1h</option>
-              <option value="4h">4h</option>
-              <option value="1d">1d</option>
+              <option value="1h">1h</option>
             </select>
           </div>
         </div>
@@ -963,7 +956,7 @@ tr:hover td{background:rgba(95,168,245,.07)}
         </div>
 
         <div style="margin-bottom:6px">
-          <div style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-bottom:3px;text-transform:uppercase;letter-spacing:.5px">Leverage</div>
+          <div style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-bottom:3px;text-transform:uppercase;letter-spacing:.5px">Leverage <span style="color:var(--text3);text-transform:none;font-size:8px">(default 1x para paper)</span></div>
           <div class="leverage-selector" id="leverageSelector">
             <button class="lev-btn active" data-lev="1" onclick="setLeverage(1)">1x</button>
             <button class="lev-btn" data-lev="2" onclick="setLeverage(2)">2x</button>
@@ -996,18 +989,6 @@ tr:hover td{background:rgba(95,168,245,.07)}
             <div class="stat-card"><div class="stat-label">Entropy</div><div class="stat-value" id="ctrlEntropy" style="font-size:10px">0.0b</div></div>
           </div>
         </div>
-
-        <!-- v0.35.0: Last Trade -->
-        <div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--border)">
-          <div style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-bottom:3px;text-transform:uppercase;letter-spacing:.5px">Last Trade</div>
-          <div id="ctrlLastTrade" style="font-family:var(--mono);font-size:9px;color:var(--text3)">No trades yet.</div>
-        </div>
-
-        <!-- v0.35.0: Last 5 Signals -->
-        <div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--border)">
-          <div style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-bottom:3px;text-transform:uppercase;letter-spacing:.5px">Recent Signals (last 5)</div>
-          <div id="ctrlRecentSignals" style="font-family:var(--mono);font-size:9px;color:var(--text3);max-height:80px;overflow-y:auto">No signals yet.</div>
-        </div>
       </div>
     </div>
 
@@ -1025,13 +1006,13 @@ tr:hover td{background:rgba(95,168,245,.07)}
           <div class="stat-card"><div class="stat-label">Active Nodes</div><div class="stat-value" id="mmNodeCount">0</div></div>
         </div>
 
-        <div style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-bottom:3px;text-transform:uppercase;letter-spacing:.5px">Child Nodes</div>
+        <div style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-bottom:3px;text-transform:uppercase;letter-spacing:.5px">Multi-Token Allocation <span style="color:var(--text3);text-transform:none;font-size:8px">(asigná capital a N tokens en paralelo)</span></div>
         <div id="nodesContainer">
-          <div class="empty-state">No nodes</div>
+          <div class="empty-state">No tokens asignados — agregá tokens para operar en paralelo</div>
         </div>
 
         <div style="margin-top:4px;padding-top:4px;border-top:1px solid var(--border)">
-          <div style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-bottom:3px;text-transform:uppercase;letter-spacing:.5px">Add Node</div>
+          <div style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-bottom:3px;text-transform:uppercase;letter-spacing:.5px">Add Token</div>
           <div class="form-row">
             <label>Symbol</label>
             <div class="field"><input type="text" id="nodeSymbol" placeholder="BTC/USDT"></div>
@@ -1040,9 +1021,11 @@ tr:hover td{background:rgba(95,168,245,.07)}
             <label>TF</label>
             <div class="field">
               <select id="nodeTF">
+                <option value="1m">1m</option>
+                <option value="5m" selected>5m</option>
+                <option value="15m">15m</option>
+                <option value="30m">30m</option>
                 <option value="1h">1h</option>
-                <option value="4h">4h</option>
-                <option value="1d">1d</option>
               </select>
             </div>
           </div>
@@ -1052,16 +1035,12 @@ tr:hover td{background:rgba(95,168,245,.07)}
           </div>
           <div class="form-row">
             <label>Lev</label>
-            <div class="field"><input type="number" id="nodeLev" value="1" min="1" max="20"></div>
+            <div class="field"><input type="number" id="nodeLev" value="1" min="1" max="10"></div>
           </div>
           <div style="display:flex;gap:3px;margin-top:3px">
             <button class="btn btn-ghost btn-sm" onclick="addNode()" style="flex:1">+ Add</button>
             <button class="btn btn-ghost btn-sm" onclick="redistributeCapital()" style="flex:1">Redistribute</button>
           </div>
-        </div>
-
-        <div style="margin-top:6px">
-          <button class="btn btn-danger btn-block btn-sm" id="killSwitchBtn" onclick="toggleKillSwitch()">KILL SWITCH: ACTIVATE</button>
         </div>
       </div>
     </div>

@@ -98,12 +98,14 @@ sax:
   window_size: 10
   strategy: ohlcv
 
-# Timeframes activos (info-only, el motor toma TF del CLI)
+# Timeframes activos — el usuario va a operar principalmente en 1m y 5m,
+# pero el motor debe soportar hasta 1h para análisis multi-TF.
 timeframes:
-  - 1h
-  - 15m
+  - 1m
   - 5m
-  - 4h
+  - 15m
+  - 30m
+  - 1h
 
 # Build settings
 build:

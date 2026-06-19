@@ -9031,3 +9031,91 @@ Ninguno está en `paper_v1`, así que no afecta el paper trading.
 ### Commits
 
 - `feat(v0.40.24-paper-cleanup): cleanup_config.sh + paper_v1 group + trazabilidad` (este commit)
+
+---
+
+## v0.40.24-terminal-cleanup — Limpieza profunda de UI del terminal
+
+**Fecha:** 2026-06-19
+**Tipo:** UI cleanup + multi-token professional layout
+**Estado:** ✅ Aplicado en repo
+
+### Contexto
+
+El usuario va a operar paper trading en 1m y 5m principalmente. La terminal
+tenía ruido visual y defaults inapropiados. Esta limpieza deja la UI
+profesional, sin perder funcionalidad crítica (Portfolio, multi-token,
+history).
+
+### Filosofía aplicada — separación de responsabilidades
+
+- **Motor PPMT** = genera señales (entry, SL, TP, direction)
+- **Money Management** = decide tamaño, posiciones simultáneas, asignación
+- **Portfolio** = control de exposición, equity curve, P&L
+- **Multi-token control** = gestionar N tokens en paralelo sin interferir
+
+### Cambios en `src/ppmt/terminal/static/index.html`
+
+#### 1. Tab bar reordenada
+```
+Antes:  Operaciones | Discovery | Trading
+Ahora:  Operaciones | Trading | Portfolio | Discovery | History & Signals
+```
+Portfolio y History vuelven a ser visibles (se habían ocultado en un intento
+previo). Trading pasa a segundo lugar porque es la tab de control activo.
+
+#### 2. TF dropdowns saneados
+- `setupTimeframe`: removidas opciones 10m, 4h, 1d. Solo 1m, 5m, 15m, 30m, 1h
+- Default cambiado de `1h` a `5m`
+- `nodeTF` (Multi-Token Allocation): mismas 5 opciones, default `5m`
+
+#### 3. TOKEN GROUPS defaults saneados
+| Campo | Antes | Ahora |
+|---|---|---|
+| Límite | 50 | 25 |
+| VolMin | 0 | 50,000,000 (50M USDT) |
+| VolatMin | 2% (descheckeado) | 1.5% (checkeado) |
+
+#### 4. Setup & Validation — explainer eliminado
+Removido el "What is validation?" box que ocupaba espacio visual sin aportar
+funcionalidad.
+
+#### 5. Trading Control — Last Trade y Recent Signals eliminados
+Eran redundantes con el Live Session Feed en la misma tab. El Live Feed ya
+muestra señales y trades en tiempo real.
+
+#### 6. Leverage — conservado hasta 10x con hint visual
+```
+Antes:  "Leverage" + botones 1x, 2x, 3x, 5x, 10x
+Ahora:  "Leverage (default 1x para paper)" + mismos botones
+```
+Default sigue en 1x. El usuario puede subir hasta 10x si quiere estresarlo.
+
+#### 7. Money Management — KILL SWITCH eliminado
+Removido el botón "KILL SWITCH: ACTIVATE" — peligroso para paper trading,
+puede cerrar todas las posiciones por accidente. Si se necesita frenar
+todo, se usa Stop All en Operaciones.
+
+#### 8. Money Management — Child Nodes reformulado como Multi-Token Allocation
+- Label cambiado: "Child Nodes" → "Multi-Token Allocation (asigná capital a N tokens en paralelo)"
+- Empty state: "No nodes" → "No tokens asignados — agregá tokens para operar en paralelo"
+- "Add Node" → "Add Token"
+- `nodeLev` max cambiado de 20 a 10 (consistente con leverage selector)
+
+### Cambios en `scripts/cleanup_config.sh`
+
+Timeframes activos en config.yaml cambiado de `[1h, 15m, 5m, 4h]` a
+`[1m, 5m, 15m, 30m, 1h]` — refleja que el usuario opera en 1m/5m pero el
+motor necesita soportar hasta 1h para análisis multi-TF.
+
+### Próximos pasos
+
+1. Usuario ejecuta `git pull origin main` en su Mac
+2. Ejecuta `bash scripts/cleanup_config.sh` para actualizar config.yaml
+3. Reinicia `ppmt terminal` para cargar el HTML actualizado
+4. Verifica que la UI carga limpia con 5 tabs y defaults correctos
+5. Carga grupo `paper_v1` y arranca paper trading
+
+### Commits
+
+- `feat(v0.40.24-terminal-cleanup): limpieza UI + multi-token + TF 1m-1h` (este commit)
