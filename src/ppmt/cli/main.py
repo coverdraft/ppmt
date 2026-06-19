@@ -23,6 +23,9 @@ from pathlib import Path
 import click
 import yaml
 from rich.console import Console
+
+# v0.40.24: leer versión del paquete en vez de hardcodearla
+from ppmt import __version__ as _PPMT_VERSION
 from rich.table import Table
 
 from ppmt.data.storage import PPMTStorage
@@ -47,7 +50,7 @@ def load_config() -> dict:
 
 
 @click.group()
-@click.version_option(version="0.40.11")
+@click.version_option(version=_PPMT_VERSION)
 def cli():
     """PPMT Terminal - Autonomous Pattern-Based Trading Terminal"""
     pass

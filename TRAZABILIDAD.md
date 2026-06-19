@@ -8776,3 +8776,105 @@ Si hay `money_mgr_*.json` por token, al arrancar v0.41.1:
    de ruido visual.
 2. Validar con usuario que el dashboard limpio se ve bien.
 3. Recién entonces arrancar FASE 2.
+
+---
+
+## v0.40.24-bis — Script rebuild_all.sh + fix version CLI
+
+**Fecha**: 2026-06-19
+
+### Motivo
+
+Cross-AI review señaló que el rebuild de tries es **MANDATORIO** antes
+de cualquier otra cosa — sin eso, v0.40.23/v0.40.24 son noop en vivo.
+Había que darle al usuario un script automático que recorra todos los
+symbols/timeframes trackeados y los rebuild.
+
+### Cambios
+
+**1. `scripts/rebuild_all.sh` (nuevo, 192 líneas)**
+
+Script bash portable (sin dependencia de `sqlite3` CLI, usa Python
+stdlib) que:
+- Verifica versión de ppmt ≥ 0.40.24 (aborta si no)
+- Hace backup automático de tries viejos a
+  `~/.ppmt/tries_backup_v04024_<timestamp>/`
+- Lista todos los (symbol, timeframe) en tabla `ohlcv`
+- Por cada uno: corre `ppmt build -s X -t Y`
+- Log completo a `~/.ppmt/rebuild_all_<timestamp>.log`
+- Resumen final con éxitos/fallos
+- Sugerencia de verificación con `ppmt stats` por cada symbol
+
+Opciones:
+- `--dry-run` — solo mostrar qué haría, sin ejecutar
+- `--symbol BTCUSDT` — solo un symbol
+- `--timeframe 1m` — solo un timeframe
+
+**2. `src/ppmt/cli/main.py` (fix)**
+
+El CLI tenía `@click.version_option(version="0.40.11")` hardcoded
+— siempre reportaba 0.40.11 sin importar la versión real del paquete.
+
+Cambiado a leer `__version__` del paquete:
+```python
+from ppmt import __version__ as _PPMT_VERSION
+@click.group()
+@click.version_option(version=_PPMT_VERSION)
+```
+
+Esto era crítico porque `rebuild_all.sh` verifica la versión antes
+de correr — sin este fix, el script abortaba siempre.
+
+### Test en env de desarrollo
+
+```
+$ ppmt ingest -s BTCUSDT -t 1h --days 7
+Fetched 168 candles
+
+$ bash scripts/rebuild_all.sh --dry-run
+PPMT version: 0.40.24
+Encontrados 1 (symbol, timeframe) para rebuild:
+  - BTCUSDT | 1h
+[DRY-RUN] No se ejecuta nada.
+
+$ bash scripts/rebuild_all.sh
+Building PPMT for BTCUSDT (168 candles)...
+  N1 Trie: 11 patterns
+  N2 Trie: 11 patterns
+  N3 Trie: 11 patterns
+  N4 Trie: 11 patterns
+✓ OK: BTCUSDT 1h
+
+RESUMEN:
+  Éxitos: 1
+  Fallos: 0
+```
+
+### Uso en la Mac del usuario
+
+```bash
+cd ~/ppmt
+git pull origin main
+pip install -e .
+
+# Rebuild todos los symbols/timeframes trackeados
+bash scripts/rebuild_all.sh
+
+# O solo uno
+bash scripts/rebuild_all.sh --symbol BTCUSDT --timeframe 1h
+
+# Verificar que aplicó la nueva semántica (wins/count debería ser 0.4-0.6)
+ppmt stats -s BTCUSDT -t 1h
+```
+
+### Próximos pasos
+
+1. **Usuario corre `rebuild_all.sh` en su Mac** — esto aplica v0.40.24
+   a los tries reales.
+2. **Arrancar `ppmt terminal`** y dejar paper trading 24-48h.
+3. **Validar señales más selectivas** (menos cantidad, mejor calidad).
+4. Recién entonces arrancar FASE 2 (cablear PortfolioManager).
+
+### Commits
+
+- (próximo commit) `feat(v0.40.24-bis): rebuild_all.sh + fix CLI version`
