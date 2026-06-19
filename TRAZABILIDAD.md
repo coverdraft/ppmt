@@ -7565,3 +7565,133 @@ direccional es la norma, no la excepción. La información existe en los datos.
   avg_move_long` vs `short_edge` — variante de P6 con peso por win_rate).
   Pendiente: decidir si se commitean, se refinan o se descartan en base a la
   decisión del usuario sobre P6.
+
+---
+
+## v0.40.21-audit (2026-06-19) — Validación P6 vs P1 con SL/TP y fees de producción
+
+**Contexto**: Tras v0.40.20-audit (política P6 = `dir = LONG si avg_move_long > |avg_move_short|`
+gana con +179pp PnL total en simulación hold-to-35-velas sin SL/TP ni fees), el usuario
+pidió validación completa antes de integrar: walk-forward con SL/TP de producción, fees
+incluidos, multi-token y multi-ventana.
+
+### Setup experimental
+
+- **Tokens**: 8 (BTC, ETH, SOL, BNB, XRP, LINK, PEPE, ARB)
+- **Ventanas**: 3 ventanas disjuntas sobre 100k velas 1m por token:
+  - W1: train[0:70k] test[70k:100k]
+  - W2: train[30k:100k] test[0:30k]
+  - W3: train[0:60k] test[60k:90k]
+- **Total**: 24 escenarios (token × ventana) × 2 políticas = 205,564 trades
+- **SL/TP**: `meta.compute_sl_tp()` (paper_trader.py:1654)
+  - SL = max_drawdown_pct × 1.5
+  - TP = max(|expected_move_pct|, max_favorable_pct) × 1.0
+  - Floors: SL_distance ≥ 0.1%, TP_distance ≥ 0.1%
+- **Fees**: Binance Futures taker 0.04% × 2 = 0.08% round-trip (restado de pnl_gross)
+- **Hold máximo**: 35 velas (= PATTERN_LEN × WINDOW); si no toca SL/TP → exit al close
+- **Config SAX**: α=4, W=7, PL=5 (idéntico a auditorías previas)
+
+### Resultados agregados (102,782 trades por política)
+
+| Política | N trades | WR | PF | Expectancy | PnL total | PnL medio | LONG WR | LONG PnL medio | SHORT WR | SHORT PnL medio |
+|---|---|---|---|---|---|---|---|---|---|---|
+| **P1** (current) | 102,782 | 0.4207 | 0.6115 | -0.0842% | -8650.45% | -0.0842% | 0.3831 | -0.0972 | 0.4556 | -0.0721 |
+| **P6** (majority_avg_move) | 102,782 | 0.4223 | 0.6220 | -0.0812% | -8346.41% | -0.0812% | 0.3835 | -0.0935 | 0.4583 | -0.0697 |
+
+**Delta P6 − P1**: PnL total **+304.04pp**, expectancy **+0.0030pp/trade**, PF **+0.011**
+
+### Resultados por token (3 ventanas agregadas)
+
+| Token | P1 PnL | P6 PnL | Δ PnL | P1 WR | P6 WR | Veredicto |
+|---|---|---|---|---|---|---|
+| ARBUSDT | -1157.48 | -987.89 | **+169.59** | 0.4617 | 0.4705 | MEJORA |
+| PEPEUSDT | -983.50 | -843.18 | **+140.32** | 0.4097 | 0.4188 | MEJORA |
+| SOLUSDT | -1140.36 | -1067.72 | +72.64 | 0.4241 | 0.4275 | MEJORA |
+| ETHUSDT | -1092.36 | -1052.89 | +39.47 | 0.4074 | 0.4099 | MEJORA |
+| BNBUSDT | -971.66 | -986.26 | -14.60 | 0.4182 | 0.4165 | EMPEORA |
+| BTCUSDT | -1087.93 | -1097.85 | -9.92 | 0.3895 | 0.3877 | EMPEORA |
+| LINKUSDT | -1096.32 | -1183.98 | -87.66 | 0.4415 | 0.4360 | EMPEORA |
+| XRPUSDT | -1120.83 | -1126.64 | -5.81 | 0.4132 | 0.4113 | EMPEORA |
+
+**Tokens mejorados**: 4/8 (50%) · **Tokens empeorados**: 4/8 (50%)
+
+La mejora agregada (+304pp) se concentra en **ARBUSDT + PEPEUSDT** (+309pp juntos),
+que compensan con creces las pérdidas en los otros 4 tokens.
+
+### Resultados por ventana (todos los tokens agregados)
+
+| Ventana | P1 PnL | P6 PnL | Δ | Veredicto |
+|---|---|---|---|---|
+| W1 | -2755.86 | -2633.20 | +122.66 | MEJORA |
+| W2 | -2888.95 | -2825.42 | +63.53 | MEJORA |
+| W3 | -3005.64 | -2887.79 | +117.85 | MEJORA |
+
+**Ventanas mejoradas**: 3/3 — consistencia temporal sólida.
+
+### Veredicto
+
+**PARCIAL: P6 mejora PnL total pero no consistentemente por token.**
+
+✅ **Favorable**:
+- PnL total: +304pp
+- 3/3 ventanas temporales mejoran (consistencia temporal)
+- Ambas direcciones (LONG y SHORT) mejoran marginalmente
+- WR, PF y expectancy mejoran en agregado
+
+❌ **Desfavorable**:
+- Solo 4/8 tokens mejoran — la mitad empeora
+- La mejora agregada depende de 2 tokens (ARB + PEPE = +309pp)
+- BTC y ETH (los más líquidos/eficientes) empeoran marginalmente (-10pp cada uno)
+- LINKUSDT empeora fuertemente (-88pp)
+
+### Hipótesis a investigar
+
+1. **Sesgo direccional intrínseco del token**: ¿P6 capta ruido direccional en tokens
+   volátiles (PEPE, ARB) pero empeora la dirección en tokens eficientes (BTC, ETH)
+   donde el expected_move_pct ya es buena señal?
+
+2. **Distribución de asimetría por token**: En v0.40.20-audit vimos que la asimetría
+   |long_wr - short_wr| es la norma, pero no se midió si los tokens que mejoran con
+   P6 tienen asimetría más fuerte que los que empeoran.
+
+3. **Interacción con SL/TP**: `compute_sl_tp` usa `expected_move_pct` (mezclado) para
+   el TP. Si P6 elige dirección opuesta a `expected_move_pct`, el TP computado podría
+   ser inconsistente con la dirección real del trade. Posible FIX: computar SL/TP
+   con `avg_move_long` o `avg_move_short` según la dirección elegida.
+
+### Recomendación al usuario
+
+**NO integrar P6 sin más análisis.** Razones:
+- La mejora es real en agregado pero NO robusta por token (4/8).
+- El motor actual (P1) ya empeora en todos los tokens (PnL negativo en todos),
+  así que "empeora marginalmente" sigue siendo "perdedor pero un poco menos".
+- Se necesita entender por qué P6 funciona en ARB/PEPE pero no en BTC/ETH antes
+  de integrar — podría ser overfitting al ruido direccional de tokens pequeños.
+
+**Próximos pasos sugeridos**:
+- Análisis 1: distribuciones de asimetría por token (¿ARB/PEPE más asimétricos?)
+- Análisis 2: P6 con SL/TP coherente con dirección (usar avg_move_dir en lugar de
+  expected_move_pct para compute_sl_tp)
+- Análisis 3: filtrar P6 solo para tokens con asimetría > X pts
+- Análisis 4: P6 combinado con SL/TP dinámico (ATR o drawdown/favorable histórico)
+
+### Artefactos
+
+- `/home/z/my-project/scripts/p6_validation.py` (también en `ppmt/scripts/audit_trie_1m/`)
+- `/home/z/my-project/download/p6_validation/`:
+  * `per_trade.csv` — 205,564 trades (token, ventana, política, dir, pnl_gross, pnl_net, exit_reason)
+  * `per_token_ventana.csv` — métricas por (token, ventana, política)
+  * `per_token_aggregated.csv` — métricas por (token, política) sumando 3 ventanas
+  * `per_window_aggregated.csv` — métricas por (ventana, política) sumando 8 tokens
+  * `summary.csv` — métricas totales por política
+  * `validation.json` — JSON estructurado completo
+  * `validation.md` — reporte legible con veredicto
+
+### Estado del repo
+
+- Commit `f5bec08` pusheado a `coverdraft/ppmt`.
+- NO se modificó el motor. NO se hicieron commits a `src/ppmt/`.
+- Siguen existiendo cambios WIP sin commitear en `src/ppmt/core/trie.py`,
+  `src/ppmt/engine/ppmt.py`, `src/ppmt/engine/signal.py` (de un intento previo
+  de integración de FIX-A con variante edge = win_rate × avg_move). Pendiente
+  decisión del usuario sobre P6 / WIP.
