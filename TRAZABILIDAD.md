@@ -9907,3 +9907,313 @@ Con agent-browser + eval directo:
 
 ### Commits
 - `fix(v0.40.34): state push after warmup + live ticker + UI header fixes` (este commit)
+
+
+---
+
+# 📘 GUÍA DEL MOTOR PPMT — PARA CONTINUAR EL TRABAJO
+
+> **Esta sección es para el próximo chat/agente que retome el proyecto.**
+> Creada: 2026-06-19, versión actual: **v0.40.34**
+> Lee esto PRIMERO, luego revisa `git log --oneline -20` y las entradas v0.40.x al final del archivo.
+
+---
+
+## 🎯 DÓNDE EMPEZAR A LEER
+
+Si eres nuevo en el proyecto, lee en este orden:
+
+1. **Esta sección** (GUÍA DEL MOTOR) — visión general del motor y su arquitectura.
+2. **`HANDOFF.md`** (en la raíz del repo) — contexto histórico + credenciales.
+3. **`git log --oneline -30`** — historial reciente de commits.
+4. **`src/ppmt/engine/realtime.py`** — corazón del motor (3276 líneas). Empieza por:
+   - Líneas 1-100: docstring del módulo
+   - Líneas 200-290: `LiveConfig` dataclass (todos los parámetros configurables)
+   - Líneas 336-458: `_DirectPollExchange` (wrapper HTTP directo, NO ccxt)
+   - Líneas 458-1500: `RealtimeTrader` (la clase principal)
+   - Líneas 930-1060: skip filters (corazón del filtering de señales)
+   - Líneas 1100-1270: LONG/SHORT gating + regime-aware filtering
+5. **`src/ppmt/terminal/server.py`** — FastAPI server con 32+ endpoints. Empieza por:
+   - `/api/multi-start` (líneas 943-1405) — arranca una sesión de trading
+   - `/api/multi-status` (líneas 1405-1500) — estado en vivo de todas las sesiones
+   - `/api/market/price` (líneas 524-569) — precio spot vía REST directo
+6. **`src/ppmt/terminal/static/index.html`** — el dashboard frontend (single-page app vanilla JS + HTML).
+7. **Sección `## v0.40.34`** al final de este archivo — último fix aplicado.
+
+---
+
+## 🏗️ ARQUITECTURA DEL MOTOR PPMT
+
+PPMT (Probability Position Management Tool) es un motor de trading autónomo basado en **Trie progresivo de patrones + SAX + fuzzy matching + gestión de capital tipo Kelly**.
+
+### Flujo de datos (live trading)
+
+```
+Exchange REST API (MEXC/Binance/Bybit)
+        ↓
+_DirectPollExchange.fetch_ohlcv()  ← requests + asyncio.to_thread (NO aiohttp, NO ccxt load_markets)
+        ↓
+RealtimeTrader.run_live()  ← bucle principal cada 5s
+        ↓
+1. SAX incremental encoding  ← core/sax.py + core/encoder.py
+        ↓
+2. Trie lookup N1+N2+N3+N4  ← core/trie.py + core/matcher.py
+        ↓
+3. Prediction engine  ← engine/predict_live.py + engine/prediction.py
+        ↓
+4. Skip filters (regime, prob, move, counter-trend)  ← realtime.py líneas 930-1270
+        ↓
+5. Risk manager (Kelly sizing, exposure, drawdown)  ← risk/money_manager.py
+        ↓
+6. Paper trade execution  ← realtime.py líneas 1500-2200
+        ↓
+7. State push al dashboard  ← _update_terminal_state() + _state_cb
+        ↓
+FastAPI /api/multi-status  ← terminal/server.py
+        ↓
+Frontend poll cada 2s  ← terminal/static/index.html
+```
+
+### Componentes principales (con líneas de código)
+
+**Capa ENGINE (`src/ppmt/engine/`, ~9000 LOC):**
+- `realtime.py` (3276) — Motor live trading. `RealtimeTrader` + `_DirectPollExchange` + bucle principal.
+- `paper_trader.py` (2206) — Backtesting streaming con same logic que realtime.
+- `ppmt.py` (883) — Algoritmo PPMT base.
+- `validator.py` (1254) — Pre-trade validation gate (WR/PF/RoR checks).
+- `signal.py` (793) — Generación de señales.
+- `prediction.py` (450) — Motor de predicción con multi-level matching.
+- `predict_live.py` (251) — Wrapper para predicción en vivo.
+- `buffer.py` (368) — Buffer circular de velas.
+- `monte_carlo.py` (376) — Simulación MC para calibración.
+- `weights.py` (268) — Pesos para N1/N2/N3/N4.
+
+**Capa CORE (`src/ppmt/core/`, ~5000 LOC):**
+- `trie.py` (1104) — Trie progresivo de patrones (la estructura de datos central).
+- `metadata.py` (1265) — Metadata por nodo del trie (WR, PF, RoR, regime distribution).
+- `profiles.py` (1221) — TokenProfile por token (BTC, ETH, etc.) con parámetros auto-calibrados.
+- `matcher.py` (520) — Fuzzy matching contra el trie.
+- `sax.py` (429) — Discretización SAX (Symbolic Aggregate approXimation).
+- `thresholds.py` (278) — Thresholds adaptativos.
+- `regime.py` (198) — Detección de régimen (trending/ranging/volatile).
+- `encoder.py` (155) — Encoder incremental SAX.
+
+**Capa RISK (`src/ppmt/risk/`, ~9000 LOC):**
+- `money_manager.py` (1936) — Gestión de capital Kelly.
+- `portfolio_runner.py` (1775) — Runner multi-token portfolio.
+- `portfolio_manager.py` (1543) — Portfolio manager con rebalanceo.
+- `portfolio_api.py` (1223) — API REST para portfolio.
+- `correlation_engine.py` (751) — Motor de correlación entre posiciones.
+- `portfolio_backtester.py` (814) — Backtester portfolio.
+- `regime_allocator.py` (529) — Allocación por régimen.
+- `manager.py` (453) — Risk manager básico.
+- `monte_carlo.py` (454) — MC para risk metrics.
+- `position_sizing.py` (136) — AdvancedPositionSizer (Quarter-Kelly × confianza × régimen × vol × drawdown).
+
+**Capa TERMINAL (`src/ppmt/terminal/`, ~4000 LOC):**
+- `server.py` (3228) — FastAPI server con 32+ endpoints.
+- `history_manager.py` (530) — Persistencia de trades en SQLite.
+- `state.py` (358) — State singleton para modo single-token.
+- `sweep_cache.py` (60) — Cache para sweep de parámetros.
+
+**Capa CLI (`src/ppmt/cli/main.py`, 1464 LOC):**
+- CLI Typer con comandos: `terminal`, `replay`, `validate`, `calibrate`, etc.
+
+---
+
+## ⚙️ CARACTERÍSTICAS CLAVE
+
+### Motor de detección de patrones
+- **Trie progresivo de 4 niveles (N1+N2+N3+N4)**: cada candle se discretiza via SAX a un símbolo, y los últimos 5 símbolos forman un pattern que se busca en el trie. Cada nivel captura horizontes de predicción distintos (1/2/3/4 candles ahead).
+- **SAX adaptativo**: α (alphabet size) y W (window size) se auto-calibran por token. BTC tiene α/W distinto a DOGE. Re-calibración cada N candles (TF-aware: 2000 para ≤15m, escalado para TFs mayores, cap 50k).
+- **Living Trie**: el trie se actualiza en vivo con cada candle nueva (no es estático del backtest).
+
+### Fuzzy matching
+- Tolerancia a 1 símbolo de diferencia para matching parcial.
+- Score ponderado por historical_count (más muestras = más confianza).
+- Bayesian shrinkage para nodos con pocos datos.
+
+### Regime-aware (3 regímenes + 2 sub-trend)
+- **trending_up / trending_down**: favores señales en sentido del trend.
+- **ranging**: gate más alto para evitar señales falsas (0.40 vs 0.25 default).
+- **volatile**: gate moderado (0.45).
+- Regime detection via `RegimeDetector` con `lookback=50, vol_threshold=0.6, trend_threshold=0.005` (en `src/ppmt/core/regime.py`).
+
+### Gestión de capital
+- **Quarter-Kelly (25%)** por defecto. `kelly_fraction = 0.25` en LiveConfig.
+- **AdvancedPositionSizer**: tamaño = Kelly × confianza × régimen × vol × drawdown, cap duro 25% equity, min 0.5%.
+- **Max exposure 80%** del capital total.
+- **Max single position 25%** del portfolio.
+- **Max correlated positions**: 2 (misma asset class).
+- **Kill switch**: si exposure > 95%, cerrar todo.
+- **Daily loss limit 5%**, max drawdown 15% (circuit breaker).
+
+### Modos de operación
+- **Paper trading** (default): `dry_run=True`, procesa señales pero no ejecuta órdenes reales.
+- **Live trading**: `dry_run=False`, ejecuta órdenes vía ccxt (aún no probado en producción).
+- **Replay mode**: step through historical data para testing del pipeline.
+- **Backtest**: batch processing via `paper_trader.py`.
+- **Multi-token**: hasta 20 tokens en paralelo, cada uno con su propio hilo de RealtimeTrader.
+
+### Timeframes soportados
+- 1m, 5m, 10m, 15m, 30m, 1h, 4h, 1d.
+- Re-calibración TF-aware (más frecuente en TFs cortos).
+
+---
+
+## 🤖 FUNCIONES AUTÓNOMAS
+
+El motor toma las siguientes decisiones sin intervención humana:
+
+1. **Detección de patrón**: cada 5s, encode SAX + trie lookup + prediction engine.
+2. **Filtrado de señales**: skip filters aplican gates por probabilidad, expected move, régimen, counter-trend.
+3. **Sizing automático**: Quarter-Kelly × confianza × régimen × vol × drawdown.
+4. **Apertura de posición**: si señal pasa todos los filters, abre LONG o SHORT con SL/TP calculados via ATR.
+5. **Monitoreo de posición**: cada candle, check SL/TP hit, trailing stop opcional, time-based exit (si no se cierra en N candles).
+6. **Cierre de posición**: market order simulada (paper) o real (live) cuando SL/TP/circuit-breaker/time-exit disparan.
+7. **Kill switch automático**: si exposure > 95% o daily loss > 5% o drawdown > 15%, cerrar todas las posiciones.
+8. **Re-calibración SAX**: cada N candles (TF-aware), re-fit α/W sobre las últimas 50k velas.
+9. **Living Trie update**: cada candle, agrega el pattern al trie si no existe, actualiza metadata (WR/PF).
+10. **State push al dashboard**: cada cambio de estado, callback al FastAPI server que actualiza `/api/multi-status`.
+
+---
+
+## 💀 DÓNDE COSTÓ MÁS (top 5 bugs más difíciles)
+
+### #1 — `load_markets()` bloqueado desde LATAM/EU (v0.40.28 → v0.40.33)
+- **Síntoma**: `mexc GET https://api.mexc.com/api/v3/exchangeInfo` fallaba. Antes `binance GET .../exchangeInfo`. 4 versiones para resolver.
+- **Diagnóstico errado**: pensamos que era solo Binance. Cambiamos a MEXC. Mismo error. Pensamos que ccxt con `load_markets=False` bastaba. No: ccxt's `fetch_ticker()` llama `load_markets()` internamente. Inyectar `markets` stub no funcionaba porque ccxt's `safe_market()` accede `markets[0]` cuando `marketId=None` → KeyError.
+- **Solución final (v0.40.33)**: crear `_DirectPollExchange` que bypassa ccxt TOTALMENTE para market data. Llama directo a `/api/v3/ticker/price` y `/api/v3/klines` con `requests.Session`. Wrap en `asyncio.to_thread` para no bloquear el event loop. Toma 4 versiones llegar aquí.
+- **Lección**: si un proveedor externo bloquea ciertos endpoints, bypass total > wrapper parcial.
+
+### #2 — `aiohttp` timeout silencioso (v0.40.32 → v0.40.33)
+- **Síntoma**: v0.40.32 con `_DirectPollExchange` basado en aiohttp fallaba con `Failed to connect: ` (mensaje vacío tras el colon).
+- **Diagnóstico**: `asyncio.TimeoutError` tiene `str()` vacío. `f"Failed to connect: {e}"` producía string sin contexto. aiohttp timed out silenciosamente en la Mac del usuario.
+- **Solución**: reescribir `_DirectPollExchange` con `requests + asyncio.to_thread`. requests ya funcionaba en la Mac del usuario (lo usábamos para `/api/market/price` sync ccxt).
+- **Lección**: nunca uses una librería con error reporting vacío en production paths. Siempre incluir `{type(e).__name__}: {e}` en los except blocks.
+
+### #3 — State desync top bar vs operations feed (v0.40.33 → v0.40.34)
+- **Síntoma**: header superior del dashboard decía "STOPPED" mientras el Operations feed mostraba "Motor RUNNING". Usuario pensó que nada funcionaba.
+- **Causa raíz**: el header leía del `_terminal_state` singleton (legacy single-token mode), pero multi-token mode (`state_callback != None`) SKIPEA el singleton. Así que el header nunca recibía updates.
+- **Solución**: crear `_updateHeaderFromMulti(sess)` en frontend que lee de `/api/multi-status` en cada poll. Y agregar `open_position` field al response de `/api/multi-status` para que el header pueda mostrar posición LONG.
+- **Lección**: cuando haya dos state stores (singleton + multi-sessions), el frontend SIEMPRE debe leer del multi-sessions. El singleton es legacy.
+
+### #4 — "Candles: 0" pese a 200 velas warmup procesadas (v0.40.33 → v0.40.34)
+- **Síntoma**: contador de velas en UI mostraba 0 incluso después de que el log del engine dijera "Warmup: processed 200 historical candles".
+- **Causa raíz**: `_state_cb` recibía `candles_processed` kwarg solo en el polling loop DESPUÉS de warmup (cada 5s). Durante warmup (15-30s en conexiones lentas), la UI seguía mostrando 0.
+- **Solución**: push state inmediatamente después de warmup: `_update_terminal_state(is_running=True, candles_processed=200, current_price=..., portfolio_value=...)`. La UI recibe el update sin esperar al primer poll.
+- **Lección**: cualquier evento de estado importante (warmup done, position opened, position closed) debe disparar un state push inmediato, no esperar al próximo polling cycle.
+
+### #5 — Saltos de precio $700 entre polling cycles (v0.40.33 → v0.40.34)
+- **Síntoma**: precio BTC en UI saltaba de $63,060 a $63,760 sin ticks intermedios. "Saltos muy grandes en el precio de btc sin sentido".
+- **Causa raíz**: frontend poleaba `/api/market/price` cada 2s (chart ticker, sync ccxt fetch_ticker) Y mostraba `current_price` del engine desde `/api/multi-status` (REST poll fetch_ohlcv close). Estas dos fuentes venían de endpoints distintos y con delay distinto. Cuando el engine price iba 5-10s detrás del chart ticker, la UI flickerea entre los dos.
+- **Solución**: engine ahora usa `fetch_ticker` (no `fetch_ohlcv close`) para `live_price` en el polling loop. Y `/api/market/price` tiene `Cache-Control: no-store, no-cache, must-revalidate, max-age=0` para evitar CDN/browser proxies que sirvan precios stale.
+- **Lección**: SIEMPRE una sola fuente de precio. Si necesitas múltiples endpoints, que todos converjan al mismo valor en el mismo instante.
+
+---
+
+## 📈 CÓMO SE RESOLVIÓ LARGOS Y CORTOS
+
+### LONG (compra)
+- **Apertura**: cuando `prediction.direction == "LONG"` y pasa todos los skip filters (prob gate, move floor, regime gate, counter-trend gate).
+- **SL/TP**: calculados via ATR. SL = entry - 1.5×ATR, TP = entry + 2.5×ATR (ratio 1:1.67).
+- **Exit**: SL hit, TP hit, time-based exit (si no se cierra en N candles), o kill switch.
+- **Sizing**: Quarter-Kelly × confianza × régimen_mult × vol_mult × drawdown_mult, cap 25% equity.
+
+### SHORT (venta)
+- **TokenProfile gating**: cada token tiene `short_allowed: bool` (en `src/ppmt/core/profiles.py`). BTC/ETH/SOL default True. Memes (DOGE/SHIB) default False. Si `short_allowed=False`, SHORT signals se descartan.
+- **Regime gating**: SHORT tiene multiplicador de min_confidence por régimen (realtime.py ~línea 1149):
+  - `trending_up`: 1.5x (más difícil abrir SHORT contra trend alcista)
+  - `trending_down`: 0.8x (más fácil abrir SHORT a favor del trend bajista)
+  - `ranging`: 1.2x (más difícil en sideways)
+  - `volatile`: 1.0x (neutral)
+  - **Floor**: `effective_min_conf = max(effective_min_conf * short_regime_mult, 0.20)` — nunca bajar de 0.20.
+- **Counter-trend LONG gating**: si régimen es `trending_down` y señal es LONG, gate más alto (0.35 vs 0.08 default) — contra-trend LONG en downtrend es muy arriesgado.
+- **SL/TP SHORT**: SL = entry + 1.5×ATR, TP = entry - 2.5×ATR.
+- **Restricción MEXC SPOT**: MEXC SPOT no soporta SHORT nativo. En paper trading, SHORT se simula como posición virtual con P&L tracking. En live trading (cuando se habilite), habría que migrar a MEXC FUTURES o usar otro exchange.
+
+### Por qué se diseñó así
+- v0.40.8 audit sobre 50k velas × 8 tokens mostró: LONG ganaba en trending_up, perdía en ranging/volatile. SHORT ganaba en trending_down, perdía en ranging.
+- Bayes shrinkage bajaba confidence en nodos con pocos datos, así que gate default se bajó de 0.20 → 0.08 (v0.21.0).
+- Pero gate 0.08 producía demasiados false positives en ranging. Fix: regime-aware gate (0.40 ranging, 0.45 volatile, 0.08 trending).
+- Counter-trend LONG en downtrend era el peor setup: 8/10 perdían. Fix: gate 0.35 para ese caso específico.
+
+---
+
+## 📊 ESTADO ACTUAL (v0.40.34)
+
+### Funcionando ✅
+- Motor arranca en Mac del usuario sin errores.
+- Conexión a MEXC via `_DirectPollExchange` (requests + asyncio.to_thread).
+- 200 velas warmup procesadas al arrancar.
+- TRADE #1 LONG BTC/USDT @ $63,150.61 (paper trading).
+- SL/TP calculados correctamente.
+- Operations feed muestra señales y trades en vivo.
+- Header actualizado desde `/api/multi-status` (no más state desync).
+- Candles counter se actualiza inmediatamente después de warmup.
+- Precio en tiempo real via `fetch_ticker` (no más saltos grandes).
+
+### Pendiente ⚠️
+- **Live trading (real money)**: `dry_run=False` no probado en producción. Requiere:
+  - Probar MEXC API keys con permisos de trading.
+  - Migrar a MEXC FUTURES si se quiere SHORT real (SPOT no soporta SHORT).
+  - Validar order execution path (línea 2249 load_markets comentada — descomentar y testear).
+- **Multi-token paralelo**: probado con 1 token, falta probar con 5-20 simultáneos.
+- **WebSocket feed**: `use_websocket=False` default. Binance WS limita 5 conexiones/5min/IP, no escala a 20 tokens. MEXC WS no probado.
+- **Persistencia de trie**: `trie_persist_interval=100` guarda cada 100 candles. No probado en crashes.
+- **Frontend mobile**: layout responsive funcional pero no exhaustivamente probado.
+
+### Bugs conocidos NO bloqueantes
+- Token list puede tardar 5-10s en cargar la primera vez (429 USDT pairs vía `/api/market/symbols`).
+- Operations feed no persiste tras refresh del navegador (solo se guardan los trades cerrados en SQLite).
+- Chart no muestra indicator overlays (solo velas + live ticker).
+
+---
+
+## 🔄 CÓMO SE BUMPEA LA VERSIÓN
+
+Creado helper `/home/z/my-project/scripts/bump_version.py` que automatiza bump en:
+
+1. `pyproject.toml` — `version = "X.Y.Z"`
+2. `src/ppmt/__init__.py` — `__version__ = "X.Y.Z"` (CRÍTICO, `ppmt --version` lee de aquí)
+3. `src/ppmt/cli/main.py` — banner `vX.Y.Z`
+4. `src/ppmt/terminal/server.py` — `FastAPI(version="X.Y.Z")` (línea ~46)
+5. `src/ppmt/terminal/static/index.html` — 9 ocurrencias (title, header, footer, etc.)
+
+Uso:
+```bash
+python3 /home/z/my-project/scripts/bump_version.py 0.40.35
+```
+
+Luego commit:
+```bash
+cd /home/z/my-project/ppmt
+git add -A
+git -c user.email="coverdraft@users.noreply.github.com" -c user.name="coverdraft" commit -m "fix(v0.40.35): descripción corta"
+git push origin main
+```
+
+---
+
+## 🚀 PRÓXIMOS PASOS SUGERIDOS
+
+1. **Validar v0.40.34 en Mac del usuario**: pedirle que haga `pip install --force-reinstall ...` y arranque `ppmt terminal`. Confirmar que header muestra RUNNING + Candles > 0 + precio sin saltos + posición LONG visible.
+2. **Si todo OK, probar multi-token**: arrancar 3-5 tokens (BTC, ETH, SOL, XRP, DOGE) en paralelo. Verificar que no hay race conditions en el state callback.
+3. **Migrar a MEXC FUTURES** si se quiere SHORT real (actualmente solo LONG real, SHORT simulado en paper).
+4. **Implementar live trading** con API keys reales del usuario (requiere validación manual del usuario).
+5. **WebSocket feed** para reducir latencia (opcional, REST polling funciona).
+6. **Frontend polish**: indicator overlays en chart, persistencia de operations feed, mobile testing exhaustivo.
+
+---
+
+## 📞 CONTACTO Y CONTEXTO
+
+- **Usuario**: `coco` (coco@cocos-MacBook-Air), trabaja desde México, shell zsh, usa `python3` (no `python`).
+- **Repositorio**: https://github.com/coverdraft/ppmt
+- **Branch activa**: `main`
+- **GitHub PAT**: embebido en `git remote -v` (formato: `https://<token>@github.com/coverdraft/ppmt.git`)
+- **Idioma preferido**: Español.
+- **Estilo de commit**: `fix(vX.Y.Z): descripción corta` (ver `git log --oneline -10`).
+- **Worklog**: este archivo (`TRAZABILIDAD.md`) + `worklog.md` en la raíz del repo. AMBOS deben actualizarse con cada versión.
+
+---
