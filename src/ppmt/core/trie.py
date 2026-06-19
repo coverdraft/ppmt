@@ -94,28 +94,88 @@ class TrieNode:
     # === Serialization ===
 
     def to_dict(self) -> dict:
-        """Serialize this node and all descendants to a dictionary."""
+        """Serialize this node and all descendants to a dictionary.
+
+        SAX Dual serialization (PASO 1 validation):
+        Dual symbols stored as "a|x" internally are serialized to JSON lists
+        ["a", "x"] so the DB never contains stringified tuples. Single
+        symbols remain as strings. Children dict keys follow the same rule:
+        when dual symbols exist, children become a list of {"key", "node"}
+        pairs with list keys; otherwise the traditional dict format is kept
+        for backward compatibility and smaller payload.
+        """
+        # Symbol: list for dual ("a|x" -> ["a", "x"]), string for single
+        sym_out: str | list
+        if isinstance(self.symbol, str) and "|" in self.symbol:
+            sym_out = self.symbol.split("|")
+        else:
+            sym_out = self.symbol
+
+        # Children: detect if any dual-symbol keys exist
+        has_dual = any(
+            isinstance(k, str) and "|" in k for k in self.children
+        )
+        if has_dual:
+            # List-of-pairs format so dual keys serialize as lists
+            children_out = [
+                {
+                    "key": k.split("|") if "|" in k else k,
+                    "node": child.to_dict(),
+                }
+                for k, child in self.children.items()
+            ]
+        else:
+            # Traditional dict format (backward compat, smaller)
+            children_out = {
+                k: child.to_dict() for k, child in self.children.items()
+            }
+
         return {
-            "symbol": self.symbol,
+            "symbol": sym_out,
             "depth": self.depth,
             "metadata": self.metadata.to_dict(),
-            "children": {
-                sym: child.to_dict() for sym, child in self.children.items()
-            },
+            "children": children_out,
         }
 
     @classmethod
     def from_dict(cls, data: dict, parent: Optional[TrieNode] = None) -> TrieNode:
-        """Deserialize a node and all descendants from a dictionary."""
+        """Deserialize a node and all descendants from a dictionary.
+
+        Handles both serialization formats:
+        - New format: symbol as list ["a", "x"], children as list of pairs
+        - Old format: symbol as string "a|x", children as dict with string keys
+        """
+        # Symbol: list -> join with "|", string -> pass through
+        sym_raw = data["symbol"]
+        if isinstance(sym_raw, list):
+            symbol = "|".join(str(s) for s in sym_raw)
+        else:
+            symbol = str(sym_raw)
+
         node = cls(
-            symbol=data["symbol"],
+            symbol=symbol,
             depth=data.get("depth", 0),
             parent=parent,
             metadata=BlockLifecycleMetadata.from_dict(data.get("metadata", {})),
         )
-        for sym, child_data in data.get("children", {}).items():
-            child = TrieNode.from_dict(child_data, parent=node)
-            node.children[sym] = child
+
+        # Children: list-of-pairs or dict format
+        children_data = data.get("children", {})
+        if isinstance(children_data, list):
+            for entry in children_data:
+                key_raw = entry["key"]
+                if isinstance(key_raw, list):
+                    key = "|".join(str(s) for s in key_raw)
+                else:
+                    key = str(key_raw)
+                child = TrieNode.from_dict(entry["node"], parent=node)
+                node.children[key] = child
+        else:
+            # Dict format (old or single-symbol tries)
+            for key, child_data in children_data.items():
+                child = TrieNode.from_dict(child_data, parent=node)
+                node.children[key] = child
+
         return node
 
 
@@ -591,17 +651,23 @@ class PPMTTrie:
 
     @classmethod
     def from_dict(cls, data: dict) -> PPMTTrie:
-        """Deserialize a Trie from a dictionary."""
+        """Deserialize a Trie from a dictionary.
+
+        Handles both old (dict children) and new (list-of-pairs children)
+        serialization formats produced by TrieNode.to_dict().
+        """
         trie = cls(name=data.get("name", "root"))
         trie._pattern_count = data.get("pattern_count", 0)
         trie._max_depth = data.get("max_depth", 0)
         trie.trading_observations = data.get("trading_observations", 0)
 
-        # Reconstruct children from root
+        # Reconstruct children from root — delegate to TrieNode.from_dict
+        # which already handles both dict and list-of-pairs formats.
         root_data = data.get("root", {})
-        for sym, child_data in root_data.get("children", {}).items():
-            child = TrieNode.from_dict(child_data, parent=trie.root)
-            trie.root.children[sym] = child
+        # Rebuild the root node entirely via TrieNode.from_dict
+        # (it handles symbol + children format detection)
+        rebuilt_root = TrieNode.from_dict(root_data)
+        trie.root = rebuilt_root
 
         return trie
 

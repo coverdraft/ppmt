@@ -5,6 +5,7 @@ across all asset classes. This populates the shared N1/N2 pools.
 
 Usage:
     python -m ppmt.data.bulk_downloader --exchange binance --days 90
+    python -m ppmt.data.bulk_downloader --exchange binance --days 30 --symbols BTC/USDT,SOL/USDT --save-to-db
     python -m ppmt.data.bulk_downloader --exchange mexc --tokens BTC/USDT ETH/USDT
 """
 
@@ -185,16 +186,38 @@ def main():
     parser.add_argument("--exchange", default="binance", help="Exchange name (binance, mexc, etc.)")
     parser.add_argument("--days", type=int, default=90, help="Days of history to download")
     parser.add_argument("--timeframes", nargs="+", default=TIMEFRAMES, help="Timeframes to download")
+    parser.add_argument("--symbols", type=str, default=None,
+                        help="Comma-separated list of symbols to download "
+                             "(e.g. BTC/USDT,SOL/USDT). If omitted, downloads "
+                             "the full REPRESENTATIVE_TOKENS list.")
     parser.add_argument("--save-to-db", action="store_true", help="Save to PPMT database")
     args = parser.parse_args()
-    
+
+    # Resolve tokens dict
+    if args.symbols:
+        # --symbols flag: auto-classify each symbol and build a focused dict
+        from ppmt.data.classifier import AssetClassifier
+        classifier = AssetClassifier()
+        tokens = {}
+        for sym in args.symbols.split(","):
+            sym = sym.strip()
+            if not sym:
+                continue
+            info = classifier.classify(sym)
+            tokens.setdefault(info.asset_class, []).append(sym)
+        print(f"--symbols mode: {args.symbols}")
+        for ac, syms in tokens.items():
+            print(f"  {ac}: {syms}")
+    else:
+        tokens = None  # uses REPRESENTATIVE_TOKENS
+
     storage = None
     if args.save_to_db:
         from ppmt.data.storage import PPMTStorage
         storage = PPMTStorage()
     
     downloader = BulkDownloader(exchange=args.exchange)
-    downloader.download_all(days=args.days, timeframes=args.timeframes, storage=storage)
+    downloader.download_all(days=args.days, tokens=tokens, timeframes=args.timeframes, storage=storage)
 
 
 if __name__ == "__main__":

@@ -6,8 +6,11 @@ data progressively.
 
 Usage:
     python -m ppmt.data.sequential_builder
+    python -m ppmt.data.sequential_builder --symbols BTC/USDT,SOL/USDT
+    python -m ppmt.data.sequential_builder --timeframe 5m
 """
 
+import argparse
 import time
 from ppmt.data.storage import PPMTStorage, UNIVERSAL_POOL_KEY, class_pool_key
 from ppmt.engine.ppmt import PPMT
@@ -25,13 +28,17 @@ BUILD_ORDER = [
 
 
 def build_all_tries(timeframe: str = "15m", pattern_length: int = 5, 
-                    storage: PPMTStorage = None) -> dict:
+                    storage: PPMTStorage = None,
+                    symbols: list[str] | None = None) -> dict:
     """Build tries sequentially for all tokens, populating shared pools.
     
     Args:
         timeframe: Timeframe to build
         pattern_length: Pattern length for trie construction
         storage: PPMTStorage instance (created if None)
+        symbols: Optional list of specific symbols to build.
+                 If provided, only these symbols are built (auto-classified).
+                 If None, uses the full BUILD_ORDER.
     
     Returns:
         Dict with build stats and pool verification.
@@ -46,8 +53,26 @@ def build_all_tries(timeframe: str = "15m", pattern_length: int = 5,
         'errors': [],
     }
     
-    for asset_class, symbols in BUILD_ORDER:
-        for symbol in symbols:
+    # Determine build order
+    if symbols is not None:
+        # Auto-classify and build in class order
+        build_order = []
+        classified = {}
+        for sym in symbols:
+            info = classifier.classify(sym)
+            classified.setdefault(info.asset_class, []).append(sym)
+        # Maintain class priority order
+        for ac in ["blue_chip", "large_cap", "mid_cap", "defi", "meme", "new_launch"]:
+            if ac in classified:
+                build_order.append((ac, classified[ac]))
+    else:
+        build_order = BUILD_ORDER
+    
+    asset_classes_seen = set()
+    
+    for asset_class, sym_list in build_order:
+        asset_classes_seen.add(asset_class)
+        for symbol in sym_list:
             print(f"\n{'='*60}")
             print(f"Building: {symbol} ({asset_class}) @ {timeframe}")
             print(f"{'='*60}")
@@ -91,8 +116,10 @@ def build_all_tries(timeframe: str = "15m", pattern_length: int = 5,
                 })
                 
             except Exception as e:
+                import traceback
                 msg = f"{symbol}: {str(e)}"
                 print(f"  ERROR: {msg}")
+                traceback.print_exc()
                 stats['errors'].append(msg)
     
     # Final pool verification
@@ -107,7 +134,7 @@ def build_all_tries(timeframe: str = "15m", pattern_length: int = 5,
     }
     print(f"N1 Universal: {stats['pool_status']['n1_universal']}")
     
-    for ac in ["blue_chip", "large_cap", "mid_cap", "defi", "meme"]:
+    for ac in asset_classes_seen:
         n2 = storage.load_trie(class_pool_key(ac), "n2")
         key = f"n2_{ac}"
         stats['pool_status'][key] = {
@@ -120,4 +147,20 @@ def build_all_tries(timeframe: str = "15m", pattern_length: int = 5,
 
 
 if __name__ == "__main__":
-    build_all_tries()
+    parser = argparse.ArgumentParser(description="PPMT Sequential Trie Builder")
+    parser.add_argument("--symbols", type=str, default=None,
+                        help="Comma-separated list of symbols to build "
+                             "(e.g. BTC/USDT,SOL/USDT). If omitted, builds all.")
+    parser.add_argument("--timeframe", default="15m", help="Timeframe to build")
+    parser.add_argument("--pattern-length", type=int, default=5, help="Pattern length")
+    args = parser.parse_args()
+    
+    symbols = None
+    if args.symbols:
+        symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
+    
+    build_all_tries(
+        timeframe=args.timeframe,
+        pattern_length=args.pattern_length,
+        symbols=symbols,
+    )
