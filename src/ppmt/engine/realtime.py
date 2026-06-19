@@ -328,18 +328,22 @@ class RealtimeResult:
     duration_seconds: float = 0.0
 
 
-# v0.40.32: Direct HTTP polling — bypasses ccxt's load_markets() which
-# times out on some networks. Implements only fetch_ticker + fetch_ohlcv,
-# which is all the engine needs for paper trading.
+# v0.40.33: Direct HTTP polling using requests+asyncio.to_thread.
+# v0.40.32 used aiohttp but it timed out silently on some networks
+# (asyncio.TimeoutError has empty str repr → "Failed to connect: ").
+# requests uses the same network stack as the working /api/market/price
+# endpoint (ccxt sync + requests), so behavior is now consistent.
 class _DirectPollExchange:
-    """Lightweight exchange wrapper using aiohttp direct HTTP calls.
+    """Lightweight exchange wrapper using requests + asyncio.to_thread.
 
     Implements only the methods the engine actually uses:
     - fetch_ticker(symbol) -> {last, close, ...}
     - fetch_ohlcv(symbol, timeframe, limit) -> [[ts, o, h, l, c, v], ...]
-    - close() -> cleanup aiohttp session
+    - close() -> no-op (requests creates a new session per call, no cleanup needed)
 
-    Supports: mexc, binance (spot). Other exchanges fall back to ccxt.
+    Supports: mexc, binance, bybit (spot). All HTTP calls go through the
+    `requests` library wrapped in asyncio.to_thread, so we get the same
+    network behavior as sync ccxt calls (which work on the user's Mac).
     """
 
     _BASE_URLS = {
@@ -365,30 +369,22 @@ class _DirectPollExchange:
     }
 
     def __init__(self, exchange_name: str, api_key: str = None, api_secret: str = None):
-        import aiohttp
+        import requests  # noqa: F401 — sanity check that requests is installed
         self.exchange_name = exchange_name.lower()
         self.api_key = api_key
         self.api_secret = api_secret
         self.base_url = self._BASE_URLS.get(self.exchange_name)
         if not self.base_url:
             raise ValueError(f"_DirectPollExchange: unsupported exchange '{exchange_name}'")
-        self._session = None
         # ccxt-compat fields
         self.markets = {}
         self.markets_by_id = {}
+        # Shared requests session for connection pooling
+        self._session = requests.Session()
+        self._session.headers.update({"User-Agent": "ppmt/0.40.33"})
 
-    async def _get_session(self):
-        if self._session is None or self._session.closed:
-            import aiohttp
-            self._session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=15),
-                headers={"User-Agent": "ppmt/0.40.32"},
-            )
-        return self._session
-
-    async def fetch_ticker(self, symbol: str) -> dict:
-        """GET /api/v3/ticker/price?symbol=BTCUSDT (MEXC/Binance format)."""
-        session = await self._get_session()
+    def _sync_fetch_ticker(self, symbol: str) -> dict:
+        """Sync impl — runs in thread via to_thread."""
         symbol_id = symbol.replace("/", "").upper()
         if self.exchange_name in ("mexc", "binance"):
             url = f"{self.base_url}/api/v3/ticker/price"
@@ -398,10 +394,10 @@ class _DirectPollExchange:
             params = {"category": "spot", "symbol": symbol_id}
         else:
             raise ValueError(f"fetch_ticker not implemented for {self.exchange_name}")
-        async with session.get(url, params=params) as resp:
-            if resp.status != 200:
-                raise RuntimeError(f"{self.exchange_name} fetch_ticker HTTP {resp.status}: {await resp.text()}")
-            data = await resp.json()
+        resp = self._session.get(url, params=params, timeout=15)
+        if resp.status_code != 200:
+            raise RuntimeError(f"{self.exchange_name} fetch_ticker HTTP {resp.status_code}: {resp.text[:300]}")
+        data = resp.json()
         if self.exchange_name in ("mexc", "binance"):
             price = float(data.get("price", 0))
             return {"symbol": symbol, "last": price, "close": price, "info": data}
@@ -412,9 +408,13 @@ class _DirectPollExchange:
             price = float(tickers[0].get("lastPrice", 0))
             return {"symbol": symbol, "last": price, "close": price, "info": data}
 
-    async def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100) -> list:
-        """GET /api/v3/klines (MEXC/Binance) or /v5/market/kline (Bybit)."""
-        session = await self._get_session()
+    async def fetch_ticker(self, symbol: str) -> dict:
+        """Async wrapper around sync impl via asyncio.to_thread."""
+        import asyncio
+        return await asyncio.to_thread(self._sync_fetch_ticker, symbol)
+
+    def _sync_fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100) -> list:
+        """Sync impl — runs in thread via to_thread."""
         symbol_id = symbol.replace("/", "").upper()
         tf_native = self._TIMEFRAME_MAP.get(self.exchange_name, {}).get(timeframe, timeframe)
         if self.exchange_name in ("mexc", "binance"):
@@ -425,10 +425,10 @@ class _DirectPollExchange:
             params = {"category": "spot", "symbol": symbol_id, "interval": tf_native, "limit": limit}
         else:
             raise ValueError(f"fetch_ohlcv not implemented for {self.exchange_name}")
-        async with session.get(url, params=params) as resp:
-            if resp.status != 200:
-                raise RuntimeError(f"{self.exchange_name} fetch_ohlcv HTTP {resp.status}: {await resp.text()}")
-            data = await resp.json()
+        resp = self._session.get(url, params=params, timeout=15)
+        if resp.status_code != 200:
+            raise RuntimeError(f"{self.exchange_name} fetch_ohlcv HTTP {resp.status_code}: {resp.text[:300]}")
+        data = resp.json()
         if self.exchange_name in ("mexc", "binance"):
             # [[ts, o, h, l, c, v, ...], ...]
             return [[int(c[0]), float(c[1]), float(c[2]), float(c[3]), float(c[4]), float(c[5])] for c in data]
@@ -438,10 +438,19 @@ class _DirectPollExchange:
             klines = list(reversed(klines))
             return [[int(c[0]), float(c[1]), float(c[2]), float(c[3]), float(c[4]), float(c[5])] for c in klines]
 
+    async def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100) -> list:
+        """Async wrapper around sync impl via asyncio.to_thread."""
+        import asyncio
+        return await asyncio.to_thread(self._sync_fetch_ohlcv, symbol, timeframe, limit)
+
     async def close(self):
-        if self._session is not None and not self._session.closed:
-            await self._session.close()
-        self._session = None
+        # No-op — requests.Session closes itself on GC. Kept for API compat
+        # with the engine's `await poll_exchange.close()` calls.
+        try:
+            self._session.close()
+        except Exception:
+            pass
+
 
 
 
@@ -2246,7 +2255,11 @@ class RealtimeTrader:
                         exchange.set_sandbox_mode(True)
                         console.print(f"[yellow]Using {cfg.exchange} TESTNET for orders[/yellow]")
 
-                    await exchange.load_markets()
+                    # v0.40.33: Skip load_markets() — it's the endpoint that's
+                    # blocked on the user's network. Order execution paths that
+                    # need market metadata should use _DirectPollExchange or
+                    # fetch_ticker on-demand instead.
+                    # await exchange.load_markets()
 
                     # v0.20.0: Set leverage on exchange if > 1
                     leverage = getattr(cfg, 'leverage', 1)
@@ -2617,8 +2630,10 @@ class RealtimeTrader:
                                 console.print(f"[green]Connected to MEXC (fallback from Binance) — direct HTTP polling[/green]")
                                 console.print(f"  {cfg.symbol} last price: ${_ticker_price}")
                             except Exception as e_mexc:
-                                _err_msg = f"Exchange connection failed (binance + mexc fallback): binance={e_primary} | mexc={e_mexc}"
-                                console.print(f"[red]Failed to connect: binance={e_primary} | mexc fallback={e_mexc}[/red]")
+                                _err_msg = (f"Exchange connection failed (binance + mexc fallback): "
+                                    f"binance={type(e_primary).__name__}: {e_primary} | "
+                                    f"mexc={type(e_mexc).__name__}: {e_mexc}")
+                                console.print(f"[red]Failed to connect: binance={type(e_primary).__name__}: {e_primary} | mexc fallback={type(e_mexc).__name__}: {e_mexc}[/red]")
                                 try:
                                     self._update_terminal_state(
                                         is_running=False,
@@ -2634,8 +2649,8 @@ class RealtimeTrader:
                                 storage.close()
                                 return result
                         else:
-                            _err_msg = f"Exchange connection failed: {e_primary}"
-                            console.print(f"[red]Failed to connect: {e_primary}[/red]")
+                            _err_msg = f"Exchange connection failed: {type(e_primary).__name__}: {e_primary}"
+                            console.print(f"[red]Failed to connect: {type(e_primary).__name__}: {e_primary}[/red]")
                             try:
                                 self._update_terminal_state(
                                     is_running=False,
