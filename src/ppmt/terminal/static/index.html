@@ -3,8 +3,174 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>PPMT Terminal v0.40.25</title>
-<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<title>PPMT Terminal v0.40.26</title>
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js">
+// ============================================================
+// v0.40.26 — TRADING TAB (Token List + Ticket + Operations Feed)
+// ============================================================
+
+let _allSymbols = [];
+let _selectedToken = null;
+let _selectedTF = '5m';
+
+// Render the left-sidebar token list from the symbols array
+function renderTokenList(symbols) {
+  _allSymbols = Array.isArray(symbols) ? symbols : [];
+  const list = document.getElementById('tokenList');
+  const countEl = document.getElementById('tokenListCount');
+  if (!list) return;
+  if (!_allSymbols.length) {
+    list.innerHTML = '<div class="token-list-empty">No hay tokens disponibles</div>';
+    if (countEl) countEl.textContent = '—';
+    return;
+  }
+  if (countEl) countEl.textContent = _allSymbols.length + ' tokens';
+  // Default-select BTC/USDT or first symbol so the chart has a target
+  if (!_selectedToken) _selectedToken = _allSymbols.includes('BTC/USDT') ? 'BTC/USDT' : _allSymbols[0];
+  renderTokenListHTML(_allSymbols);
+}
+
+function renderTokenListHTML(symbols) {
+  const list = document.getElementById('tokenList');
+  if (!list) return;
+  if (!symbols.length) {
+    list.innerHTML = '<div class="token-list-empty">Sin resultados</div>';
+    return;
+  }
+  list.innerHTML = symbols.map(s => {
+    const sel = s === _selectedToken ? ' selected' : '';
+    return `<div class="token-item${sel}" data-symbol="${s}" onclick="selectToken('${s}')">
+      <span class="tk-name">${s}</span>
+      <span class="tk-price" data-symbol="${s}">—</span>
+    </div>`;
+  }).join('');
+  // Async-load prices for the visible tokens (rate-limited: 10 at a time)
+  refreshTokenPrices(symbols.slice(0, 30));
+}
+
+function filterTokens() {
+  const q = (document.getElementById('tokenSearch') || {}).value || '';
+  const ql = q.toLowerCase().trim();
+  const filtered = !ql ? _allSymbols
+    : _allSymbols.filter(s => s.toLowerCase().includes(ql));
+  renderTokenListHTML(filtered);
+}
+
+function selectToken(symbol) {
+  _selectedToken = symbol;
+  // Update visual selection
+  document.querySelectorAll('.token-item').forEach(el => {
+    el.classList.toggle('selected', el.dataset.symbol === symbol);
+  });
+  // Update the ticket display
+  const ticket = document.getElementById('ticketSymbol');
+  if (ticket) ticket.textContent = symbol;
+  // Update the chart toolbar so the chart loads
+  const selC = document.getElementById('chartSymbol');
+  if (selC) selC.value = symbol;
+  // Update chart TF to match ticket selection
+  const selT = document.getElementById('chartTimeframe');
+  if (selT) selT.value = _selectedTF;
+  // Load chart for the selected token
+  if (typeof loadChart === 'function') loadChart();
+  // Enable Start button now that a token is selected
+  const btnStart = document.getElementById('btnStartTrading');
+  if (btnStart) btnStart.disabled = false;
+}
+
+// Fetch and display prices for a list of symbols (best-effort, non-blocking)
+async function refreshTokenPrices(symbols) {
+  for (const sym of symbols) {
+    try {
+      const res = await fetch(`${API}/api/market/price?symbol=${encodeURIComponent(sym)}&exchange=binance`);
+      if (!res.ok) continue;
+      const data = await res.json();
+      const price = data.price;
+      if (price === undefined || price === null) continue;
+      // Format price nicely
+      const fmt = price > 100 ? price.toFixed(2) : price > 1 ? price.toFixed(4) : price.toPrecision(4);
+      document.querySelectorAll(`.tk-price[data-symbol="${sym}"]`).forEach(el => {
+        el.textContent = '$' + fmt;
+      });
+    } catch (e) {
+      // silent: best-effort price loading
+    }
+  }
+}
+
+// Timeframe selector (button group)
+function setTF(tf) {
+  _selectedTF = tf;
+  document.querySelectorAll('#ticketTFGroup .tg-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.tf === tf);
+  });
+  // Sync chart toolbar TF
+  const selT = document.getElementById('chartTimeframe');
+  if (selT) selT.value = tf;
+  // If a token is selected, reload the chart with the new TF
+  if (_selectedToken && typeof loadChart === 'function') loadChart();
+}
+
+// Mode selector (Manual / Auto)
+function setMode(isAuto) {
+  autoMode = !!isAuto;
+  const m = document.getElementById('modeManual');
+  const a = document.getElementById('modeAuto');
+  if (m) m.classList.toggle('active', !autoMode);
+  if (a) a.classList.toggle('active', autoMode);
+}
+
+// Capital input → push to server so all child nodes share it
+async function updateCapital() {
+  const inp = document.getElementById('ticketCapital');
+  if (!inp) return;
+  const val = parseFloat(inp.value) || 1000;
+  // v0.40.26: also update Money Management display
+  const mm = document.getElementById('mmTotalCapital');
+  if (mm) mm.textContent = '$' + val.toLocaleString('en-US', {minimumFractionDigits: 0, maximumFractionDigits: 2});
+  // Persist to server (best-effort)
+  try {
+    await fetch(`${API}/api/nodes/capital`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({total_capital: val})
+    });
+  } catch (e) {
+    // silent — UI still reflects user input
+  }
+}
+
+// Initialize on DOMContentLoaded: trigger capital sync + ensure token list is loaded
+document.addEventListener('DOMContentLoaded', () => {
+  // Set initial capital display
+  setTimeout(() => { updateCapital(); }, 500);
+});
+
+// Append operations feed items (called by WS handler when signals/trades arrive)
+function appendOpsFeed(type, msg, pnl, time) {
+  const feed = document.getElementById('liveSignalsFeed');
+  if (!feed) return;
+  // Clear empty-state on first append
+  if (feed.querySelector('.ops-feed-empty')) feed.innerHTML = '';
+  const cls = type === 'signal' ? 'signal'
+            : (msg || '').toLowerCase().includes('short') ? 'trade-short'
+            : 'trade-long';
+  const t = time || new Date().toLocaleTimeString('es-ES', {hour12: false});
+  const pnlHtml = pnl !== undefined && pnl !== null
+    ? `<span class="of-pnl ${pnl >= 0 ? 'pos' : 'neg'}">${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%</span>`
+    : '<span class="of-pnl"></span>';
+  const item = document.createElement('div');
+  item.className = `ops-feed-item ${cls}`;
+  item.innerHTML = `<span class="of-time">${t}</span><span class="of-msg">${msg}</span>${pnlHtml}`;
+  feed.insertBefore(item, feed.firstChild);
+  // Cap at 50 items
+  while (feed.children.length > 50) feed.removeChild(feed.lastChild);
+  // Update count
+  const cnt = document.getElementById('liveOpsCount');
+  if (cnt) cnt.textContent = feed.children.length + ' eventos';
+}
+
+</script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -573,6 +739,232 @@ tr:hover td{background:rgba(95,168,245,.07)}
     gap:6px 12px;padding:10px 14px;
   }
 }
+
+/* ================================================================ */
+/* v0.40.26 — TRADING TAB (HIG-inspired professional redesign)     */
+/* 3-column: Token List | Trade Ticket | Operations Feed           */
+/* Responsive: 3-col → 2-col → 1-col stacking                      */
+/* ================================================================ */
+.trading-layout{
+  display:grid;
+  grid-template-columns:240px minmax(320px,1fr) 1fr;
+  gap:0;flex:1;min-height:0;overflow:hidden;
+}
+.trading-layout > section,
+.trading-layout > aside{
+  display:flex;flex-direction:column;overflow:hidden;
+  border-right:1px solid var(--border);min-height:0;
+}
+.trading-layout > section:last-child,
+.trading-layout > aside:last-child{border-right:none}
+
+/* Section header (consistent across the three columns) */
+.trading-section-header{
+  display:flex;align-items:center;justify-content:space-between;
+  gap:8px;padding:14px 18px;flex-shrink:0;
+  border-bottom:1px solid var(--border2);
+  background:linear-gradient(180deg,var(--bg2) 0%,var(--bg3) 100%);
+}
+.trading-section-title{
+  font-family:var(--sans);font-size:13px;font-weight:600;
+  color:var(--text);letter-spacing:-0.1px;text-transform:none;
+}
+.trading-section-sub{
+  font-family:var(--mono);font-size:10px;font-weight:600;
+  color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;
+}
+
+/* === LEFT: Token List === */
+.token-search-wrap{
+  display:flex;align-items:center;gap:6px;padding:8px 12px;flex-shrink:0;
+  border-bottom:1px solid var(--border);background:var(--bg2);
+}
+.token-search{
+  flex:1;background:var(--bg);border:1px solid var(--border2);
+  color:var(--text);font-family:var(--mono);font-size:12px;
+  padding:7px 10px;border-radius:6px;outline:none;
+  transition:border-color .15s,box-shadow .15s;
+}
+.token-search:focus{
+  border-color:var(--accent);box-shadow:0 0 0 3px rgba(95,168,245,.18);
+}
+.token-list{
+  flex:1;overflow-y:auto;padding:6px 0;
+}
+.token-item{
+  display:flex;align-items:center;justify-content:space-between;
+  gap:8px;padding:10px 14px;cursor:pointer;
+  border-left:2px solid transparent;
+  transition:background .12s,border-color .12s;
+}
+.token-item:hover{background:rgba(95,168,245,.06)}
+.token-item.selected{
+  background:rgba(95,168,245,.10);
+  border-left-color:var(--accent);
+}
+.token-item .tk-name{
+  font-family:var(--mono);font-size:12px;font-weight:600;
+  color:var(--text);letter-spacing:-0.1px;
+}
+.token-item.selected .tk-name{color:var(--accent)}
+.token-item .tk-price{
+  font-family:var(--mono);font-size:11px;
+  color:var(--text3);font-variant-numeric:tabular-nums;
+}
+.token-list-empty{
+  padding:32px 18px;text-align:center;
+  font-family:var(--mono);font-size:11px;color:var(--text3);
+}
+
+/* === CENTER: Trade Ticket === */
+.ticket-body{
+  flex:1;overflow-y:auto;padding:18px 20px;
+  display:flex;flex-direction:column;gap:16px;
+}
+.ticket-row{
+  display:flex;flex-direction:column;gap:7px;
+}
+.ticket-label{
+  font-family:var(--mono);font-size:10px;font-weight:600;
+  color:var(--text3);text-transform:uppercase;letter-spacing:0.8px;
+}
+.ticket-value{
+  font-family:var(--mono);font-size:18px;font-weight:700;
+  color:var(--text);letter-spacing:-0.2px;
+  padding:9px 12px;background:var(--bg2);
+  border:1px solid var(--border2);border-radius:6px;
+}
+.ticket-input-wrap{
+  position:relative;display:flex;align-items:center;
+}
+.ticket-prefix{
+  position:absolute;left:12px;
+  font-family:var(--mono);font-size:15px;font-weight:700;
+  color:var(--text3);pointer-events:none;
+}
+.ticket-input{
+  width:100%;padding:10px 12px 10px 26px;
+  background:var(--bg2);border:1px solid var(--border2);
+  color:var(--text);font-family:var(--mono);font-size:16px;font-weight:600;
+  border-radius:6px;outline:none;
+  font-variant-numeric:tabular-nums;
+  transition:border-color .15s,box-shadow .15s;
+}
+.ticket-input:focus{
+  border-color:var(--accent);box-shadow:0 0 0 3px rgba(95,168,245,.18);
+}
+/* Button groups (TF + Leverage + Mode) */
+.ticket-btn-group{
+  display:grid;grid-template-columns:repeat(5,1fr);gap:4px;
+}
+.ticket-btn-group.two-col{grid-template-columns:1fr 1fr}
+.tg-btn{
+  background:var(--bg2);border:1px solid var(--border2);
+  color:var(--text2);font-family:var(--mono);font-size:12px;font-weight:700;
+  padding:10px 4px;border-radius:5px;cursor:pointer;
+  transition:all .12s;text-align:center;
+  font-variant-numeric:tabular-nums;
+}
+.tg-btn:hover{background:var(--bg3);color:var(--text);border-color:var(--text3)}
+.tg-btn.active{
+  background:var(--accent);color:#fff;border-color:var(--accent2);
+  box-shadow:0 1px 3px rgba(95,168,245,.4);
+}
+/* Live stats grid (4 mini cards) */
+.ticket-stats{
+  display:grid;grid-template-columns:1fr 1fr;gap:6px;
+  padding-top:14px;border-top:1px solid var(--border);
+}
+.ticket-stat{
+  background:var(--bg2);border:1px solid var(--border2);
+  padding:9px 12px;border-radius:6px;
+}
+.ticket-stat-label{
+  font-family:var(--mono);font-size:9px;font-weight:600;
+  color:var(--text3);text-transform:uppercase;letter-spacing:0.6px;
+  margin-bottom:2px;
+}
+.ticket-stat-val{
+  font-family:var(--mono);font-size:13px;font-weight:700;
+  color:var(--text);font-variant-numeric:tabular-nums;
+}
+.ticket-stat-val.green{color:var(--green)}
+.ticket-stat-val.red{color:var(--red)}
+/* Action buttons — big, prominent, Apple HIG style */
+.ticket-actions{
+  display:grid;grid-template-columns:1fr 1fr;gap:8px;
+  padding-top:14px;border-top:1px solid var(--border);
+}
+.btn-start{
+  background:var(--green2);border:none;color:#fff;
+  font-family:var(--sans);font-size:14px;font-weight:700;
+  padding:13px 16px;border-radius:8px;cursor:pointer;
+  transition:all .15s;letter-spacing:0.2px;
+  box-shadow:0 2px 6px rgba(16,185,129,.35);
+}
+.btn-start:hover:not(:disabled){background:var(--green);box-shadow:0 4px 10px rgba(16,185,129,.45)}
+.btn-start:disabled{
+  background:var(--bg4);color:var(--text3);cursor:not-allowed;
+  box-shadow:none;
+}
+.btn-stop{
+  background:transparent;border:1px solid var(--red2);color:var(--red);
+  font-family:var(--sans);font-size:14px;font-weight:700;
+  padding:13px 16px;border-radius:8px;cursor:pointer;
+  transition:all .15s;letter-spacing:0.2px;
+}
+.btn-stop:hover:not(:disabled){background:rgba(248,113,113,.1);border-color:var(--red)}
+.btn-stop:disabled{opacity:.4;cursor:not-allowed}
+
+/* === RIGHT: Operations Feed === */
+.ops-feed{
+  flex:1;overflow-y:auto;padding:8px 12px;
+}
+.ops-feed-empty{
+  padding:48px 24px;text-align:center;
+  font-family:var(--mono);font-size:11px;color:var(--text3);
+  line-height:1.7;
+}
+.ops-feed-item{
+  padding:10px 12px;margin-bottom:6px;
+  background:var(--bg2);border:1px solid var(--border2);
+  border-left:3px solid var(--text3);
+  border-radius:5px;font-family:var(--mono);font-size:11px;
+  display:grid;grid-template-columns:auto 1fr auto;gap:8px;align-items:center;
+}
+.ops-feed-item.signal{border-left-color:var(--accent)}
+.ops-feed-item.trade-long{border-left-color:var(--green)}
+.ops-feed-item.trade-short{border-left-color:var(--red)}
+.ops-feed-item .of-time{color:var(--text3);font-size:10px}
+.ops-feed-item .of-msg{color:var(--text);font-size:11px}
+.ops-feed-item .of-pnl{font-weight:700;font-variant-numeric:tabular-nums}
+.ops-feed-item .of-pnl.pos{color:var(--green)}
+.ops-feed-item .of-pnl.neg{color:var(--red)}
+
+/* === RESPONSIVE: Trading tab === */
+@media(max-width:1100px){
+  .trading-layout{grid-template-columns:200px 1fr;}
+  .trading-layout > section:last-child{
+    border-right:none;border-top:1px solid var(--border);
+    max-height:240px;
+  }
+}
+@media(max-width:700px){
+  .trading-layout{grid-template-columns:1fr;grid-template-rows:auto auto auto}
+  .trading-layout > aside,
+  .trading-layout > section{
+    border-right:none;border-bottom:1px solid var(--border);
+    max-height:300px;
+  }
+  .trading-layout > section:last-child{max-height:280px}
+  .ticket-body{padding:14px 14px}
+  .ticket-btn-group{grid-template-columns:repeat(5,1fr);gap:3px}
+  .tg-btn{padding:9px 2px;font-size:11px}
+  .ticket-stats{grid-template-columns:1fr 1fr}
+  .ticket-actions{grid-template-columns:1fr 1fr}
+  .btn-start,.btn-stop{padding:11px 12px;font-size:13px}
+}
+
 </style>
 </head>
 <body>
@@ -580,7 +972,7 @@ tr:hover td{background:rgba(95,168,245,.07)}
 <!-- ========== HEADER ========== -->
 <header class="header">
   <div class="header-left">
-    <span class="logo">PPMT<span class="logo-ver">v0.40.25</span></span>
+    <span class="logo">PPMT<span class="logo-ver">v0.40.26</span></span>
     <span class="status-dot stopped" id="headerDot"></span>
     <span id="headerStatus" style="font-family:var(--mono);font-size:10px;color:var(--text2)">DETENIDO</span>
   </div>
@@ -741,165 +1133,127 @@ tr:hover td{background:rgba(95,168,245,.07)}
     </div>
   </div><!-- /tab-operations -->
 
-  <!-- ========== TAB: TRADING (Control + Active Tokens + Live Feed) ========== -->
+  <!-- ========== TAB: TRADING (v0.40.26 — Professional HIG redesign) ========== -->
   <div class="tab-content" id="tab-trading">
-    <div class="tab-grid-trading">
-      <div>
-        <div class="sidebar-section">
+    <div class="trading-layout">
 
-    <!-- PANEL: TRADING CONTROL -->
-    <div class="panel" id="panelTrading">
-      <div class="panel-header">
-        <div class="panel-title">Trading Control</div>
-        <button class="panel-collapse" onclick="togglePanel('panelTrading')">-</button>
-      </div>
-      <div class="panel-body">
-        <div style="display:flex;gap:4px;margin-bottom:6px">
-          <button class="btn btn-success" id="btnStartTrading" onclick="startPaperTrading()" disabled style="flex:1">Start Paper</button>
-          <button class="btn btn-danger" id="btnStopTrading" onclick="stopTrading()" disabled style="flex:1">Stop</button>
+      <!-- LEFT: Token List -->
+      <aside class="trading-tokens">
+        <header class="trading-section-header">
+          <span class="trading-section-title">Tokens</span>
+          <span class="trading-section-sub" id="tokenListCount">—</span>
+        </header>
+        <div class="token-search-wrap">
+          <input type="search" id="tokenSearch" class="token-search"
+                 placeholder="Buscar BTC, ETH..." oninput="filterTokens()">
         </div>
+        <div id="tokenList" class="token-list">
+          <div class="token-list-empty">Cargando tokens…</div>
+        </div>
+      </aside>
 
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
-          <span style="font-family:var(--mono);font-size:10px;color:var(--text2)">Status</span>
+      <!-- CENTER: Trade Ticket -->
+      <section class="trading-ticket">
+        <header class="trading-section-header">
+          <span class="trading-section-title">Operar</span>
           <span class="badge badge-stopped" id="tradingStatusBadge">STOPPED</span>
-        </div>
+        </header>
+        <div class="ticket-body">
 
-        <div class="stats-grid" style="margin-bottom:6px">
-          <div class="stat-card"><div class="stat-label">Symbol</div><div class="stat-value accent" id="ctrlSymbol" style="font-size:10px">--</div></div>
-          <div class="stat-card"><div class="stat-label">Timeframe</div><div class="stat-value" id="ctrlTF" style="font-size:10px">--</div></div>
-          <div class="stat-card"><div class="stat-label">Exchange</div><div class="stat-value" id="ctrlExchange" style="font-size:10px">--</div></div>
-          <div class="stat-card"><div class="stat-label">Price</div><div class="stat-value" id="ctrlPrice" style="font-size:10px">--</div></div>
-        </div>
-
-        <div style="margin-bottom:6px">
-          <div style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-bottom:3px;text-transform:uppercase;letter-spacing:.5px">Leverage <span style="color:var(--text3);text-transform:none;font-size:8px">(default 1x para paper)</span></div>
-          <div class="leverage-selector" id="leverageSelector">
-            <button class="lev-btn active" data-lev="1" onclick="setLeverage(1)">1x</button>
-            <button class="lev-btn" data-lev="2" onclick="setLeverage(2)">2x</button>
-            <button class="lev-btn" data-lev="3" onclick="setLeverage(3)">3x</button>
-            <button class="lev-btn" data-lev="5" onclick="setLeverage(5)">5x</button>
-            <button class="lev-btn" data-lev="10" onclick="setLeverage(10)">10x</button>
+          <!-- Selected Token -->
+          <div class="ticket-row">
+            <span class="ticket-label">Token Seleccionado</span>
+            <div class="ticket-value" id="ticketSymbol">—</div>
           </div>
-        </div>
 
-        <div class="toggle-wrap">
-          <span style="font-size:9px;color:var(--text3)">Manual</span>
-          <div class="toggle" id="autoModeToggle" onclick="toggleAutoMode()">
-            <div class="toggle-knob"></div>
-          </div>
-          <span style="font-size:9px;color:var(--text3)">Auto</span>
-          <span style="font-family:var(--mono);font-size:9px;color:var(--accent);margin-left:3px" id="autoModeLabel">MANUAL</span>
-        </div>
-
-        <!-- v0.35.0: Position & Live Status — more data per user request -->
-        <div style="margin-top:8px;padding-top:6px;border-top:1px solid var(--border)">
-          <div style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-bottom:3px;text-transform:uppercase;letter-spacing:.5px">Position &amp; Live Status</div>
-          <div class="stats-grid" style="margin-bottom:4px">
-            <div class="stat-card"><div class="stat-label">Position</div><div class="stat-value" id="ctrlPosition" style="font-size:10px">FLAT</div></div>
-            <div class="stat-card"><div class="stat-label">P&amp;L</div><div class="stat-value" id="ctrlPnl" style="font-size:10px">+0.00%</div></div>
-            <div class="stat-card"><div class="stat-label">Regime</div><div class="stat-value" id="ctrlRegime" style="font-size:10px">--</div></div>
-            <div class="stat-card"><div class="stat-label">Candles</div><div class="stat-value" id="ctrlCandles" style="font-size:10px">0</div></div>
-            <div class="stat-card"><div class="stat-label">Signals</div><div class="stat-value" id="ctrlSignals" style="font-size:10px">0</div></div>
-            <div class="stat-card"><div class="stat-label">Trades</div><div class="stat-value" id="ctrlTrades" style="font-size:10px">0</div></div>
-            <div class="stat-card"><div class="stat-label">Pattern</div><div class="stat-value" id="ctrlPattern" style="font-size:10px;font-family:var(--mono)">[...]</div></div>
-            <div class="stat-card"><div class="stat-label">Entropy</div><div class="stat-value" id="ctrlEntropy" style="font-size:10px">0.0b</div></div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- PANEL: MONEY MANAGEMENT -->
-    <div class="panel" id="panelMoney">
-      <div class="panel-header">
-        <div class="panel-title">Money Management</div>
-        <button class="panel-collapse" onclick="togglePanel('panelMoney')">-</button>
-      </div>
-      <div class="panel-body">
-        <div class="stats-grid" style="margin-bottom:4px">
-          <div class="stat-card"><div class="stat-label">Total Capital</div><div class="stat-value accent" id="mmTotalCapital">$--</div></div>
-          <div class="stat-card"><div class="stat-label">Reserve</div><div class="stat-value" id="mmReserve">$--</div></div>
-          <div class="stat-card"><div class="stat-label">Total Exposure</div><div class="stat-value" id="mmExposure">--</div></div>
-          <div class="stat-card"><div class="stat-label">Active Nodes</div><div class="stat-value" id="mmNodeCount">0</div></div>
-        </div>
-
-        <div style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-bottom:3px;text-transform:uppercase;letter-spacing:.5px">Multi-Token Allocation <span style="color:var(--text3);text-transform:none;font-size:8px">(asigná capital a N tokens en paralelo)</span></div>
-        <div id="nodesContainer">
-          <div class="empty-state">No tokens asignados — agregá tokens para operar en paralelo</div>
-        </div>
-
-        <div style="margin-top:4px;padding-top:4px;border-top:1px solid var(--border)">
-          <div style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-bottom:3px;text-transform:uppercase;letter-spacing:.5px">Add Token</div>
-          <div class="form-row">
-            <label>Symbol</label>
-            <div class="field"><input type="text" id="nodeSymbol" placeholder="BTC/USDT"></div>
-          </div>
-          <div class="form-row">
-            <label>TF</label>
-            <div class="field">
-              <select id="nodeTF">
-                <option value="1m">1m</option>
-                <option value="5m" selected>5m</option>
-                <option value="15m">15m</option>
-                <option value="30m">30m</option>
-                <option value="1h">1h</option>
-              </select>
+          <!-- Capital -->
+          <div class="ticket-row">
+            <label class="ticket-label" for="ticketCapital">Capital Total ($)</label>
+            <div class="ticket-input-wrap">
+              <span class="ticket-prefix">$</span>
+              <input type="number" id="ticketCapital" class="ticket-input"
+                     value="1000" min="100" step="100"
+                     onchange="updateCapital()" oninput="updateCapital()">
             </div>
           </div>
-          <div class="form-row">
-            <label>Alloc %</label>
-            <div class="field"><input type="number" id="nodeAlloc" value="25" min="5" max="100" step="5"></div>
-          </div>
-          <div class="form-row">
-            <label>Lev</label>
-            <div class="field"><input type="number" id="nodeLev" value="1" min="1" max="10"></div>
-          </div>
-          <div style="display:flex;gap:3px;margin-top:3px">
-            <button class="btn btn-ghost btn-sm" onclick="addNode()" style="flex:1">+ Add</button>
-            <button class="btn btn-ghost btn-sm" onclick="redistributeCapital()" style="flex:1">Redistribute</button>
-          </div>
-        </div>
-      </div>
-    </div>
 
-        </div><!-- /sidebar (trading col) -->
-      </div><!-- /trading col-1 -->
-      <!-- v0.35.0: Trading col-2 — Active Trading Tokens (multi-token list) -->
-      <div>
-        <div class="panel" style="border-bottom:none;height:100%;display:flex;flex-direction:column;overflow:hidden">
-          <div class="panel-header" style="margin-bottom:4px;flex-shrink:0">
-            <div class="panel-title">Active Trading Tokens</div>
-            <span style="font-family:var(--mono);font-size:9px;color:var(--text3)" id="activeTokensCount">0 tokens</span>
-          </div>
-          <div class="panel-body" style="flex:1;overflow:hidden;display:flex;flex-direction:column">
-            <div id="activeTokensBody" style="flex:1;overflow-y:auto;font-family:var(--mono);font-size:10px">
-              <div class="empty-state">No active tokens. Add tokens in Money Management above and click Start Paper.</div>
+          <!-- Timeframe -->
+          <div class="ticket-row">
+            <span class="ticket-label">Timeframe</span>
+            <div class="ticket-btn-group" id="ticketTFGroup">
+              <button class="tg-btn" data-tf="1m" onclick="setTF('1m')">1m</button>
+              <button class="tg-btn active" data-tf="5m" onclick="setTF('5m')">5m</button>
+              <button class="tg-btn" data-tf="15m" onclick="setTF('15m')">15m</button>
+              <button class="tg-btn" data-tf="30m" onclick="setTF('30m')">30m</button>
+              <button class="tg-btn" data-tf="1h" onclick="setTF('1h')">1h</button>
             </div>
+          </div>
+
+          <!-- Leverage -->
+          <div class="ticket-row">
+            <span class="ticket-label">Apalancamiento <span style="color:var(--text3);text-transform:none;font-size:9px;font-weight:500">(default 1x · max 10x)</span></span>
+            <div class="ticket-btn-group" id="ticketLevGroup">
+              <button class="tg-btn active" data-lev="1" onclick="setLeverage(1)">1x</button>
+              <button class="tg-btn" data-lev="2" onclick="setLeverage(2)">2x</button>
+              <button class="tg-btn" data-lev="3" onclick="setLeverage(3)">3x</button>
+              <button class="tg-btn" data-lev="5" onclick="setLeverage(5)">5x</button>
+              <button class="tg-btn" data-lev="10" onclick="setLeverage(10)">10x</button>
+            </div>
+          </div>
+
+          <!-- Mode -->
+          <div class="ticket-row">
+            <span class="ticket-label">Modo</span>
+            <div class="ticket-btn-group two-col">
+              <button class="tg-btn active" id="modeManual" onclick="setMode(false)">Manual</button>
+              <button class="tg-btn" id="modeAuto" onclick="setMode(true)">Auto</button>
+            </div>
+          </div>
+
+          <!-- Live Stats -->
+          <div class="ticket-stats">
+            <div class="ticket-stat">
+              <div class="ticket-stat-label">Precio</div>
+              <div class="ticket-stat-val" id="ctrlPrice">—</div>
+            </div>
+            <div class="ticket-stat">
+              <div class="ticket-stat-label">Posición</div>
+              <div class="ticket-stat-val" id="ctrlPosition">FLAT</div>
+            </div>
+            <div class="ticket-stat">
+              <div class="ticket-stat-label">P&amp;L</div>
+              <div class="ticket-stat-val" id="ctrlPnl">+0.00%</div>
+            </div>
+            <div class="ticket-stat">
+              <div class="ticket-stat-label">Regime</div>
+              <div class="ticket-stat-val" id="ctrlRegime">—</div>
+            </div>
+          </div>
+
+          <!-- Action Buttons -->
+          <div class="ticket-actions">
+            <button class="btn-start" id="btnStartTrading" onclick="startPaperTrading()" disabled>Start Paper</button>
+            <button class="btn-stop" id="btnStopTrading" onclick="stopTrading()" disabled>Stop</button>
+          </div>
+
+        </div>
+      </section>
+
+      <!-- RIGHT: Operations Feed -->
+      <section class="trading-ops">
+        <header class="trading-section-header">
+          <span class="trading-section-title">Operaciones</span>
+          <span class="trading-section-sub" id="liveOpsCount">0 eventos</span>
+        </header>
+        <div class="ops-feed" id="liveSignalsFeed">
+          <div class="ops-feed-empty">
+            Las operaciones aparecerán aquí cuando el motor opere.<br><br>
+            Seleccioná un token, configurá capital/TF/leverage y pulsá <strong>Start Paper</strong>.
           </div>
         </div>
-      </div><!-- /trading col-2 -->
-      <!-- Trading col-3: Live Trade Feed / Signals -->
-      <div>
-        <div class="panel" style="border-bottom:none;height:100%;display:flex;flex-direction:column;overflow:hidden">
-          <div class="panel-header" style="margin-bottom:4px;flex-shrink:0">
-            <div class="panel-title">Live Session Feed</div>
-            <span style="font-family:var(--mono);font-size:9px;color:var(--text3)" id="liveSessionStatus">No active session</span>
-          </div>
-          <div class="panel-body" style="flex:1;overflow:hidden;display:flex;flex-direction:column">
-            <!-- Live stats -->
-            <div class="stats-grid" style="margin-bottom:4px;flex-shrink:0">
-              <div class="stat-card"><div class="stat-label">Candles Processed</div><div class="stat-value accent" id="liveCandles">0</div></div>
-              <div class="stat-card"><div class="stat-label">SAX Symbols</div><div class="stat-value" id="liveSax">0</div></div>
-              <div class="stat-card"><div class="stat-label">WS Status</div><div class="stat-value" id="liveWs">--</div></div>
-              <div class="stat-card"><div class="stat-label">Reconnects</div><div class="stat-value" id="liveReconn">0</div></div>
-            </div>
-            <div style="font-family:var(--mono);font-size:8px;color:var(--text3);margin-bottom:2px;text-transform:uppercase;letter-spacing:.5px;flex-shrink:0">Recent Signals</div>
-            <div id="liveSignalsFeed" style="flex:1;overflow-y:auto;font-family:var(--mono);font-size:9px">
-              <div class="empty-state">Start a paper trading session to see live signals here.</div>
-            </div>
-          </div>
-        </div>
-      </div><!-- /trading col-3 -->
-    </div><!-- /tab-grid-2 -->
+      </section>
+
+    </div><!-- /trading-layout -->
   </div><!-- /tab-trading -->
 
   <!-- ========== TAB: PORTFOLIO ========== -->
@@ -1049,14 +1403,14 @@ tr:hover td{background:rgba(95,168,245,.07)}
     <div class="status-item" style="margin-left:12px"><span id="statusMessage" style="color:var(--text3)">Listo.</span></div>
   </div>
   <div class="status-right">
-    <span>PPMT v0.40.25</span>
+    <span>PPMT v0.40.26</span>
     <div class="status-item"><span class="label">Uptime:</span><span class="value" id="btmUptime">00:00:00</span></div>
   </div>
 </footer>
 
 <script>
 // ============================================================
-// PPMT Terminal v0.40.25 — Trading Dashboard
+// PPMT Terminal v0.40.26 — Trading Dashboard
 // ============================================================
 
 const API = '';
@@ -1102,7 +1456,13 @@ document.addEventListener('DOMContentLoaded', () => {
     if (sel && sel.value && typeof loadChart === 'function') {
       loadChart();
     }
+    // v0.40.26: ensure BTC/USDT is pre-selected in the token list on first load
+    if (sel && sel.value && typeof selectToken === 'function') {
+      selectToken(sel.value);
+    }
   }, 1500);
+  // v0.40.26: initial capital sync to server
+  setTimeout(() => { if (typeof updateCapital === 'function') updateCapital(); }, 800);
 });
 
 // ============================================================
@@ -1644,7 +2004,10 @@ function updateDashboard(s) {
     headerTB.textContent = 'STOPPED';
     headerTB.className = 'badge badge-stopped';
     document.getElementById('btnStopTrading').disabled = true;
-    document.getElementById('btnStartTrading').disabled = !validationPassed;
+    // v0.40.26: validationPassed gate removed — motor self-validates via
+    // /api/multi-start. Enable Start when a token is selected.
+    const _selSym = (document.getElementById('ticketSymbol') || {}).textContent;
+    document.getElementById('btnStartTrading').disabled = (_selSym === '—' || !_selSym);
   }
 
   // Trading control
@@ -2224,45 +2587,52 @@ async function loadSymbols() {
     ];
     const allSymbols = [...new Set([...defaultSymbols, ...symbols.map(s => typeof s === 'string' ? s : s.symbol)])].sort();
 
+    // v0.40.26: setupSymbol was removed (Discovery tab deleted).
+    // Use null-safe access so loadChart() always fires even if the
+    // setupSymbol element is gone. THIS WAS THE BUG THAT BROKE THE CHART.
     const selectChart = document.getElementById('chartSymbol');
     const selectSetup = document.getElementById('setupSymbol');
 
-    // v0.32.5: Preserve current selection if possible (so reloading the
-    // symbol list doesn't reset the user's pick).
-    const currentChart = selectChart.value;
-    const currentSetup = selectSetup.value;
+    const currentChart = selectChart ? selectChart.value : '';
+    const currentSetup = selectSetup ? selectSetup.value : '';
 
-    [selectChart, selectSetup].forEach(sel => {
-      sel.innerHTML = allSymbols.map(s => `<option value="${s}">${s}</option>`).join('');
-    });
+    if (selectChart) {
+      selectChart.innerHTML = allSymbols.map(s => `<option value="${s}">${s}</option>`).join('');
+      selectChart.value = (currentChart && allSymbols.includes(currentChart))
+        ? currentChart
+        : (allSymbols.includes('BTC/USDT') ? 'BTC/USDT' : allSymbols[0] || '');
+    }
+    if (selectSetup) {
+      selectSetup.innerHTML = allSymbols.map(s => `<option value="${s}">${s}</option>`).join('');
+      selectSetup.value = (currentSetup && allSymbols.includes(currentSetup))
+        ? currentSetup
+        : (allSymbols.includes('BTC/USDT') ? 'BTC/USDT' : allSymbols[0] || '');
+    }
 
-    // Restore selection if still in list, otherwise default to BTC/USDT
-    if (currentChart && allSymbols.includes(currentChart)) {
-      selectChart.value = currentChart;
-    } else if (allSymbols.includes('BTC/USDT')) {
-      selectChart.value = 'BTC/USDT';
-    }
-    if (currentSetup && allSymbols.includes(currentSetup)) {
-      selectSetup.value = currentSetup;
-    } else if (allSymbols.includes('BTC/USDT')) {
-      selectSetup.value = 'BTC/USDT';
-    }
+    // v0.40.26: Also populate the new Token List sidebar
+    if (typeof renderTokenList === 'function') renderTokenList(allSymbols);
 
     // Auto-load chart
     loadChart();
   } catch (e) {
     console.error('loadSymbols error:', e);
-    // Set defaults
+    // Fallback: ensure chart still loads even if symbol fetch failed
     const defaultSyms = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT',
                          'DOGE/USDT', 'ADA/USDT', 'AVAX/USDT', 'LINK/USDT'];
-    [document.getElementById('chartSymbol'), document.getElementById('setupSymbol')].forEach(sel => {
-      sel.innerHTML = defaultSyms.map(s => `<option value="${s}">${s}</option>`).join('');
-    });
+    const selChart = document.getElementById('chartSymbol');
+    if (selChart) {
+      selChart.innerHTML = defaultSyms.map(s => `<option value="${s}">${s}</option>`).join('');
+      selChart.value = 'BTC/USDT';
+    }
+    if (typeof renderTokenList === 'function') renderTokenList(defaultSyms);
     loadChart();
   }
 }
 
 async function autoSetup() {
+  // v0.40.26: Discovery tab was deleted — autoSetup is dead code.
+  // Null-guard so accidental calls don't throw.
+  if (!document.getElementById('setupSymbol')) { console.warn('autoSetup: Discovery tab deleted, no-op'); return; }
   const symbol = document.getElementById('setupSymbol').value;
   const timeframe = document.getElementById('setupTimeframe').value;
   const exchange = document.getElementById('chartExchange').value;
@@ -2364,15 +2734,19 @@ async function validateToken() {
 }
 
 async function startPaperTrading() {
-  if (!validationPassed) {
-    alert('No puedes iniciar Paper Trading: el token no ha pasado la validación (PASS). Ejecuta "Prepare Token" primero.');
-    return;
-  }
-
-  const symbol = document.getElementById('setupSymbol').value;
-  const timeframe = document.getElementById('setupTimeframe').value;
-  const exchange = document.getElementById('chartExchange').value;
-  const capital = parseFloat(document.getElementById('setupCapital').value) || 1000;
+  // v0.40.26: Use new ticket elements. setupSymbol/setupTimeframe/setupCapital
+  // were removed with the Discovery tab. Motor auto-validates via /api/multi-start.
+  const symbol = (document.getElementById('chartSymbol') || {}).value
+              || (document.getElementById('ticketSymbol') || {}).textContent
+              || 'BTC/USDT';
+  // Normalize: ticket text may be "BTC/USDT" or just "BTC"; ensure /USDT suffix
+  const normSymbol = symbol.includes('/') ? symbol : symbol.toUpperCase() + '/USDT';
+  const tfGroup = document.getElementById('ticketTFGroup');
+  const timeframe = (tfGroup && tfGroup.querySelector('.tg-btn.active'))
+                 ? tfGroup.querySelector('.tg-btn.active').dataset.tf
+                 : '5m';
+  const exchange = (document.getElementById('chartExchange') || {}).value || 'binance';
+  const capital = parseFloat((document.getElementById('ticketCapital') || {}).value) || 1000;
 
   // UX: mostrar feedback inmediato
   const btn = document.getElementById('btnStartTrading');
@@ -2385,7 +2759,7 @@ async function startPaperTrading() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        symbol, timeframe, exchange, capital,
+        symbol: normSymbol, timeframe, exchange, capital,
         leverage: currentLeverage,
         auto_mode: autoMode
       })
@@ -2412,8 +2786,10 @@ async function startPaperTrading() {
     updateTradingBadge('LIVE');
 
     // Update chart
-    document.getElementById('chartSymbol').value = symbol;
-    document.getElementById('chartTimeframe').value = timeframe;
+    const selC = document.getElementById('chartSymbol');
+    if (selC) selC.value = normSymbol;
+    const selT = document.getElementById('chartTimeframe');
+    if (selT) selT.value = timeframe;
     loadChart();
 
     // v0.34.1: feedback claro en el status bar
@@ -2886,7 +3262,8 @@ async function toggleKillSwitch() {
 
 function setLeverage(lev) {
   currentLeverage = lev;
-  document.querySelectorAll('.lev-btn').forEach(b => {
+  // v0.40.26: handle both legacy .lev-btn and new .tg-btn[data-lev]
+  document.querySelectorAll('.lev-btn, #ticketLevGroup .tg-btn').forEach(b => {
     b.classList.toggle('active', parseInt(b.dataset.lev) === lev);
   });
 }

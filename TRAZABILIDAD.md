@@ -9225,3 +9225,140 @@ Actualizado en `<title>`, logo, footer, header de JS.
 ### Commits
 
 - `feat(v0.40.25-terminal-cleanup): remove Discovery tab + Sweep History` (este commit)
+
+---
+
+## v0.40.26 — Trading tab profesional (HIG) + fix chart + responsive
+
+**Fecha:** 2026-06-19
+**Commit:** `feat(v0.40.26-trading-redesign): 3-col HIG layout + chart fix + responsive`
+
+### Bug crítico resuelto: chart en blanco
+
+**Causa raíz:** En v0.40.25 eliminé la tab Discovery completa, lo que
+borró el elemento `#setupSymbol`. Pero `loadSymbols()` (línea ~2585 del
+index.html) todavía hacía `document.getElementById('setupSymbol').value`
+— esto lanzaba `TypeError: Cannot read properties of null (reading
+'value')` y abortaba la función ANTES de llegar a `loadChart()`. Por
+eso el chart quedaba en blanco.
+
+**Fix:** `loadSymbols()` ahora usa acceso null-safe:
+```js
+const selectSetup = document.getElementById('setupSymbol');  // null
+const currentSetup = selectSetup ? selectSetup.value : '';
+if (selectSetup) { ... }  // se omite si no existe
+```
+
+`loadChart()` siempre se ejecuta, incluso si el fetch de símbolos falla.
+
+### Rediseño profesional de la Trading tab (3 columnas)
+
+**Layout:**
+```
+┌────────────┬────────────────────┬─────────────────┐
+│  Tokens    │      Operar        │   Operaciones   │
+│ (sidebar)  │   (ticket center)  │   (feed right)  │
+├────────────┼────────────────────┼─────────────────┤
+│ [search]   │ Token Seleccionado │  [eventos ↓]    │
+│            │ ─────────────────  │                 │
+│ BTC/USDT   │ Capital: $1000     │  [signal]       │
+│ ETH/USDT   │ ─────────────────  │  [trade LONG]   │
+│ SOL/USDT   │ TF: 1m 5m 15m 30m 1h│  [trade SHORT] │
+│ ...        │ ─────────────────  │                 │
+│            │ Lev: 1x 2x 3x 5x 10x│                │
+│            │ ─────────────────  │                 │
+│            │ Modo: Manual|Auto  │                 │
+│            │ ─────────────────  │                 │
+│            │ Precio | Posición  │                 │
+│            │ P&L    | Regime    │                 │
+│            │ ─────────────────  │                 │
+│            │ [Start Paper][Stop]│                 │
+└────────────┴────────────────────┴─────────────────┘
+```
+
+### Componentes nuevos
+
+#### 1. Token List (sidebar izquierdo)
+- Search field (`tokenSearch`) con filter en vivo
+- Cada item: `BTC/USDT` + precio en vivo (vía `/api/market/price`)
+- Click → selecciona token → actualiza chart + ticket + habilita Start
+- Selected item tiene borde azul izquierdo + bg accent
+
+#### 2. Trade Ticket (centro)
+- **Token Seleccionado** — display grande del token actual
+- **Capital** — input numérico con prefijo `$`, default 1000, editable,
+  oninput → `updateCapital()` → POST `/api/nodes/capital` + actualiza
+  display en Money Management
+- **Timeframe** — button group 1m | 5m(default) | 15m | 30m | 1h
+- **Apalancamiento** — button group 1x(default) | 2x | 3x | 5x | 10x
+- **Modo** — Manual | Auto (toggle)
+- **Live stats** — 4 mini-cards: Precio, Posición, P&L, Regime
+- **Acciones** — Start Paper (verde, grande) + Stop (outline rojo)
+
+#### 3. Operations Feed (derecha)
+- Lista vertical de eventos en vivo (signals + trades)
+- Cada item: hora + mensaje + P&L%
+- Color-coded: signal (azul), trade LONG (verde), trade SHORT (rojo)
+- Cap 50 items (FIFO)
+- Empty state con instrucciones
+
+### Estilo HIG (Apple Human Interface Guidelines)
+
+- Tipografía sans (Inter) para labels y headers
+- Tabular-nums en todos los números financieros
+- Padding generoso (14-18px) en lugar del anterior denso
+- Border-radius 6-8px (más redondeado = más moderno)
+- Botones de acción grandes (13px padding) con shadow suave
+- Single accent color (azul #5fa8f5) — sin saturar
+- Estados hover/focus/active con transitions suaves
+- Search con box-shadow azul al focus (estilo iOS)
+
+### Responsive
+
+```css
+@media(max-width:1100px){ /* tablet */
+  .trading-layout{grid-template-columns:200px 1fr}
+  .trading-layout > section:last-child{max-height:240px}
+}
+@media(max-width:700px){ /* mobile */
+  .trading-layout{grid-template-columns:1fr;grid-template-rows:auto auto auto}
+  .ticket-body{padding:14px}
+  .tg-btn{padding:9px 2px;font-size:11px}
+  .btn-start,.btn-stop{padding:11px 12px;font-size:13px}
+}
+```
+
+Verificado con agent-browser + VLM:
+- Desktop 1400×900: 3 columnas perfectas, todo visible
+- Mobile 390×844: 1 columna, sin overflow horizontal, todo usable
+
+### Funciones JS nuevas
+
+- `renderTokenList(symbols)` — poblar sidebar
+- `filterTokens()` — filter por texto del search
+- `selectToken(symbol)` — seleccionar + actualizar chart + ticket
+- `refreshTokenPrices(symbols)` — best-effort load de precios
+- `setTF(tf)` — cambiar TF del ticket + sync chart toolbar
+- `setMode(isAuto)` — toggle Manual/Auto
+- `updateCapital()` — POST a `/api/nodes/capital` + UI sync
+- `appendOpsFeed(type, msg, pnl, time)` — append eventos al feed
+
+### Fixes adicionales
+
+- `startPaperTrading()` ya NO requiere `validationPassed=true` (gate
+  eliminado). El motor self-valida vía `/api/multi-start` con
+  auto-validate + auto-ingest + auto-build.
+- `startPaperTrading()` ahora lee de los nuevos elementos
+  (`chartSymbol`, `ticketCapital`, `ticketTFGroup`) en vez de los
+  eliminados (`setupSymbol`, `setupCapital`, `setupTimeframe`).
+- `autoSetup()` (dead code) null-guarded para que no tire error si se
+  llama accidentalmente.
+- Status-poll: `btnStartTrading.disabled = !validationPassed` cambiado
+  a `disabled = (_selSym === '—' || !_selSym)` — habilita Start
+  apenas se selecciona un token.
+- `DOMContentLoaded`: pre-selecciona BTC/USDT después del primer
+  loadChart + sincroniza capital al server.
+
+### Commits
+
+- `feat(v0.40.26-trading-redesign): 3-col HIG layout + chart fix + responsive` (este commit)
