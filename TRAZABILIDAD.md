@@ -8447,3 +8447,332 @@ correctamente al trie en vivo. Pero la base construida sigue siendo
    pool) en lugar de N3 (per-symbol) a `compute_outcome_won`. N1/N2 tiene
    miles de observaciones → SL/TP más estables para nodos jóvenes en
    el per-asset trie.
+
+---
+
+## v0.41.0 — Dashboard Refactor + Portfolio Manager Wiring
+
+**Fecha**: 2026-06-19
+**Estado**: PLAN (no implementado todavía)
+
+### Motivo
+
+El dashboard actual (`ppmt terminal`, puerto 8420) acumuló panelería que no
+refleja cómo opera el motor en vivo. El motor PPMT sabe:
+- Detectar patrones (SAX + trie)
+- Calcular SL/TP dinámico
+- Generar señales LONG/SHORT con confidence
+- Ejecutar paper trades con exit reasons
+- Actualizar el trie en vivo (living trie)
+
+Pero el dashboard está lleno de cosas que NO son operación en vivo:
+- Tab Discovery con Token Groups + Sweep + Validation (procesos batch)
+- Money Management con "Child Nodes" (sistema legado sin uso en vivo)
+- Portfolio tab que muestra UN solo token, no un portfolio agregado
+
+El usuario lo formuló así: "el motor ppmt sabe ejecutar solo y sabe poner
+stop loss, lo unico que deberia tener un sistema de portfolio que maneje
+el dinero en que proporciones para que opere multiples token".
+
+### Hallazgo clave
+
+**Ya existe un `PortfolioManager` completo en `src/ppmt/risk/portfolio_manager.py`
+(1543 líneas)** con todo lo necesario:
+- `TokenSlot`, `PortfolioConfig`, `RebalanceResult` dataclasses
+- Capital allocation (equal weight, risk parity, regime-aware, quality-weighted)
+- Exposure management a nivel portfolio
+- Correlation governance (`CrossTokenCorrelationEngine`)
+- Circuit breakers (kill switch, daily loss, drawdown, correlation crisis)
+- Rebalancing periódico
+- Analytics (summary, risk report, equity curve)
+
+**PERO NO ESTÁ CABLEADO** al motor en vivo. Grep confirma:
+- `realtime.py` no lo importa
+- `paper_trader.py` no lo importa
+- `server.py` no lo importa
+
+Está conectado solo a:
+- CLI `ppmt portfolio` (offline)
+- API server en puerto 8430 (separado del dashboard 8420)
+
+Multi-token "trading" hoy = N tasks aislados de `(RealtimeTrader +
+MoneyManager)` con capital dividido como `req.capital / len(tokens)` (server.py:936).
+Cero coordinación cross-token.
+
+### Plan en 2 fases
+
+---
+
+### FASE 1 — Limpiar el dashboard (v0.41.0)
+
+#### 1.1 Sacar tab Discovery completo
+
+**HTML a eliminar** (`index.html` L746-933):
+- `<!-- ========== TAB: DISCOVERY ========== -->` completo
+- Panel: TOKEN GROUPS (L752)
+- Panel: SETUP & VALIDATION (L789)
+
+**HTML — botón de tab** (busca `tab-discovery` en tab bar, eliminar).
+
+**JS a eliminar** (`index.html`):
+- Token Groups: `loadGroups` L3367, `renderGroupSelect` L3385, `onGroupChange`
+  L414, `_collectFilters` L3427, `loadGroupIntoDropdown` L3442,
+  `saveCurrentAsCustomGroup` L3506, `deleteCustomGroup` L3541
+- Sweep: `startSweep` L3572, `pollSweepStatus` L3631, `cancelSweep` L3825,
+  `selectAllPassTokens` L3866, `computeScore` L3836, `escapeHtml` L3855
+- Pipeline Log: `logActivity` L4275, `renderActivityLog`, `clearActivityLog`
+  L4315, wrappers L4319-4367
+- State: `_groupsCache` L3365, `sweepPollHandle` L1312, `_activityLog` L4272,
+  `_lastSweep*` L4326-4327
+
+**JS — NO eliminar**: `autoSetup` L2497, `validateToken` L2570 (siguen
+siendo usados por Trading tab como pre-trade gate).
+
+**Endpoints a eliminar** (server.py):
+- `/api/validate` (REUBICAR — es llamado internamente por `/api/start-trading`)
+- `/api/auto-setup`
+- `/api/sweep`
+- `/api/sweep-cancel`
+- `/api/sweep-status`
+- `/api/groups`
+- `/api/groups/resolve`
+- `/api/groups/custom` (POST + DELETE)
+- `/api/multi-setup`
+- 6 endpoints `/api/history/*` (scan history)
+
+**Mover a CLI** (ya existen o se añaden):
+```bash
+ppmt scan --top 25 --min-vol 1M --no-stable  # ya existe
+ppmt validate --group top25 --timeframe 1h   # nuevo
+ppmt backtest -s BTCUSDT -t 1h               # ya existe
+```
+
+#### 1.2 Simplificar Money Management panel
+
+**HTML a eliminar** (index.html, dentro de `panelMoney` L1014):
+- "Child Nodes" div con header (L1029-1031)
+- `nodesContainer` (L1029-1031)
+- "Add Node" form completo (L1033-1061): Symbol, TF, Alloc %, Lev inputs
+  y los botones Add / Redistribute
+
+**HTML — mantener**:
+- Stats grid: Total Capital, Reserve, Total Exposure, Active Nodes (renombrar
+  a "Active Tokens")
+- Total Capital input (nuevo — editable)
+- Kill Switch button
+
+**JS a eliminar**:
+- `addNode` L3026
+- `removeNode` L3052
+- `toggleNodeAuto` L3068
+- `redistributeCapital` L3082
+- `updateNodes` L2393 (polling de nodos)
+
+**JS — mantener**:
+- `toggleKillSwitch` L3095
+- Nuevo: input de Total Capital → POST `/api/capital`
+
+**Endpoints a eliminar** (server.py):
+- `GET /api/nodes`
+- `POST /api/nodes/add`
+- `POST /api/nodes/remove`
+- `POST /api/nodes/leverage`
+- `POST /api/nodes/auto-mode`
+- `POST /api/nodes/redistribute`
+
+**Endpoints — mantener**:
+- `POST /api/nodes/kill-switch/activate`
+- `POST /api/nodes/kill-switch/deactivate`
+- `GET /api/nodes/capital` (o renombrar a `/api/portfolio/capital`)
+
+**Código Python — marcar como deprecated** (no borrar todavía):
+- `ParentNodeManager` en `money_manager.py` L1468-1937 — no se usa en vivo.
+  Deixar el archivo pero añadir `# DEPRECATED v0.41.0 — replaced by
+  PortfolioManager in risk/portfolio_manager.py` al header de la clase.
+
+---
+
+### FASE 2 — Cablear PortfolioManager al motor en vivo (v0.41.1)
+
+#### 2.1 Refactor realtime.py multi-token mode
+
+**Antes** (`realtime.py` ~L2060-2075, en `multi-start`):
+```python
+# Por cada token, instanciar RealtimeTrader + MoneyManager aislado
+for symbol in tokens:
+    trader = RealtimeTrader(symbol=symbol, ...)
+    mm = MoneyManager(config=MoneyManagerConfig(
+        initial_capital=req.capital / len(tokens),  # ← split dumb
+        ...
+    ))
+    asyncio.create_task(trader.run())
+```
+
+**Después**:
+```python
+# Un PortfolioManager compartido para todos los tokens
+pm = PortfolioManager(config=PortfolioConfig(
+    tokens=tokens,
+    initial_capital=req.capital,
+    allocation_method=AllocationMethod.RISK_PARITY,  # o REGIME_AWARE
+    max_portfolio_positions=5,
+    max_portfolio_exposure_pct=80.0,
+    max_single_token_exposure_pct=25.0,
+    kill_switch_drawdown_pct=15.0,
+    daily_loss_limit_pct=5.0,
+    rebalance_interval_minutes=60,
+))
+#pm.save("portfolio_state.json")  # persistir
+
+# Por cada token, instanciar RealtimeTrader pero pasándole el PM compartido
+for symbol in tokens:
+    trader = RealtimeTrader(
+        symbol=symbol,
+        portfolio_manager=pm,  # ← inyección
+        ...
+    )
+    asyncio.create_task(trader.run())
+```
+
+#### 2.2 Modificar RealtimeTrader para consultar PM antes de abrir trade
+
+**Antes** (`realtime.py` en `on_signal`):
+```python
+if not risk_mgr.can_open(signal):
+    return  # reject
+position_size = risk_mgr.calculate_position_size(signal)
+# abrir trade
+```
+
+**Después**:
+```python
+# 1. Check portfolio-level gate
+if not pm.can_open(symbol, signal.direction, signal.confidence):
+    return  # rejected at portfolio level (correlation, exposure, etc.)
+
+# 2. Get portfolio-approved allocation
+slot = pm.get_slot(symbol)
+position_size = pm.calculate_position_size(symbol, signal)
+
+# 3. Open trade with PM-approved size
+trade = open_trade(symbol, signal.direction, position_size, ...)
+
+# 4. Notify PM
+pm.on_trade_opened(symbol, trade)
+```
+
+#### 2.3 Hooks para PM en el trade lifecycle
+
+`PortfolioManager` necesita enterarse de:
+- Trade opened (para actualizar exposure)
+- Trade closed (para actualizar realized P&L, equity curve)
+- Candle processed (para correlation engine, regime detection)
+- Kill switch triggered (para cerrar todo)
+
+Añadir a `RealtimeTrader` callbacks:
+```python
+trader.on_trade_opened = pm.on_trade_opened
+trader.on_trade_closed = pm.on_trade_closed
+trader.on_candle = pm.on_candle
+```
+
+#### 2.4 Persistencia del PM
+
+`portfolio_state.json` con:
+- Config (tokens, allocation method, limits)
+- Estado (equity curve, open positions, realized P&L per token)
+- Rebalance history
+
+Cargar al arrancar `ppmt terminal` (si existe) o crear nuevo.
+
+#### 2.5 Reforzar tab Portfolio
+
+**HTML nuevo** en `panelPortfolio`:
+
+```
++---------------------------------------+
+| Portfolio & Positions                 |
++---------------------------------------+
+| [Portfolio Value] [Cash] [Unrealized] |
+| [Realized P&L]                        |
+|                                       |
+| Exposure: ████████░░ 67% / 80% max    |
+|                                       |
+| Equity Curve:                         |
+| [============]                        |
+|                                       |
+| --- ALLOCATION POLICY ---             |  ← NUEVO
+| Method: [Risk Parity ▼]               |
+| Max positions: [5]                    |
+| Max exposure: [80%]                   |
+| Max per token: [25%]                  |
+| Rebalance: [60 min]                   |
+|                                       |
+| --- RISK BUDGET ---                   |  ← NUEVO
+| Max DD: [15%]                         |
+| Daily loss limit: [5%]                |
+| Current DD: 3.2% [====-----]          |
+| Daily P&L: -1.1% [===-------]         |
+|                                       |
+| --- ALLOCATION BREAKDOWN ---          |  ← NUEVO
+| BTCUSDT  ████████ 25.0%  +2.3%        |
+| ETHUSDT  ██████   18.5%  -0.5%        |
+| SOLUSDT  █████    15.0%  +1.1%        |
+| ...                                   |
+|                                       |
+| --- CORRELATION MATRIX ---            |  ← NUEVO
+| [heatmap 5x5]                         |
+|                                       |
+| --- OPEN POSITIONS ---                |
+| (tabla existente, mejorar)            |
++---------------------------------------+
+```
+
+**Endpoints nuevos** (server.py):
+- `GET /api/portfolio/allocation` → breakdown por token
+- `GET /api/portfolio/risk` → risk budget consumption (DD, daily loss)
+- `GET /api/portfolio/correlation` → matriz de correlación
+- `POST /api/portfolio/config` → actualizar allocation policy
+- `GET /api/portfolio/summary` → aggregate stats
+
+#### 2.6 Migración de estado existente
+
+Si hay `money_mgr_*.json` por token, al arrancar v0.41.1:
+1. Leer todos los `money_mgr_*.json` existentes
+2. Sumar equity → portfolio equity
+3. Crear `portfolio_state.json` con tokens existentes
+4. Backupear los `money_mgr_*.json` (no borrar)
+
+---
+
+### Orden de ejecución
+
+1. **FASE 1.1** — Sacar tab Discovery (HTML + JS + endpoints) → commit `feat(v0.41.0-a): remove Discovery tab`
+2. **FASE 1.2** — Simplificar Money Management panel → commit `feat(v0.41.0-b): simplify Money Management panel`
+3. **FASE 1.3** — Smoke test: dashboard arranca, tabs Operaciones/Trading/Portfolio/History funcionan
+4. **FASE 2.1** — Cablear PortfolioManager a realtime.py multi-token mode → commit `feat(v0.41.1-a): wire PortfolioManager to live engine`
+5. **FASE 2.2** — Refactor RealtimeTrader para consultar PM → commit `feat(v0.41.1-b): PM gates in RealtimeTrader`
+6. **FASE 2.3** — Persistencia PM + migración estado → commit `feat(v0.41.1-c): PM state persistence + migration`
+7. **FASE 2.4** — Reforzar tab Portfolio con allocation/risk/correlation widgets → commit `feat(v0.41.1-d): Portfolio tab UI`
+8. **FASE 2.5** — Smoke test end-to-end: 3 tokens en paper, verificar exposure/correlation/risk budget funcionan
+
+### Riesgos y mitigaciones
+
+- **Riesgo**: romper el motor en vivo que ya funciona.
+  **Mitigación**: FASE 1 es solo UI (no toca el motor). FASE 2 se hace con
+  feature flag `USE_PORTFOLIO_MANAGER=1` para poder volver al modo viejo.
+
+- **Riesgo**: PortfolioManager existente (v0.16.0) puede tener bugs.
+  **Mitigación**: smoke test exhaustivo en FASE 2.5 antes de promover a
+  default. Mantener feature flag hasta 1 semana de paper trading limpio.
+
+- **Riesgo**: migración de estado `money_mgr_*.json` → `portfolio_state.json`
+  puede perder datos.
+  **Mitigación**: backup automático, no borrar originals, modo fallback.
+
+### Próximos pasos
+
+1. Empezar FASE 1.1 (sacar tab Discovery) — es lo más seguro y liberador
+   de ruido visual.
+2. Validar con usuario que el dashboard limpio se ve bien.
+3. Recién entonces arrancar FASE 2.
