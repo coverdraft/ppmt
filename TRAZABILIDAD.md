@@ -7094,3 +7094,161 @@ Antes de tocar el motor, validar **FIX-A** (sesgo de `won`):
 
 Si FIX-A muestra que el win_rate histórico estaba efectivamente sesgado para LONG,
 el siguiente paso es FIX-B (revisar `expected_move_pct`).
+
+---
+
+## v0.40.18-audit (2026-06-19) — Análisis crítico de 7 criticidades estructurales
+
+### Contexto
+
+El usuario trajo un análisis externo que critica 7 puntos de la estructura interna
+del motor PPMT. Pidió verificar críticamente si las críticas tienen razón o si lo
+que tenemos es mejor. Cada crítica se contrasta contra el código REAL del repo hoy
+(commit 724145d).
+
+### Crítica 1: "La metadata es un PROMEDIO que pierde información de distribución"
+
+**Afirma**: `expected_move_pct = sum(moves)/len(moves)` y no hay std_dev ni percentiles.
+
+**Realidad**: PARCIALMENTE OBSOLETA.
+- `expected_move_pct` SÍ es un promedio incremental (líneas 568-571 de metadata.py).
+- PERO ya existe `move_variance` (Welford's online algorithm, V4.1) y `move_std` property (líneas 380-391).
+- También existe `move_coefficient_of_variation` (CV = std/|mean|) que es la métrica exacta que pide el crítico ("si std_dev > expected_move_pct × 0.8 → skip").
+- Lo que SÍ falta: percentiles (p25, p50, p75) — no se pueden computar incrementalmente sin almacenar datos.
+
+**Veredicto**: 70% resuelto. Falta: percentiles (memoria costosa) y exponer `move_std`/`CV` en `confidence()`.
+
+**Acción**: Integrar `move_coefficient_of_variation` en el cálculo de `confidence()`. Ya está implementado en `sizing_signal` pero no en `confidence` (que es lo que el motor usa para filtrar).
+
+---
+
+### Crítica 2: "continuation_nodes cuenta hijos, no probabilidades. break_nodes hardcodeado a 0."
+
+**Afirma**: `continuation_nodes = len(children)` y `break_nodes = 0` siempre.
+
+**Realidad**: FALSA en continuation_nodes, PARCIALMENTE CIERTA en break_nodes.
+- `continuation_nodes` NO es un entero, es una **lista de símbolos SAX** observados como continuación (metadata.py:150). Se llena en `update_from_observation()` cuando `next_symbol is not None`. Cada símbolo solo se añade una vez (dedup). NO pierde información de probabilidad en el sentido que dice el crítico — pero tampoco guarda la distribución de probabilidades (cuál es más frecuente).
+- `break_nodes` SÍ es metadata muerta: la lista existe pero `update_from_observation` nunca la llena. Solo se propaga en `insert()` (trie.py:216-218) desde metadata explícita — pero ningún caller pasa break_nodes.
+- La distribución de probabilidades que pide el crítico SÍ está implícita: cada child node tiene `observation_count` (TrieNode) y `historical_count` (metadata). El engine la recalcula en `check_continuation()` via `get_continuation_symbols()` + child's `metadata.confidence`.
+
+**Veredicto**: continuation_nodes es funcional; break_nodes es código muerto; lo que pide el crítico (transition_probs precalculado) sería un optimization pero no un bug.
+
+**Acción**: 
+1. Borrar break_nodes o implementarlo (es código muerto; decide).
+2. (Opcional, perf) Precalcular transition_probs en `propagate_metadata()` para evitar recálculo en cada `check_continuation`.
+
+---
+
+### Crítica 3: "La metadata no distingue DIRECCIÓN del outcome. win_rate mezcla LONG y SHORT."
+
+**Afirma**: `won = move_pct > 0` y un solo win_rate mezcla ambas direcciones.
+
+**Realidad**: CIERTA y crítica. Confirmada por código:
+- `ppmt.py:336`: `won = move_pct > 0  # Simple: positive move = win`
+- Esta línea es válida SOLO para LONG. Para SHORT, "ganar" sería `move_pct < 0`.
+- Pero el trie no sabe la dirección al insertar. La dirección se decide en runtime mirando `expected_move_pct` (positivo=LONG, negativo=SHORT).
+- Resultado: si un patrón se observó 10 veces con move_pct > 0 (todas "ganadoras") y 10 veces con move_pct < 0 (todas "perdedoras"), `win_rate = 0.50`. Pero si el motor decide LONG al verlo, el win_rate histórico LONG es 1.0; si decide SHORT, es 0.0. La metadata miente.
+- Esto explica directamente el hallazgo del audit anterior (LONG vs confidence): LONG pierde porque `expected_move_pct > 0` en train no implica que el patrón vaya a subir en test — pero el win_rate que alimenta `confidence()` SÍ incluye observaciones donde el patrón bajó (que el motor contó como "perdedoras" pero en realidad eran "ganadoras para SHORT").
+
+**Veredicto**: CIERTA. Es la causa raíz más probable de la asimetría LONG/SHORT.
+
+**Acción**: Implementar `DirectionStats` por dirección. En `update_from_observation`, clasificar la observación como LONG-instance si `move_pct > 0` y SHORT-instance si `move_pct < 0`, y mantener `long_wins/long_count` y `short_wins/short_count` por separado. En runtime, el motor consulta el `win_rate` correspondiente a la dirección que va a tomar.
+
+---
+
+### Crítica 4: "N4 no es realmente per-asset + regime. Usa string compuesto 'BTC:trending_up:abcde'."
+
+**Afirma**: N4 concatena symbol+regime+sax_sequence como string.
+
+**Realidad**: FALSA (obsoleta desde v0.40.2 FIX-1).
+- `RegimePartitionedTrie` (trie.py:904-1078) ES un wrapper que mantiene `sub_tries: dict[str, PPMTTrie]` con 4 entradas (trending_up, trending_down, ranging, volatile).
+- Cada sub-trie es un PPMTTrie SAX puro. La selección de sub-trie se hace ANTES de la búsqueda, no dentro del path.
+- `insert_with_observations(regime=...)` rutea al sub-trie correcto (líneas 982-1006).
+- `search()` y `search_prefix()` consultan solo el sub-trie del régimen actual (líneas 1012-1018).
+- El crítico está mirando código pre-v0.40.2.
+
+**Veredicto**: FALSA. Ya está implementado como pide el crítico.
+
+**Acción**: Ninguna. (Nota: como vimos en REGIME-PARTITION-1, N4 no aporta valor empírico — pero eso es problema de hipótesis, no de implementación.)
+
+---
+
+### Crítica 5: "Los pesos de merge son estáticos y no reflejan la CALIDAD de cada match."
+
+**Afirma**: `weights = {'n1': 0.10, 'n2': 0.30, ...}` y se aplica tal cual a cada match.
+
+**Realidad**: PARCIALMENTE CIERTA.
+- Los pesos base son estáticos (weights.py:31-56), PERO `AdaptiveWeights.adapt()` (líneas 131-195) los ajusta:
+  - Redistribuye peso de niveles con `pattern_count < min_observations` a niveles con suficiente data.
+  - Aplica un "quality bonus" del 10% basado en `avg_confidence` por nivel (líneas 177-186).
+- PERO `compute_weighted_confidence()` (líneas 197-235) NO aplica un quality factor por MATCH individual — solo a nivel agregado por nivel de trie.
+- Es decir: si N1 tiene 5000 observaciones y confidence 0.90 en un match concreto, y N4 tiene 3 observaciones y confidence 0.50, el peso aplicado es el mismo que si el match de N4 tuviera confidence 0.10. El quality bonus solo ajusta el peso del NIVEL, no del match.
+
+**Veredicto**: PARCIALMENTE CIERTA. El crítico tiene razón en que el match individual no se ajusta por su propia calidad. Pero la quality adjustment a nivel de nivel sí existe.
+
+**Acción**: Modificar `compute_weighted_confidence()` para multiplicar cada peso por `historical_count / (historical_count + 100)` (Bayesian shrinkage). Es un cambio de 5 líneas.
+
+---
+
+### Crítica 6: "La metadata no tiene TIMESTAMP y no puede decaer."
+
+**Afirma**: No hay first_seen ni last_seen.
+
+**Realidad**: FALSA (obsoleta desde V4.2).
+- `last_observation_time` (metadata.py:225) — timestamp epoch seconds de la última observación.
+- `observation_timespan` (metadata.py:235) — tiempo entre primera y última observación.
+- `freshness_decay` property (líneas 407-433) — multiplicador [0, 1] con half-life 7 días.
+- `observation_density` property (líneas 436+) — observaciones por unidad de tiempo.
+
+**Veredicto**: FALSA. Ya está implementado y se actualiza incrementalmente en `update_from_observation()` (líneas 644-657).
+
+**Acción**: Verificar si `freshness_decay` se aplica en `confidence()`. Si no, integrarlo.
+
+---
+
+### Crítica 7: "sl_price y tp_price en metadata son un error de concepto."
+
+**Afirma**: Son precios absolutos que no pertenecen al nodo, deberían calcularse en runtime.
+
+**Realidad**: PARCIALMENTE CIERTA en diagnóstico, FALSA en impacto.
+- Sí, `sl_price` y `tp_price` son precios absolutos almacenados en metadata (líneas 141-147).
+- PERO `compute_sl_tp(entry_price)` se llama en runtime en cada generación de señal (signal.py:590, paper_trader.py:1656), sobreescribiendo los valores del nodo.
+- En el flujo normal (build → match → signal), los valores de build se sobreescriben antes de ser usados.
+- El riesgo real: si alguien lee `metadata.sl_price` directamente sin llamar `compute_sl_tp()` primero, lee un precio absoluto de build (que es el entry_price de la última observación insertada). Es confuso pero no buggy si todos los callers respetan el contrato.
+
+**Veredicto**: PARCIALMENTE CIERTA. El campo es confuso conceptualmente pero no causa bugs en el flujo normal.
+
+**Acción**: Opción A (limpieza): mover sl_price/tp_price de metadata a Signal solo. Opción B (mínimo): agregar docstring warning "DEPRECATED — call compute_sl_tp(entry) before reading". Recomiendo A a largo plazo, B a corto.
+
+---
+
+### Resumen
+
+| # | Crítica | Veredicto | Acción recomendada | Prioridad |
+|---|---|---|---|---|
+| 1 | Promedio sin distribución | 70% resuelto | Integrar `move_cv` en `confidence()` | Media |
+| 2 | continuation/break_nodes | FALSA + código muerto | Borrar break_nodes | Baja |
+| 3 | win_rate mezcla LONG/SHORT | **CIERTA** | `DirectionStats` por dirección | **Alta** |
+| 4 | N4 string compuesto | FALSA (v0.40.2) | Ninguna | — |
+| 5 | Pesos estáticos sin quality | PARCIALMENTE CIERTA | Bayesian shrinkage en `compute_weighted_confidence` | Media |
+| 6 | Sin timestamp | FALSA (V4.2) | Verificar uso de `freshness_decay` en confidence | Baja |
+| 7 | sl_price/tp_price en metadata | PARCIALMENTE CIERTA | Mover a Signal o docstring warning | Baja |
+
+### Conclusión
+
+De las 7 críticas, **solo 1 es realmente crítica y.Actionable ahora mismo: la #3**.
+Y es la misma hipótesis que detectamos en el audit LONG-confidence anterior (FIX-A).
+
+Las críticas 4 y 6 están basadas en código viejo (pre-v0.40.2 y pre-V4.2 respectivamente).
+Las críticas 1, 5, 7 son parcialmente ciertas y merecen backlog.
+La crítica 2 identifica código muerto (break_nodes) — limpieza, no bug.
+
+**El análisis externo es bueno conceptualmente pero está mirando una versión
+obsoleta del código. La causa raíz que sí detecta correctamente (#3) ya la
+habíamos identificado nosotros en el audit anterior como FIX-A.**
+
+### Próximo paso sugerido
+
+Implementar **FIX-A** (crítica #3): `DirectionStats` por dirección en metadata.
+Es el único cambio que tiene impacto directo en el problema LONG/SHORT que
+venimos persiguiendo. Las otras 6 críticas son backlog de limpieza/perf.
