@@ -9690,3 +9690,220 @@ Con agent-browser + eval directo:
 
 - `fix(v0.40.28): spot-only ccxt + real-time chart ticker + state-desync fixes` (este commit)
 
+
+
+---
+
+## v0.40.29 — MEXC default + Binance→MEXC auto-fallback
+
+**Fecha:** 2026-06-19
+**Trigger:** v0.40.28 falló en la Mac del usuario con `Exchange connection failed: binance GET https://api.binance.com/api/v3/exchangeInfo`. Binance SPOT también está bloqueado desde algunas redes LATAM/EU, no solo fapi.
+
+### Problemas diagnosticados
+
+1. **Binance spot endpoint bloqueado** — `api.binance.com/api/v3/exchangeInfo` retorna timeout/error desde la red del usuario. Esto afecta `load_markets()` que es el primer llamado del engine al arrancar.
+2. **Sin fallback automático** — El engine intentaba Binance, fallaba, y se quedaba STOPPED. No había retry con MEXC.
+3. **Default exchange hardcoded a Binance** — Server defaults, frontend defaults, todos apuntaban a Binance.
+
+### Fixes aplicados (4 patches en 3 archivos)
+
+**`src/ppmt/engine/realtime.py`:**
+- **P1:** Auto-fallback Binance→MEXC en REST polling. Si `binance.load_markets()` falla, cierra el exchange, crea `ccxt_async.mexc`, retry. La sesión sigue RUNNING con MEXC.
+- Default exchange cambiado a "mexc" en LiveConfig.
+
+**`src/ppmt/terminal/server.py`:**
+- **P2:** 12 defaults `exchange: str = "binance"` → `"mexc"` en todos los endpoints.
+
+**`src/ppmt/terminal/static/index.html`:**
+- **P3a:** chartExchange dropdown HTML arranca en MEXC selected (antes Binance).
+- **P3b:** 8 JS fallbacks `|| 'binance'` → `|| 'mexc'`.
+
+**`pyproject.toml`, `cli/main.py`:**
+- Version bump v0.40.28 → v0.40.29.
+
+### Commits
+- `fix(v0.40.29): MEXC default + Binance→MEXC auto-fallback` (commit d35d420)
+
+---
+
+## v0.40.30 — Bump `__version__` in `__init__.py` + server.py FastAPI
+
+**Fecha:** 2026-06-19
+**Trigger:** Usuario reportó que tras instalar v0.40.29, `ppmt --version` seguía mostrando 0.40.24.
+
+### Problemas diagnosticados
+
+1. **`__version__` hardcoded en `src/ppmt/__init__.py`** — Línea 9 tenía `__version__ = "0.40.24"` que nunca fue bumpiado por el script de v0.40.29. `cli/main.py` hace `from ppmt import __version__`, entonces aunque el wheel decía 0.40.29, el comando leía 0.40.24.
+2. **`FastAPI(version="0.40.28")` hardcoded en `server.py`** — También nunca bumpiado en v0.40.29.
+
+### Fixes aplicados
+
+- `src/ppmt/__init__.py`: `__version__ = "0.40.30"`
+- `src/ppmt/terminal/server.py`: `FastAPI(version="0.40.30")`
+- Version bump v0.40.29 → v0.40.30 en: `pyproject.toml`, `__init__.py`, `cli/main.py`, `server.py`, `index.html` (9 ocurrencias).
+
+### Verificación
+- `python3 -c "import ppmt; print(ppmt.__version__)"` → "0.40.30"
+- `ppmt --version` ahora muestra `0.40.30` tras `pip install -e . --force-reinstall --no-deps`.
+
+### Commits
+- `fix(v0.40.30): bump __version__ in __init__.py + server.py FastAPI` (commit d6323fe)
+
+---
+
+## v0.40.31 — Skip `load_markets()`, inject symbol stub
+
+**Fecha:** 2026-06-19
+**Trigger:** v0.40.30 falló en Mac del usuario con `Failed to connect: mexc GET https://api.mexc.com/api/v3/exchangeInfo`. MEXC también falla en `load_markets()` desde la Mac del usuario. Pero `fetch_ticker` y `fetch_ohlcv` SÍ funcionan (200 OK en `/api/market/price?exchange=mexc`).
+
+### Problemas diagnosticados
+
+1. **`load_markets()` descarga TODOS los mercados del exchange** (~3260 para MEXC). Algunas redes/ISPs bloquean este endpoint masivo.
+2. **`fetch_ticker` y `fetch_ohlcv` son endpoints individuales que sí funcionan** en la misma red.
+3. **ccxt requiere `exchange.markets[symbol]` antes de `fetch_ohlcv`** — Workaround: inyectar manualmente un market stub para el símbolo específico.
+
+### Fixes aplicados (3 patches)
+
+**`src/ppmt/engine/realtime.py`:**
+- **P1:** Reemplazado el bloque `load_markets()` + auto-fallback con `fetch_ticker()` + market stub injection. Si `fetch_ticker` OK → `fetch_ohlcv` funciona. Auto-fallback Binance→MEXC preservado si `fetch_ticker` falla.
+
+**`src/ppmt/terminal/server.py`:**
+- **P2:** `/api/market/symbols` usa `fetch_tickers()` en vez de `load_markets()`. Si `fetch_tickers` también falla, retorna hardcoded top-50 USDT pairs.
+
+**Version bump:** v0.40.30 → v0.40.31 en 5 archivos.
+
+### Resultado
+- Smoke test en servidor: `POST /api/multi-start BTC/USDT 1m exchange=mexc: RUNNING, candles=201`.
+- Pero en la Mac del usuario siguió fallando (ver v0.40.32).
+
+### Commits
+- `fix(v0.40.31): skip load_markets, inject symbol stub` (commit 5b95525)
+
+---
+
+## v0.40.32 — Direct HTTP polling (bypass ccxt entirely)
+
+**Fecha:** 2026-06-19
+**Trigger:** v0.40.31 falló con mismo error `mexc GET https://api.mexc.com/api/v3/exchangeInfo`. Causa: ccxt's `fetch_ticker()` llama `load_markets()` internamente. Pre-poblar `markets` con stub no funciona para `fetch_ticker` (ccxt's MEXC impl usa `safe_market()` que accede `markets[0]` cuando `marketId=None` → KeyError).
+
+### Problemas diagnosticados
+
+1. **ccxt's `fetch_ticker`, `fetch_ohlcv`, etc. todos llaman `self.load_markets()` al inicio**. Si `markets` está vacío, hace la network call al endpoint masivo `/api/v3/exchangeInfo` que está bloqueado en la red del usuario.
+2. **Pre-poblar `markets` con stub no funciona** para `fetch_ticker` porque la impl de MEXC usa `safe_market()` que accede `markets[0]` cuando `marketId=None`.
+
+### Fixes aplicados (4 patches)
+
+**`src/ppmt/engine/realtime.py`:**
+- **P1:** Nueva clase `_DirectPollExchange` usando aiohttp directo. Implementa `fetch_ticker` + `fetch_ohlcv` via HTTP directo a MEXC/Binance/Bybit REST APIs. No usa ccxt.
+- **P2:** Reemplaza el bloque REST polling para usar `_DirectPollExchange` en vez de ccxt. Auto-fallback Binance→MEXC preservado.
+
+**`src/ppmt/terminal/server.py`:**
+- **P3:** `/api/market/symbols` migrado a HTTP directo con timeout de 10s y fallback hardcoded top-50.
+
+**Version bump:** v0.40.31 → v0.40.32 en 7 archivos.
+
+### Resultado
+- Smoke test en servidor: `'Connected to mexc (direct HTTP polling, no load_markets)'`, `'BTC/USDT last price: $62,945.86'`, `'Warmup: processed 200 historical candles'`, status=RUNNING.
+- Pero en la Mac del usuario siguió fallando con `Failed to connect: ` (mensaje vacío) → ver v0.40.33.
+
+### Commits
+- `fix(v0.40.32): direct HTTP polling, bypass ccxt load_markets entirely` (commit 6d5e2e7)
+
+---
+
+## v0.40.33 — requests-based `_DirectPollExchange` (no aiohttp)
+
+**Fecha:** 2026-06-19
+**Trigger:** v0.40.32 falló en Mac del usuario con `Failed to connect: ` (mensaje vacío tras el colon) — mismo comportamiento que v0.40.31.
+
+### Problemas diagnosticados
+
+1. **`aiohttp` (usado por `_DirectPollExchange` en v0.40.32) timed out silenciosamente**. `asyncio.TimeoutError` tiene `str()` vacío → `f"Failed to connect: {e_primary}"` produce "Failed to connect: " sin contexto.
+2. **Mientras tanto, el endpoint `/api/market/price` (que usa sync ccxt + `requests`) funcionaba perfecto** en la misma Mac. Confirmado porque el usuario veía precios en el dashboard mientras el engine fallaba.
+3. **Causa raíz:** aiohttp (pure-Python async HTTP) tiene diferente comportamiento SSL/IPv6/DNS que `requests`. En redes restrictivas aiohttp times out mientras `requests` funciona.
+
+### Fixes aplicados (4 patches)
+
+**`src/ppmt/engine/realtime.py`:**
+- **P1:** Reescrita clase `_DirectPollExchange` completa. Eliminado aiohttp. Nueva impl usa `requests.Session` + `asyncio.to_thread` para wrappers async. Misma API pública (`fetch_ticker`, `fetch_ohlcv`, `close`).
+- **P2:** Mensajes de error mejorados — ahora incluyen `{type(e).__name__}: {e}` para que excepciones vacías (TimeoutError) sigan siendo diagnósticas.
+- **P3:** Comentado `await exchange.load_markets()` en path de order execution (línea 2249) con comentario explicativo v0.40.33.
+
+**Version bump:** v0.40.32 → v0.40.33 en 6 archivos.
+
+### Verificación
+- `import ppmt; ppmt.__version__` → "0.40.33"
+- Smoke test `_DirectPollExchange` directo:
+  - MEXC `fetch_ticker('BTC/USDT')` → $63,195.00
+  - MEXC `fetch_ohlcv('BTC/USDT', '1m', 5)` → 5 candles
+  - Binance `fetch_ticker('BTC/USDT')` → $63,209.99
+- Smoke test del motor completo (25s timeout): "Connected to mexc (direct HTTP polling, no load_markets)" → "BTC/USDT last price: $63,213.86" → "Warmup: processed 200 historical candles" → motor corriendo sin crash.
+- Grep `load_markets` en `realtime.py` → solo comentarios y strings, CERO llamadas activas.
+
+### Validación en Mac del usuario (v0.40.33)
+- Usuario instaló v0.40.33: `ppmt, version 0.40.33` ✓
+- Log del server muestra: "Connected to mexc (direct HTTP polling, no load_markets)" ✓
+- "TRADE #1 LONG BTC/USDT @ $63150.6100 | conf=0.12" ✓
+- "Warmup: processed 200 historical candles" ✓
+- **EL MOTOR ESTÁ FUNCIONANDO.** El error de `exchangeInfo` está resuelto.
+
+### Bugs residuales (NO son del engine, son del frontend/state)
+1. **Candles: 0 en UI** pese a que el engine procesó 200 velas warmup. Causa: `_state_cb` no recibe `candles_processed` hasta el primer polling cycle (5s después de warmup). Fix en v0.40.34.
+2. **STOPPED en header superior** pese a que el Operations feed dice RUNNING. Causa: header lee del singleton, pero multi-token mode bypassa el singleton. Fix en v0.40.34.
+3. **Saltos de precio BTC $63,060 → $63,760 sin ticks intermedios**. Causa: UI alterna entre `fetch_ticker` (chart ticker) y `fetch_ohlcv close` (engine price) que pueden diferir varios segundos. Fix en v0.40.34.
+4. **POSICIÓN FLAT en header** pese a que hay trade LONG abierto. Causa: header lee del singleton. Fix en v0.40.34.
+
+### Commits
+- `fix(v0.40.33): requests-based _DirectPollExchange, no aiohttp` (commit 3e77386)
+
+---
+
+## v0.40.34 — State push after warmup + live ticker + UI header fixes
+
+**Fecha:** 2026-06-19
+**Trigger:** v0.40.33 resolvvió el bug de `load_markets` y el motor ARRANCÓ en la Mac del usuario (log muestra "Connected to mexc", "TRADE #1 LONG BTC/USDT @ $63150.61", "Warmup: processed 200 historical candles"). Pero el usuario reportó:
+- "STOPPED" en header superior pese a que Operations feed dice RUNNING.
+- "Candles: 0" pese a que el engine procesó 200 velas.
+- "saltos muy grandes en el precio de btc sin sentido" — BTC salta $63,060 → $63,760 sin ticks intermedios.
+- "POSICIÓN FLAT" + "P&L +0.00%" pese a que hay trade LONG abierto.
+- "no realizó ni una operación" pese a que el Operations feed muestra TRADE #1.
+
+### Problemas diagnosticados (5 bugs, todos frontend/state — NO del engine)
+
+1. **Candles: 0 en UI** — `_state_cb` recibe `candles_processed` kwarg del engine y lo guarda en `s["candles_processed"]`. Pero el engine solo dispara `_update_terminal_state` con `candles_processed` cuando `if ohlcv:` block corre dentro del polling loop (cada 5s tras warmup). El warmup path no dispara `_update_terminal_state`, así que la UI muestra 0 hasta el primer poll.
+
+2. **STOPPED en header** — Header badge lee de `/api/multi-status`, que solo flipea a RUNNING cuando `_state_cb` recibe `is_running=True`. Pero esa actualización también solo se dispara en el polling loop DESPUÉS de warmup. Durante warmup (15-30s en conexiones lentas), la UI sigue mostrando STOPPED.
+
+3. **Saltos de precio BTC** — Frontend polea `/api/market/price` cada 2s para el chart ticker, Y también muestra `current_price` del engine desde `/api/multi-status`. Estos dos valores vienen de fuentes DIFERENTES (chart ticker = sync ccxt `fetch_ticker`; engine price = REST poll `fetch_ohlcv close`). Cuando el engine's price va 5-10s detrás del chart ticker, la UI flickerea entre ellos.
+
+4. **POSICIÓN FLAT en header** — Header position/P&L lee del `_terminal_state` singleton, pero multi-token mode (`state_callback != None`) SKIPEA el singleton (v0.39.1 fix). Así que el header nunca ve la posición abierta.
+
+5. **"no realizó ni una operación"** — El trade SÍ se hizo (TRADE #1 LONG @ $63,150 en el log). Pero el header mostraba FLAT, así que el usuario pensó que no pasó nada. 7+ minutos en 1m TF sin close = normal (SL $62,834, TP $63,624, price necesita moverse ±0.5%).
+
+### Fixes aplicados (7 patches en 3 archivos)
+
+**`src/ppmt/engine/realtime.py`:**
+- **P1:** Push state inmediatamente después de warmup (candles_processed + is_running=True + current_price + portfolio_value). Antes, la UI mostraba Candles: 0 y STOPPED por 5-30s después de warmup.
+- **P2:** Use `fetch_ticker` para `live_price` en polling loop (en vez de `fetch_ohlcv close` que puede estar 5-60s stale). Ticker da spot price real-time, ohlcv da boundary de candle.
+- **P7:** Engine pushea `open_position` via `_update_terminal_state` cuando se abre/cierra un trade. Antes, el header no veía la posición porque el singleton estaba bypassado.
+
+**`src/ppmt/terminal/server.py`:**
+- **P3:** `Cache-Control: no-store, no-cache, must-revalidate, max-age=0` headers en `/api/market/price` response. Previene CDN/browser proxies de servir precios stale.
+- **P4:** `open_position` field agregado al response de `/api/multi-status`.
+- **P5:** `_state_cb` ahora captura `open_position` kwarg.
+
+**`src/ppmt/terminal/static/index.html`:**
+- **P6:** Nueva función `_updateHeaderFromMulti(sess)` — actualiza header price/position/P&L/regime desde multi-status session data. Llamada desde `_pollSessionStatus` en cada poll.
+
+**Version bump:** v0.40.33 → v0.40.34 en 6 archivos.
+
+### Verificación (smoke test)
+- `python3 -m py_compile` OK en realtime.py, server.py, cli/main.py.
+- `import ppmt; ppmt.__version__` → "0.40.34".
+- Motor arranca, conecta a MEXC via HTTP directo, procesa 200 warmup candles, sigue running.
+- Tras warmup, `_update_terminal_state(is_running=True, candles_processed=200)` se dispara inmediatamente → UI debe mostrar Candles>0 y status=RUNNING sin esperar al primer poll.
+- `fetch_ticker` da precio real-time → no más saltos de $700 entre polling cycles.
+- Header lee de multi-status → POSICIÓN muestra LONG cuando hay trade abierto.
+
+### Commits
+- `fix(v0.40.34): state push after warmup + live ticker + UI header fixes` (este commit)

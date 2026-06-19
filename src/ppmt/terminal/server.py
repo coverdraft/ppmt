@@ -58,7 +58,7 @@ async def _lifespan(app: FastAPI):
         logger.debug("Could not capture event loop on startup: %s", _e)
     yield
 
-app = FastAPI(title="PPMT Terminal", version="0.40.33", lifespan=_lifespan)
+app = FastAPI(title="PPMT Terminal", version="0.40.34", lifespan=_lifespan)
 
 # Global terminal state (shared with engine)
 terminal_state: TerminalState = get_terminal_state()
@@ -539,15 +539,25 @@ async def get_market_price(
         exc = ex(_opts)
         try:
             ticker = exc.fetch_ticker(symbol)
-            return {
-                "ok": True,
-                "symbol": symbol,
-                "price": ticker.get("last", 0),
-                "change_24h": ticker.get("percentage", 0),
-                "high_24h": ticker.get("high", 0),
-                "low_24h": ticker.get("low", 0),
-                "volume_24h": ticker.get("quoteVolume", 0),
-            }
+            # v0.40.34: Explicit no-cache headers to prevent CDN/browser
+            # proxies from serving stale prices (user saw 700-dollar jumps
+            # in BTC price suggesting stale cached responses).
+            from fastapi.responses import JSONResponse
+            return JSONResponse(
+                content={
+                    "ok": True,
+                    "symbol": symbol,
+                    "price": ticker.get("last", 0),
+                    "change_24h": ticker.get("percentage", 0),
+                    "high_24h": ticker.get("high", 0),
+                    "low_24h": ticker.get("low", 0),
+                    "volume_24h": ticker.get("quoteVolume", 0),
+                    "ts": int(time.time()),
+                },
+                headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                         "Pragma": "no-cache",
+                         "Expires": "0"},
+            )
         finally:
             if hasattr(exc, 'close'):
                 exc.close()
@@ -1276,6 +1286,11 @@ async def multi_start(req: MultiStartRequest) -> dict:
                         s["win_rate"] = float(kwargs["win_rate"] or 0)
                     if "exposure_pct" in kwargs:
                         s["exposure_pct"] = float(kwargs["exposure_pct"] or 0)
+                    # v0.40.34: Capture open_position so the dashboard header
+                    # can show LONG/SHORT + entry + P&L even in multi-token mode
+                    # (where the global _terminal_state singleton is bypassed).
+                    if "open_position" in kwargs:
+                        s["open_position"] = kwargs["open_position"]
                     # v0.39.3: Capture engine errors (e.g., "No Trie") so
                     # the dashboard can show WHY a session died instead of
                     # just flipping to STOPPED with no reason.
@@ -1458,6 +1473,9 @@ async def multi_status() -> dict:
             "validation_verdict": sess.get("validation_verdict", ""),
             "last_update_ts": last_update,
             "seconds_since_update": (now - last_update) if last_update > 0 else 0,
+            # v0.40.34: open_position for header display (multi-token mode bypasses
+            # the singleton, so header reads from here instead).
+            "open_position": sess.get("open_position"),
             # v0.38.9: new realized P&L fields
             "realized_pnl": realized_pnl,
             "realized_pnl_pct": realized_pnl_pct,

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>PPMT Terminal v0.40.33</title>
+<title>PPMT Terminal v0.40.34</title>
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -829,7 +829,7 @@ tr:hover td{background:rgba(95,168,245,.07)}
 <!-- ========== HEADER ========== -->
 <header class="header">
   <div class="header-left">
-    <span class="logo">PPMT<span class="logo-ver">v0.40.33</span></span>
+    <span class="logo">PPMT<span class="logo-ver">v0.40.34</span></span>
     <span class="status-dot stopped" id="headerDot"></span>
     <span id="headerStatus" style="font-family:var(--mono);font-size:10px;color:var(--text2)">DETENIDO</span>
   </div>
@@ -1290,7 +1290,7 @@ tr:hover td{background:rgba(95,168,245,.07)}
     <div class="status-item" style="margin-left:12px"><span id="statusMessage" style="color:var(--text3)">Listo.</span></div>
   </div>
   <div class="status-right">
-    <span>PPMT v0.40.33</span>
+    <span>PPMT v0.40.34</span>
     <div class="status-item"><span class="label">Uptime:</span><span class="value" id="btmUptime">00:00:00</span></div>
   </div>
 </footer>
@@ -1884,7 +1884,7 @@ function _updateChartLiveTick(price, symbol, timeframe) {
 }
 
 // ============================================================
-// v0.40.33: CHART FALLBACK TICKER
+// v0.40.34: CHART FALLBACK TICKER
 // ============================================================
 // When no active trading session is pushing current_price for the
 // chart's symbol (e.g. page just loaded, no session running, or
@@ -1949,6 +1949,63 @@ function _stopChartTicker() {
 // button from 'Iniciando...' to 'Running' (or back to 'Start Paper' on
 // error). This addresses the user's complaint: 'se queda en iniciando
 // y no hace nada'.
+// v0.40.34: Update header position/P&L/price from multi-status session.
+// Called from _pollSessionStatus when in multi-token mode (state_callback != null).
+// Previously the header read from the singleton _terminal_state, which is
+// bypassed in multi-token mode, so header always showed FLAT + P&L 0% even
+// with open positions.
+function _updateHeaderFromMulti(sess) {
+  if (!sess) return;
+  // Header strip (top of page) — headerPrice / headerPnl / headerRegime
+  const headerPrice = document.getElementById('headerPrice');
+  const headerPnl = document.getElementById('headerPnl');
+  const headerRegime = document.getElementById('headerRegime');
+  // Trading panel (left side) — ctrlPrice / ctrlPosition / ctrlPnl / ctrlRegime
+  const ctrlPrice = document.getElementById('ctrlPrice');
+  const ctrlPosition = document.getElementById('ctrlPosition');
+  const ctrlPnl = document.getElementById('ctrlPnl');
+  const ctrlRegime = document.getElementById('ctrlRegime');
+  // Price: prefer session.last_price (engine's live ticker)
+  if (sess.last_price && sess.last_price > 0) {
+    const p = Number(sess.last_price);
+    const fmt = p > 100 ? '$' + p.toLocaleString('en-US', {maximumFractionDigits: 2})
+              : p > 0.01 ? '$' + p.toFixed(4)
+              : '$' + p.toFixed(8);
+    if (headerPrice) headerPrice.textContent = fmt;
+    if (ctrlPrice) ctrlPrice.textContent = fmt;
+  }
+  // Position: LONG/SHORT/FLAT
+  let posLabel = 'FLAT';
+  let posColor = 'var(--text-dim)';
+  if (sess.open_position) {
+    const dir = sess.open_position.direction || 'LONG';
+    posLabel = dir;
+    posColor = dir === 'LONG' ? 'var(--green)' : 'var(--red)';
+  }
+  if (ctrlPosition) {
+    ctrlPosition.textContent = posLabel;
+    ctrlPosition.style.color = posColor;
+  }
+  // P&L: from pnl_pct
+  const pnl = Number(sess.pnl_pct || 0);
+  const pnlText = (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + '%';
+  const pnlColor = pnl >= 0 ? 'var(--green)' : 'var(--red)';
+  if (headerPnl) {
+    headerPnl.textContent = 'P&L ' + pnlText;
+    headerPnl.style.color = pnlColor;
+  }
+  if (ctrlPnl) {
+    ctrlPnl.textContent = pnlText;
+    ctrlPnl.style.color = pnlColor;
+  }
+  // Regime
+  if (sess.regime) {
+    const regimeText = String(sess.regime).toUpperCase();
+    if (headerRegime) headerRegime.textContent = regimeText;
+    if (ctrlRegime) ctrlRegime.textContent = regimeText;
+  }
+}
+
 function _pollSessionStatus(symbol, timeframe, attemptsLeft = 30) {
   if (attemptsLeft <= 0) {
     const btn = document.getElementById('btnStartTrading');
@@ -1969,7 +2026,7 @@ function _pollSessionStatus(symbol, timeframe, attemptsLeft = 30) {
       if (st === 'RUNNING') {
         if (btn) { btn.textContent = 'Running'; btn.disabled = true; }
         document.getElementById('btnStopTrading').disabled = false;
-        // v0.40.33: update BOTH badges (header + trading tab) so the
+        // v0.40.34: update BOTH badges (header + trading tab) so the
         // header at the top of the screen also shows LIVE.
         updateTradingBadge('LIVE');
         const headerTB = document.getElementById('headerTradingBadge');
@@ -1978,15 +2035,22 @@ function _pollSessionStatus(symbol, timeframe, attemptsLeft = 30) {
         if (headerDot) headerDot.className = 'status-dot live';
         const headerStatus = document.getElementById('headerStatus');
         if (headerStatus) { headerStatus.textContent = 'LIVE'; headerStatus.style.color = 'var(--green)'; }
+        // v0.40.34: Update header position/price/P&L from session data.
+        // Multi-token mode bypasses the singleton, so the header must
+        // read from the session object directly.
+        _updateHeaderFromMulti(sess);
         showStatusMsg(`Motor operando: ${symbol} ${timeframe} — esperando señales…`);
         if (typeof appendOpsFeed === 'function') {
           appendOpsFeed('info', `Motor RUNNING — ${symbol} ${timeframe} — analizando velas…`);
         }
-        // v0.40.33: kick off the chart fallback ticker — the chart
+        // v0.40.34: kick off the chart fallback ticker — the chart
         // needs a live price feed even when the engine is slow to
         // deliver the first current_price (warmup can take 10-15s).
         if (typeof _startChartTicker === 'function') _startChartTicker();
-        return; // stop polling
+        // v0.40.34: Keep polling so header position/P&L stay updated
+        // as the engine pushes new state. Use a slower cadence (5s).
+        setTimeout(() => _pollSessionStatus(symbol, timeframe, 9999), 5000);
+        return;
       }
       if (st === 'ERROR' || st === 'VALIDATION_FAILED') {
         if (btn) { btn.textContent = 'Start Paper'; btn.disabled = false; }
@@ -1999,13 +2063,13 @@ function _pollSessionStatus(symbol, timeframe, attemptsLeft = 30) {
         if (typeof appendOpsFeed === 'function') {
           appendOpsFeed('info', `Error: ${errMsg}`);
         }
-        // v0.40.33: even on engine error, kick off the chart ticker
+        // v0.40.34: even on engine error, kick off the chart ticker
         // so the chart shows live prices (just without trading signals).
         if (typeof _startChartTicker === 'function') _startChartTicker();
         return;
       }
       if (st === 'STOPPED') {
-        // v0.40.33: handle the case where the session went STARTING ->
+        // v0.40.34: handle the case where the session went STARTING ->
         // STOPPED directly (e.g. validation returned early, or load_markets
         // failed before _state_cb set is_running=True).
         if (btn) { btn.textContent = 'Start Paper'; btn.disabled = false; }
@@ -5425,7 +5489,7 @@ document.addEventListener('DOMContentLoaded', () => {
       pollMultiStatus();
     }
   }, 800);
-  // v0.40.33: kick off the chart fallback ticker so the chart shows
+  // v0.40.34: kick off the chart fallback ticker so the chart shows
   // live prices even before any trading session is started.
   setTimeout(() => {
     if (typeof _startChartTicker === 'function') _startChartTicker();

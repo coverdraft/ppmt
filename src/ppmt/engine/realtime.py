@@ -965,6 +965,46 @@ class RealtimeTrader:
                         if pos is None:
                             position_state = PositionState.FLAT
                             current_position = None
+
+                            # v0.40.34: Push position closure to state_callback
+
+                            try:
+
+                                self._update_terminal_state(open_position=None)
+
+                            except Exception:
+
+                                pass
+
+                            # v0.40.34: Push position closure to state_callback
+
+                            try:
+
+                                self._update_terminal_state(open_position=None)
+
+                            except Exception:
+
+                                pass
+
+                            # v0.40.34: Push position closure to state_callback
+
+                            try:
+
+                                self._update_terminal_state(open_position=None)
+
+                            except Exception:
+
+                                pass
+
+                            # v0.40.34: Push position closure to state_callback
+
+                            try:
+
+                                self._update_terminal_state(open_position=None)
+
+                            except Exception:
+
+                                pass
                             continue
 
                         # Catastrophic loss check
@@ -981,6 +1021,16 @@ class RealtimeTrader:
                                 catastrophic_close = True
                                 position_state = PositionState.FLAT
                                 current_position = None
+
+                                # v0.40.34: Push position closure to state_callback
+
+                                try:
+
+                                    self._update_terminal_state(open_position=None)
+
+                                except Exception:
+
+                                    pass
                                 consecutive_breaks = 0
 
                         if catastrophic_close:
@@ -1743,6 +1793,26 @@ class RealtimeTrader:
                                           current_time, exit_reason, result)
                         position_state = PositionState.FLAT
                         current_position = None
+
+                        # v0.40.34: Push position closure to state_callback
+
+                        try:
+
+                            self._update_terminal_state(open_position=None)
+
+                        except Exception:
+
+                            pass
+
+                        # v0.40.34: Push position closure to state_callback
+
+                        try:
+
+                            self._update_terminal_state(open_position=None)
+
+                        except Exception:
+
+                            pass
                         return (sax_buffer, pattern_buffer, position_state, current_position,
                                 trade_counter, current_regime, peak_capital, last_losing_trade_idx)
 
@@ -2022,6 +2092,22 @@ class RealtimeTrader:
                             matched_pattern=current_symbols,
                         )
                         current_position.sl_price = sl_price  # type: ignore
+                        # v0.40.34: Push open_position to state_callback so the
+                        # dashboard header can show LONG/SHORT + entry + P&L.
+                        try:
+                            self._update_terminal_state(
+                                open_position={
+                                    "direction": current_position.direction,
+                                    "entry_price": current_position.entry_price,
+                                    "size": current_position.size,
+                                    "sl_price": float(getattr(current_position, 'sl_price', 0) or 0),
+                                    "tp_price": float(getattr(current_position, 'tp_price', 0) or 0),
+                                    "entry_time": current_position.entry_time,
+                                    "trade_id": current_position.trade_id,
+                                },
+                            )
+                        except Exception:
+                            pass
                         current_position.tp_price = tp_price  # type: ignore
                         current_position.trailing_activated = False  # type: ignore
 
@@ -2296,6 +2382,16 @@ class RealtimeTrader:
         sax_buffer = []
         position_state = PositionState.FLAT
         current_position = None
+
+        # v0.40.34: Push position closure to state_callback
+
+        try:
+
+            self._update_terminal_state(open_position=None)
+
+        except Exception:
+
+            pass
         trade_counter = 0
         peak_capital = cfg.initial_capital
         last_losing_trade_idx = -999
@@ -2713,24 +2809,47 @@ class RealtimeTrader:
                                 stream_buf._symbols_produced = result.sax_symbols_produced
                                 stream_buf._trim()
                         console.print(f"[green]Warmup: processed {len(warmup_ohlcv)} historical candles[/green]")
+                        # v0.40.34: Push state IMMEDIATELY after warmup so the
+                        # dashboard shows Candles>0 and status=RUNNING without
+                        # waiting for the first polling cycle (which can take 5s).
+                        # Previously, the UI showed Candles: 0 and STOPPED for
+                        # 5-30s after warmup completed, confusing the user.
+                        try:
+                            self._update_terminal_state(
+                                is_running=True,  # promote to RUNNING (v0.40.34)
+                                candles_processed=len(warmup_ohlcv),
+                                current_price=recent_prices[-1] if recent_prices else 0,
+                                portfolio_value=money_mgr.total_value,
+                                cash=money_mgr.cash,
+                                websocket_status="polling",
+                                regime=current_regime,
+                            )
+                        except Exception:
+                            pass
                     except Exception as e:
                         console.print(f"[yellow]Warmup failed: {e}[/yellow]")
 
                     while True:
                         try:
+                            # v0.40.34: Fetch live ticker FIRST for real-time price.
+                            # Previously we only fetched ohlcv (1m candle close) which
+                            # could be 5-60s stale on 1m+ TFs, causing visible price
+                            # jumps in the UI when the new candle finally closed.
+                            # Now: ticker gives real-time spot, ohlcv gives candle boundary.
+                            try:
+                                _live_ticker = await poll_exchange.fetch_ticker(cfg.symbol)
+                                live_price = float(_live_ticker.get('last') or _live_ticker.get('close') or 0)
+                            except Exception:
+                                live_price = 0.0
                             ohlcv = await poll_exchange.fetch_ohlcv(cfg.symbol, cfg.timeframe, limit=1)
 
                             if ohlcv:
                                 candle_data = ohlcv[-1]
                                 candle_ts = candle_data[0]
-                                # v0.38.2 FIX: ALWAYS update recent_prices with the
-                                # latest close price on every poll (every 5s), even
-                                # when candle_ts hasn't changed. Previously, price
-                                # would stay stale until the next candle CLOSE — could
-                                # be up to 1h on 1h TF. This made "real-time" feel dead.
-                                # Now the displayed Price and dashboard last_price
-                                # reflect the latest tick within the forming candle.
-                                live_price = float(candle_data[4]) if len(candle_data) > 4 else 0.0
+                                # v0.40.34: Prefer ticker price (real-time). Fall back
+                                # to ohlcv close only if ticker failed.
+                                if live_price <= 0:
+                                    live_price = float(candle_data[4]) if len(candle_data) > 4 else 0.0
                                 if live_price > 0:
                                     recent_prices.append(live_price)
                                     if len(recent_prices) > 200:
