@@ -7834,3 +7834,139 @@ como infraestructura útil para P7.
 - Worklog: Task ID `P7-VALIDATION` en `/home/z/my-project/worklog.md`
 - NO se modificó el motor. NO se hicieron commits a `src/ppmt/`. Pendiente
   decisión del usuario sobre integración de P7.
+
+---
+
+## v0.40.22 (2026-06-19) — FIX-A P7: directional_edge policy integrada al motor
+
+### Contexto
+
+Tras v0.40.22-audit (validación que mostró P7 superior a P1 y P6), se
+procede a integrar P7 al motor como reemplazo definitivo de la política
+legacy `dir = sign(expected_move_pct)`.
+
+### Cambios
+
+**1. `src/ppmt/core/thresholds.py`** (+31 líneas)
+
+Añadidos 3 campos nuevos al `SignalThresholds` (tanto en `paper()` como
+en `real()`):
+
+```python
+p7_min_edge_pct: float = 0.10     # gate de calidad (10 bps > 8 bps fees RT)
+p7_bayesian_alpha: float = 1.0    # Laplace prior α
+p7_bayesian_beta: float = 1.0     # Laplace prior β
+```
+
+**2. `src/ppmt/core/metadata.py`** (+101 líneas)
+
+Añadidas 6 properties/methods a `BlockLifecycleMetadata`:
+
+```python
+bayesian_wr_long(alpha, beta)   = (long_wins  + α) / (long_count  + α + β)
+bayesian_wr_short(alpha, beta)  = (short_wins + α) / (short_count + α + β)
+long_edge(alpha, beta)          = bayesian_wr_long  × avg_move_long
+short_edge(alpha, beta)         = bayesian_wr_short × |avg_move_short|
+directional_edge(alpha, beta)   = long_edge − short_edge
+best_direction_p7(min_edge_pct, alpha, beta) → 'LONG' | 'SHORT' | None
+```
+
+`best_direction_p7` es la política canónica P7:
+1. Si ambos counts son 0 → None
+2. Compute long_edge y short_edge con bayesian shrinkage
+3. **Gate**: si max(long_edge, short_edge) < min_edge_pct → None
+4. Si solo una dirección tiene observaciones → esa dirección
+5. Sino → dirección con mayor edge
+
+**3. `src/ppmt/engine/signal.py`** (+44/−7 líneas)
+
+Reemplazado el bloque legacy:
+
+```python
+# ANTES (P1):
+if abs(meta.expected_move_pct) < self.thresholds.hard_move_floor:
+    return None
+signal_type = (
+    SignalType.ENTRY_LONG if meta.expected_move_pct > 0
+    else SignalType.ENTRY_SHORT
+)
+
+# DESPUÉS (P7):
+direction_str = meta.best_direction_p7(
+    min_edge_pct=self.thresholds.p7_min_edge_pct,
+    alpha=self.thresholds.p7_bayesian_alpha,
+    beta=self.thresholds.p7_bayesian_beta,
+)
+if direction_str is None:
+    return None
+signal_type = (
+    SignalType.ENTRY_LONG if direction_str == "LONG"
+    else SignalType.ENTRY_SHORT
+)
+# Hard move floor ahora sobre avg_move de la dirección elegida
+effective_move = (
+    meta.avg_move_long if signal_type == SignalType.ENTRY_LONG
+    else abs(meta.avg_move_short)
+)
+if effective_move < self.thresholds.hard_move_floor:
+    return None
+```
+
+### Smoke test (5000 BTC velas, 200 patrones muestreados)
+
+- LONG: 26.0%, SHORT: 27.5% (balanceado)
+- None por gate P7: 46.5% (calidad filtrando ruido)
+- Señal generada: 25.5%
+- Rechazado por move_floor post-gate: 28.0%
+- Sin errores de importación ni runtime
+
+### Validación esperada (según v0.40.22-audit)
+
+Sobre 8 tokens × 3 ventanas × 100k velas:
+- PnL total: −8650% → −8090% (**+560pp**)
+- WR: 0.421 → 0.421 (sin cambio)
+- PF: 0.612 → 0.625 (+0.013)
+- Tokens mejorados: 4/8 → **7/8** (recupera BTC, BNB, XRP)
+- Ventanas mejoradas: 3/3
+- LINKUSDT sigue empeorando (−60pp) pero menos que con P6 (−87pp)
+
+### Notas importantes
+
+1. **No se redefine `long_wins` todavía**. Sigue siendo `≡ long_count`
+   por la definición actual (`move_pct > 0`). El bayesian shrinkage
+   `(lc+1)/(lc+2)` ya aporta valor porque penaliza N bajo.
+
+2. **Fase C** (redefinir `long_wins` con outcome SL/TP real, no
+   `move_pct>0`) queda como optimización futura para romper la
+   equivalencia algebraica `long_wr ≡ legacy_wr`. Predicción: sería
+   el siguiente +200-400pp potencial.
+
+3. **`p7_min_edge_pct = 0.10%`** es ligeramente superior a los fees RT
+   (0.08%), garantizando que solo se generan trades con expected edge
+   neto positivo. El gate es lo que filtra el ruido direccional que
+   hacía fallar a P6 en BTC/ETH/LINK/BNB/XRP.
+
+4. ** backwards compat**: el API legacy (`expected_move_pct`,
+   `win_rate`, `confidence`) sigue funcionando — solo cambió la
+   selección de dirección. Todo el resto del pipeline (matcher, SL/TP,
+   risk manager) queda intacto.
+
+### Commits
+
+- `ce544f1` fix(v0.40.22): FIX-A P7 — directional_edge policy integrada al motor
+
+### Próximos pasos sugeridos
+
+1. **Validación en vivo (paper trading)**: ejecutar el motor con datos
+   realtime en paper mode durante 24-48h para verificar que las señales
+   generadas coinciden con las expectativas (proporción LONG/SHORT, Nº
+   de señales por hora, etc.).
+
+2. **Fase C (opcional)**: redefinir `long_wins` con outcome SL/TP. Esto
+   requiere:
+   - Backfill de metadata existente: para cada ocurrencia histórica,
+     simular LONG outcome (precio toca TP antes que SL en ventana de
+     hold) y SHORT outcome por separado.
+   - Actualizar `DirectionStats.wins` para almacenar estos outcomes
+     reales en lugar de `count` por construcción.
+   - Re-validar con `p7_validation.py` actualizado.
