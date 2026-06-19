@@ -21,6 +21,91 @@ import numpy as np
 
 
 @dataclass
+class DirectionStats:
+    """
+    V4.3 (FIX-A): Per-direction statistics for a node's observation history.
+
+    Tracks win_rate, expected_move, and count separately for LONG and SHORT
+    observations, enabling the trading engine to make direction-aware decisions
+    like: "This pattern wins 62% as LONG but only 33% as SHORT."
+
+    PROBLEM (v0.40.17-audit): The legacy `win_rate` field mixes LONG and SHORT
+    observations. `won = move_pct > 0` (ppmt.py:336) is valid for LONG only —
+    a SHORT trade "wins" when `move_pct < 0`. The mixed win_rate systematically
+    overestimates LONG win_rate and underestimates SHORT win_rate, producing
+    the LONG/SHORT asymmetry observed in the audit:
+      - LONG PnL medio = -0.017% (negative in ALL confidence deciles >0.40)
+      - SHORT PnL medio = +0.013% (positive in ALL confidence deciles)
+      - Spearman confidence<->PnL LONG = -0.008 (no predictive power)
+
+    SOLUTION: Classify each observation by sign of move_pct at insert time.
+    `long_stats` accumulates observations where move_pct > 0 (LONG wins).
+    `short_stats` accumulates observations where move_pct < 0 (SHORT wins).
+    At match time, the engine queries the stats for the direction it intends
+    to trade, getting an unbiased win_rate.
+    """
+    count: int = 0
+    """Number of observations in this direction (move_pct > 0 for LONG, < 0 for SHORT)."""
+
+    wins: int = 0
+    """Number of winning observations in this direction.
+    For LONG: move_pct > 0 (always wins by definition of classification).
+    For SHORT: move_pct < 0 (always wins by definition of classification).
+    So wins == count for DirectionStats — but kept for API symmetry with RegimeStats."""
+
+    total_move_pct: float = 0.0
+    """Cumulative move_pct across all observations in this direction.
+    For LONG: sum of positive move_pct values (LONG's expected profit).
+    For SHORT: sum of negative move_pct values (SHORT's expected profit, negative)."""
+
+    total_drawdown_pct: float = 0.0
+    """Cumulative drawdown observed in this direction's observations."""
+
+    @property
+    def win_rate(self) -> float:
+        """Win rate within this direction. By construction always 1.0 since
+        classification IS by winning direction. Kept for API symmetry."""
+        if self.count == 0:
+            return 0.0
+        return self.wins / self.count
+
+    @property
+    def avg_move_pct(self) -> float:
+        """Average move_pct within this direction.
+        For LONG: average positive move (expected profit).
+        For SHORT: average negative move (expected SHORT profit, returned as negative)."""
+        if self.count == 0:
+            return 0.0
+        return self.total_move_pct / self.count
+
+    @property
+    def avg_drawdown_pct(self) -> float:
+        """Average max drawdown within this direction."""
+        if self.count == 0:
+            return 0.0
+        return self.total_drawdown_pct / self.count
+
+    def to_dict(self) -> dict:
+        """Serialize to dictionary."""
+        return {
+            "count": self.count,
+            "wins": self.wins,
+            "total_move_pct": round(self.total_move_pct, 4),
+            "total_drawdown_pct": round(self.total_drawdown_pct, 4),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> DirectionStats:
+        """Deserialize from dictionary."""
+        return cls(
+            count=data.get("count", 0),
+            wins=data.get("wins", 0),
+            total_move_pct=data.get("total_move_pct", 0.0),
+            total_drawdown_pct=data.get("total_drawdown_pct", 0.0),
+        )
+
+
+@dataclass
 class RegimeStats:
     """
     Statistics for a single regime within a node's observation history.
@@ -189,6 +274,19 @@ class BlockLifecycleMetadata:
     - A pattern observed 50 times in volatile with 30% WR is dangerous
     Without this, the trading engine cannot make regime-aware decisions.
     Key: regime name (e.g., 'trending_up'), Value: RegimeStats."""
+
+    # === V4.3 (FIX-A): Per-direction statistics ===
+    long_stats: DirectionStats = field(default_factory=DirectionStats)
+    """Statistics for observations where move_pct > 0 (LONG instances).
+    At match time, when the engine decides LONG, it should query
+    long_stats.win_rate and long_stats.avg_move_pct instead of the
+    mixed-aggregate `win_rate` field, which conflates LONG and SHORT outcomes."""
+
+    short_stats: DirectionStats = field(default_factory=DirectionStats)
+    """Statistics for observations where move_pct < 0 (SHORT instances).
+    At match time, when the engine decides SHORT, it should query
+    short_stats.win_rate and short_stats.avg_move_pct (the latter is negative,
+    representing SHORT's expected profit when expressed as a signed move)."""
 
     # === V4.1: Move Variance Tracking ===
     move_variance: float = 0.0
@@ -591,6 +689,22 @@ class BlockLifecycleMetadata:
             if next_symbol not in self.continuation_nodes:
                 self.continuation_nodes.append(next_symbol)
 
+        # V4.3 (FIX-A): Track per-direction statistics.
+        # Classify by sign of move_pct: positive => LONG instance, negative => SHORT.
+        # This is the unbiased replacement for the legacy `won = move_pct > 0` flag
+        # which mixes LONG-wins with SHORT-losses into a single `win_rate`.
+        if move_pct > 0:
+            self.long_stats.count += 1
+            self.long_stats.wins += 1  # By definition, move_pct > 0 is a LONG win
+            self.long_stats.total_move_pct += move_pct
+            self.long_stats.total_drawdown_pct += drawdown_pct
+        elif move_pct < 0:
+            self.short_stats.count += 1
+            self.short_stats.wins += 1  # By definition, move_pct < 0 is a SHORT win
+            self.short_stats.total_move_pct += move_pct  # negative
+            self.short_stats.total_drawdown_pct += drawdown_pct
+        # move_pct == 0: don't classify — degenerate case.
+
         # V4.1: Track move variance using Welford's online algorithm
         # This is numerically stable and doesn't require storing raw data.
         # After n observations, move_variance holds the M2 statistic
@@ -655,6 +769,121 @@ class BlockLifecycleMetadata:
                     self.observation_timespan, now - (self.last_observation_time - self.observation_timespan)
                 )
             self.last_observation_time = now
+
+    @property
+    def win_rate_long(self) -> float:
+        """V4.3 (FIX-A): Win rate when this pattern is traded as LONG.
+
+        This is the count of LONG-favorable observations divided by total
+        observations. A pattern with `win_rate_long = 0.70` means: when this
+        pattern was observed historically, 70% of the time the price went UP
+        afterward. The engine should use this — NOT `win_rate` — when deciding
+        whether to enter a LONG position.
+
+        Returns 0.0 if no observations.
+        """
+        if self.historical_count == 0:
+            return 0.0
+        return self.long_stats.count / self.historical_count
+
+    @property
+    def win_rate_short(self) -> float:
+        """V4.3 (FIX-A): Win rate when this pattern is traded as SHORT.
+
+        This is the count of SHORT-favorable observations divided by total
+        observations. A pattern with `win_rate_short = 0.70` means: when this
+        pattern was observed historically, 70% of the time the price went DOWN
+        afterward. The engine should use this — NOT `win_rate` — when deciding
+        whether to enter a SHORT position.
+
+        Returns 0.0 if no observations.
+        """
+        if self.historical_count == 0:
+            return 0.0
+        return self.short_stats.count / self.historical_count
+
+    @property
+    def avg_move_long(self) -> float:
+        """V4.3 (FIX-A): Average move_pct when LONG was favorable.
+        Positive number = expected profit per LONG trade on this pattern.
+        Returns 0.0 if no LONG-favorable observations."""
+        return self.long_stats.avg_move_pct
+
+    @property
+    def avg_move_short(self) -> float:
+        """V4.3 (FIX-A): Average move_pct when SHORT was favorable.
+        Negative number — its absolute value is the expected profit per SHORT
+        trade on this pattern.
+        Returns 0.0 if no SHORT-favorable observations."""
+        return self.short_stats.avg_move_pct
+
+    def confidence_for_direction(self, direction: str) -> float:
+        """
+        V4.3 (FIX-A): Direction-aware confidence score.
+
+        This is the drop-in replacement for `confidence()` when the engine
+        knows which direction it intends to trade. Uses the per-direction
+        win_rate (unbiased) instead of the mixed-aggregate `win_rate` field.
+
+        Args:
+            direction: 'LONG' or 'SHORT' (case-insensitive).
+
+        Returns:
+            Confidence score in [0, 1]. Returns 0.0 if no observations.
+
+        Formula mirrors `confidence()` but with direction-specific win_rate:
+            adjusted_wr = (wr_dir * count + 0.5 * 10) / (count + 10)
+            count_bonus = min(1.0, sqrt(log1p(count) / log(1000)))
+            base_confidence = adjusted_wr * count_bonus
+        Plus the dependent-node penalty from `confidence()`.
+        """
+        if self.historical_count == 0:
+            return 0.0
+
+        direction = direction.upper()
+        if direction == "LONG":
+            wr = self.win_rate_long
+        elif direction == "SHORT":
+            wr = self.win_rate_short
+        else:
+            # Unknown direction: fall back to mixed-aggregate (legacy behavior)
+            wr = self.win_rate
+
+        prior_strength = 10.0
+        adjusted_wr = (
+            (wr * self.historical_count + 0.5 * prior_strength)
+            / (self.historical_count + prior_strength)
+        )
+        count_bonus = min(1.0, np.sqrt(np.log1p(self.historical_count) / np.log(1000)))
+        base_confidence = adjusted_wr * count_bonus
+
+        if self.node_type == "dependent" and self.historical_count > 0:
+            dependency_ratio = min(
+                1.0, self.historical_count / self.min_independent_count
+            )
+            dependency_penalty = 0.5 + 0.5 * dependency_ratio
+            base_confidence *= dependency_penalty
+
+        return base_confidence
+
+    def expected_move_for_direction(self, direction: str) -> float:
+        """
+        V4.3 (FIX-A): Direction-aware expected move.
+
+        For LONG: returns avg_move_long (positive number = expected % profit).
+        For SHORT: returns abs(avg_move_short) (positive number = expected % profit).
+
+        This is the drop-in replacement for `expected_move_pct` when the engine
+        knows the direction. The legacy `expected_move_pct` mixes LONG and SHORT
+        moves and can be near-zero even when both directions have strong edges.
+        """
+        direction = direction.upper()
+        if direction == "LONG":
+            return self.avg_move_long
+        if direction == "SHORT":
+            # SHORT profit = abs(move_pct) when move_pct < 0
+            return abs(self.avg_move_short)
+        return self.expected_move_pct  # fallback
 
     def compute_sl_tp(self, entry_price: float, safety_margin: float = 0.2) -> None:
         """
@@ -725,6 +954,9 @@ class BlockLifecycleMetadata:
             "regime_distribution": self.regime_distribution,
             # V4.1: Per-regime statistics
             "regime_stats": {k: v.to_dict() for k, v in self.regime_stats.items()},
+            # V4.3 (FIX-A): Per-direction statistics
+            "long_stats": self.long_stats.to_dict(),
+            "short_stats": self.short_stats.to_dict(),
             # V4.1: Move variance tracking
             "move_variance": round(self.move_variance, 6),
             "move_mean_for_variance": round(self.move_mean_for_variance, 6),
@@ -761,6 +993,11 @@ class BlockLifecycleMetadata:
                 k: RegimeStats.from_dict(v) if isinstance(v, dict) else RegimeStats()
                 for k, v in data.get("regime_stats", {}).items()
             },
+            # V4.3 (FIX-A): Per-direction statistics
+            long_stats=DirectionStats.from_dict(data.get("long_stats", {}))
+                if isinstance(data.get("long_stats", {}), dict) else DirectionStats(),
+            short_stats=DirectionStats.from_dict(data.get("short_stats", {}))
+                if isinstance(data.get("short_stats", {}), dict) else DirectionStats(),
             # V4.1: Move variance tracking
             move_variance=data.get("move_variance", 0.0),
             move_mean_for_variance=data.get("move_mean_for_variance", 0.0),

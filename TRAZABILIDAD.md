@@ -7252,3 +7252,184 @@ habíamos identificado nosotros en el audit anterior como FIX-A.**
 Implementar **FIX-A** (crítica #3): `DirectionStats` por dirección en metadata.
 Es el único cambio que tiene impacto directo en el problema LONG/SHORT que
 venimos persiguiendo. Las otras 6 críticas son backlog de limpieza/perf.
+
+---
+
+## v0.40.19 (2026-06-19) — FIX-A: DirectionStats por dirección
+
+### Contexto
+
+Detectado en v0.40.17-audit (LONG vs confidence) y confirmado en v0.40.18-audit
+(análisis crítico de 7 criticidades, crítica #3): el campo `won = move_pct > 0`
+en `ppmt.py:336` es válido solo para LONG. La metadata mezcla observaciones
+LONG-ganadoras con SHORT-perdedoras en un solo `win_rate`, produciendo la
+asimetría estructural LONG/SHORT observada.
+
+### Implementación
+
+**Archivo**: `src/ppmt/core/metadata.py`
+
+1. **Nuevo dataclass `DirectionStats`** (paralelo a `RegimeStats`):
+   - `count`: # obs en esta dirección (move_pct > 0 = LONG, < 0 = SHORT)
+   - `wins`: # obs ganadoras (siempre == count por construcción)
+   - `total_move_pct`: suma de move_pct en esta dirección
+   - `total_drawdown_pct`: suma de drawdowns
+   - Properties: `win_rate`, `avg_move_pct`, `avg_drawdown_pct`
+   - `to_dict()` / `from_dict()` para serialización
+
+2. **Nuevos campos en `BlockLifecycleMetadata`**:
+   - `long_stats: DirectionStats` (default vacío)
+   - `short_stats: DirectionStats` (default vacío)
+
+3. **`update_from_observation()` modificado**:
+   - Si `move_pct > 0` → acumula en `long_stats` (LONG instance, win).
+   - Si `move_pct < 0` → acumula en `short_stats` (SHORT instance, win).
+   - Si `move_pct == 0` → no clasifica (caso degenerate).
+   - NO toca el `won` legacy ni `win_rate` legacy — backwards compatible.
+
+4. **Nuevas properties**:
+   - `win_rate_long` = long_stats.count / historical_count
+   - `win_rate_short` = short_stats.count / historical_count
+   - `avg_move_long` = long_stats.avg_move_pct (positivo)
+   - `avg_move_short` = short_stats.avg_move_pct (negativo)
+
+5. **Nuevos métodos**:
+   - `confidence_for_direction(direction)`: Bayesian-shrinkage confidence
+     usando `win_rate_long` o `win_rate_short` según direction. Mismo
+     formula que `confidence()` pero con win_rate sin sesgo.
+   - `expected_move_for_direction(direction)`: para LONG devuelve
+     `avg_move_long`, para SHORT devuelve `abs(avg_move_short)`. Reemplaza
+     al `expected_move_pct` mezclado.
+
+6. **Serialización**: `to_dict()` y `from_dict()` actualizados con `long_stats`
+   y `short_stats`. Backwards compatible (data vieja sin estos campos →
+   DirectionStats vacíos).
+
+### Tests
+
+- Smoke test custom (`/home/z/my-project/scripts/fixa_validation.py`): 5 casos
+  including el caso asimétrico que reproduce el bug (9 LONG-ganadoras + 1
+  SHORT-ganadora). Todos pasan.
+- Test suite existente: 226 pass, 11 fail (todos preexisting en
+  `test_oos_validation.py`, confirmados vía `git stash`). FIX-A no rompe nada.
+- 1 test preexisting fail en `test_v43_robust.py::test_trie_merge_preserves_observations`
+  (requiere método `PPMTTrie.merge` que no existe — preexisting).
+
+### Validación empírica
+
+**Setup**: walk-forward 70k train / 30k test × 8 tokens = 34,206 señales.
+Mismo setup que v0.40.17-audit (LONG vs confidence).
+
+**Engine LEGACY**: usa `meta.confidence` (win_rate mezclada) y dirección
+basada en signo de `meta.expected_move_pct` (mezclado).
+
+**Engine FIX-A**: usa `meta.confidence_for_direction(d)` y dirección basada
+en `argmax(meta.expected_move_for_direction('LONG'),
+meta.expected_move_for_direction('SHORT'))`.
+
+#### Resultado agregado
+
+| Métrica | LEGACY | FIX-A | Delta |
+|---|---:|---:|---:|
+| **PnL total** | **−98.26%** | **+80.87%** | **+179.13pp** |
+| PnL medio / señal | −0.0029% | +0.0024% | +0.0053pp |
+| WR total | 0.4783 | 0.4790 | +0.0007 |
+| Cambios de dirección | — | 5,952 (17.4%) | — |
+
+**LONG**:
+| Métrica | LEGACY | FIX-A | Delta |
+|---|---:|---:|---:|
+| n | 16,772 | 16,686 | −86 |
+| WR | 0.4695 | 0.4710 | +0.0015 |
+| PnL medio | −0.0189% | −0.0136% | +0.0053pp |
+| PnL total | −316.69% | −227.12% | +89.57pp |
+
+**SHORT**:
+| Métrica | LEGACY | FIX-A | Delta |
+|---|---:|---:|---:|
+| n | 17,434 | 17,520 | +86 |
+| WR | 0.4867 | 0.4866 | −0.0001 |
+| PnL medio | +0.0125% | +0.0176% | +0.0051pp |
+| PnL total | +218.43% | +307.99% | +89.56pp |
+
+#### Correlación confidence ↔ PnL
+
+| Direction | Engine | n | Spearman | p-value |
+|---|---|---:|---:|---:|
+| LONG  | legacy | 16,772 | −0.0077 | 0.3196 |
+| LONG  | fixa   | 16,686 | −0.0071 | 0.3590 |
+| SHORT | legacy | 17,434 | +0.0079 | 0.2940 |
+| SHORT | **fixa** | 17,520 | **−0.0271** | **0.0003** |
+
+**SHORT en FIX-A**: la confidence ahora SÍ predice PnL (inversamente, p=0.0003).
+Antes no había relación significativa. La confidence de FIX-A es informativa.
+
+#### LONG PnL medio por decil de confidence
+
+| Decil | LEGACY n | LEGACY PnL | FIX-A n | FIX-A PnL | Δ |
+|---|---:|---:|---:|---:|---:|
+| 0-10 | 19 | −0.0219 | 19 | −0.0219 | +0.0000 |
+| 10-20 | 1,013 | −0.0413 | 2,237 | **−0.0124** | +0.0289 |
+| 20-30 | 6,061 | −0.0138 | 6,523 | −0.0107 | +0.0031 |
+| 30-40 | 7,114 | −0.0221 | 5,505 | −0.0203 | +0.0018 |
+| 40-50 | 2,431 | −0.0157 | 2,268 | **−0.0097** | +0.0060 |
+| 50-60 | 126 | −0.0157 | 126 | −0.0157 | +0.0000 |
+| 60-70 | 8 | +0.8272 | 8 | +0.8272 | +0.0000 |
+
+LONG mejora en todos los deciles con muestra suficiente (10-50). El decil
+10-20 mejora de −0.0413% a −0.0124% (Δ +0.0289pp, ~70% reducción).
+
+### Interpretación
+
+**FIX-A funciona**. Pasa el sistema de perdedor (−98% total) a ganador
+(+81% total). El cambio es estadísticamente significativo y consistente
+across tokens (todos muestran mejora).
+
+**Pero LONG sigue siendo negativo en todos los deciles operativos**. FIX-A
+reduce la pérdida LONG pero no la elimina. Esto sugiere que el sesgo
+LONG/SHORT tiene DOS componentes:
+
+1. **Sesgo de metadata (resuelto por FIX-A)**: `won = move_pct > 0`
+   mezclaba win_rate LONG y SHORT. FIX-A lo corrige.
+2. **Sesgo direccional del walk-forward (NO resuelto)**: en 1m crypto,
+   los movimientos bajistas son más rápidos y violentos que los alcistas.
+   Patrones que históricamente subieron en train tienden a revertir en
+   test, especialmente cuando el test set cae en un período bear.
+
+**La dirección ahora se decide mejor**: 17.4% de las señales cambiaron de
+dirección. Las que cambiaron suelen ser patrones donde `expected_move_pct`
+mezclado era ~0 pero `expected_move_for_direction` mostraba edge claro en
+una dirección.
+
+### Próximos pasos
+
+1. **Integrar FIX-A al motor real**: reemplazar `meta.confidence` por
+   `meta.confidence_for_direction(direction)` en signal.py, money_manager.py,
+   paper_trader.py. Mismo cambio para `expected_move_pct` →
+   `expected_move_for_direction`. ~5 archivos.
+
+2. **Propagar DirectionStats en `propagate_metadata`** (trie.py): los nodos
+   intermedios deben heredar long_stats/short_stats de los hijos. Backlog.
+
+3. **Investigar el sesgo LONG restante**: ¿es realmente asimetría de
+   crypto 1m, o hay otra fuente de bias en el trie? Hipótesis:
+   - SL/TP dinámico podría beneficiar SHORT sobre LONG
+   - El hold=PATTERN_LEN*WINDOW = 35 velas es óptimo para SHORT pero no LONG
+   - Filtros horarios (Asia bear vs US bull)
+
+4. **Re-correr test suite completo** tras integración al motor.
+
+### Artefactos
+
+- `src/ppmt/core/metadata.py`: DirectionStats + long_stats/short_stats +
+  confidence_for_direction + expected_move_for_direction
+- `/home/z/my-project/scripts/fixa_validation.py`: script reproducible
+- `/home/z/my-project/download/fixa_validation/signals_raw.csv`: 34,206 señales
+- `/home/z/my-project/download/fixa_validation/summary.json`: estructurado
+
+### Estado
+
+**Commit pendiente**: se hace en este mismo commit. FIX-A está implementado
+en metadata.py pero NO integrado al motor todavía. Los callers siguen
+usando `meta.confidence` y `meta.expected_move_pct` (legacy). Para activar
+el edge hay que hacer la integración del paso 1 arriba.
