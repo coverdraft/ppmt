@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>PPMT Terminal v0.40.28</title>
+<title>PPMT Terminal v0.40.29</title>
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -829,7 +829,7 @@ tr:hover td{background:rgba(95,168,245,.07)}
 <!-- ========== HEADER ========== -->
 <header class="header">
   <div class="header-left">
-    <span class="logo">PPMT<span class="logo-ver">v0.40.28</span></span>
+    <span class="logo">PPMT<span class="logo-ver">v0.40.29</span></span>
     <span class="status-dot stopped" id="headerDot"></span>
     <span id="headerStatus" style="font-family:var(--mono);font-size:10px;color:var(--text2)">DETENIDO</span>
   </div>
@@ -867,8 +867,8 @@ tr:hover td{background:rgba(95,168,245,.07)}
       </select>
       <label>Exchange</label>
       <select id="chartExchange" style="width:90px">
-        <option value="binance" selected>Binance</option>
-        <option value="mexc">MEXC</option>
+        <option value="mexc" selected>MEXC</option>
+        <option value="binance">Binance</option>
         <option value="bybit">Bybit</option>
       </select>
       <button class="btn btn-ghost btn-sm" onclick="loadChart()">Reload</button>
@@ -1290,7 +1290,7 @@ tr:hover td{background:rgba(95,168,245,.07)}
     <div class="status-item" style="margin-left:12px"><span id="statusMessage" style="color:var(--text3)">Listo.</span></div>
   </div>
   <div class="status-right">
-    <span>PPMT v0.40.28</span>
+    <span>PPMT v0.40.29</span>
     <div class="status-item"><span class="label">Uptime:</span><span class="value" id="btmUptime">00:00:00</span></div>
   </div>
 </footer>
@@ -1884,7 +1884,7 @@ function _updateChartLiveTick(price, symbol, timeframe) {
 }
 
 // ============================================================
-// v0.40.28: CHART FALLBACK TICKER
+// v0.40.29: CHART FALLBACK TICKER
 // ============================================================
 // When no active trading session is pushing current_price for the
 // chart's symbol (e.g. page just loaded, no session running, or
@@ -1902,7 +1902,7 @@ function _startChartTicker() {
     try {
       const symbol = (document.getElementById('chartSymbol') || {}).value;
       const tf = (document.getElementById('chartTimeframe') || {}).value || '5m';
-      const exch = (document.getElementById('chartExchange') || {}).value || 'binance';
+      const exch = (document.getElementById('chartExchange') || {}).value || 'mexc';
       if (!symbol) return;
       const url = `${API}/api/market/price?symbol=${encodeURIComponent(symbol)}&exchange=${encodeURIComponent(exch)}`;
       const res = await fetch(url);
@@ -1969,7 +1969,7 @@ function _pollSessionStatus(symbol, timeframe, attemptsLeft = 30) {
       if (st === 'RUNNING') {
         if (btn) { btn.textContent = 'Running'; btn.disabled = true; }
         document.getElementById('btnStopTrading').disabled = false;
-        // v0.40.28: update BOTH badges (header + trading tab) so the
+        // v0.40.29: update BOTH badges (header + trading tab) so the
         // header at the top of the screen also shows LIVE.
         updateTradingBadge('LIVE');
         const headerTB = document.getElementById('headerTradingBadge');
@@ -1982,7 +1982,7 @@ function _pollSessionStatus(symbol, timeframe, attemptsLeft = 30) {
         if (typeof appendOpsFeed === 'function') {
           appendOpsFeed('info', `Motor RUNNING — ${symbol} ${timeframe} — analizando velas…`);
         }
-        // v0.40.28: kick off the chart fallback ticker — the chart
+        // v0.40.29: kick off the chart fallback ticker — the chart
         // needs a live price feed even when the engine is slow to
         // deliver the first current_price (warmup can take 10-15s).
         if (typeof _startChartTicker === 'function') _startChartTicker();
@@ -1999,13 +1999,13 @@ function _pollSessionStatus(symbol, timeframe, attemptsLeft = 30) {
         if (typeof appendOpsFeed === 'function') {
           appendOpsFeed('info', `Error: ${errMsg}`);
         }
-        // v0.40.28: even on engine error, kick off the chart ticker
+        // v0.40.29: even on engine error, kick off the chart ticker
         // so the chart shows live prices (just without trading signals).
         if (typeof _startChartTicker === 'function') _startChartTicker();
         return;
       }
       if (st === 'STOPPED') {
-        // v0.40.28: handle the case where the session went STARTING ->
+        // v0.40.29: handle the case where the session went STARTING ->
         // STOPPED directly (e.g. validation returned early, or load_markets
         // failed before _state_cb set is_running=True).
         if (btn) { btn.textContent = 'Start Paper'; btn.disabled = false; }
@@ -2142,7 +2142,7 @@ function updateDashboard(s) {
   // Trading control
   document.getElementById('ctrlSymbol').textContent = s.symbol || '--';
   document.getElementById('ctrlTF').textContent = s.timeframe || '--';
-  document.getElementById('ctrlExchange').textContent = (s.exchange || 'binance').toUpperCase();
+  document.getElementById('ctrlExchange').textContent = (s.exchange || 'mexc').toUpperCase();
   document.getElementById('ctrlPrice').textContent = s.current_price ? formatPrice(s.current_price) : '--';
 
   // v0.35.0: Position & Live Status (extra data the user requested)
@@ -2878,7 +2878,7 @@ async function startPaperTrading() {
   const timeframe = (tfGroup && tfGroup.querySelector('.tg-btn.active'))
                  ? tfGroup.querySelector('.tg-btn.active').dataset.tf
                  : '5m';
-  const exchange = (document.getElementById('chartExchange') || {}).value || 'binance';
+  const exchange = (document.getElementById('chartExchange') || {}).value || 'mexc';
   const capital = parseFloat((document.getElementById('ticketCapital') || {}).value) || 1000;
 
   const btn = document.getElementById('btnStartTrading');
@@ -3748,7 +3748,7 @@ function _collectFilters() {
 
 async function loadGroupIntoDropdown() {
   const groupId = document.getElementById('groupSelect').value;
-  const exchange = document.getElementById('chartExchange').value || 'binance';
+  const exchange = document.getElementById('chartExchange').value || 'mexc';
   const filters = _collectFilters();
   const info = document.getElementById('groupInfo');
   info.style.display = 'block';
@@ -3878,7 +3878,7 @@ async function deleteCustomGroup() {
 
 async function startSweep(sweepAll) {
   const timeframe = document.getElementById('setupTimeframe').value || '1h';
-  const exchange = document.getElementById('chartExchange').value || 'binance';
+  const exchange = document.getElementById('chartExchange').value || 'mexc';
   const capital = parseFloat(document.getElementById('setupCapital').value) || 1000;
   // v0.33.0: Use the selected group + filters; fall back to legacy 25-majors
   // list if no group is selected or 'none' is chosen.
@@ -4095,7 +4095,7 @@ async function pollSweepStatus() {
       // box. Tokens are added in QUEUED state (server sessions are NOT
       // started automatically — the user explicitly starts them).
       const tf = document.getElementById('setupTimeframe').value || '1h';
-      const exchange = document.getElementById('chartExchange').value || 'binance';
+      const exchange = document.getElementById('chartExchange').value || 'mexc';
       const passTokens = (s.results || []).filter(r => r.verdict === 'PASS' && !r.skipped);
       let addedCount = 0;
       for (const r of passTokens) {
@@ -4193,7 +4193,7 @@ async function tradeSelectedTokens() {
   }
 
   const tf = document.getElementById('setupTimeframe').value || '1h';
-  const exchange = document.getElementById('chartExchange').value || 'binance';
+  const exchange = document.getElementById('chartExchange').value || 'mexc';
   const capital = parseFloat(document.getElementById('setupCapital').value) || 1000;
 
   // Optimistic UI: add to _activeTradeTokens immediately
@@ -4423,7 +4423,7 @@ async function startAllActiveTokens() {
   if (_activeTradeTokens.length === 0) return;
   if (!confirm(`Start paper trading on ${_activeTradeTokens.length} token(s) in parallel?`)) return;
   const tf = document.getElementById('setupTimeframe').value || '1h';
-  const exchange = document.getElementById('chartExchange').value || 'binance';
+  const exchange = document.getElementById('chartExchange').value || 'mexc';
   const capital = parseFloat(document.getElementById('setupCapital').value) || 1000;
   try {
     const res = await fetch(`${API}/api/multi-start`, {
@@ -5425,7 +5425,7 @@ document.addEventListener('DOMContentLoaded', () => {
       pollMultiStatus();
     }
   }, 800);
-  // v0.40.28: kick off the chart fallback ticker so the chart shows
+  // v0.40.29: kick off the chart fallback ticker so the chart shows
   // live prices even before any trading session is started.
   setTimeout(() => {
     if (typeof _startChartTicker === 'function') _startChartTicker();

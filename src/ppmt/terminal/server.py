@@ -486,7 +486,7 @@ async def get_ohlcv(
     symbol: str = "BTC/USDT",
     timeframe: str = "1m",
     limit: int = 200,
-    exchange: str = "binance",
+    exchange: str = "mexc",
 ) -> dict:
     """Fetch real OHLCV data from exchange via ccxt for the candlestick chart."""
     try:
@@ -523,7 +523,7 @@ async def get_ohlcv(
 @app.get("/api/market/price")
 async def get_market_price(
     symbol: str = "BTC/USDT",
-    exchange: str = "binance",
+    exchange: str = "mexc",
 ) -> dict:
     """Get current market price from exchange."""
     try:
@@ -556,7 +556,7 @@ async def get_market_price(
 
 
 @app.get("/api/market/symbols")
-async def get_market_symbols(exchange: str = "binance", limit: int = 500) -> dict:
+async def get_market_symbols(exchange: str = "mexc", limit: int = 500) -> dict:
     """Get available trading symbols from exchange.
 
     v0.32.5: Filters out leveraged/derivative tokens (1000X, 3L, 3S, 5L, 5S,
@@ -605,7 +605,7 @@ async def get_market_symbols(exchange: str = "binance", limit: int = 500) -> dic
 class IngestRequest(BaseModel):
     symbol: str = "BTC/USDT"
     timeframe: str = "1m"
-    exchange: str = "binance"
+    exchange: str = "mexc"
     days: int = 7
 
 
@@ -639,7 +639,7 @@ _trading_stop_event = asyncio.Event()
 class StartTradingRequest(BaseModel):
     symbol: str = "BTC/USDT"
     timeframe: str = "5m"
-    exchange: str = "binance"
+    exchange: str = "mexc"
     capital: float = 10_000.0
     leverage: int = 1
     auto_mode: bool = True
@@ -1620,7 +1620,7 @@ async def clear_history(req: ClearHistoryRequest) -> dict:
 class ValidateRequest(BaseModel):
     symbol: str = "BTC/USDT"
     timeframe: str = "1h"
-    exchange: str = "binance"
+    exchange: str = "mexc"
     capital: float = 10_000.0
 
 
@@ -2042,7 +2042,7 @@ async def validate_token(req: ValidateRequest) -> dict:
 class AutoSetupRequest(BaseModel):
     symbol: str = "BTC/USDT"
     timeframe: str = "1h"
-    exchange: str = "binance"
+    exchange: str = "mexc"
     capital: float = 10_000.0
     # v0.32.3: default 90 days (was 30). 30d only gives ~720 1h candles,
     # barely enough to build a meaningful trie and reach the 5-trade threshold.
@@ -2075,7 +2075,7 @@ class PortfolioBacktestRequest(BaseModel):
     symbols: list[str] = ["BTC/USDT", "ETH/USDT"]
     timeframe: str = "1h"
     capital: float = 10_000.0
-    exchange: str = "binance"
+    exchange: str = "mexc"
 
 
 @app.post("/api/portfolio-backtest")
@@ -2149,7 +2149,7 @@ async def run_portfolio_backtest(req: PortfolioBacktestRequest) -> dict:
 class MultiSetupRequest(BaseModel):
     symbols: list[str] = ["BTC/USDT"]
     timeframe: str = "1h"
-    exchange: str = "binance"
+    exchange: str = "mexc"
     capital: float = 10_000.0
 
 
@@ -2250,7 +2250,7 @@ async def list_token_groups() -> dict:
 @app.get("/api/groups/resolve")
 async def resolve_token_group(
     group_id: str = "top25_mcap",
-    exchange: str = "binance",
+    exchange: str = "mexc",
     exclude_stablecoins: bool = True,
     only_usdt_pairs: bool = True,
     min_volume_24h_usd: float = 0,
@@ -2378,7 +2378,7 @@ class SweepRequest(BaseModel):
     group_id: str = ""  # e.g. "top25_mcap", "memes", "top_volume_24h", or a custom group name
     filters: dict = {}  # optional: {min_volume_24h_usd, exclude_stablecoins, limit, ...}
     timeframe: str = "1h"
-    exchange: str = "binance"
+    exchange: str = "mexc"
     capital: float = 1_000.0
     skip_if_pass: bool = True
     """v0.32.6: If True, skip tokens that already have a PASS validation in DB."""
@@ -2836,7 +2836,7 @@ async def clear_signals(req: ClearSignalsRequest) -> dict:
 class MultiTFRequest(BaseModel):
     symbol: str = "BTC/USDT"
     timeframes: list[str] = ["1h", "5m"]
-    exchange: str = "binance"
+    exchange: str = "mexc"
     capital: float = 10_000.0
 
 

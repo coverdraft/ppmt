@@ -207,7 +207,7 @@ class LiveConfig:
     symbol: str = "BTC/USDT"
     timeframe: str = "1h"
     initial_capital: float = 10_000.0
-    exchange: str = "binance"
+    exchange: str = "mexc"
     api_key: str = ""
     api_secret: str = ""
     pattern_length: int = 5
@@ -2480,26 +2480,71 @@ class RealtimeTrader:
                     if cfg.testnet:
                         poll_exchange.set_sandbox_mode(True)
 
+                    # v0.40.29: Auto-fallback Binance → MEXC. Some EU/LATAM
+                    # networks block api.binance.com (spot) outright, not just
+                    # fapi.binance.com (futures). Without this fallback, the
+                    # whole session dies with "Exchange connection failed:
+                    # binance GET https://api.binance.com/api/v3/exchangeInfo"
+                    # and the user sees STOPPED + Candles=0 forever.
+                    _effective_exchange = cfg.exchange
+                    _fallback_used = False
                     try:
                         await poll_exchange.load_markets()
                         console.print(f"[green]Connected to {cfg.exchange} (REST polling)[/green]")
-                    except Exception as e:
-                        # v0.40.28: Capture the failure as a session ERROR
-                        # so the dashboard can show WHY the motor stopped
-                        # (was previously silent — UI just showed STOPPED).
-                        _err_msg = f"Exchange connection failed: {e}"
-                        console.print(f"[red]Failed to connect: {e}[/red]")
-                        try:
-                            self._update_terminal_state(
-                                is_running=False,
-                                websocket_status="disconnected",
-                                error=_err_msg,
-                            )
-                        except Exception:
-                            pass
-                        await poll_exchange.close()
-                        storage.close()
-                        return result
+                    except Exception as e_primary:
+                        if cfg.exchange.lower() == 'binance':
+                            console.print(f"[yellow]Binance connection failed ({e_primary}). Falling back to MEXC…[/yellow]")
+                            try:
+                                await poll_exchange.close()
+                            except Exception:
+                                pass
+                            try:
+                                mexc_class = ccxt_async.mexc
+                                _mexc_config = {'enableRateLimit': True}
+                                if cfg.api_key:
+                                    _mexc_config['apiKey'] = cfg.api_key
+                                if cfg.api_secret:
+                                    _mexc_config['secret'] = cfg.api_secret
+                                poll_exchange = mexc_class(_mexc_config)
+                                await poll_exchange.load_markets()
+                                _effective_exchange = 'mexc'
+                                _fallback_used = True
+                                console.print(f"[green]Connected to MEXC (fallback from Binance) — REST polling[/green]")
+                            except Exception as e_mexc:
+                                _err_msg = f"Exchange connection failed (binance + mexc fallback): binance={e_primary} | mexc={e_mexc}"
+                                console.print(f"[red]Failed to connect: binance={e_primary} | mexc fallback={e_mexc}[/red]")
+                                try:
+                                    self._update_terminal_state(
+                                        is_running=False,
+                                        websocket_status="disconnected",
+                                        error=_err_msg,
+                                    )
+                                except Exception:
+                                    pass
+                                try:
+                                    await poll_exchange.close()
+                                except Exception:
+                                    pass
+                                storage.close()
+                                return result
+                        else:
+                            # Non-binance exchange, no fallback. Report and exit.
+                            _err_msg = f"Exchange connection failed: {e_primary}"
+                            console.print(f"[red]Failed to connect: {e_primary}[/red]")
+                            try:
+                                self._update_terminal_state(
+                                    is_running=False,
+                                    websocket_status="disconnected",
+                                    error=_err_msg,
+                                )
+                            except Exception:
+                                pass
+                            try:
+                                await poll_exchange.close()
+                            except Exception:
+                                pass
+                            storage.close()
+                            return result
 
                     last_candle_ts = 0
 
