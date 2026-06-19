@@ -9119,3 +9119,109 @@ motor necesita soportar hasta 1h para análisis multi-TF.
 ### Commits
 
 - `feat(v0.40.24-terminal-cleanup): limpieza UI + multi-token + TF 1m-1h` (este commit)
+
+---
+
+## v0.40.25 — Eliminación de Discovery tab (TOKEN GROUPS, Sweep, Setup & Validation)
+
+**Fecha:** 2026-06-19
+**Commit:** `feat(v0.40.25-terminal-cleanup): remove Discovery tab + Sweep History`
+
+### Motivación
+
+El usuario observó que la zona **TOKEN GROUPS** en la tab Discovery es un
+"previo análisis de token" que el motor PPMT no requiere porque ya analiza
+todo automáticamente. Confirmado revisando `paper_trader.py`:
+
+- `use_token_profile=True` (default) — SAX alpha/window, catastrophic_loss_pct,
+  short_allowed, fuzzy_threshold se seleccionan automáticamente por asset class
+  + timeframe desde `TokenProfile.from_timeframe()`.
+- `auto_calibrate=True` (default) — corre mini-backtest grid search (alpha ×
+  window) sobre los datos disponibles para descubrir el mejor α/W para cada
+  token específico, override el mapping genérico.
+- `regime_aware=True` — detecta regime en cada SAX boundary y ajusta sizing.
+- `use_multi_level=True` — usa los 4 niveles de Trie (N1+N2+N3+N4).
+- `living_trie=True` — la Trie aprende durante el trading.
+
+Además, el endpoint `POST /api/multi-start` ya hace:
+1. Auto-valida (skip si ya PASS en DB)
+2. Auto-ingesta datos si < 500 candles
+3. Auto-construye Trie si falta
+4. Lanza `RealtimeTrader.run_live()` en dry_run mode
+
+Conclusión: **TOKEN GROUPS, Setup & Validation, Sweep, Pipeline Activity Log
+son herramientas de dev/pre-analysis que duplican lo que el motor ya hace
+automáticamente.** No tienen lugar en un terminal limpio orientado a operación
+profesional.
+
+### Cambios en `src/ppmt/terminal/static/index.html`
+
+#### 1. Tab bar — 5 tabs → 4 tabs
+```
+Antes:  Operaciones | Trading | Portfolio | Discovery | History & Signals
+Ahora:  Operaciones | Trading | Portfolio | History & Signals
+```
+
+#### 2. Discovery tab eliminada (182 líneas)
+Removidos los paneles:
+- **TOKEN GROUPS** (groupSelect, groupLimit, filterMinVolume, filterStablecoins,
+  filterVolatility, filterMinVolatility, Load/Save Custom/Del buttons)
+- **Setup & Validation** (setupSymbol, setupTimeframe, setupCapital, AutoSetup,
+  Sweep Selected Group, Sweep All Groups, sweepProgress, sweepResults,
+  setupProgress, validationResult, backtestStats, mcStats, candleWarning)
+- **Sweep Results** (large)
+- **Pipeline Activity Log**
+
+#### 3. Sweep History panel eliminado de History & Signals
+Panel "Sweep History (SQLite)" con tabla de scans removido. Era dependiente
+del Sweep que ya no existe. Quedan solo **Trade History** + **Signals**.
+
+#### 4. Operaciones empty states actualizados
+```
+Antes:  "Run a sweep in Discovery, then select tokens and Start."
+Ahora:  "Add tokens in Trading → Money Management and click Start All."
+```
+```
+Antes:  "No active tokens. Run a sweep in Discovery and select PASS tokens to trade."
+Ahora:  "No active tokens. Add tokens in Money Management above and click Start Paper."
+```
+
+#### 5. JS call-sites limpiados (funciones dejadas definidas pero sin caller)
+- `DOMContentLoaded`: removido `loadGroups()` (no hay dropdown que poblar).
+- `switchTab()`: removido `loadSweepHistory()` (no hay panel que refrescar).
+- Las funciones `loadGroups`, `loadGroupIntoDropdown`, `saveCurrentAsCustomGroup`,
+  `deleteCustomGroup`, `onGroupChange`, `autoSetup`, `startSweep`, `cancelSweep`,
+  `selectAllPassTokens`, `tradeSelectedTokens`, `loadSweepHistory`,
+  `clearAllSweepHistory` siguen definidas pero son dead code. Se conservan por
+  si el usuario quiere re-habilitar Discovery manualmente más adelante.
+
+#### 6. Version bump: v0.40.8 → v0.40.25
+Actualizado en `<title>`, logo, footer, header de JS.
+
+### Workflow simplificado para el usuario
+
+```
+1. Trading tab → Money Management → Add Token (Symbol / TF / Alloc% / Lev)
+2. Repetir para cuantos tokens quiera operar en paralelo
+3. Click "Start Paper" en Trading Control
+4. Ver:
+   - Operaciones tab: KPIs + Active Operations cards + Recently Closed
+   - Trading tab: Active Trading Tokens + Live Session Feed
+   - Portfolio tab: Portfolio Value, Equity Curve, Open Positions, Regime
+   - History & Signals tab: Trade History + Signals
+5. Chart arriba siempre visible, recarga al hacer click en una operación
+```
+
+### Validación post-cleanup
+
+- HTML parseado con `html.parser.HTMLParser` → 0 tags sin cerrar al EOF.
+- 21 warnings sobre `</option>` no escritos (HTML5 los hace opcionales, no es
+  un error — era así antes del cleanup también).
+- Estructura de tabs verificada: 4 tabs en tab-bar, 4 tab-content divs.
+- Todos los paneles esperados presentes: Trading Control, Money Management,
+  Active Trading Tokens, Live Session Feed, Portfolio & Positions, Regime &
+  Pattern, Trade History, Signals.
+
+### Commits
+
+- `feat(v0.40.25-terminal-cleanup): remove Discovery tab + Sweep History` (este commit)

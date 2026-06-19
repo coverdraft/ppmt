@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>PPMT Terminal v0.40.8</title>
+<title>PPMT Terminal v0.40.25</title>
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -580,7 +580,7 @@ tr:hover td{background:rgba(95,168,245,.07)}
 <!-- ========== HEADER ========== -->
 <header class="header">
   <div class="header-left">
-    <span class="logo">PPMT<span class="logo-ver">v0.40.8</span></span>
+    <span class="logo">PPMT<span class="logo-ver">v0.40.25</span></span>
     <span class="status-dot stopped" id="headerDot"></span>
     <span id="headerStatus" style="font-family:var(--mono);font-size:10px;color:var(--text2)">DETENIDO</span>
   </div>
@@ -641,7 +641,6 @@ tr:hover td{background:rgba(95,168,245,.07)}
     <button class="tab-btn active" data-tab="operations" onclick="switchTab('operations')">Operaciones</button>
     <button class="tab-btn" data-tab="trading" onclick="switchTab('trading')">Trading</button>
     <button class="tab-btn" data-tab="portfolio" onclick="switchTab('portfolio')">Portfolio</button>
-    <button class="tab-btn" data-tab="discovery" onclick="switchTab('discovery')">Discovery</button>
     <button class="tab-btn" data-tab="history" onclick="switchTab('history')">History &amp; Signals</button>
   </div>
 
@@ -696,7 +695,7 @@ tr:hover td{background:rgba(95,168,245,.07)}
           <div class="ops-empty">
             <div class="ops-empty-icon">○</div>
             <div class="ops-empty-title">No active operations</div>
-            <div class="ops-empty-sub">Run a sweep in Discovery, then select tokens and Start.</div>
+            <div class="ops-empty-sub">Add tokens in Trading → Money Management and click Start All.</div>
           </div>
         </div>
       </div>
@@ -741,189 +740,6 @@ tr:hover td{background:rgba(95,168,245,.07)}
       </div>
     </div>
   </div><!-- /tab-operations -->
-
-  <!-- ========== TAB: DISCOVERY (Token Groups + Sweep Results) ========== -->
-  <div class="tab-content" id="tab-discovery">
-    <div class="tab-grid-2">
-      <div>
-        <!-- ===== SIDEBAR (Token Groups) ===== -->
-        <div class="sidebar-section">
-
-    <!-- PANEL: TOKEN GROUPS (v0.33.0) -->
-    <div class="panel" id="panelGroups">
-      <div class="panel-header">
-        <div class="panel-title">Token Groups</div>
-        <button class="panel-collapse" onclick="togglePanel('panelGroups')">-</button>
-      </div>
-      <div class="panel-body">
-        <div class="form-row">
-          <label>Grupo</label>
-          <div class="field">
-            <select id="groupSelect" onchange="onGroupChange()" style="width:100%"></select>
-          </div>
-        </div>
-        <div class="form-row">
-          <label>Desc</label>
-          <div class="field" id="groupDescription" style="font-size:9px;color:var(--text3);padding-top:3px">--</div>
-        </div>
-        <div class="form-row">
-          <label>Límite</label>
-          <div class="field"><input type="number" id="groupLimit" value="25" step="5" min="1" max="500" style="width:60px"></div>
-          <label style="margin-left:6px">VolMin</label>
-          <div class="field"><input type="number" id="filterMinVolume" value="50000000" step="1000000" min="0" placeholder="USDT" style="width:90px"></div>
-        </div>
-        <div class="form-row" style="display:flex;flex-wrap:wrap;gap:6px;font-size:9px;color:var(--text2)">
-          <label><input type="checkbox" id="filterStablecoins" checked style="margin-right:2px;accent-color:var(--accent)"> No stable</label>
-          <label><input type="checkbox" id="filterVolatility" checked style="margin-right:2px;accent-color:var(--accent)"> VolatMin</label>
-          <input type="number" id="filterMinVolatility" value="1.5" step="0.5" min="0" style="width:40px;font-size:9px">%
-        </div>
-        <div style="display:flex;gap:4px;margin-top:4px">
-          <button class="btn btn-primary btn-sm" style="flex:1" onclick="loadGroupIntoDropdown()">Load</button>
-          <button class="btn btn-ghost btn-sm" style="flex:1" onclick="saveCurrentAsCustomGroup()">Save Custom</button>
-          <button class="btn btn-ghost btn-sm" onclick="deleteCustomGroup()" title="Borrar grupo custom seleccionado">Del</button>
-        </div>
-        <div id="groupInfo" style="margin-top:4px;font-family:var(--mono);font-size:9px;color:var(--text3);display:none"></div>
-      </div>
-    </div>
-
-    <!-- PANEL: SETUP & VALIDATION -->
-    <div class="panel" id="panelSetup">
-      <div class="panel-header">
-        <div class="panel-title">Setup &amp; Validation</div>
-        <button class="panel-collapse" onclick="togglePanel('panelSetup')">-</button>
-      </div>
-      <div class="panel-body">
-        <div class="form-row">
-          <label>Token</label>
-          <div class="field"><select id="setupSymbol"></select></div>
-        </div>
-        <div class="form-row">
-          <label>TF</label>
-          <div class="field">
-            <select id="setupTimeframe">
-              <option value="1m">1m</option>
-              <option value="5m" selected>5m</option>
-              <option value="15m">15m</option>
-              <option value="30m">30m</option>
-              <option value="1h">1h</option>
-            </select>
-          </div>
-        </div>
-        <div class="form-row">
-          <label>Capital</label>
-          <div class="field"><input type="number" id="setupCapital" value="1000" step="100" min="100"></div>
-        </div>
-        <button class="btn btn-primary btn-block" id="btnAutoSetup" onclick="autoSetup()" style="margin-bottom:4px">Prepare Token</button>
-        <!-- v0.32.6: Sweep buttons — runs validation on every token in the background -->
-        <button class="btn btn-ghost btn-block btn-sm" id="btnSweep" onclick="startSweep(false)" style="margin-bottom:4px">Sweep Selected Group</button>
-        <!-- v0.33.1: Sweep All Groups — iterates over every group sequentially (weekly reports) -->
-        <button class="btn btn-ghost btn-block btn-sm" id="btnSweepAll" onclick="startSweep(true)" style="margin-bottom:4px">Sweep All Groups</button>
-        <button class="btn btn-ghost btn-block btn-sm" id="btnSweepCancel" onclick="cancelSweep()" style="display:none;margin-bottom:4px">Cancel Sweep</button>
-        <!-- Sweep progress -->
-        <div id="sweepProgress" style="display:none;margin-bottom:6px">
-          <div style="display:flex;justify-content:space-between;margin-bottom:2px">
-            <span style="font-family:var(--mono);font-size:9px;color:var(--text2)">Sweep Progress</span>
-            <span style="font-family:var(--mono);font-size:9px;color:var(--accent)" id="sweepCounter">0/0</span>
-          </div>
-          <div class="progress-bar"><div class="progress-fill" id="sweepProgressBar" style="width:0%"></div></div>
-          <div style="font-family:var(--mono);font-size:9px;color:var(--text3);text-align:center;margin-top:2px" id="sweepCurrent">--</div>
-          <div style="display:flex;gap:6px;justify-content:center;margin-top:3px;font-family:var(--mono);font-size:9px">
-            <span class="text-green" id="sweepPassed">0 PASS</span>
-            <span class="text-red" id="sweepFailed">0 FAIL</span>
-            <span class="text-yellow" id="sweepSkipped">0 skip</span>
-          </div>
-          <div id="sweepResults" style="margin-top:4px;max-height:280px;overflow-y:auto;font-family:var(--mono);font-size:9px;display:none;border:1px solid var(--border);border-radius:2px;padding:3px;background:var(--bg3)"></div>
-          <div style="margin-top:4px;display:flex;gap:4px">
-            <button class="btn btn-ghost btn-block btn-sm" id="btnSelectAllPass" onclick="selectAllPassTokens()" style="display:none">Select All PASS</button>
-            <button class="btn btn-ghost btn-block btn-sm" id="btnTradeSelected" onclick="tradeSelectedTokens()" style="display:none">Trade Selected</button>
-          </div>
-        </div>
-
-        <!-- Progress Steps -->
-        <div id="setupProgress" style="display:none">
-          <div class="progress-steps">
-            <div class="progress-step" data-step="ingesting">Ingest</div>
-            <div class="progress-step" data-step="building">Model</div>
-            <div class="progress-step" data-step="backtesting">BT</div>
-            <div class="progress-step" data-step="montecarlo">MC</div>
-            <div class="progress-step" data-step="done">Done</div>
-          </div>
-          <div class="progress-bar"><div class="progress-fill" id="setupProgressBar" style="width:0%"></div></div>
-          <div style="font-family:var(--mono);font-size:9px;color:var(--text3);text-align:center" id="setupProgressText">Initializing...</div>
-        </div>
-
-        <!-- Validation Result -->
-        <div id="validationResult" style="display:none;margin-top:6px">
-          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
-            <span style="font-family:var(--mono);font-size:10px;font-weight:600;color:var(--text2)">VALIDATION RESULT</span>
-            <span class="badge" id="validationBadge">--</span>
-          </div>
-
-          <!-- v0.33.0: Candle-count warning for low-TF samples -->
-          <div id="candleWarning" style="display:none;font-family:var(--mono);font-size:9px;color:var(--yellow);background:rgba(251,191,36,.08);border:1px solid rgba(251,191,36,.3);padding:4px 6px;margin-bottom:4px;border-radius:3px"></div>
-
-          <div class="checks" id="validationChecks">
-            <div class="check-item pending"><span class="check-icon">o</span> Win Rate</div>
-            <div class="check-item pending"><span class="check-icon">o</span> Profit Factor</div>
-            <div class="check-item pending"><span class="check-icon">o</span> Risk of Ruin</div>
-            <div class="check-item pending"><span class="check-icon">o</span> MC Verdict</div>
-            <div class="check-item pending"><span class="check-icon">o</span> Min Trades</div>
-          </div>
-
-          <!-- Backtest Stats -->
-          <div style="margin-top:4px;font-family:var(--mono);font-size:8px;color:var(--text3);margin-bottom:2px;text-transform:uppercase;letter-spacing:.5px">Backtest</div>
-          <div class="stats-grid" id="backtestStats">
-            <div class="stat-card"><div class="stat-label">Trades</div><div class="stat-value" id="btTrades">--</div></div>
-            <div class="stat-card"><div class="stat-label">Win Rate</div><div class="stat-value" id="btWinRate">--</div></div>
-            <div class="stat-card"><div class="stat-label">P&amp;L</div><div class="stat-value" id="btPnl">--</div></div>
-            <div class="stat-card"><div class="stat-label">Max DD</div><div class="stat-value red" id="btMaxDD">--</div></div>
-          </div>
-
-          <!-- MC Stats -->
-          <div style="margin-top:4px;font-family:var(--mono);font-size:8px;color:var(--text3);margin-bottom:2px;text-transform:uppercase;letter-spacing:.5px">Monte Carlo</div>
-          <div class="stats-grid" id="mcStats">
-            <div class="stat-card"><div class="stat-label">Risk of Ruin</div><div class="stat-value" id="mcRoR">--</div></div>
-            <div class="stat-card"><div class="stat-label">Prob Profit</div><div class="stat-value" id="mcProbProfit">--</div></div>
-            <div class="stat-card"><div class="stat-label">P95 DD</div><div class="stat-value red" id="mcP95DD">--</div></div>
-            <div class="stat-card"><div class="stat-label">Verdict</div><div class="stat-value" id="mcVerdict">--</div></div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-        </div><!-- /sidebar (discovery col) -->
-      </div><!-- /discovery col-1 -->
-      <!-- Discovery col-2: Sweep Results (large) + Pipeline Activity Log -->
-      <div>
-        <div class="panel" style="height:55%;display:flex;flex-direction:column;overflow:hidden">
-          <div class="panel-header" style="margin-bottom:4px;flex-shrink:0">
-            <div class="panel-title">Sweep Results</div>
-            <span style="font-family:var(--mono);font-size:9px;color:var(--text3)" id="sweepStatusText">No sweep yet</span>
-          </div>
-          <div class="panel-body" style="flex:1;overflow:hidden;display:flex;flex-direction:column">
-            <div id="sweepResultsLarge" style="flex:1;overflow-y:auto;font-family:var(--mono);font-size:10px">
-              <div class="empty-state">Run a sweep to see per-token validation results here.</div>
-            </div>
-          </div>
-        </div>
-        <!-- v0.35.0: Pipeline Activity Log — shows data flowing through the system -->
-        <div class="panel" style="height:45%;border-bottom:none;display:flex;flex-direction:column;overflow:hidden">
-          <div class="panel-header" style="margin-bottom:4px;flex-shrink:0">
-            <div class="panel-title">Pipeline Activity Log</div>
-            <div style="display:flex;gap:6px;align-items:center">
-              <span style="font-family:var(--mono);font-size:9px;color:var(--text3)" id="activityLogStatus">Idle</span>
-              <button class="btn btn-ghost btn-sm" style="padding:1px 6px;font-size:9px" onclick="clearActivityLog()">Clear</button>
-            </div>
-          </div>
-          <div class="panel-body" style="flex:1;overflow:hidden;display:flex;flex-direction:column">
-            <div id="activityLogBody" style="flex:1;overflow-y:auto;font-family:var(--mono);font-size:9px;background:var(--bg3);border:1px solid var(--border);border-radius:2px;padding:4px">
-              <div style="color:var(--text3)">Waiting for events... Run a sweep or start paper trading to see live activity.</div>
-            </div>
-          </div>
-        </div>
-      </div><!-- /discovery col-2 -->
-    </div><!-- /tab-grid-2 -->
-  </div><!-- /tab-discovery -->
 
   <!-- ========== TAB: TRADING (Control + Active Tokens + Live Feed) ========== -->
   <div class="tab-content" id="tab-trading">
@@ -1056,7 +872,7 @@ tr:hover td{background:rgba(95,168,245,.07)}
           </div>
           <div class="panel-body" style="flex:1;overflow:hidden;display:flex;flex-direction:column">
             <div id="activeTokensBody" style="flex:1;overflow-y:auto;font-family:var(--mono);font-size:10px">
-              <div class="empty-state">No active tokens. Run a sweep in Discovery and select PASS tokens to trade.</div>
+              <div class="empty-state">No active tokens. Add tokens in Money Management above and click Start Paper.</div>
             </div>
           </div>
         </div>
@@ -1170,33 +986,6 @@ tr:hover td{background:rgba(95,168,245,.07)}
 
   <!-- ========== TAB: HISTORY & SIGNALS ========== -->
   <div class="tab-content" id="tab-history">
-  <!-- v0.36.1: Sweep History (top section, full-width) -->
-  <div style="margin-bottom:6px">
-    <div class="panel" id="panelSweepHistory" style="border-bottom:none">
-      <div class="panel-header" style="margin-bottom:4px">
-        <div class="panel-title">Sweep History (SQLite)</div>
-        <div style="display:flex;gap:4px;align-items:center">
-          <span style="font-family:var(--mono);font-size:9px;color:var(--text3)" id="sweepHistoryCount">0 scans</span>
-          <button class="btn btn-ghost btn-sm" onclick="loadSweepHistory()">Reload</button>
-          <button class="btn btn-ghost btn-sm" onclick="clearAllSweepHistory()" title="v0.39.1: Delete ALL scans from SQLite" style="color:var(--red)">Clear All</button>
-        </div>
-      </div>
-      <div class="panel-body" style="max-height:220px;overflow-y:auto">
-        <div class="table-wrap">
-          <table>
-            <thead><tr>
-              <th>ID</th><th>Fecha</th><th>Grupo</th><th>TF</th>
-              <th>Total</th><th>PASS</th><th>FAIL</th><th>Skip</th>
-              <th>Score</th><th>Tiempo</th><th>Acción</th>
-            </tr></thead>
-            <tbody id="sweepHistoryBody">
-              <tr><td colspan="11" class="text-muted" style="text-align:center">No sweep history yet. Run a sweep in the Discovery tab.</td></tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-  </div>
   <!-- ===== BLOTTER ===== -->
   <div class="blotter-section">
     <!-- Trade History -->
@@ -1260,14 +1049,14 @@ tr:hover td{background:rgba(95,168,245,.07)}
     <div class="status-item" style="margin-left:12px"><span id="statusMessage" style="color:var(--text3)">Listo.</span></div>
   </div>
   <div class="status-right">
-    <span>PPMT v0.40.8</span>
+    <span>PPMT v0.40.25</span>
     <div class="status-item"><span class="label">Uptime:</span><span class="value" id="btmUptime">00:00:00</span></div>
   </div>
 </footer>
 
 <script>
 // ============================================================
-// PPMT Terminal v0.40.8 — Trading Dashboard
+// PPMT Terminal v0.40.25 — Trading Dashboard
 // ============================================================
 
 const API = '';
@@ -1297,7 +1086,7 @@ let sweepPollHandle = null;
 document.addEventListener('DOMContentLoaded', () => {
   initChart();
   loadSymbols();
-  loadGroups();  // v0.33.0: load token groups dropdown
+  // v0.40.25: loadGroups() removed — Discovery tab deleted; motor self-tunes.
   connectWS();
   loadTradeHistory();
   checkTradingStatus();
@@ -2666,10 +2455,7 @@ function switchTab(tabName) {
   if (window._priceChart) {
     try { window._priceChart.applyOptions({ width: window._priceChart.paneWidgets()[0].getWidth() }); } catch (e) {}
   }
-  // v0.36.1: Lazy-load sweep history when the user opens the History tab.
-  if (tabName === 'history') {
-    try { loadSweepHistory(); } catch (e) { console.warn('loadSweepHistory failed:', e); }
-  }
+  // v0.40.25: loadSweepHistory() removed — Sweep History panel deleted.
   console.log(`[PPMT] Tab switched to: ${tabName}`);
 }
 
