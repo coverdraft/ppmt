@@ -511,15 +511,23 @@ class CalibrationEngine:
             favorable_pct = ((high - entry_price) / entry_price) * 100.0
 
             duration = len(window_df)
-            # v0.40.23 (P7-FaseC): outcome-SL/TP based `won`. During calibration
-            # build we don't track an existing node's historical_count (the trie
-            # is being built fresh), so we pass historical_count=0 → the helper
-            # uses bootstrap floors (0.15%). This is the conservative choice:
-            # calibration patterns tend to be young (low N), and using real
-            # SL/TP from a still-unstable max_dd/max_fav would inject noise.
+            # v0.40.24 (P7-FaseC FIX): outcome-SL/TP based `won` computed on
+            # POST-pattern candles (not the pattern window itself — see
+            # ppmt.py:337-422 for the full rationale). During calibration
+            # build we don't track an existing node's historical_count (the
+            # trie is being built fresh), so we pass historical_count=0 →
+            # the helper uses bootstrap floors (0.15%). This is the
+            # conservative choice: calibration patterns tend to be young
+            # (low N), and using real SL/TP from a still-unstable
+            # max_dd/max_fav would inject noise.
+            post_pattern_window_size = self.pattern_length * window_size
+            post_pattern_df = train_df.iloc[
+                end_candle : min(end_candle + post_pattern_window_size, len(train_df))
+            ]
+            entry_price_for_outcome = window_df["close"].iloc[-1]
             won = compute_outcome_won(
-                window_df=window_df,
-                entry_price=entry_price,
+                window_df=post_pattern_df,
+                entry_price=entry_price_for_outcome,
                 move_pct=move_pct,
                 historical_count=0,
             )
@@ -955,15 +963,23 @@ class TradingCalibrationEngine:
             favorable_pct = ((high - entry_price) / entry_price) * 100.0
 
             duration = len(window_df)
-            # v0.40.23 (P7-FaseC): outcome-SL/TP based `won`. During calibration
-            # build we don't track an existing node's historical_count (the trie
-            # is being built fresh), so we pass historical_count=0 → the helper
-            # uses bootstrap floors (0.15%). This is the conservative choice:
-            # calibration patterns tend to be young (low N), and using real
-            # SL/TP from a still-unstable max_dd/max_fav would inject noise.
+            # v0.40.24 (P7-FaseC FIX): outcome-SL/TP based `won` computed on
+            # POST-pattern candles (not the pattern window itself — see
+            # ppmt.py:337-422 for the full rationale). During calibration
+            # build we don't track an existing node's historical_count (the
+            # trie is being built fresh), so we pass historical_count=0 →
+            # the helper uses bootstrap floors (0.15%). This is the
+            # conservative choice: calibration patterns tend to be young
+            # (low N), and using real SL/TP from a still-unstable
+            # max_dd/max_fav would inject noise.
+            post_pattern_window_size = self.pattern_length * window_size
+            post_pattern_df = train_df.iloc[
+                end_candle : min(end_candle + post_pattern_window_size, len(train_df))
+            ]
+            entry_price_for_outcome = window_df["close"].iloc[-1]
             won = compute_outcome_won(
-                window_df=window_df,
-                entry_price=entry_price,
+                window_df=post_pattern_df,
+                entry_price=entry_price_for_outcome,
                 move_pct=move_pct,
                 historical_count=0,
             )

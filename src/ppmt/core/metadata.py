@@ -52,10 +52,20 @@ def simulate_first_touch(
     Returns True if TP is touched before SL within the window. Conservative
     on ties (if both SL and TP touched in same candle, SL wins).
 
+    v0.40.24 CONTRACT: `window_df` MUST be the candles AFTER entry, not the
+    candles that produced the pattern. The entry_price MUST be the close of
+    the LAST pattern candle (≈ open of the first post-pattern candle). The
+    v0.40.23 implementation in ppmt.py / profiles.py passed the pattern's
+    own window_df, which made `won` a circular function of the pattern
+    itself — see ppmt.py:337-422 for the fix rationale.
+
     Args:
-        window_df: pandas DataFrame with 'high' and 'low' columns (candles
-            after entry, in chronological order).
-        entry_price: entry price (close of the candle before the window).
+        window_df: pandas DataFrame with 'high' and 'low' columns — the
+            POST-entry candles (typically PATTERN_LEN × WINDOW candles
+            immediately after the pattern ends). Empty/short DataFrames
+            are handled gracefully (timeout = loss).
+        entry_price: entry price (close of the LAST pattern candle, i.e.
+            the candle immediately before window_df.iloc[0]).
         sl_pct: stop loss distance in percent (positive number).
         tp_pct: take profit distance in percent (positive number).
         direction: 'LONG' or 'SHORT'.
@@ -114,10 +124,15 @@ def compute_outcome_won(
       4. Simulate first-touch via simulate_first_touch().
 
     Args:
-        window_df: DataFrame with 'high' and 'low' columns for the post-entry
-            window (typically PATTERN_LEN × WINDOW candles).
-        entry_price: entry price (close of the candle before window).
-        move_pct: observed move_pct = (exit - entry) / entry × 100.
+        window_df: DataFrame with 'high' and 'low' columns for the POST-ENTRY
+            window (typically PATTERN_LEN × WINDOW candles immediately AFTER
+            the pattern ends). v0.40.24 CONTRACT: do NOT pass the pattern's
+            own window_df here — that produces a circular, meaningless `won`.
+        entry_price: entry price (close of the LAST pattern candle, i.e. the
+            candle immediately before window_df.iloc[0]).
+        move_pct: observed move_pct = (exit - entry) / entry × 100. Used only
+            to infer direction via sign — the simulation itself runs on the
+            POST-entry candles, not the pattern window that produced move_pct.
         sl_pct: node's |max_drawdown_pct| × 1.5 (None for new nodes).
         tp_pct: node's max(|expected_move_pct|, max_favorable_pct) × 1.0.
         historical_count: node's observation count BEFORE this observation

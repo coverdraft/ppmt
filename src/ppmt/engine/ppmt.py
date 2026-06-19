@@ -334,21 +334,41 @@ class PPMT:
 
             duration = len(window_df)
 
-            # v0.40.23 (P7-FaseC): compute `won` using outcome SL/TP first-touch
-            # instead of the legacy `move_pct > 0` sign check. This breaks the
-            # algebraic equivalence `bayesian_wr_long ≡ 1.0` and lets the P7
-            # gate distinguish patterns where the LONG direction has positive
-            # avg move but TP is touched before SL only ~30% of the time
-            # (those should be penalized, not rewarded).
+            # v0.40.24 (P7-FaseC FIX): compute `won` using POST-pattern candles.
             #
-            # For young nodes (historical_count < HIST_COUNT_MATURE=5) the
-            # helper falls back to conservative 0.15% bootstrap floors because
-            # max_dd/max_fav haven't stabilized yet. For mature nodes, it uses
-            # the node's actual SL/TP from accumulated metadata.
+            # v0.40.23 BUG: passed `window_df` (the pattern's own candles) to
+            # `compute_outcome_won`, but `simulate_first_touch` expects the
+            # candles AFTER entry, not the candles that produced the pattern.
+            # This made `won` a function of the pattern window itself —
+            # circular and meaningless. The smoke test ratios (0.58/0.62)
+            # were consistent with random classification under 0.15% floors
+            # applied to pattern-noise OHLC.
             #
-            # Validation: v0.40.23-audit shows this change alone delivers
-            # +3736pp PnL total vs P7-actual (v0.40.22) and +4297pp vs P1
-            # legacy, with 8/8 tokens and 3/3 windows improving.
+            # v0.40.24 FIX: simulate the trade on the POST-pattern window
+            # (the next PATTERN_LEN × WINDOW candles after `end_candle`),
+            # with entry_price = close of the LAST pattern candle (≈ open
+            # of first post-pattern candle). This matches paper_trader.py
+            # live semantics (entry at next symbol after pattern detection).
+            #
+            # Note: `move_pct` (across-pattern) is UNCHANGED — it still
+            # measures close[0]→close[-1] of the pattern window. The two
+            # quantities measure different things, and that's the point:
+            #   - move_pct > 0 = "pattern looks bullish" → classified LONG
+            #   - won = "post-pattern outcome touched TP before SL"
+            # A pattern that looks bullish but loses post-pattern is exactly
+            # what P7-FaseC is designed to penalize. The mismatch is the
+            # feature, not a bug.
+            #
+            # Bootstrap floors (0.15%) still apply for young nodes
+            # (historical_count < 5); mature nodes use real SL/TP from
+            # accumulated metadata. SL/TP values themselves are derived
+            # from the pattern window (max_dd, max_fav), which is correct:
+            # "based on what this pattern USUALLY does, would the post-
+            # pattern outcome touch TP before SL?"
+            #
+            # Validation: v0.40.23-audit (re-labeled post-pattern) showed
+            # +3736pp PnL total vs P7-actual (v0.40.22) and +4297pp vs P1.
+            # v0.40.24 is the in-engine implementation of that audit.
             #
             # Look up existing node (if any) to read historical_count and
             # mature SL/TP. For new patterns this returns None and the helper
@@ -363,7 +383,7 @@ class PPMT:
             # likely to use bootstrap floors rather than overly-wide outliers
             # from a young universal pool). N1/N2 universal pools will have
             # many more observations and could provide tighter SL/TP, but
-            # that's a v0.40.24+ optimization — for now we keep it simple.
+            # that's a v0.40.25+ optimization — for now we keep it simple.
             existing_node = self.trie_n3.search(pattern) if hasattr(self, 'trie_n3') else None
             if existing_node is not None and existing_node.metadata.historical_count > 0:
                 existing_meta = existing_node.metadata
@@ -378,9 +398,23 @@ class PPMT:
                 tp_pct_for_outcome = None
                 hist_count_for_outcome = 0
 
+            # v0.40.24: post-pattern window for SL/TP simulation.
+            # Same horizon as the pattern itself (PATTERN_LEN × WINDOW candles).
+            # If we're at the end of df, post_pattern_df may be short or empty —
+            # simulate_first_touch treats timeout (no TP hit) as loss, which is
+            # the correct conservative behavior for incomplete observations.
+            post_pattern_window_size = pattern_length * self.sax.window_size
+            post_pattern_start = end_candle
+            post_pattern_end = min(end_candle + post_pattern_window_size, len(df))
+            post_pattern_df = df.iloc[post_pattern_start:post_pattern_end]
+            # Entry for the post-pattern "trade": close of the LAST pattern candle.
+            # This matches paper_trader.py:entry_price semantics (entry at next
+            # symbol open ≈ previous symbol close for low-spread candles).
+            entry_price_for_outcome = window_df["close"].iloc[-1]
+
             won = compute_outcome_won(
-                window_df=window_df,
-                entry_price=entry_price,
+                window_df=post_pattern_df,
+                entry_price=entry_price_for_outcome,
                 move_pct=move_pct,
                 sl_pct=sl_pct_for_outcome,
                 tp_pct=tp_pct_for_outcome,

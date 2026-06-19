@@ -8311,3 +8311,139 @@ Sobre 8 tokens × 3 ventanas × 100k velas:
    audit, pero añade complejidad de memoria (~16MB) y manejo del
    living trie. Solo justificable si la mejora de Fase C en vivo es
    significativamente menor que la del audit.
+
+---
+
+## v0.40.24 — P7-FaseC FIX (post-pattern candles)
+
+**Fecha**: 2026-06-19
+
+### Motivo
+
+Revisión externa (cross-AI) detectó bug en v0.40.23: `compute_outcome_won`
+recibía `window_df` (las velas del patrón mismo) en lugar de las velas
+POST-patrón. La simulación first-touch corría sobre las velas que produjeron
+el patrón, no sobre las velas que vienen después — circular y sin sentido.
+
+El smoke test de v0.40.23 dio ratios 0.58/0.62, consistentes con
+clasificación random bajo 0.15% floors aplicados a ruido OHLC.
+
+### Cambios
+
+**1. `src/ppmt/engine/ppmt.py` (+67/-15)** — Líneas 337-422
+
+ANTES (v0.40.23, buggy):
+```python
+won = compute_outcome_won(
+    window_df=window_df,            # ← velas del patrón!
+    entry_price=entry_price,        # ← close[0] del patrón!
+    move_pct=move_pct,
+    ...
+)
+```
+
+DESPUÉS (v0.40.24, fixed):
+```python
+post_pattern_window_size = pattern_length * self.sax.window_size
+post_pattern_start = end_candle
+post_pattern_end = min(end_candle + post_pattern_window_size, len(df))
+post_pattern_df = df.iloc[post_pattern_start:post_pattern_end]
+entry_price_for_outcome = window_df["close"].iloc[-1]  # close de última vela del patrón
+
+won = compute_outcome_won(
+    window_df=post_pattern_df,                  # ← velas POST-patrón
+    entry_price=entry_price_for_outcome,        # ← close de última vela del patrón
+    move_pct=move_pct,
+    ...
+)
+```
+
+**2. `src/ppmt/core/profiles.py` (+22/-6)** — 2 call sites (líneas 513-533 y 957-985)
+
+Mismo fix aplicado a ambos call sites de calibration build.
+
+**3. `src/ppmt/core/metadata.py` (+13/-7)** — Docstrings strengthened
+
+`simulate_first_touch` y `compute_outcome_won` ahora documentan
+explícitamente el contrato v0.40.24: `window_df` DEBE ser las velas
+post-entry, NO las velas del patrón. `entry_price` DEBE ser el close
+de la última vela del patrón.
+
+### Justificación técnica
+
+- `paper_trader.py` entra trades al final del patrón (next symbol open)
+  y simula SL/TP sobre velas POST-patrón. v0.40.24 alinea el build-time
+  con esta semántica live-time.
+- `move_pct` (across-pattern) se mantiene sin cambio. La asimetría
+  move_pct (across) vs won (post-patrón) es el feature: un patrón
+  bullish que pierde post-patrón es exactamente lo que P7-FaseC debe
+  penalizar.
+- SL/TP values siguen derivados del pattern window (max_dd, max_fav).
+  Esto es correcto: "basado en lo que este patrón suele hacer, ¿el
+  outcome post-patrón toca TP antes que SL?"
+
+### Smoke test
+
+`/home/z/my-project/scripts/smoke_test_p7fasec_v04024.py` — 2000 velas
+sintéticas, 491 observaciones.
+
+| Métrica | v0.40.23 (buggy) | v0.40.24 (fixed) |
+|---|---|---|
+| win_rate overall | 0.342 | 0.475 |
+| win_rate LONG | 0.330 | 0.480 |
+| win_rate SHORT | 0.358 | 0.468 |
+| Agreement v23↔v24 | — | 0.513 (51.3%) |
+
+La mitad de las observaciones cambiaron de clasificación → el fix
+tuvo efecto sustancial, no cosmético.
+
+### CRÍTICO — Rebuild mandatorio de tries
+
+**Los tries persistidos en disco fueron construidos con la semántica
+vieja** (v0.40.22 wins≡count Y v0.40.23 won-on-pattern). Sin rebuild,
+el cambio v0.40.24 es un **NOOP en vivo**.
+
+Procedimiento mandatorio en el server de coco:
+
+```bash
+# 1. Actualizar código
+git pull
+pip install -e .  # o actualizar paquete ppmt-terminal
+
+# 2. Reconstruir tries para CADA symbol/timeframe trackeado
+ppmt list  # ver qué symbols hay
+ppmt build -s BTCUSDT -t 1m
+ppmt build -s BTCUSDT -t 5m
+ppmt build -s BTCUSDT -t 1h
+# ... repetir para cada symbol/tf
+
+# 3. Solo entonces arrancar el motor
+ppmt run
+# o
+ppmt terminal
+```
+
+**SIN ESTE REBUILD, v0.40.23/v0.40.24 son noop.** Los tries viejos
+tendrán `wins=count` hasta que se acumulen suficientes observaciones
+nuevas en vivo (días-semanas según frecuencia de señales).
+
+Los trade outcomes que se registran en paper_trader via
+`trade.exit_reason` ya tienen la semántica correcta — esos sí contribuyen
+correctamente al trie en vivo. Pero la base construida sigue siendo
+`wins≡count` hasta el rebuild.
+
+### Commits
+
+- (próximo commit) fix(v0.40.24): P7-FaseC FIX — post-pattern candles en compute_outcome_won
+
+### Próximos pasos
+
+1. **Validación in-engine walk-forward**: correr
+   `p7_fase_c_validation.py` con motor v0.40.24 — ahora el motor produce
+   `won` post-patrón nativamente, no via re-labeling del audit.
+2. **Rebuild tries en dev**: cuando se confiera un asset con `ppmt ingest`.
+3. **Comunicar a coco** el procedimiento de rebuild mandatorio.
+4. **Optimización v0.40.25+ (opcional)**: pasar SL/TP de N1/N2 (universal
+   pool) en lugar de N3 (per-symbol) a `compute_outcome_won`. N1/N2 tiene
+   miles de observaciones → SL/TP más estables para nodos jóvenes en
+   el per-asset trie.
