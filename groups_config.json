@@ -1,20 +1,56 @@
 {
-  "_comment": "PPMT Custom Token Groups — Editable by user. Keys are group IDs (lowercase, underscores). Values must have 'bases' (array of tickers like 'BTC' or 'BTC/USDT'). Optional: 'label', 'description'.",
+  "_comment": "PPMT Custom Token Groups — v0.40.24-paper-cleanup. Estructura de referencia para scripts/cleanup_config.sh. El usuario tiene su propia copia en ~/.ppmt/groups_config.json que NO se sobreescribe automáticamente desde el repo.",
+
+  "paper_v1": {
+    "label": "Paper v1 — 25 tokens saneados",
+    "description": "Universo limpio para paper trading 24-48h. Todos los tokens tienen >500 patterns y ratio wins/count entre 0.38 y 0.55 en verify_all.sh v0.40.24.",
+    "bases": [
+      "BTC",
+      "ETH",
+      "SOL",
+      "BNB",
+      "XRP",
+      "ADA",
+      "AVAX",
+      "DOT",
+      "LINK",
+      "LTC",
+      "ATOM",
+      "NEAR",
+      "APT",
+      "ARB",
+      "OP",
+      "INJ",
+      "SUI",
+      "TIA",
+      "SEI",
+      "TON",
+      "PEPE",
+      "SHIB",
+      "DOGE",
+      "WIF",
+      "FLOKI"
+    ]
+  },
+
   "mi_cartera": {
     "label": "Mi Cartera",
     "description": "Tokens que estoy siguiendo de cerca",
     "bases": ["BTC", "ETH", "SOL"]
   },
+
   "memes_seguimiento": {
     "label": "Memes Seguimiento",
     "description": "Memes con potencial especulativo",
     "bases": ["DOGE", "PEPE", "WIF", "SHIB"]
   },
+
   "layer2_prueba": {
     "label": "Layer2 Prueba",
     "description": "Escalabilidad Ethereum para pruebas",
     "bases": ["ARB", "OP", "MATIC", "IMX"]
   },
+
   "experimentales": {
     "label": "Experimentales",
     "description": "Tokens en fase experimental — alta incertidumbre",

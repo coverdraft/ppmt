@@ -8878,3 +8878,156 @@ ppmt stats -s BTCUSDT -t 1h
 ### Commits
 
 - (próximo commit) `feat(v0.40.24-bis): rebuild_all.sh + fix CLI version`
+
+---
+
+## v0.40.24-paper-cleanup — Limpieza de config + grupo paper_v1
+
+**Fecha:** 2026-06-19
+**Tipo:** Config cleanup + setup para paper trading
+**Estado:** ✅ Aplicado en repo, pendiente de ejecución en la Mac del usuario
+
+### Contexto
+
+Después de aplicar v0.40.24 (FaseC fix) y verificar con `verify_all.sh` que
+los 429 (symbol, timeframe) tries quedaron con ratio `wins/count` entre 0.38
+y 0.55, el usuario reporta que quiere arrancar `ppmt terminal` para paper
+trading pero observa que la UI tiene:
+
+- `TOKEN GROUPS` con grupos predefinidos (top 25 por cap, etc.)
+- `VOLMIN`, `NO STABLE`, `VOLATMIN%` settings
+- Múltiples grupos (`mi_cartera`, `memes_seguimiento`, `layer2_prueba`, `experimentales`)
+
+Si arranca el motor con esos grupos, va a operar con ruido de micro-caps y
+tokens con poca data, invalidando la prueba de 24-48h.
+
+### Diagnóstico
+
+1. **`ppmt list` muestra solo 9 assets tracked** (BTC, ETH, SOL, BNB, XRP,
+   ADA, AVAX, DOT, DOGE), aunque la DB tiene 429 tries. El motor solo va a
+   operar esos 9 salvo que el grupo activo diga otra cosa.
+
+2. **`config.yaml` del usuario** (`~/.ppmt/config.yaml`) tiene solo SAX + build
+   + signal_quality (vestigial). **Le faltan las secciones `risk` y `signal`**
+   que controlan position sizing, stop loss, trailing stop. Sin esas, el motor
+   usa defaults internos del código que no son tuneables.
+
+3. **`groups_config.json` del usuario** tiene 4 grupos experimentales con
+   tokens que tienen data pobre o ratios fuera de rango (MATIC, FET, WLD, RNDR).
+
+### Cambios
+
+#### `scripts/cleanup_config.sh` (NUEVO)
+
+Script idempotente que:
+
+1. Hace backup automático con timestamp de `config.yaml` y `groups_config.json`
+2. Preserva `alphabet_size` del usuario (default 5)
+3. Reescribe `config.yaml` con:
+   - SAX: alpha=5 (preservado), window=10, ohlcv
+   - Timeframes: 1h, 15m, 5m, 4h
+   - Build: forward_window=5, won_rr_threshold=1.5, pattern_length=5
+   - **Risk: max_position_size_pct=2%, max_daily_loss=5%, max_dd=15%, min_rr=1.5, max_open=5**
+   - **Signal: min_confidence=0.60, unknown_block_exit=true, trailing 3%/1.5%**
+   - Logging: INFO level
+4. Reescribe `groups_config.json` con UN solo grupo `paper_v1` de 25 tokens
+5. Verifica que los archivos queden YAML/JSON válidos
+6. Imprime comandos de rollback si el usuario quiere revertir
+
+#### `groups_config.json` (referencia en el repo)
+
+Agrega `paper_v1` con 25 tokens líquidos sanos (todos con >500 patterns y
+ratio 0.38-0.55 en `verify_all.sh`):
+
+```
+BTC, ETH, SOL, BNB, XRP, ADA, AVAX, DOT, LINK, LTC,
+ATOM, NEAR, APT, ARB, OP, INJ, SUI, TIA, SEI, TON,
+PEPE, SHIB, DOGE, WIF, FLOKI
+```
+
+Conserva los 4 grupos experimentales previos (`mi_cartera`, `memes_seguimiento`,
+`layer2_prueba`, `experimentales`) como referencia — el script en la Mac del
+usuario los reemplaza, pero en el repo quedan como histórico.
+
+### Universo `paper_v1` — justificación
+
+Elegidos de los 429 tries verificados con estos criterios:
+
+| Criterio | Threshold | Por qué |
+|---|---|---|
+| Patterns | >500 | Stats significativas |
+| Ratio wins/count | 0.38-0.55 | FaseC sana, no sesgo direccional |
+| Volume 24h | >$50M | Liquidez suficiente para slippage realista |
+| Volatility 24h | >1.5% | Filtra stablecoins sin flag |
+| Asset class | blue_chip + large_cap + meme | Diversificación pero sin micro-caps |
+
+### Cómo aplicar en la Mac del usuario
+
+```bash
+cd ~/ppmt
+git pull origin main
+
+# Ejecutar el cleanup (hace backup automático)
+bash scripts/cleanup_config.sh
+
+# Verificar que aplicó
+cat ~/.ppmt/config.yaml | head -20
+cat ~/.ppmt/groups_config.json
+
+# Arrancar terminal
+ppmt terminal
+# En la UI: TOKEN GROUPS → cargar "paper_v1"
+#           VOLMIN=50M, VOLATMIN=1.5%, NO STABLE=ON
+```
+
+### Verificación post-cleanup
+
+```bash
+# Debe mostrar 25 tokens en paper_v1
+python3 -c "import json; print(len(json.load(open('$HOME/.ppmt/groups_config.json'))['paper_v1']['bases']))"
+
+# config.yaml debe tener sección risk y signal
+grep -E "^(risk|signal):" ~/.ppmt/config.yaml
+```
+
+### Rollback
+
+```bash
+# Listar backups
+ls ~/.ppmt/*.bak-*
+
+# Restaurar el más reciente
+LATEST=$(ls -t ~/.ppmt/config.yaml.bak-* | head -1)
+cp "$LATEST" ~/.ppmt/config.yaml
+
+LATEST_GRP=$(ls -t ~/.ppmt/groups_config.json.bak-* | head -1)
+cp "$LATEST_GRP" ~/.ppmt/groups_config.json
+```
+
+### Próximos pasos
+
+1. **Usuario ejecuta `cleanup_config.sh` en su Mac** → aplica config y grupo.
+2. **Arrancar `ppmt terminal`** y cargar grupo `paper_v1`.
+3. **Paper trading 24-48h** con monitoreo de:
+   - `wins/count` estable en `ppmt stats` (no debe divergir)
+   - Trades abiertos/cerrados con sentido (no loop fantasma)
+   - PnL paper-trading vs esperado
+4. Si todo sano en 24h → listo para producción.
+5. Si algo se rompe → mandar log del terminal y diagnosticar.
+
+### Outliers conocidos (NO son problema)
+
+Estos tokens en `verify_all.sh` tienen ratio <0.30 pero son esperables:
+
+- **Stablecoins**: EUR/USDT (0.028), USD1/USDT (0.000), RLUSD/USDT (0.000),
+  U/USDT (0.000), XUSD/USDT (0.018) — no tienen edge direccional, correcto.
+- **Micro-price tokens**: BTTC/USDT (0.036), BSB/USDT (0.061) — data ruidosa.
+- **Low-n assets**: BAL (0.160), BEAT (0.133), EVAA (0.169), XMR (0.150),
+  HYPE (0.178), KAS (0.220), TRUMP (0.221), BLAST (0.219) — estabilizan con
+  más data.
+
+Ninguno está en `paper_v1`, así que no afecta el paper trading.
+
+### Commits
+
+- `feat(v0.40.24-paper-cleanup): cleanup_config.sh + paper_v1 group + trazabilidad` (este commit)

@@ -426,3 +426,27 @@ Stage Summary:
 - 3 endpoints nuevos + 2 funciones nuevas en storage/history_manager.
 - Frontend: 4 botones nuevos (Clear All + Del per-row en Sweep History, Clear en Signals).
 - Lista para commit + push a GitHub.
+
+---
+Task ID: v0.40.24-paper-cleanup
+Agent: main (z-ai)
+Task: Limpiar config del usuario + grupo paper_v1 + commitear a GitHub para paper trading 24-48h
+
+Work Log:
+- Verificado que v0.40.24 FaseC quedó aplicada en los 429 tries (verify_all.sh output: ratio 0.38-0.55, 220842/339756 patterns con wins<count)
+- Detectado que ppmt list solo muestra 9 assets tracked aunque DB tiene 429 tries
+- Analizado config.yaml del usuario: SAX OK pero faltan secciones risk/signal
+- Analizado groups_config.json: 4 grupos experimentales con data pobre
+- Creado scripts/cleanup_config.sh: backup + rewrite config.yaml + groups_config.json con paper_v1 (25 tokens líquidos sanos)
+- Actualizado groups_config.json del repo con grupo paper_v1 + conservados 4 grupos previos como referencia
+- Agregada entrada v0.40.24-paper-cleanup a TRAZABILIDAD.md (153 líneas)
+- Configurada SSH key ed25519 para acceso a github.com/coverdraft/ppmt (agregada por usuario a su cuenta de GitHub)
+- Verificado git pull: branch main up to date, sin commits locales ni remotos pendientes
+- Commitear y pushear a main
+
+Stage Summary:
+- scripts/cleanup_config.sh: 6.9KB, idempotente, backup automático, verificación YAML/JSON
+- groups_config.json: agregado paper_v1 (25 tokens) + conservados 4 grupos experimentales previos
+- TRAZABILIDAD.md: entrada v0.40.24-paper-cleanup con contexto, cambios, verificación, rollback, próximos pasos
+- Universo paper_v1: BTC ETH SOL BNB XRP ADA AVAX DOT LINK LTC ATOM NEAR APT ARB OP INJ SUI TIA SEI TON PEPE SHIB DOGE WIF FLOKI
+- Pendiente: usuario ejecuta cleanup_config.sh en su Mac y arranca ppmt terminal con grupo paper_v1
