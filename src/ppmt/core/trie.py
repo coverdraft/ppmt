@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
-from ppmt.core.metadata import BlockLifecycleMetadata, RegimeStats
+from ppmt.core.metadata import BlockLifecycleMetadata, DirectionStats, RegimeStats
 
 
 @dataclass
@@ -534,6 +534,34 @@ class PPMTTrie:
                 between_variance = sum(n * (mean - grand_mean) ** 2 for mean, n in child_means)
                 node.metadata.move_variance = child_m2_total + between_variance
                 node.metadata.move_mean_for_variance = grand_mean
+
+        # V4.3 (FIX-A): Propagate long_stats / short_stats from children.
+        # Without this, intermediate nodes carry empty DirectionStats and
+        # win_rate_long / win_rate_short return 0.0 — the engine would never
+        # see directional edge at non-leaf nodes (which are the majority of
+        # matches in a sparse trie).
+        agg_long_count = sum(m.long_stats.count for m in child_metas) + node.metadata.long_stats.count
+        agg_long_wins = sum(m.long_stats.wins for m in child_metas) + node.metadata.long_stats.wins
+        agg_long_move = sum(m.long_stats.total_move_pct for m in child_metas) + node.metadata.long_stats.total_move_pct
+        agg_long_dd = sum(m.long_stats.total_drawdown_pct for m in child_metas) + node.metadata.long_stats.total_drawdown_pct
+
+        agg_short_count = sum(m.short_stats.count for m in child_metas) + node.metadata.short_stats.count
+        agg_short_wins = sum(m.short_stats.wins for m in child_metas) + node.metadata.short_stats.wins
+        agg_short_move = sum(m.short_stats.total_move_pct for m in child_metas) + node.metadata.short_stats.total_move_pct
+        agg_short_dd = sum(m.short_stats.total_drawdown_pct for m in child_metas) + node.metadata.short_stats.total_drawdown_pct
+
+        node.metadata.long_stats = DirectionStats(
+            count=agg_long_count,
+            wins=agg_long_wins,
+            total_move_pct=agg_long_move,
+            total_drawdown_pct=agg_long_dd,
+        )
+        node.metadata.short_stats = DirectionStats(
+            count=agg_short_count,
+            wins=agg_short_wins,
+            total_move_pct=agg_short_move,
+            total_drawdown_pct=agg_short_dd,
+        )
 
         # V4 FIX: Update node_type for intermediate nodes
         if node.metadata.historical_count >= node.metadata.min_independent_count:

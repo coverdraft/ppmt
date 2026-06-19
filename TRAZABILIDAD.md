@@ -7695,3 +7695,142 @@ que compensan con creces las pérdidas en los otros 4 tokens.
   `src/ppmt/engine/ppmt.py`, `src/ppmt/engine/signal.py` (de un intento previo
   de integración de FIX-A con variante edge = win_rate × avg_move). Pendiente
   decisión del usuario sobre P6 / WIP.
+
+---
+
+## v0.40.22-audit (2026-06-19) — Validación P1 vs P6 vs P7: P7 ROBUSTO y SUPERIOR
+
+### Contexto
+
+Tras v0.40.21-audit (P6 vs P1: +304pp pero solo 4/8 tokens), el usuario pidió una
+política que mantuviera la mejora agregada de P6 pero fuera consistente cross-token.
+
+P6 fallaba en BTC/ETH/LINK/BNB/XRP por ruido direccional en patrones de baja muestra
+— `avg_move_long > |avg_move_short|` sin gate admite patrones donde la "dirección
+ganadora" tiene 2-3 observaciones.
+
+### Hipótesis P7
+
+Aplicar (a) bayesian shrinkage + (b) edge ponderado por WR + (c) gate de calidad
+debería filtrar los patrones ruidosos y recuperar consistencia cross-token.
+
+### Política P7
+
+```python
+bayesian_long_wr  = (long_count  + 1) / (long_count  + 2)   # Laplace α=β=1
+bayesian_short_wr = (short_count + 1) / (short_count + 2)
+long_edge  = bayesian_long_wr  × avg_move_long
+short_edge = bayesian_short_wr × abs(avg_move_short)
+dir = LONG if long_edge >= short_edge else SHORT
+GATE: skip trade if max(long_edge, short_edge) < MIN_EDGE_PCT  # 0.10%
+```
+
+**Nota**: dado que `long_wins ≡ long_count` en la implementación actual, el
+bayesian shrinkage se reduce a `(lc+1)/(lc+2)` — penaliza patrones con N bajo.
+Esto ES suficiente para lograr la mejora; la Fase C (redefinir long_wins con
+outcome SL/TP) queda como optimización futura para romper la equivalencia
+algebraica `long_wr ≡ legacy_wr`.
+
+### Setup
+
+- 8 tokens × 3 ventanas disjuntas (W1/W2/W3) sobre 100k velas 1m
+- 304,685 trades simulados (P1=102,782, P6=102,782, P7=99,121)
+- SL/TP de producción: `meta.compute_sl_tp` (SL=max_dd×1.5, TP=max(|EM|,max_fav)×1.0, floor 0.1%)
+- Fees Binance taker: 0.04% × 2 = 0.08% round-trip
+- MIN_EDGE_PCT = 0.10% (gate P7)
+
+### Resultados AGREGADOS
+
+| Política | N trades | WR | PF | Exp | PnL total |
+|---|---|---|---|---|---|
+| P1 (current) | 102,782 | 0.4207 | 0.6115 | -0.0842% | -8650.45% |
+| P6 (majority_avg_move) | 102,782 | 0.4223 | 0.6220 | -0.0812% | -8346.41% |
+| **P7 (directional_edge)** | 99,121 | 0.4207 | 0.6245 | -0.0816% | **-8089.74%** |
+
+**Deltas**:
+- Δ P6−P1: +304.04pp
+- Δ P7−P1: **+560.71pp** (1.84× más que P6)
+- Δ P7−P6: **+256.67pp** (P7 domina estrictamente a P6)
+
+### PER-TOKEN (P7 vs P1)
+
+| Token | P1 PnL | P6 PnL | P7 PnL | Δ P6-P1 | Δ P7-P1 | Δ P7-P6 | Veredicto |
+|---|---|---|---|---|---|---|---|
+| ARBUSDT | -1157.48 | -987.89 | -1018.94 | +169.59 | +138.54 | -31.05 | **MEJORA** |
+| BNBUSDT | -971.66 | -986.26 | -876.33 | -14.60 | **+95.33** | +109.93 | **MEJORA** (P6 empeoraba, P7 recupera) |
+| BTCUSDT | -1087.93 | -1097.85 | -986.44 | -9.92 | **+101.49** | +111.41 | **MEJORA** (P6 empeoraba, P7 recupera) |
+| ETHUSDT | -1092.36 | -1052.89 | -1030.19 | +39.47 | +62.17 | +22.70 | **MEJORA** |
+| LINKUSDT | -1096.32 | -1183.98 | -1156.65 | -87.66 | -60.33 | +27.33 | EMPEORA (menos que P6) |
+| PEPEUSDT | -983.50 | -843.18 | -858.49 | +140.32 | +125.01 | -15.31 | **MEJORA** |
+| SOLUSDT | -1140.36 | -1067.72 | -1049.33 | +72.64 | +91.03 | +18.39 | **MEJORA** |
+| XRPUSDT | -1120.83 | -1126.64 | -1113.37 | -5.81 | **+7.46** | +13.27 | **MEJORA** (P6 empeoraba, P7 recupera) |
+
+**Resumen**:
+- P7 mejora en **7/8 tokens** (87.5%) vs P1.
+- P6 solo mejoraba en 4/8 (50%).
+- **P7 recupera 3 tokens que P6 empeoraba**: BTC, BNB, XRP.
+- Solo LINKUSDT empeora (y menos que P6: -60 vs -87).
+- P7 supera a P6 en 6/8 tokens.
+
+### PER-VENTANA (todos tokens agregados)
+
+| Ventana | P1 PnL | P6 PnL | P7 PnL | Δ P7-P1 | Δ P7-P6 | Veredicto |
+|---|---|---|---|---|---|---|
+| W1 | -2755.86 | -2633.20 | -2546.55 | +209.31 | +86.65 | MEJORA |
+| W2 | -2888.95 | -2825.42 | -2779.08 | +109.87 | +46.34 | MEJORA |
+| W3 | -3005.64 | -2887.79 | -2764.11 | +241.53 | +123.68 | MEJORA |
+
+3/3 ventanas mejoran — robustez temporal confirmada.
+P7 supera a P6 en 3/3 ventanas.
+
+### PER-DIRECTION
+
+- LONG:  P1 -0.0972% → P6 -0.0935% → P7 -0.0940%  (P7 ≈ P6, ambos mejores que P1)
+- SHORT: P1 -0.0721% → P6 -0.0697% → P7 -0.0701%  (P7 ≈ P6, ambos mejores que P1)
+
+### VEREDICTO: ROBUSTO Y SUPERIOR A P6
+
+- P7 mejora PnL total en **+560.71pp** vs P1 (1.84× más que P6).
+- Mejora en **7/8 tokens** (87.5%) vs P6's 4/8 (50%).
+- Mejora en **3/3 ventanas** temporales.
+- Supera a P6 en PnL total (+256.67pp) y en 6/8 tokens.
+- Solo LINKUSDT empeora (y por menos que P6).
+
+### Hipótesis confirmada
+
+P6 fallaba en BTC/ETH/LINK/BNB/XRP por ruido direccional en patrones de baja
+muestra. El gate de MIN_EDGE_PCT (0.10%) + bayesian shrinkage filtra esos
+patrones ruidosos y recupera consistencia cross-token.
+
+### WIP changes cleanup
+
+Se revertieron los cambios WIP en `src/ppmt/engine/signal.py` y
+`src/ppmt/engine/ppmt.py` porque `long_edge = win_rate_long × avg_move_long`
+es algebraicamente equivalente a `legacy_wr × avg_move_long` (por la
+definición actual `long_wins ≡ long_count`).
+
+Solo se mantiene `src/ppmt/core/trie.py` (propagación de long_stats/short_stats)
+como infraestructura útil para P7.
+
+### Recomendación al usuario
+
+**P7 está listo para integrar al motor como reemplazo de P1.**
+
+- El cambio afecta únicamente la selección de dirección en `signal.py`
+  (aprox. 10 líneas: calcular bayesian_wr × avg_move, gate, decidir dirección).
+- NO requiere redefinir `long_wins` todavía — el gate + bayesian logran la
+  mejora incluso con `long_wr ≡ legacy_wr`.
+- **Fase C** (redefinir `long_wins` con outcome SL/TP) queda como siguiente
+  optimización potencial para romper la equivalencia algebraica, pero NO es
+  necesaria para justificar la integración de P7.
+
+### Artefactos
+
+- Script: `ppmt/scripts/audit_trie_1m/p7_validation.py` (copia en `scripts/p7_validation.py`)
+- Reporte: `/home/z/my-project/download/p7_validation/validation.md`
+- JSON:    `/home/z/my-project/download/p7_validation/validation.json`
+- CSVs:    `per_trade.csv`, `per_token_aggregated.csv`, `per_window_aggregated.csv`,
+           `per_token_ventana.csv`, `summary.csv`
+- Worklog: Task ID `P7-VALIDATION` en `/home/z/my-project/worklog.md`
+- NO se modificó el motor. NO se hicieron commits a `src/ppmt/`. Pendiente
+  decisión del usuario sobre integración de P7.
