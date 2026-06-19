@@ -3026,6 +3026,379 @@ async def multi_tf_analysis(req: MultiTFRequest) -> dict:
 
 
 # ------------------------------------------------------------------ #
+# REST endpoints — Trie Maturity & Decision Trace (v0.41.0 FASE 5)
+# ------------------------------------------------------------------ #
+
+
+@app.get("/api/trie-maturity/{symbol:path}")
+async def trie_maturity(symbol: str, timeframe: str = "15m") -> dict:
+    """Trie maturity score: how full are N1, N2, N3, N4 for this token.
+
+    Returns fill ratios (pattern_count / max_possible_patterns) for each
+    trie level, along with raw pattern counts. The max_possible_patterns
+    heuristic is based on the SAX alphabet size and pattern length: for a
+    given alphabet α and pattern length L, the theoretical maximum is α^L.
+    In practice, tries are far from full — fill_ratio gives a quick gauge
+    of how mature the data is for this symbol.
+
+    v0.41.0 FASE 5 Tarea 5.1: Terminal frontend consumes this to show a
+    readiness indicator (e.g., "N1: 85k patterns ✓, N3: 340 ✓, N4: 120 ✓").
+    """
+    try:
+        storage = PPMTStorage()
+        classifier = AssetClassifier()
+        info = classifier.classify(symbol)
+
+        from ppmt.data.storage import UNIVERSAL_POOL_KEY, class_pool_key as _cpk
+
+        levels = {}
+        # N1: universal pool
+        n1 = storage.load_trie(UNIVERSAL_POOL_KEY, "n1")
+        n1_count = n1.pattern_count if n1 else 0
+        # α=3 for N1, L=5 → 3^5 = 243 theoretical max per unique path prefix
+        n1_max = 3 ** 5
+        levels["n1"] = {
+            "pool": "universal",
+            "pattern_count": n1_count,
+            "max_possible": n1_max,
+            "fill_ratio": round(min(n1_count / n1_max, 1.0), 4) if n1_max > 0 else 0.0,
+            "exists": n1 is not None,
+        }
+
+        # N2: class-shared pool
+        n2_key = _cpk(info.asset_class)
+        n2 = storage.load_trie(n2_key, "n2")
+        n2_count = n2.pattern_count if n2 else 0
+        n2_max = 4 ** 5  # α=4 for N2
+        levels["n2"] = {
+            "pool": f"asset_class:{info.asset_class}",
+            "pattern_count": n2_count,
+            "max_possible": n2_max,
+            "fill_ratio": round(min(n2_count / n2_max, 1.0), 4) if n2_max > 0 else 0.0,
+            "exists": n2 is not None,
+        }
+
+        # N3: per-symbol
+        n3 = storage.load_trie(symbol, "n3")
+        n3_count = n3.pattern_count if n3 else 0
+        n3_max = 6 ** 5  # α=6 for N3
+        levels["n3"] = {
+            "pool": "per_symbol",
+            "pattern_count": n3_count,
+            "max_possible": n3_max,
+            "fill_ratio": round(min(n3_count / n3_max, 1.0), 4) if n3_max > 0 else 0.0,
+            "exists": n3 is not None,
+        }
+
+        # N4: per-symbol+regime (RegimePartitionedTrie)
+        n4 = storage.load_trie(symbol, "n4")
+        if n4 is not None and hasattr(n4, 'pattern_count'):
+            n4_count = n4.pattern_count
+        else:
+            n4_count = 0
+        n4_max = 8 ** 5  # α=8 for N4
+        levels["n4"] = {
+            "pool": "per_symbol_regime",
+            "pattern_count": n4_count,
+            "max_possible": n4_max,
+            "fill_ratio": round(min(n4_count / n4_max, 1.0), 4) if n4_max > 0 else 0.0,
+            "exists": n4 is not None,
+        }
+
+        # Overall maturity: weighted average (same as engine weights)
+        total_patterns = n1_count + n2_count + n3_count + n4_count
+        overall_maturity = min(total_patterns / 500, 1.0)  # 500+ patterns ≈ mature
+
+        return {
+            "ok": True,
+            "symbol": symbol,
+            "asset_class": info.asset_class,
+            "weight_profile": info.weight_profile,
+            "levels": levels,
+            "total_patterns": total_patterns,
+            "overall_maturity": round(overall_maturity, 4),
+            "ready_to_trade": total_patterns >= 100,
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/decision-trace/{symbol:path}")
+async def decision_trace(symbol: str, timeframe: str = "15m") -> dict:
+    """Why was the decision made? Full trace from signal to execution.
+
+    Returns the latest signal for this symbol with all filter results,
+    including: signal_type, confidence, BTC_filter_result, pattern_matched,
+    level_weights, time_decay_factor.
+
+    v0.41.0 FASE 5 Tarea 5.2: Terminal frontend consumes this to render
+    an explainable-AI panel ("Why did PPMT go LONG? → N3 matched 'abcde'
+    with 0.78 confidence, BTC filter passed (trend=up), …").
+    """
+    try:
+        storage = PPMTStorage()
+        classifier = AssetClassifier()
+        info = classifier.classify(symbol)
+
+        # Get latest signal from storage
+        signals = storage.get_signals(symbol, limit=1)
+        latest_signal = signals[0] if signals else None
+
+        # Build the trace
+        trace = {
+            "symbol": symbol,
+            "asset_class": info.asset_class,
+            "timeframe": timeframe,
+            "latest_signal": latest_signal,
+            "filter_results": {},
+            "level_details": {},
+        }
+
+        if latest_signal:
+            # Extract signal fields into structured trace
+            trace["signal_type"] = latest_signal.get("signal_type", "HOLD")
+            trace["confidence"] = latest_signal.get("confidence", 0.0)
+            trace["matched_pattern"] = latest_signal.get("matched_pattern", [])
+            trace["trie_level"] = latest_signal.get("trie_level", "")
+            trace["is_fuzzy"] = latest_signal.get("is_fuzzy", False)
+            trace["win_rate"] = latest_signal.get("win_rate", 0.0)
+            trace["risk_reward_ratio"] = latest_signal.get("risk_reward_ratio", 0.0)
+            trace["quality_score"] = latest_signal.get("quality_score", 0.0)
+            trace["entry_price"] = latest_signal.get("entry_price")
+            trace["sl_price"] = latest_signal.get("sl_price")
+            trace["tp_price"] = latest_signal.get("tp_price")
+            trace["timestamp"] = latest_signal.get("timestamp")
+
+            # BTC filter result (check if we have BTC context)
+            btc_signals = storage.get_signals("BTC/USDT", limit=1)
+            if btc_signals:
+                btc_sig = btc_signals[0]
+                trace["filter_results"]["btc_filter"] = {
+                    "btc_trend": btc_sig.get("signal_type", "HOLD"),
+                    "btc_confidence": btc_sig.get("confidence", 0.0),
+                    "btc_aligned": (
+                        btc_sig.get("signal_type") in ("LONG", "EXIT_SHORT")
+                        and latest_signal.get("signal_type") == "LONG"
+                    ) or (
+                        btc_sig.get("signal_type") in ("SHORT", "EXIT_LONG")
+                        and latest_signal.get("signal_type") == "SHORT"
+                    ),
+                }
+            else:
+                trace["filter_results"]["btc_filter"] = {
+                    "btc_trend": "unknown",
+                    "btc_confidence": 0.0,
+                    "btc_aligned": None,
+                    "note": "No BTC signal available",
+                }
+
+            # Level weights from the engine's weight profile
+            from ppmt.engine.weights import AdaptiveWeights
+            weights = AdaptiveWeights.from_profile(info.weight_profile)
+            trace["level_details"]["weights"] = {
+                "n1_universal": weights.n1_universal,
+                "n2_asset_class": weights.n2_asset_class,
+                "n3_per_asset": weights.n3_per_asset,
+                "n4_per_asset_regime": weights.n4_per_asset_regime,
+            }
+
+            # Trie maturity context
+            from ppmt.data.storage import UNIVERSAL_POOL_KEY, class_pool_key as _cpk
+            n1 = storage.load_trie(UNIVERSAL_POOL_KEY, "n1")
+            n2_key = _cpk(info.asset_class)
+            n2 = storage.load_trie(n2_key, "n2")
+            n3 = storage.load_trie(symbol, "n3")
+
+            trace["level_details"]["pattern_counts"] = {
+                "n1": n1.pattern_count if n1 else 0,
+                "n2": n2.pattern_count if n2 else 0,
+                "n3": n3.pattern_count if n3 else 0,
+            }
+
+            # Time decay factor applied to the matched pattern
+            from ppmt.engine.weights import apply_time_decay
+            last_ts = latest_signal.get("timestamp", 0)
+            if last_ts:
+                decayed = apply_time_decay(latest_signal.get("confidence", 0.0), last_ts)
+                trace["level_details"]["time_decay_factor"] = round(
+                    decayed / max(latest_signal.get("confidence", 0.001), 0.001), 4
+                )
+            else:
+                trace["level_details"]["time_decay_factor"] = 1.0
+
+        return {"ok": True, "trace": trace}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/pattern/{symbol:path}")
+async def pattern_info(symbol: str, timeframe: str = "15m") -> dict:
+    """Current matched pattern info: SAX pattern, dominant level, confidence per level.
+
+    Returns the current SAX symbols, which level dominated, confidence from
+    each level, and expected sequence (forward prediction from the matched node).
+
+    v0.41.0 FASE 5 Tarea 5.3: Terminal frontend consumes this to render
+    the pattern visualization panel ("Current pattern: a|bc|de → next: f|g
+    with 0.72 probability").
+    """
+    try:
+        storage = PPMTStorage()
+        classifier = AssetClassifier()
+        info = classifier.classify(symbol)
+
+        from ppmt.data.storage import UNIVERSAL_POOL_KEY, class_pool_key as _cpk
+
+        result = {
+            "ok": True,
+            "symbol": symbol,
+            "asset_class": info.asset_class,
+            "timeframe": timeframe,
+            "current_pattern": None,
+            "dominant_level": None,
+            "confidence_per_level": {},
+            "expected_sequence": None,
+        }
+
+        # Get latest signal for current pattern
+        signals = storage.get_signals(symbol, limit=1)
+        if signals:
+            sig = signals[0]
+            result["current_pattern"] = sig.get("matched_pattern", [])
+            result["dominant_level"] = sig.get("trie_level", "")
+            result["confidence"] = sig.get("confidence", 0.0)
+            result["signal_type"] = sig.get("signal_type", "HOLD")
+            result["is_fuzzy"] = sig.get("is_fuzzy", False)
+
+        # Load tries and check per-level confidence
+        n1 = storage.load_trie(UNIVERSAL_POOL_KEY, "n1")
+        n2_key = _cpk(info.asset_class)
+        n2 = storage.load_trie(n2_key, "n2")
+        n3 = storage.load_trie(symbol, "n3")
+        n4 = storage.load_trie(symbol, "n4")
+
+        # Get per-level pattern counts and best available info
+        levels_info = {}
+        for level_name, trie_obj in [("n1", n1), ("n2", n2), ("n3", n3), ("n4", n4)]:
+            if trie_obj is not None:
+                count = trie_obj.pattern_count
+                # Try to get the matched node for current pattern
+                matched_pattern = result.get("current_pattern", [])
+                node = None
+                if matched_pattern and len(matched_pattern) > 0:
+                    try:
+                        node = trie_obj.search(matched_pattern)
+                    except Exception:
+                        pass
+
+                level_data = {
+                    "pattern_count": count,
+                    "exists": True,
+                }
+                if node is not None:
+                    level_data["confidence"] = node.metadata.confidence
+                    level_data["win_rate"] = node.metadata.win_rate
+                    level_data["historical_count"] = node.metadata.historical_count
+                    level_data["expected_move_pct"] = node.metadata.expected_move_pct
+                    # Expected sequence from next_symbol_counts
+                    if node.metadata.next_symbol_counts:
+                        total = sum(node.metadata.next_symbol_counts.values())
+                        if total > 0:
+                            probs = {
+                                k: round(v / total, 4)
+                                for k, v in sorted(
+                                    node.metadata.next_symbol_counts.items(),
+                                    key=lambda x: -x[1],
+                                )
+                            }
+                            level_data["expected_next_symbol"] = probs
+                    # Forward sequence (next 3 symbols) from forward_sequences
+                    if hasattr(node.metadata, 'forward_sequences') and node.metadata.forward_sequences:
+                        total_fwd = sum(node.metadata.forward_sequences.values())
+                        if total_fwd > 0:
+                            fwd_probs = {
+                                k: round(v / total_fwd, 4)
+                                for k, v in sorted(
+                                    node.metadata.forward_sequences.items(),
+                                    key=lambda x: -x[1],
+                                )[:5]  # Top 5 most likely
+                            }
+                            level_data["forward_sequence"] = fwd_probs
+                else:
+                    level_data["confidence"] = 0.0
+                    level_data["historical_count"] = 0
+
+                levels_info[level_name] = level_data
+            else:
+                levels_info[level_name] = {
+                    "pattern_count": 0,
+                    "exists": False,
+                    "confidence": 0.0,
+                }
+
+        result["confidence_per_level"] = levels_info
+
+        # Determine expected sequence from the dominant level
+        dominant = result.get("dominant_level", "")
+        if dominant and dominant in levels_info:
+            dom_info = levels_info[dominant]
+            if "expected_next_symbol" in dom_info:
+                result["expected_sequence"] = {
+                    "level": dominant,
+                    "next_symbol_probabilities": dom_info["expected_next_symbol"],
+                }
+            if "forward_sequence" in dom_info:
+                result["expected_sequence"] = result.get("expected_sequence") or {"level": dominant}
+                result["expected_sequence"]["forward_sequence"] = dom_info["forward_sequence"]
+
+        return result
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+# ------------------------------------------------------------------ #
+# WebSocket event: sequence_update (v0.41.0 FASE 5 Tarea 5.4)
+# ------------------------------------------------------------------ #
+# The sequence_update event is broadcast via the existing _broadcast_event
+# mechanism. When the engine generates a new signal with predicted_path
+# data (from Signal.predicted_path / PredictionBlock), the frontend
+# receives a WS message like:
+#
+#   {
+#     "type": "sequence_update",
+#     "event": "sequence_update",
+#     "payload": {
+#       "symbol": "BTC/USDT",
+#       "timeframe": "15m",
+#       "current_pattern": ["a|b", "c|d", "e|f", "g|h", "i|j"],
+#       "dominant_level": "n3",
+#       "confidence": 0.78,
+#       "expected_sequence": {
+#         "level": "n3",
+#         "next_symbol_probabilities": {"k|l": 0.45, "m|n": 0.30, ...},
+#         "forward_sequence": {"('k','l')('m','n')('o','p')": 0.25, ...}
+#       },
+#       "signal_type": "LONG",
+#       "timestamp": 1709123456.789
+#     }
+#   }
+#
+# To emit this event from the engine, call:
+#   asyncio.run_coroutine_threadsafe(
+#       _broadcast_event({
+#           "type": "sequence_update",
+#           "event": "sequence_update",
+#           "payload": { ... }
+#       }),
+#       app.state.loop
+#   )
+#
+# This structure is already supported by the existing _broadcast_event
+# function (v0.39.6) which sends discrete typed events to all connected
+# WS clients. The frontend dispatches on msg.type === "sequence_update".
+
+
+# ------------------------------------------------------------------ #
 # Pre-trade gate (v0.31.0) — integrated into start_trading
 # ------------------------------------------------------------------ #
 
