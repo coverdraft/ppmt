@@ -1,7 +1,8 @@
 # TRAZABILIDAD PPMT — Estado del Proyecto
 
 > Última actualización: 2026-06-19
-> Versión actual: **v0.40.11** — Dataset expandido v4 (5 majors + 4 memes + 7 alts × 200k velas): PnL total +108.73pp, SHORT +516pp, pero LONG -408pp
+> Versión actual: **v0.40.34** — Motor arrancando en Mac del usuario, paper trading LONG BTC/USDT @ $63,150 funcional
+> ⚠️ **Si eres nuevo, lee primero la sección `# 📘 GUÍA DEL MOTOR PPMT — PARA CONTINUAR EL TRABAJO` al final de este archivo (línea 9914+).** Ahí está la arquitectura, dónde empezar a leer, dónde costó más, cómo se resolvieron largos y cortos, y el estado actual.
 > Repositorio: https://github.com/coverdraft/ppmt
 > Idioma: Español
 
