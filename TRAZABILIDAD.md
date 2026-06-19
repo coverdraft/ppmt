@@ -6708,3 +6708,87 @@ Las 3 condiciones se cumplen raramente → 99.91% cae al default `ranging`. N4 R
 - Resultados consistentes entre v4 y 12m: detector degenerado en ambos
 - No se modificó código de motor, solo análisis
 - No se bump de versión
+## v0.40.15-audit — Comparativa 5 detectores de régimen (pre-FIX-17)
+
+**Fecha**: 2026-06-19
+**Tipo**: Análisis comparativo (sin cambios de motor)
+**Motivo**: Antes de implementar FIX-17 (nuevo RegimeDetector), comparar 5 enfoques alternativos para distinguir A) detector degenerado B) dataset insuficiente C) ambos. Propuesta del usuario: ADX + EMA + Bollinger Width en lugar de Hurst.
+
+### Setup
+
+- Dataset: 8 tokens (BTC, ETH, SOL, BNB, XRP, ARB, LINK, PEPE) × 100k velas 1m = 800k velas (~70 días cada uno)
+- Split: 75% train / 25% test
+- Ventanas pseudo-humanas: 1168 ventanas × 8 tokens, etiquetadas por retorno acumulado + volatilidad relativa (bull > +3%, bear < -3%, range |·|<1%, volatile >2× mediana)
+- PnL: LONG/SHORT hold=50 velas, PnL por régimen detectado
+
+### Detectores evaluados
+
+1. **ADX solo** (período 14, umbral 25)
+2. **EMA slope** (21/55, slope 5 velas, umbral 0.15%)
+3. **Bollinger Width** (período 20, σ=2, umbral 1.5× mediana móvil 500)
+4. **ADX + EMA** (ADX>=25 Y EMA slope confirmatorio Y DI alineado)
+5. **ADX + EMA + Bollinger** (volatile override por BB width, luego trending check)
+
+### Resultados agregados
+
+| Detector | Ranging% | Up% | Down% | Vol% | ΔT/T pp | Bull% | Bear% | Range% | Sep LONG | Sep SHORT |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| adx | 0.0 | 98.6 | 1.4 | 0.0 | 0.3 | 100 | 0 | 0 | -0.0078% | -0.0304% |
+| ema_slope | 93.6 | 3.0 | 3.4 | 0.0 | 7.0 | 0 | 0 | 100 | -0.0002% | -0.0645% |
+| bollinger | 78.8 | 3.9 | 4.1 | 13.2 | 5.4 | 5 | 0 | 99 | +0.0229% | -0.0341% |
+| adx_ema | 96.7 | 3.0 | 0.3 | 0.0 | 3.2 | 0 | 0 | 100 | -0.0020% | -0.1617% |
+| adx_ema_bb | 78.1 | 0.7 | 0.0 | 21.2 | 1.1 | 0 | 0 | 99 | +0.0336% | -0.0610% |
+
+### Hallazgos críticos
+
+**1. ADX solo está mal calibrado para 1m crypto.**
+Umbral estándar Wilder (25) es demasiado bajo para 1m: clasifica 98.6% como `trending_up`. En 1m, el ruido produce suficiente directional movement para disparar ADX constantemente. PnL LONG en `trending_up` = **-0.0078%** (negativo). ADX solo NO SIRVE para 1m crypto sin recalibrar.
+
+**2. EMA slope solo es casi inútil.**
+93.6% ranging, separabilidad casi 0. Detecta muy pocos regímenes direccionales.
+
+**3. Bollinger Width es el que mejor separa LONG.**
+Sep LONG = +0.0229% (positivo, correcto): LONG en `trending_up` gana +0.0105% vs LONG en `ranging` pierde -0.0124%. La separabilidad es la más coherente con la hipótesis.
+
+**4. ADX+EMA+BB es el mejor en Sep LONG pero casi nunca detecta trending_down.**
+Sep LONG = +0.0336% (el mejor de todos), pero solo 0.04% trending_down → Sep SHORT no se puede evaluar bien.
+
+**5. Ningún detector tiene buen acuerdo humano en bull/bear.**
+Solo ADX (100% bull) y Bollinger (5% bull) detectan algo, pero ADX lo hace porque clasifica TODO como up. El etiquetado pseudo-humano es muy exigente (>3% move en 200 velas), lo que explicaría la baja concordancia.
+
+### Veredicto
+
+**NO implementar FIX-17 todavía.** Ningún detector es claramente superior:
+
+- ADX solo: roto (98.6% up)
+- EMA slope: demasiado conservador (93.6% range)
+- Bollinger: mejor Sep LONG pero no detecta bear
+- ADX+EMA: terrible Sep SHORT (-0.1617%)
+- ADX+EMA+BB: mejor Sep LONG pero sin apenas down
+
+**Próximos pasos obligatorios antes de FIX-17**:
+1. **Recalibrar ADX** probando umbrales 30/35/40/45 (el 25 es claramente bajo para 1m)
+2. **Probar ADX con período 28 o 50** (suavizar el ruido 1m)
+3. **Probar Bollinger Width con thresholds más altos** (2.0×, 2.5× mediana) para reducir falsos volatile
+4. **Re-etiquetar ventanas humanas manualmente** (las pseudo-humanas son demasiado exigentes)
+5. **Evaluar separabilidad LONG-SHORT combinada** (Sep LONG + Sep SHORT) como métrica única
+
+### Archivos creados
+
+- `scripts/audit_trie_1m/regime_detectors_v2.py` — 5 detectores standalone
+- `scripts/audit_trie_1m/regime_detector_comparison.py` — comparativa con 4 evaluaciones
+- `scripts/audit_trie_1m/download_1m_for_audit.py` — descarga 8 tokens × 100k velas
+- `download/regime_detector_comparison/comparison.json` — datos completos
+- `download/regime_detector_comparison/comparison_summary.csv` — tabla resumen
+- `download/regime_detector_comparison/comparison_report.md` — reporte ejecutivo
+
+### Datos descargados (no en git por tamaño)
+
+- `download/real_data_1m/BTCUSDT_1m.csv` — 100k velas 1m
+- `download/real_data_1m/ETHUSDT_1m.csv` — 100k velas 1m
+- `download/real_data_1m/SOLUSDT_1m.csv` — 100k velas 1m
+- `download/real_data_1m/BNBUSDT_1m.csv` — 100k velas 1m
+- `download/real_data_1m/XRPUSDT_1m.csv` — 100k velas 1m
+- `download/real_data_1m/ARBUSDT_1m.csv` — 16k velas 1m (descarga parcial)
+- `download/real_data_1m/LINKUSDT_1m.csv` — 100k velas 1m
+- `download/real_data_1m/PEPEUSDT_1m.csv` — 100k velas 1m
