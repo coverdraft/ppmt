@@ -1028,7 +1028,7 @@ def terminal(host: str, port: int, open_browser: bool):
       ppmt terminal -p 9000             # Custom port
       ppmt terminal --open-browser      # Auto-open in browser
     """
-    console.print("[bold cyan]PPMT Terminal Dashboard v0.40.31[/bold cyan]")
+    console.print("[bold cyan]PPMT Terminal Dashboard v0.40.32[/bold cyan]")
 
     if open_browser:
         import webbrowser

@@ -328,6 +328,124 @@ class RealtimeResult:
     duration_seconds: float = 0.0
 
 
+# v0.40.32: Direct HTTP polling — bypasses ccxt's load_markets() which
+# times out on some networks. Implements only fetch_ticker + fetch_ohlcv,
+# which is all the engine needs for paper trading.
+class _DirectPollExchange:
+    """Lightweight exchange wrapper using aiohttp direct HTTP calls.
+
+    Implements only the methods the engine actually uses:
+    - fetch_ticker(symbol) -> {last, close, ...}
+    - fetch_ohlcv(symbol, timeframe, limit) -> [[ts, o, h, l, c, v], ...]
+    - close() -> cleanup aiohttp session
+
+    Supports: mexc, binance (spot). Other exchanges fall back to ccxt.
+    """
+
+    _BASE_URLS = {
+        "mexc": "https://api.mexc.com",
+        "binance": "https://api.binance.com",
+        "bybit": "https://api.bybit.com",
+    }
+
+    _TIMEFRAME_MAP = {
+        # CCXT-style -> exchange-native
+        "mexc": {
+            "1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m",
+            "1h": "1H", "4h": "4H", "1d": "1D",
+        },
+        "binance": {
+            "1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m",
+            "1h": "1h", "4h": "4h", "1d": "1d",
+        },
+        "bybit": {
+            "1m": "1", "5m": "5", "15m": "15", "30m": "30",
+            "1h": "60", "4h": "240", "1d": "D",
+        },
+    }
+
+    def __init__(self, exchange_name: str, api_key: str = None, api_secret: str = None):
+        import aiohttp
+        self.exchange_name = exchange_name.lower()
+        self.api_key = api_key
+        self.api_secret = api_secret
+        self.base_url = self._BASE_URLS.get(self.exchange_name)
+        if not self.base_url:
+            raise ValueError(f"_DirectPollExchange: unsupported exchange '{exchange_name}'")
+        self._session = None
+        # ccxt-compat fields
+        self.markets = {}
+        self.markets_by_id = {}
+
+    async def _get_session(self):
+        if self._session is None or self._session.closed:
+            import aiohttp
+            self._session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=15),
+                headers={"User-Agent": "ppmt/0.40.32"},
+            )
+        return self._session
+
+    async def fetch_ticker(self, symbol: str) -> dict:
+        """GET /api/v3/ticker/price?symbol=BTCUSDT (MEXC/Binance format)."""
+        session = await self._get_session()
+        symbol_id = symbol.replace("/", "").upper()
+        if self.exchange_name in ("mexc", "binance"):
+            url = f"{self.base_url}/api/v3/ticker/price"
+            params = {"symbol": symbol_id}
+        elif self.exchange_name == "bybit":
+            url = f"{self.base_url}/v5/market/tickers"
+            params = {"category": "spot", "symbol": symbol_id}
+        else:
+            raise ValueError(f"fetch_ticker not implemented for {self.exchange_name}")
+        async with session.get(url, params=params) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"{self.exchange_name} fetch_ticker HTTP {resp.status}: {await resp.text()}")
+            data = await resp.json()
+        if self.exchange_name in ("mexc", "binance"):
+            price = float(data.get("price", 0))
+            return {"symbol": symbol, "last": price, "close": price, "info": data}
+        elif self.exchange_name == "bybit":
+            tickers = data.get("result", {}).get("list", [])
+            if not tickers:
+                raise RuntimeError(f"bybit fetch_ticker: no data for {symbol}")
+            price = float(tickers[0].get("lastPrice", 0))
+            return {"symbol": symbol, "last": price, "close": price, "info": data}
+
+    async def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100) -> list:
+        """GET /api/v3/klines (MEXC/Binance) or /v5/market/kline (Bybit)."""
+        session = await self._get_session()
+        symbol_id = symbol.replace("/", "").upper()
+        tf_native = self._TIMEFRAME_MAP.get(self.exchange_name, {}).get(timeframe, timeframe)
+        if self.exchange_name in ("mexc", "binance"):
+            url = f"{self.base_url}/api/v3/klines"
+            params = {"symbol": symbol_id, "interval": tf_native, "limit": limit}
+        elif self.exchange_name == "bybit":
+            url = f"{self.base_url}/v5/market/kline"
+            params = {"category": "spot", "symbol": symbol_id, "interval": tf_native, "limit": limit}
+        else:
+            raise ValueError(f"fetch_ohlcv not implemented for {self.exchange_name}")
+        async with session.get(url, params=params) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"{self.exchange_name} fetch_ohlcv HTTP {resp.status}: {await resp.text()}")
+            data = await resp.json()
+        if self.exchange_name in ("mexc", "binance"):
+            # [[ts, o, h, l, c, v, ...], ...]
+            return [[int(c[0]), float(c[1]), float(c[2]), float(c[3]), float(c[4]), float(c[5])] for c in data]
+        elif self.exchange_name == "bybit":
+            klines = data.get("result", {}).get("list", [])
+            # Bybit returns newest-first, reverse to oldest-first
+            klines = list(reversed(klines))
+            return [[int(c[0]), float(c[1]), float(c[2]), float(c[3]), float(c[4]), float(c[5])] for c in klines]
+
+    async def close(self):
+        if self._session is not None and not self._session.closed:
+            await self._session.close()
+        self._session = None
+
+
+
+
 class RealtimeTrader:
     """
     Real-Time Trading Engine with incremental SAX encoding.
@@ -2458,106 +2576,45 @@ class RealtimeTrader:
                         storage.close()
                         return result
 
-                    exchange_config = {'enableRateLimit': True}
-                    if cfg.api_key:
-                        exchange_config['apiKey'] = cfg.api_key
-                    if cfg.api_secret:
-                        exchange_config['secret'] = cfg.api_secret
-                    # v0.40.28: spot-only markets. Without this, ccxt's
-                    # binance.load_markets() also hits fapi.binance.com
-                    # (USD-M futures) + dapi.binance.com (COIN-M futures).
-                    # fapi is intermittently blocked from EU networks —
-                    # when it 403s, the whole load_markets() raises and
-                    # the engine returns early with no polling, no live
-                    # prices, no chart updates. Restricting to spot avoids
-                    # the futures endpoints entirely.
-                    if cfg.exchange.lower() == 'binance':
-                        exchange_config.setdefault('options', {})
-                        exchange_config['options']['defaultType'] = 'spot'
-                        exchange_config['options']['fetchMarkets'] = ['spot']
-
-                    poll_exchange = exchange_class(exchange_config)
-                    if cfg.testnet:
-                        poll_exchange.set_sandbox_mode(True)
-
-                    # v0.40.31: SKIP load_markets() entirely.
-                    # load_markets() descarga TODOS los mercados del exchange
-                    # (3260 para MEXC, 3600 para Binance). Algunas redes/ISPs
-                    # bloquean o timeoutean este endpoint masivo, pero permiten
-                    # endpoints individuales como /ticker/price y /klines.
-                    # Workaround: inyectar manualmente un market stub para
-                    # cfg.symbol. Verificamos con fetch_ticker que el símbolo
-                    # exista. Si OK, fetch_ohlcv va a funcionar.
+# v0.40.32: Use _DirectPollExchange (aiohttp direct HTTP) instead of ccxt.
+                    # ccxt's fetch_ticker/fetch_ohlcv internally call load_markets()
+                    # which times out on some networks. _DirectPollExchange bypasses
+                    # ccxt entirely, calling MEXC/Binance/Bybit REST APIs directly.
                     _effective_exchange = cfg.exchange
                     try:
-                        # Verify symbol exists via fetch_ticker (lightweight,
-                        # 1 request instead of 3260)
+                        poll_exchange = _DirectPollExchange(
+                            cfg.exchange,
+                            api_key=cfg.api_key,
+                            api_secret=cfg.api_secret,
+                        )
+                        # Verify connection with a single fetch_ticker
                         _ticker = await poll_exchange.fetch_ticker(cfg.symbol)
                         _ticker_price = _ticker.get('last') or _ticker.get('close')
-                        if _ticker_price is None:
+                        if _ticker_price is None or _ticker_price == 0:
                             raise RuntimeError(f"fetch_ticker returned no price for {cfg.symbol}")
-                        # Inject minimal market stub
-                        if cfg.symbol not in poll_exchange.markets:
-                            _base, _quote = cfg.symbol.split('/')
-                            poll_exchange.markets[cfg.symbol] = {
-                                'id': cfg.symbol.replace('/', ''),
-                                'symbol': cfg.symbol,
-                                'base': _base,
-                                'quote': _quote,
-                                'active': True,
-                                'type': 'spot',
-                                'spot': True,
-                                'future': False,
-                                'option': False,
-                                'contract': False,
-                                'precision': {'amount': 8, 'price': 8},
-                                'limits': {
-                                    'amount': {'min': 0.00000001, 'max': None},
-                                    'price': {'min': 0.00000001, 'max': None},
-                                    'cost': {'min': 0.00000001, 'max': None},
-                                },
-                            }
-                            poll_exchange.markets_by_id[cfg.symbol.replace('/', '')] = poll_exchange.markets[cfg.symbol]
-                        console.print(f"[green]Connected to {cfg.exchange} (REST polling, symbol-stub mode)[/green]")
+                        console.print(f"[green]Connected to {cfg.exchange} (direct HTTP polling, no load_markets)[/green]")
                         console.print(f"  {cfg.symbol} last price: ${_ticker_price}")
                     except Exception as e_primary:
-                        # If fetch_ticker fails too, try ONE fallback to MEXC
-                        # (covers the case where Binance is hardcoded but
-                        # symbol ticker itself doesn't work)
+                        # Auto-fallback Binance → MEXC
                         if cfg.exchange.lower() == 'binance':
-                            console.print(f"[yellow]Binance ticker failed ({e_primary}). Falling back to MEXC…[/yellow]")
+                            console.print(f"[yellow]Binance direct poll failed ({e_primary}). Falling back to MEXC…[/yellow]")
                             try:
-                                await poll_exchange.close()
+                                if 'poll_exchange' in dir():
+                                    await poll_exchange.close()
                             except Exception:
                                 pass
                             try:
-                                mexc_class = ccxt_async.mexc
-                                _mexc_config = {'enableRateLimit': True}
-                                if cfg.api_key:
-                                    _mexc_config['apiKey'] = cfg.api_key
-                                if cfg.api_secret:
-                                    _mexc_config['secret'] = cfg.api_secret
-                                poll_exchange = mexc_class(_mexc_config)
+                                poll_exchange = _DirectPollExchange(
+                                    'mexc',
+                                    api_key=cfg.api_key,
+                                    api_secret=cfg.api_secret,
+                                )
                                 _ticker = await poll_exchange.fetch_ticker(cfg.symbol)
                                 _ticker_price = _ticker.get('last') or _ticker.get('close')
-                                if _ticker_price is None:
+                                if _ticker_price is None or _ticker_price == 0:
                                     raise RuntimeError(f"MEXC fetch_ticker returned no price for {cfg.symbol}")
-                                if cfg.symbol not in poll_exchange.markets:
-                                    _base, _quote = cfg.symbol.split('/')
-                                    poll_exchange.markets[cfg.symbol] = {
-                                        'id': cfg.symbol.replace('/', ''),
-                                        'symbol': cfg.symbol,
-                                        'base': _base,
-                                        'quote': _quote,
-                                        'active': True,
-                                        'type': 'spot',
-                                        'spot': True,
-                                        'precision': {'amount': 8, 'price': 8},
-                                        'limits': {'amount': {'min': 1e-8}, 'price': {'min': 1e-8}, 'cost': {'min': 1e-8}},
-                                    }
-                                    poll_exchange.markets_by_id[cfg.symbol.replace('/', '')] = poll_exchange.markets[cfg.symbol]
                                 _effective_exchange = 'mexc'
-                                console.print(f"[green]Connected to MEXC (fallback from Binance) — REST polling, symbol-stub mode[/green]")
+                                console.print(f"[green]Connected to MEXC (fallback from Binance) — direct HTTP polling[/green]")
                                 console.print(f"  {cfg.symbol} last price: ${_ticker_price}")
                             except Exception as e_mexc:
                                 _err_msg = f"Exchange connection failed (binance + mexc fallback): binance={e_primary} | mexc={e_mexc}"

@@ -58,7 +58,7 @@ async def _lifespan(app: FastAPI):
         logger.debug("Could not capture event loop on startup: %s", _e)
     yield
 
-app = FastAPI(title="PPMT Terminal", version="0.40.31", lifespan=_lifespan)
+app = FastAPI(title="PPMT Terminal", version="0.40.32", lifespan=_lifespan)
 
 # Global terminal state (shared with engine)
 terminal_state: TerminalState = get_terminal_state()
@@ -573,26 +573,39 @@ async def get_market_symbols(exchange: str = "mexc", limit: int = 500) -> dict:
             return {"ok": False, "error": f"Exchange '{exchange}' not found"}
         exc = ex()
         try:
-            # v0.40.31: Skip load_markets() — it times out on some networks.
-            # Use fetch_tickers() instead: lighter endpoint, returns same info.
-            # If fetch_tickers also fails, return a hardcoded fallback list.
+            # v0.40.32: Use direct HTTP /api/v3/exchangeInfo with timeout.
+            # If it times out (>10s), fall back to hardcoded top-50 list.
+            # This avoids blocking the whole server when the endpoint is slow.
+            import requests as _requests
+            _base_urls = {
+                "mexc": "https://api.mexc.com",
+                "binance": "https://api.binance.com",
+                "bybit": "https://api.bybit.com",
+            }
+            _base = _base_urls.get(exchange.lower(), "https://api.mexc.com")
             try:
-                tickers = exc.fetch_tickers()
+                _r = _requests.get(f"{_base}/api/v3/exchangeInfo", timeout=10)
+                _r.raise_for_status()
+                _data = _r.json()
                 usdt_pairs = []
-                for s in tickers.keys():
-                    if not s.endswith("/USDT"):
+                for s_obj in _data.get("symbols", []):
+                    s = s_obj.get("symbol", "")
+                    if not s.endswith("USDT"):
                         continue
-                    base = s[:-5]
-                    if base.startswith(("1000", "10000", "1BULL", "3L", "3S", "5L", "5S")):
+                    if not s_obj.get("status", "TRADING") == "TRADING":
                         continue
-                    if base.endswith(("UP", "DOWN", "BULL", "BEAR")) and len(base) > 4:
-                        continue
-                    usdt_pairs.append(s)
+                    # Reconstruct CCXT-style symbol: BTCUSDT -> BTC/USDT
+                    base = s[:-4]
+                    usdt_pairs.append(f"{base}/USDT")
+                # Filter leveraged tokens
+                usdt_pairs = [s for s in usdt_pairs
+                              if not s[:-5].startswith(("1000", "10000", "1BULL", "3L", "3S", "5L", "5S"))
+                              and not (s[:-5].endswith(("UP", "DOWN", "BULL", "BEAR")) and len(s[:-5]) > 4)]
                 usdt_pairs.sort()
                 return {"ok": True, "exchange": exchange, "symbols": usdt_pairs[:limit],
                         "total_available": len(usdt_pairs)}
-            except Exception as e_tickers:
-                # Hardcoded fallback: top 50 USDT pairs (works on any exchange)
+            except Exception as e_direct:
+                # Hardcoded fallback
                 _fallback = [
                     "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT",
                     "ADA/USDT", "DOGE/USDT", "AVAX/USDT", "DOT/USDT", "LINK/USDT",
@@ -607,7 +620,7 @@ async def get_market_symbols(exchange: str = "mexc", limit: int = 500) -> dict:
                 ]
                 return {"ok": True, "exchange": exchange, "symbols": _fallback[:limit],
                         "total_available": len(_fallback), "fallback": True,
-                        "note": f"load_markets and fetch_tickers failed ({e_tickers}); using hardcoded top-50 list"}
+                        "note": f"direct HTTP exchangeInfo failed ({e_direct}); using hardcoded top-50 list"}
         finally:
             if hasattr(exc, 'close'):
                 exc.close()
