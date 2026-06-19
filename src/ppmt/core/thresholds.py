@@ -88,6 +88,27 @@ class SignalThresholds:
     per_trade_min_confidence: float = 0.08
     per_trade_min_risk_reward: float = 0.5
 
+    # ----- P7 (V4.4): directional_edge policy ----- #
+    # v0.40.22-audit: P7 replaces `dir = sign(expected_move_pct)` with a
+    # bayesian-shrunk per-direction edge + quality gate. Validation on
+    # 8 tokens × 3 windows (304,685 trades) showed +560pp PnL total vs P1
+    # and improvement in 7/8 tokens (vs 4/8 for P6 magnitude-only).
+    p7_min_edge_pct: float = 0.10
+    """Hard floor on max(long_edge, short_edge) for P7 policy.
+    Below this → no directional edge strong enough to trade → skip.
+    0.10% = 10 bps — below this the expected edge is indistinguishable
+    from fee noise (0.08% RT). Validated in v0.40.22-audit."""
+
+    p7_bayesian_alpha: float = 1.0
+    """Laplace prior α for bayesian shrinkage of per-direction win_rate.
+    bayesian_wr = (wins + α) / (count + α + β).
+    α=β=1 = uniform prior (Laplace's rule of succession).
+    Shrinks low-N observations toward 0.5 — a pattern with 80% WR over
+    5 cases gets shrunk to 67%, reducing false confidence."""
+
+    p7_bayesian_beta: float = 1.0
+    """Laplace prior β for bayesian shrinkage. See p7_bayesian_alpha."""
+
     # ---------------------------------------------------------------- #
     # Factory methods
     # ---------------------------------------------------------------- #
@@ -140,6 +161,11 @@ class SignalThresholds:
             default_min_confidence=0.08,
             per_trade_min_confidence=0.08,
             per_trade_min_risk_reward=0.5,
+            # P7 (V4.4): directional_edge policy — same params in paper & real
+            # mode (validated in v0.40.22-audit on 8 tokens × 3 windows).
+            p7_min_edge_pct=0.10,
+            p7_bayesian_alpha=1.0,
+            p7_bayesian_beta=1.0,
         )
 
     @classmethod
@@ -183,6 +209,11 @@ class SignalThresholds:
             default_min_confidence=0.60,
             per_trade_min_confidence=0.08,
             per_trade_min_risk_reward=0.5,
+            # P7 (V4.4): same params in real mode — the gate is what protects
+            # against bad trades, not stricter bayesian params.
+            p7_min_edge_pct=0.10,
+            p7_bayesian_alpha=1.0,
+            p7_bayesian_beta=1.0,
         )
 
     @classmethod

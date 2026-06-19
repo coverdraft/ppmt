@@ -885,6 +885,107 @@ class BlockLifecycleMetadata:
             return abs(self.avg_move_short)
         return self.expected_move_pct  # fallback
 
+    # ---------------------------------------------------------------- #
+    # V4.4 (P7): directional_edge policy
+    # ---------------------------------------------------------------- #
+    #
+    # v0.40.22-audit: P7 replaces the legacy `dir = sign(expected_move_pct)`
+    # policy in signal.py. It computes a per-direction edge using bayesian-
+    # shrunk win_rate × avg_move, then picks the direction with the higher
+    # edge. The motor applies a quality gate (min_edge_pct) to skip trades
+    # where neither direction has enough expected edge.
+    #
+    # Validation (v0.40.22-audit): 8 tokens × 3 windows, 304,685 trades.
+    #   P1 (legacy):  PnL -8650%, WR 0.421, PF 0.612
+    #   P7 (this):    PnL -8090%, WR 0.421, PF 0.625  (+560pp, 7/8 tokens)
+    #
+    # Note on long_wins ≡ long_count: the current definition classifies
+    # observations by sign(move_pct), so wins == count by construction.
+    # The bayesian shrinkage (lc+1)/(lc+2) still adds value because it
+    # penalizes low-N observations. Fase C (redefine long_wins with SL/TP
+    # outcome) would break this equivalence and unlock further gains.
+
+    def bayesian_wr_long(self, alpha: float = 1.0, beta: float = 1.0) -> float:
+        """Bayesian-shrunk win_rate for LONG direction.
+        bayesian_wr = (long_wins + α) / (long_count + α + β).
+        With current definition (long_wins ≡ long_count), this simplifies
+        to (lc + 1) / (lc + 2) for Laplace prior α=β=1.
+        """
+        lc = self.long_stats.count
+        lw = self.long_stats.wins
+        if lc == 0:
+            return 0.0
+        return (lw + alpha) / (lc + alpha + beta)
+
+    def bayesian_wr_short(self, alpha: float = 1.0, beta: float = 1.0) -> float:
+        """Bayesian-shrunk win_rate for SHORT direction.
+        See bayesian_wr_long for details.
+        """
+        sc = self.short_stats.count
+        sw = self.short_stats.wins
+        if sc == 0:
+            return 0.0
+        return (sw + alpha) / (sc + alpha + beta)
+
+    def long_edge(self, alpha: float = 1.0, beta: float = 1.0) -> float:
+        """V4.4 (P7): Expected edge for LONG = bayesian_wr_long × avg_move_long.
+        Positive number representing expected % profit per LONG trade."""
+        return self.bayesian_wr_long(alpha, beta) * self.avg_move_long
+
+    def short_edge(self, alpha: float = 1.0, beta: float = 1.0) -> float:
+        """V4.4 (P7): Expected edge for SHORT = bayesian_wr_short × |avg_move_short|.
+        Positive number representing expected % profit per SHORT trade."""
+        return self.bayesian_wr_short(alpha, beta) * abs(self.avg_move_short)
+
+    def directional_edge(self, alpha: float = 1.0, beta: float = 1.0) -> float:
+        """V4.4 (P7): Signed directional edge = long_edge − short_edge.
+        Positive → LONG is favoured. Negative → SHORT is favoured.
+        Zero → no directional preference (gate will likely reject)."""
+        return self.long_edge(alpha, beta) - self.short_edge(alpha, beta)
+
+    def best_direction_p7(
+        self,
+        min_edge_pct: float = 0.10,
+        alpha: float = 1.0,
+        beta: float = 1.0,
+    ) -> Optional[str]:
+        """V4.4 (P7): Pick the best direction using bayesian-shrunk edge.
+
+        Returns 'LONG', 'SHORT', or None (if no direction clears the gate).
+        This is the canonical P7 policy — signal.py calls this instead of
+        the legacy `sign(expected_move_pct)` logic.
+
+        Args:
+            min_edge_pct: Hard floor on max(long_edge, short_edge).
+                Below this → no trade (return None).
+            alpha, beta: Laplace prior for bayesian shrinkage.
+
+        Decision logic:
+            1. If both long_count and short_count are 0 → no data → None.
+            2. Compute long_edge and short_edge with bayesian shrinkage.
+            3. Gate: if max(long_edge, short_edge) < min_edge_pct → None.
+            4. If only one direction has observations → return that direction
+               (after gate check).
+            5. Otherwise → return direction with higher edge.
+        """
+        lc = self.long_stats.count
+        sc = self.short_stats.count
+        if lc == 0 and sc == 0:
+            return None
+
+        long_e = self.long_edge(alpha, beta)
+        short_e = self.short_edge(alpha, beta)
+
+        # Gate: best edge must clear min_edge_pct
+        if max(long_e, short_e) < min_edge_pct:
+            return None
+
+        if lc == 0:
+            return "SHORT" if sc > 0 else None
+        if sc == 0:
+            return "LONG"
+        return "LONG" if long_e >= short_e else "SHORT"
+
     def compute_sl_tp(self, entry_price: float, safety_margin: float = 0.2) -> None:
         """
         Compute stop loss and take profit prices from metadata.

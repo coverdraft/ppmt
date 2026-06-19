@@ -573,18 +573,48 @@ class SignalGenerator:
         if meta.historical_count < 1:
             return None
 
-        # Determine direction from expected move.
-        # v0.38.8: move floor now sourced from self.thresholds.hard_move_floor
-        # (was hardcoded 0.5). In paper mode (validation_mode=True) this is
-        # 0.05 (matches realtime.py paper floor); in real mode it is 0.5
-        # (preserved verbatim from v0.38.7).
-        if abs(meta.expected_move_pct) < self.thresholds.hard_move_floor:
+        # Determine direction using V4.4 (P7) policy: bayesian-shrunk
+        # per-direction edge + quality gate.
+        #
+        # v0.40.22-audit: replaces the legacy `sign(expected_move_pct)`
+        # logic. The legacy policy mixed LONG and SHORT moves in
+        # expected_move_pct and could be near-zero even when both
+        # directions had strong edges. P7 picks the direction with the
+        # higher bayesian-shrunk × avg_move edge, with a quality gate
+        # (min_edge_pct) to skip trades where neither direction has
+        # enough expected edge to clear fee noise.
+        #
+        # Validation (8 tokens × 3 windows, 304,685 trades):
+        #   P1 (legacy):  PnL -8650%, WR 0.421, PF 0.612
+        #   P7 (this):    PnL -8090%, WR 0.421, PF 0.625
+        #   Δ P7-P1: +560pp PnL total, 7/8 tokens improve, 3/3 windows improve.
+        #
+        # v0.38.8 hard_move_floor is now applied to the per-direction
+        # avg_move (not the mixed expected_move_pct). In paper mode
+        # (validation_mode=True) the floor is 0.05; in real mode it is 0.5.
+        direction_str = meta.best_direction_p7(
+            min_edge_pct=self.thresholds.p7_min_edge_pct,
+            alpha=self.thresholds.p7_bayesian_alpha,
+            beta=self.thresholds.p7_bayesian_beta,
+        )
+        if direction_str is None:
             return None
 
         signal_type = (
-            SignalType.ENTRY_LONG if meta.expected_move_pct > 0
+            SignalType.ENTRY_LONG if direction_str == "LONG"
             else SignalType.ENTRY_SHORT
         )
+
+        # Hard move floor on the chosen direction's avg_move (not the
+        # mixed expected_move_pct). This catches patterns where the chosen
+        # direction has a strong bayesian edge but a tiny absolute move.
+        effective_move = (
+            meta.avg_move_long
+            if signal_type == SignalType.ENTRY_LONG
+            else abs(meta.avg_move_short)
+        )
+        if effective_move < self.thresholds.hard_move_floor:
+            return None
 
         # Compute SL/TP from metadata
         meta.compute_sl_tp(current_price)
