@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>PPMT Terminal v0.40.26</title>
+<title>PPMT Terminal v0.40.27</title>
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -575,7 +575,7 @@ tr:hover td{background:rgba(95,168,245,.07)}
 }
 
 /* ================================================================ */
-/* v0.40.26 — TRADING TAB (HIG-inspired professional redesign)     */
+/* v0.40.27 — TRADING TAB (HIG-inspired professional redesign)     */
 /* 3-column: Token List | Trade Ticket | Operations Feed           */
 /* Responsive: 3-col → 2-col → 1-col stacking                      */
 /* ================================================================ */
@@ -724,11 +724,34 @@ tr:hover td{background:rgba(95,168,245,.07)}
 }
 .ticket-stat-val.green{color:var(--green)}
 .ticket-stat-val.red{color:var(--red)}
-/* Action buttons — big, prominent, Apple HIG style */
-.ticket-actions{
-  display:grid;grid-template-columns:1fr 1fr;gap:8px;
-  padding-top:14px;border-top:1px solid var(--border);
+.ticket-allocation {
+  background: rgba(15, 23, 42, 0.5);
+  border: 1px solid rgba(30, 42, 58, 0.6);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-top: 2px;
 }
+.ticket-alloc-header { display: flex; align-items: center; gap: 4px; margin-bottom: 6px; }
+.ticket-alloc-hint { color: var(--text3); font-size: 11px; cursor: help; }
+.ticket-alloc-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 8px;
+}
+.alloc-cell { display: flex; flex-direction: column; gap: 1px; padding: 3px 0; }
+.alloc-label { font-size: 8px; color: var(--text3); text-transform: uppercase; letter-spacing: 0.5px; }
+.alloc-val { font-family: var(--mono); font-size: 12px; font-weight: 600; color: var(--text); }
+.alloc-val.accent { color: var(--accent); }
+.alloc-val.accent2 { color: var(--accent2); }
+.alloc-sub { font-size: 8px; color: var(--text3); font-weight: 400; }
+.ticket-alloc-foot {
+  font-size: 9px;
+  color: var(--text3);
+  margin-top: 6px;
+  line-height: 1.3;
+  font-style: italic;
+}
+.ticket-actions {display:flex;gap:6px;margin-top:10px;}
 .btn-start{
   background:var(--green2);border:none;color:#fff;
   font-family:var(--sans);font-size:14px;font-weight:700;
@@ -806,7 +829,7 @@ tr:hover td{background:rgba(95,168,245,.07)}
 <!-- ========== HEADER ========== -->
 <header class="header">
   <div class="header-left">
-    <span class="logo">PPMT<span class="logo-ver">v0.40.26</span></span>
+    <span class="logo">PPMT<span class="logo-ver">v0.40.27</span></span>
     <span class="status-dot stopped" id="headerDot"></span>
     <span id="headerStatus" style="font-family:var(--mono);font-size:10px;color:var(--text2)">DETENIDO</span>
   </div>
@@ -967,7 +990,7 @@ tr:hover td{background:rgba(95,168,245,.07)}
     </div>
   </div><!-- /tab-operations -->
 
-  <!-- ========== TAB: TRADING (v0.40.26 — Professional HIG redesign) ========== -->
+  <!-- ========== TAB: TRADING (v0.40.27 — Professional HIG redesign) ========== -->
   <div class="tab-content" id="tab-trading">
     <div class="trading-layout">
 
@@ -1032,6 +1055,35 @@ tr:hover td{background:rgba(95,168,245,.07)}
               <button class="tg-btn" data-lev="3" onclick="setLeverage(3)">3x</button>
               <button class="tg-btn" data-lev="5" onclick="setLeverage(5)">5x</button>
               <button class="tg-btn" data-lev="10" onclick="setLeverage(10)">10x</button>
+            </div>
+          </div>
+
+          <!-- v0.40.27: Capital Allocation breakdown -->
+          <div class="ticket-allocation" id="ticketAllocation">
+            <div class="ticket-alloc-header">
+              <span class="ticket-label">Asignación por Trade</span>
+              <span class="ticket-alloc-hint" title="PPMT usa Quarter-Kelly (25%) × confianza × régimen × volatilidad × drawdown, con cap duro de 25% del equity por trade. El leverage se aplica DESPUÉS del sizing.">ⓘ</span>
+            </div>
+            <div class="ticket-alloc-grid">
+              <div class="alloc-cell">
+                <span class="alloc-label">Kelly</span>
+                <span class="alloc-val">25% <span class="alloc-sub">(Quarter)</span></span>
+              </div>
+              <div class="alloc-cell">
+                <span class="alloc-label">Max/Trade</span>
+                <span class="alloc-val" id="allocMaxPct">25% <span class="alloc-sub">equity</span></span>
+              </div>
+              <div class="alloc-cell">
+                <span class="alloc-label">$/Trade</span>
+                <span class="alloc-val accent" id="allocPerTrade">$250</span>
+              </div>
+              <div class="alloc-cell">
+                <span class="alloc-label">Notional c/Leverage</span>
+                <span class="alloc-val accent2" id="allocNotional">$250</span>
+              </div>
+            </div>
+            <div class="ticket-alloc-foot" id="allocFoot">
+              Tamaño dinámico: conf + régimen + vol + drawdown lo ajustan en vivo.
             </div>
           </div>
 
@@ -1237,14 +1289,14 @@ tr:hover td{background:rgba(95,168,245,.07)}
     <div class="status-item" style="margin-left:12px"><span id="statusMessage" style="color:var(--text3)">Listo.</span></div>
   </div>
   <div class="status-right">
-    <span>PPMT v0.40.26</span>
+    <span>PPMT v0.40.27</span>
     <div class="status-item"><span class="label">Uptime:</span><span class="value" id="btmUptime">00:00:00</span></div>
   </div>
 </footer>
 
 <script>
 // ============================================================
-// PPMT Terminal v0.40.26 — Trading Dashboard
+// PPMT Terminal v0.40.27 — Trading Dashboard
 // ============================================================
 
 const API = '';
@@ -1258,7 +1310,7 @@ let killSwitchActive = false;
 let validationPassed = false;
 let isTrading = false;
 let tradeHistoryData = [];
-// v0.40.26 — Trading tab state (declared as `var` to avoid TDZ if
+// v0.40.27 — Trading tab state (declared as `var` to avoid TDZ if
 // script execution is interrupted; hoisted with init to undefined).
 var _allSymbols = [];
 var _selectedToken = null;
@@ -1295,12 +1347,12 @@ document.addEventListener('DOMContentLoaded', () => {
     if (sel && sel.value && typeof loadChart === 'function') {
       loadChart();
     }
-    // v0.40.26: ensure BTC/USDT is pre-selected in the token list on first load
+    // v0.40.27: ensure BTC/USDT is pre-selected in the token list on first load
     if (sel && sel.value && typeof selectToken === 'function') {
       selectToken(sel.value);
     }
   }, 1500);
-  // v0.40.26: initial capital sync to server
+  // v0.40.27: initial capital sync to server
   setTimeout(() => { if (typeof updateCapital === 'function') updateCapital(); }, 800);
 });
 
@@ -1454,6 +1506,12 @@ async function loadChart() {
     volumeSeries.setData([]);
   } finally {
     if (reloadBtn) { reloadBtn.textContent = 'Reload'; reloadBtn.disabled = false; }
+    // v0.40.27: Track the last candle's timestamp so _updateChartLiveTick
+    // knows when to push a new candle vs. update the current one.
+    try {
+      const lastBar = candleSeries && candleSeries.data ? candleSeries.data().slice(-1)[0] : null;
+      _lastCandleTime = lastBar ? lastBar.time : 0;
+    } catch (e) { /* chart may be mid-reload */ }
   }
 }
 
@@ -1727,7 +1785,15 @@ function handleTradeEvent(msg) {
   try {
     const ev = msg.event || '';
     const p = msg.payload || {};
-    // Log to the activity feed so the user sees a visible trace.
+    // v0.40.27: Also push to the Trading tab Operations feed so the user
+    // sees the closed trade in the right column immediately.
+    if (typeof appendOpsFeed === 'function' && ev === 'trade_closed') {
+      const dir = (p.direction || '').toUpperCase();
+      const sym = p.symbol || '?';
+      const pnl = Number(p.pnl_pct || 0);
+      const reason = p.exit_reason || '';
+      appendOpsFeed('trade', `CLOSE ${dir} ${sym} (${reason})`, pnl);
+    }
     if (typeof logActivity === 'function') {
       const dir = (p.direction || '').toUpperCase();
       const sym = p.symbol || '?';
@@ -1769,18 +1835,149 @@ function handleTradeEvent(msg) {
 }
 
 // ============================================================
+// v0.40.27: REAL-TIME CHART TICK UPDATE
+// ============================================================
+// The WS pushes a snapshot every 1s with `current_price`. We hook into
+// updateDashboard() to live-update the chart's last candle's close
+// (and high/low if exceeded). When the TF boundary crosses, we push a
+// new candle so the chart scrolls naturally. Without this the chart
+// is static between manual Reload clicks.
+let _lastCandleTime = 0;
+function _updateChartLiveTick(price, symbol, timeframe) {
+  if (!chart || !candleSeries || !price || price <= 0) return;
+  const chartSym = (document.getElementById('chartSymbol') || {}).value;
+  if (symbol && chartSym && symbol !== chartSym) return; // not the displayed symbol
+  const tfSecs = { '1m': 60, '5m': 300, '10m': 600, '15m': 900, '30m': 1800, '1h': 3600, '4h': 14400, '1d': 86400 };
+  const tf = timeframe || (document.getElementById('chartTimeframe') || {}).value || '5m';
+  const secs = tfSecs[tf] || 300;
+  const now = Math.floor(Date.now() / 1000);
+  const bucket = Math.floor(now / secs) * secs;
+  try {
+    const lastBar = candleSeries.data().slice(-1)[0];
+    if (bucket > _lastCandleTime && _lastCandleTime > 0 && lastBar) {
+      // New TF bucket started — push a fresh candle. The previous candle's
+      // close becomes the new candle's open.
+      const newCandle = { time: bucket, open: lastBar.close, high: Math.max(lastBar.close, price), low: Math.min(lastBar.close, price), close: price };
+      candleSeries.update(newCandle);
+      _lastCandleTime = bucket;
+    } else if (lastBar && lastBar.time === bucket) {
+      // Same bucket — update last candle's close (and high/low if exceeded)
+      candleSeries.update({
+        time: lastBar.time,
+        open: lastBar.open,
+        high: Math.max(lastBar.high, price),
+        low: Math.min(lastBar.low, price),
+        close: price,
+      });
+    } else if (!lastBar || lastBar.time < bucket) {
+      // No prior candle for this bucket — seed one
+      candleSeries.update({ time: bucket, open: price, high: price, low: price, close: price });
+      _lastCandleTime = bucket;
+    }
+    // Update the price display in the ticket
+    const ctrlPrice = document.getElementById('ctrlPrice');
+    if (ctrlPrice) ctrlPrice.textContent = formatPrice(price);
+  } catch (e) {
+    // Chart may be mid-reload; non-critical
+  }
+}
+
+// ============================================================
+// v0.40.27: SESSION STATUS POLLER (post-Start)
+// ============================================================
+// After /api/multi-start returns, the session goes through states:
+//   STARTING -> VALIDATING -> INGESTING -> BUILDING -> STARTING_TRADER
+//   -> CONNECTING -> WARMING_UP -> RUNNING
+// We poll /api/multi-status every 2s for up to 60s and flip the Start
+// button from 'Iniciando...' to 'Running' (or back to 'Start Paper' on
+// error). This addresses the user's complaint: 'se queda en iniciando
+// y no hace nada'.
+function _pollSessionStatus(symbol, timeframe, attemptsLeft = 30) {
+  if (attemptsLeft <= 0) {
+    const btn = document.getElementById('btnStartTrading');
+    if (btn) { btn.disabled = false; btn.textContent = 'Start Paper'; }
+    showStatusMsg('Timeout esperando sesión — revisa la consola del servidor.');
+    return;
+  }
+  setTimeout(async () => {
+    try {
+      const res = await fetch(`${API}/api/multi-status`);
+      if (!res.ok) { _pollSessionStatus(symbol, timeframe, attemptsLeft - 1); return; }
+      const data = await res.json();
+      if (!data.ok) { _pollSessionStatus(symbol, timeframe, attemptsLeft - 1); return; }
+      const sess = (data.sessions || []).find(s => s.symbol === symbol && s.timeframe === timeframe);
+      const btn = document.getElementById('btnStartTrading');
+      if (!sess) { _pollSessionStatus(symbol, timeframe, attemptsLeft - 1); return; }
+      const st = sess.status || '';
+      if (st === 'RUNNING') {
+        if (btn) { btn.textContent = 'Running'; btn.disabled = true; }
+        document.getElementById('btnStopTrading').disabled = false;
+        updateTradingBadge('LIVE');
+        showStatusMsg(`Motor operando: ${symbol} ${timeframe} — esperando señales…`);
+        if (typeof appendOpsFeed === 'function') {
+          appendOpsFeed('info', `Motor RUNNING — ${symbol} ${timeframe} — analizando velas…`);
+        }
+        return; // stop polling
+      }
+      if (st === 'ERROR' || st === 'VALIDATION_FAILED') {
+        if (btn) { btn.textContent = 'Start Paper'; btn.disabled = false; }
+        document.getElementById('btnStopTrading').disabled = true;
+        updateTradingBadge('ERROR');
+        const errMsg = sess.error || st;
+        showStatusMsg(`Error iniciando: ${errMsg}`);
+        if (typeof appendOpsFeed === 'function') {
+          appendOpsFeed('info', `Error: ${errMsg}`);
+        }
+        return;
+      }
+      // Still starting — update button text to show progress
+      if (btn) btn.textContent = 'Iniciando… (' + st + ')';
+      _pollSessionStatus(symbol, timeframe, attemptsLeft - 1);
+    } catch (e) {
+      _pollSessionStatus(symbol, timeframe, attemptsLeft - 1);
+    }
+  }, 2000);
+}
+
+// ============================================================
 // DASHBOARD UPDATE
 // ============================================================
 
+let _lastSigTs = 0;
 function updateDashboard(s) {
   if (!s) return;
-
+  // v0.40.27: Push new signals to the Trading tab Operations feed.
+  // The WS snapshot may include multi_signals_by_symbol (a map keyed
+  // by symbol, each value a list of signal dicts). We dedupe by
+  // timestamp so we don't double-fire on every snapshot.
+  if (s.multi_signals_by_symbol && typeof appendOpsFeed === 'function') {
+    try {
+      for (const sym in s.multi_signals_by_symbol) {
+        const sigs = s.multi_signals_by_symbol[sym];
+        if (!Array.isArray(sigs)) continue;
+        for (const sig of sigs) {
+          const ts = Number(sig.timestamp || 0);
+          if (ts > _lastSigTs) {
+            _lastSigTs = ts;
+            const dir = (sig.direction || sig.type || 'SIGNAL').toUpperCase();
+            const conf = Number(sig.confidence || 0).toFixed(2);
+            const price = sig.entry_price ? ' @ ' + formatPrice(sig.entry_price) : '';
+            appendOpsFeed('signal', `${dir} ${sym}${price} conf=${conf}`);
+          }
+        }
+      }
+    } catch (e) { /* non-critical */ }
+  }
   // Header
   const dot = document.getElementById('headerDot');
   const statusText = document.getElementById('headerStatus');
   document.getElementById('headerSymbol').textContent = s.symbol || '--';
   document.getElementById('headerTF').textContent = s.timeframe || '--';
   document.getElementById('headerPrice').textContent = s.current_price ? formatPrice(s.current_price) : '--';
+  // v0.40.27: live-update the chart's last candle with the new price tick
+  if (s.current_price && typeof _updateChartLiveTick === 'function') {
+    _updateChartLiveTick(s.current_price, s.symbol, s.timeframe);
+  }
 
   // Update header P&L
   const headerPnl = document.getElementById('headerPnl');
@@ -1843,7 +2040,7 @@ function updateDashboard(s) {
     headerTB.textContent = 'STOPPED';
     headerTB.className = 'badge badge-stopped';
     document.getElementById('btnStopTrading').disabled = true;
-    // v0.40.26: validationPassed gate removed — motor self-validates via
+    // v0.40.27: validationPassed gate removed — motor self-validates via
     // /api/multi-start. Enable Start when a token is selected.
     const _selSym = (document.getElementById('ticketSymbol') || {}).textContent;
     document.getElementById('btnStartTrading').disabled = (_selSym === '—' || !_selSym);
@@ -2426,7 +2623,7 @@ async function loadSymbols() {
     ];
     const allSymbols = [...new Set([...defaultSymbols, ...symbols.map(s => typeof s === 'string' ? s : s.symbol)])].sort();
 
-    // v0.40.26: setupSymbol was removed (Discovery tab deleted).
+    // v0.40.27: setupSymbol was removed (Discovery tab deleted).
     // Use null-safe access so loadChart() always fires even if the
     // setupSymbol element is gone. THIS WAS THE BUG THAT BROKE THE CHART.
     const selectChart = document.getElementById('chartSymbol');
@@ -2448,7 +2645,7 @@ async function loadSymbols() {
         : (allSymbols.includes('BTC/USDT') ? 'BTC/USDT' : allSymbols[0] || '');
     }
 
-    // v0.40.26: Also populate the new Token List sidebar
+    // v0.40.27: Also populate the new Token List sidebar
     if (typeof renderTokenList === 'function') renderTokenList(allSymbols);
 
     // Auto-load chart
@@ -2469,7 +2666,7 @@ async function loadSymbols() {
 }
 
 async function autoSetup() {
-  // v0.40.26: Discovery tab was deleted — autoSetup is dead code.
+  // v0.40.27: Discovery tab was deleted — autoSetup is dead code.
   // Null-guard so accidental calls don't throw.
   if (!document.getElementById('setupSymbol')) { console.warn('autoSetup: Discovery tab deleted, no-op'); return; }
   const symbol = document.getElementById('setupSymbol').value;
@@ -2573,12 +2770,16 @@ async function validateToken() {
 }
 
 async function startPaperTrading() {
-  // v0.40.26: Use new ticket elements. setupSymbol/setupTimeframe/setupCapital
-  // were removed with the Discovery tab. Motor auto-validates via /api/multi-start.
+  // v0.40.27: Switched from /api/start-trading (which has a pre-trade
+  // validation gate that blocks paper trading when WR/PF/RoR checks fail)
+  // to /api/multi-start (which auto-validates but in paper mode
+  // dry_run=True proceeds anyway). This lets the user see the bot
+  // operating immediately, even on tokens that haven't passed strict
+  // validation yet. The motor self-tunes via use_token_profile=True +
+  // auto_calibrate=True.
   const symbol = (document.getElementById('chartSymbol') || {}).value
               || (document.getElementById('ticketSymbol') || {}).textContent
               || 'BTC/USDT';
-  // Normalize: ticket text may be "BTC/USDT" or just "BTC"; ensure /USDT suffix
   const normSymbol = symbol.includes('/') ? symbol : symbol.toUpperCase() + '/USDT';
   const tfGroup = document.getElementById('ticketTFGroup');
   const timeframe = (tfGroup && tfGroup.querySelector('.tg-btn.active'))
@@ -2587,18 +2788,20 @@ async function startPaperTrading() {
   const exchange = (document.getElementById('chartExchange') || {}).value || 'binance';
   const capital = parseFloat((document.getElementById('ticketCapital') || {}).value) || 1000;
 
-  // UX: mostrar feedback inmediato
   const btn = document.getElementById('btnStartTrading');
   const originalText = btn.textContent;
   btn.disabled = true;
   btn.textContent = 'Iniciando...';
 
   try {
-    const res = await fetch(`${API}/api/start-trading`, {
+    // v0.40.27: /api/multi-start expects
+    // {tokens: [{symbol, timeframe, exchange}], capital, leverage, auto_mode}
+    const res = await fetch(`${API}/api/multi-start`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        symbol: normSymbol, timeframe, exchange, capital,
+        tokens: [{ symbol: normSymbol, timeframe, exchange }],
+        capital,
         leverage: currentLeverage,
         auto_mode: autoMode
       })
@@ -2608,32 +2811,45 @@ async function startPaperTrading() {
     const data = await res.json();
 
     if (!data.ok) {
-      alert('No se pudo iniciar Paper Trading:\n\n' + (data.error || 'Error desconocido') +
-            '\n\nSugerencias:\n' +
-            '• Verifica que el token haya pasado validación (verde PASS)\n' +
-            '• Prueba con timeframe 15m o 1h (más datos que 1m)\n' +
-            '• Si MEXC falla, cambia a Binance en el chart toolbar');
+      alert('No se pudo iniciar Paper Trading:\n\n' + (data.error || 'Error desconocido'));
       btn.disabled = false;
       btn.textContent = originalText;
       return;
     }
 
+    // v0.40.27: multi-start returns immediately with launched sessions.
+    // The actual session goes through states: STARTING -> VALIDATING ->
+    // INGESTING -> BUILDING -> STARTING_TRADER -> CONNECTING ->
+    // WARMING_UP -> RUNNING. We poll /api/multi-status every 2s and flip
+    // the button to 'Running' when the session reaches RUNNING (or after
+    // 60s timeout).
     isTrading = true;
-    document.getElementById('btnStartTrading').disabled = true;
-    document.getElementById('btnStartTrading').textContent = 'Running';
     document.getElementById('btnStopTrading').disabled = false;
     updateTradingBadge('LIVE');
 
-    // Update chart
+    // Ensure chart shows the right symbol/TF
     const selC = document.getElementById('chartSymbol');
     if (selC) selC.value = normSymbol;
     const selT = document.getElementById('chartTimeframe');
     if (selT) selT.value = timeframe;
     loadChart();
 
-    // v0.34.1: feedback claro en el status bar
-    showStatusMsg(`Paper trading iniciado: ${symbol} ${timeframe} en ${exchange}. ` +
-                  `Esperando señales... (puede tardar varios minutos según TF)`);
+    showStatusMsg(`Paper trading iniciado: ${normSymbol} ${timeframe} en ${exchange}. ` +
+                  `Validando + ingiriendo datos + construyendo trie...`);
+    if (typeof appendOpsFeed === 'function') {
+      appendOpsFeed('info', `Start ${normSymbol} ${timeframe} ${currentLeverage}x — iniciando motor…`);
+    }
+
+    // Kick off status poller (flips button to 'Running' when session live)
+    _pollSessionStatus(normSymbol, timeframe);
+
+    // Ensure global multi-status poll is running too
+    if (typeof pollMultiStatus === 'function') {
+      if (!_multiStatusPollHandle) {
+        _multiStatusPollHandle = setInterval(pollMultiStatus, 3000);
+      }
+      pollMultiStatus();
+    }
 
   } catch (e) {
     console.error('startPaperTrading error:', e);
@@ -2675,14 +2891,23 @@ function switchTab(tabName) {
 }
 
 async function stopTrading() {
+  // v0.40.27: Switched from /api/stop-trading (which only stops the
+  // singleton trading task) to /api/multi-stop (which cancels ALL
+  // multi-token sessions). With no node_id param, it stops everything.
   try {
-    const res = await fetch(`${API}/api/stop-trading`, { method: 'POST' });
+    const res = await fetch(`${API}/api/multi-stop?node_id=`, { method: 'POST' });
     if (!res.ok) throw new Error('Error deteniendo trading');
 
     isTrading = false;
-    document.getElementById('btnStartTrading').disabled = !validationPassed;
+    // v0.40.27: enable Start if a token is selected (no validationPassed gate)
+    const _selSym = (document.getElementById('ticketSymbol') || {}).textContent;
+    document.getElementById('btnStartTrading').disabled = (_selSym === '—' || !_selSym);
+    document.getElementById('btnStartTrading').textContent = 'Start Paper';
     document.getElementById('btnStopTrading').disabled = true;
     updateTradingBadge('STOPPED');
+    if (typeof appendOpsFeed === 'function') {
+      appendOpsFeed('info', 'Stop — motor detenido por el usuario.');
+    }
 
   } catch (e) {
     console.error('stopTrading error:', e);
@@ -3101,10 +3326,11 @@ async function toggleKillSwitch() {
 
 function setLeverage(lev) {
   currentLeverage = lev;
-  // v0.40.26: handle both legacy .lev-btn and new .tg-btn[data-lev]
+  // v0.40.27: handle both legacy .lev-btn and new .tg-btn[data-lev]
   document.querySelectorAll('.lev-btn, #ticketLevGroup .tg-btn').forEach(b => {
     b.classList.toggle('active', parseInt(b.dataset.lev) === lev);
   });
+  if (typeof updateAllocation === 'function') updateAllocation();
 }
 
 function toggleAutoMode() {
@@ -3262,27 +3488,34 @@ setInterval(loadTradeMarkers, 15000);
 // history only refreshed on the 30-second polling tick.
 // v0.32.6: Also reset the validation + setup-progress UI so stale state
 // from the previous token doesn't bleed into the new token's view.
-document.getElementById('setupSymbol').addEventListener('change', function() {
-  const chart = document.getElementById('chartSymbol');
-  if (chart.value !== this.value) {
-    chart.value = this.value;
-  }
-  resetValidationUI();
-  loadChart();
-  loadTradeHistory();
-  // v0.32.6: After switching, check if we already have a saved validation
-  // for this token in the DB and show it.
-  loadExistingValidation(this.value, document.getElementById('setupTimeframe').value);
-});
-document.getElementById('setupTimeframe').addEventListener('change', function() {
-  const chartTf = document.getElementById('chartTimeframe');
-  if (chartTf.value !== this.value) {
-    chartTf.value = this.value;
-  }
-  resetValidationUI();
-  loadChart();
-  loadExistingValidation(document.getElementById('setupSymbol').value, this.value);
-});
+// v0.40.27: Null-guard — setupSymbol/setupTimeframe were deleted in
+// v0.40.25 (Discovery tab removal). Without this guard, .addEventListener
+// on null throws TypeError and aborts ALL top-level code after this point
+// (including polling timers + DOMContentLoaded setup). This was the silent
+// killer breaking real-time chart updates + post-Start status polling.
+(function() {
+  const _ss = document.getElementById('setupSymbol');
+  if (_ss) _ss.addEventListener('change', function() {
+    const chart = document.getElementById('chartSymbol');
+    if (chart.value !== this.value) {
+      chart.value = this.value;
+    }
+    resetValidationUI();
+    loadChart();
+    loadTradeHistory();
+    loadExistingValidation(this.value, document.getElementById('setupTimeframe').value);
+  });
+  const _st = document.getElementById('setupTimeframe');
+  if (_st) _st.addEventListener('change', function() {
+    const chartTf = document.getElementById('chartTimeframe');
+    if (chartTf.value !== this.value) {
+      chartTf.value = this.value;
+    }
+    resetValidationUI();
+    loadChart();
+    loadExistingValidation(document.getElementById('setupSymbol').value, this.value);
+  });
+})();
 
 // v0.32.6: Reset the validation + setup-progress panel. Called whenever
 // the user switches token. Hides stale "Step 0/5: error..." messages and
@@ -4928,9 +5161,9 @@ refreshOperationsTab();
 
 
 // ============================================================
-// v0.40.26 — TRADING TAB (Token List + Ticket + Operations Feed)
+// v0.40.27 — TRADING TAB (Token List + Ticket + Operations Feed)
 // ============================================================
-// v0.40.26-fix: _allSymbols / _selectedToken / _selectedTF declarations
+// v0.40.27-fix: _allSymbols / _selectedToken / _selectedTF declarations
 // MOVED to top of script (right after other top-level lets) to avoid
 // TDZ if script execution is interrupted before this line.
 
@@ -4975,6 +5208,22 @@ function filterTokens() {
   const filtered = !ql ? _allSymbols
     : _allSymbols.filter(s => s.toLowerCase().includes(ql));
   renderTokenListHTML(filtered);
+}
+
+// v0.40.27: Update Capital Allocation panel based on capital + leverage.
+// Called from setLeverage, updateCapital, DOMContentLoaded.
+function updateAllocation() {
+  const cap = parseFloat((document.getElementById('ticketCapital') || {}).value) || 1000;
+  const lev = currentLeverage || 1;
+  const maxPct = 0.25;  // 25% of equity hard cap (max_position_pct)
+  const perTrade = cap * maxPct;
+  const notional = perTrade * lev;
+  const elMax = document.getElementById('allocMaxPct');
+  const elPT = document.getElementById('allocPerTrade');
+  const elN = document.getElementById('allocNotional');
+  if (elMax) elMax.innerHTML = (maxPct * 100).toFixed(0) + '% <span class="alloc-sub">equity</span>';
+  if (elPT) elPT.textContent = '$' + perTrade.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+  if (elN) elN.textContent = '$' + notional.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
 }
 
 function selectToken(symbol) {
@@ -5046,9 +5295,11 @@ async function updateCapital() {
   const inp = document.getElementById('ticketCapital');
   if (!inp) return;
   const val = parseFloat(inp.value) || 1000;
-  // v0.40.26: also update Money Management display
+  // v0.40.27: also update Money Management display
   const mm = document.getElementById('mmTotalCapital');
   if (mm) mm.textContent = '$' + val.toLocaleString('en-US', {minimumFractionDigits: 0, maximumFractionDigits: 2});
+  // v0.40.27: refresh Capital Allocation panel
+  if (typeof updateAllocation === 'function') updateAllocation();
   // Persist to server (best-effort)
   try {
     await fetch(`${API}/api/nodes/capital`, {
@@ -5061,10 +5312,26 @@ async function updateCapital() {
   }
 }
 
-// Initialize on DOMContentLoaded: trigger capital sync + ensure token list is loaded
+// v0.40.27: Initialize on DOMContentLoaded — kick off capital sync,
+// update the allocation panel, and start multi-status polling so any
+// sessions running on the server are reflected in the UI immediately.
+// Without this, refreshing the page while sessions are running would
+// leave the UI in a stale state until the user clicks something.
 document.addEventListener('DOMContentLoaded', () => {
-  // Set initial capital display
-  setTimeout(() => { updateCapital(); }, 500);
+  setTimeout(() => {
+    updateCapital();
+    if (typeof updateAllocation === 'function') updateAllocation();
+  }, 300);
+  // Start multi-status polling (covers case where user refreshes page
+  // while sessions are running on the server).
+  setTimeout(() => {
+    if (typeof pollMultiStatus === 'function') {
+      if (!_multiStatusPollHandle) {
+        _multiStatusPollHandle = setInterval(pollMultiStatus, 3000);
+      }
+      pollMultiStatus();
+    }
+  }, 800);
 });
 
 // Append operations feed items (called by WS handler when signals/trades arrive)

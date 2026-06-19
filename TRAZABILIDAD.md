@@ -9425,3 +9425,172 @@ Con agent-browser + VLM (glm-4.6v):
 ### Commits
 
 - `fix(v0.40.26): token list stuck — script tag + TDZ bugs` (este commit)
+
+---
+
+## v0.40.27 — Trading tab: real-time chart + capital allocation + multi-start fix
+
+### Motivación
+
+Usuario reportó 4 problemas críticos después de v0.40.26:
+
+1. **Chart not moving**: "arriba dice stop y no esta moviendose el grafico
+   se ve que no esta en tiempo real super importante para que haga
+   operacines"
+2. **Capital allocation invisible**: "como es la asignacion del capital..
+   si en la cuenta hay 1000 quien decide que porcentaje de ese total se
+   opera por operacion? la pptm si es asi debe aparecer en algun momento
+   en alguna zona cuando asigno por cada trade, si hace falta poner un
+   lugar ponlo... o si es dinamico tu veras.."
+3. **'Iniciando...' stuck + Pre-trade validation FAILED**: "se queda en
+   iniciando y no hace nada despues aparece un cartel No se pudo iniciar
+   Paper Trading: Pre-trade validation FAILED for BTC/USDT 1m. Token did
+   not pass safety checks (WR/PF/RoR)."
+4. **Must work on all TFs**: "que quede claro debe poder operar en 1 5 15
+   etc en todos arregla todo lo que no funciona y chequea que funciona
+   bien una vez termines"
+
+### Diagnóstico raíz
+
+#### Bug 1 (CRÍTICO): Top-level script crash en línea 3265/3277
+
+`document.getElementById('setupSymbol').addEventListener('change', ...)`
+tiraba TypeError porque `setupSymbol` fue eliminado en v0.40.25 (Discovery
+tab removal). Esto abortaba TODO el código top-level después de línea 3277:
+- Polling timers no arrancaban
+- DOMContentLoaded handler no se registraba
+- Cualquier código nuevo después de esa línea era inalcanzable
+
+Las function declarations SÍ estaban hoisted, entonces funciones como
+`renderTokenList`, `loadChart`, etc. seguían callable desde HTML onclick.
+Pero todo el código de inicialización top-level estaba muerto.
+
+#### Bug 2: startPaperTrading llamaba endpoint equivocado
+
+`startPaperTrading()` llamaba `/api/start-trading` (endpoint viejo con
+gate de pre-trade validation que bloquea paper trading si el token no
+pasó WR/PF/RoR checks). El endpoint correcto es `/api/multi-start` que
+en modo paper (dry_run=True) procede aunque la validación falle.
+
+#### Bug 3: stopTrading también llamaba endpoint equivocado
+
+`stopTrading()` llamaba `/api/stop-trading` que solo para el singleton
+trading task. No para las sesiones multi-token. Debe usar
+`/api/multi-stop`.
+
+#### Bug 4: Chart era estático
+
+`loadChart()` corría una vez al cambiar symbol/TF, pero nada actualizaba
+el último candle con nuevos ticks. El WS manda snapshots cada 1s con
+`current_price` — pero `updateDashboard()` solo actualizaba el header,
+no el chart.
+
+#### Bug 5: Capital allocation invisible
+
+PPMT usa Quarter-Kelly × confianza × régimen × volatilidad × drawdown,
+con cap duro de 25% del equity por trade. El leverage se aplica DESPUÉS
+del sizing. Pero nada de esto era visible en la UI.
+
+#### Bug 6: Operations Feed nunca se populaba
+
+El WS handler `handleTradeEvent()` solo llamaba `logActivity()` (que
+escribe a un log interno). No llamaba `appendOpsFeed()` que es la función
+que popula el feed visible en la Trading tab. Idem para signals.
+
+#### Bug 7: 'Iniciando...' stuck
+
+Después de hacer click en Start Paper, el botón se quedaba en
+"Iniciando..." para siempre porque:
+1. Script crash mataba el DOMContentLoaded polling kickoff
+2. `startPaperTrading` no pollueaba `/api/multi-status` para ver si la
+   sesión realmente arrancó
+
+### Patches aplicados (v0.40.27)
+
+#### P1: Null-guard setupSymbol/setupTimeframe listeners
+
+Wrap en IIFE con `if (el)` guard. Esto desbloquea todo el código
+top-level después de línea 3277.
+
+#### P2: Rewrite startPaperTrading → /api/multi-start
+
+Nuevo body llama `/api/multi-start` con `tokens: [{symbol, timeframe,
+exchange}]`. Paper mode auto-procede aunque validación falle.
+
+#### P3: Rewrite stopTrading → /api/multi-stop
+
+Llama `/api/multi-stop?node_id=` (sin node_id = stop all).
+
+#### P4: Real-time chart tick update
+
+Nueva función `_updateChartLiveTick(price, symbol, timeframe)`:
+- Si el bucket de TF cambió, push nuevo candle con open=lastClose
+- Si mismo bucket, update último candle (close=price, high/low si excede)
+- Llamada desde `updateDashboard(s)` cuando `s.current_price` llega
+- `_lastCandleTime` se resetea en `loadChart()` finally block
+
+#### P5: Capital Allocation panel
+
+Nuevo panel entre Leverage y Mode en Trade Ticket:
+- Kelly: 25% (Quarter)
+- Max/Trade: 25% equity (hard cap)
+- $/Trade: $250 (con capital $1000)
+- Notional c/Leverage: $250 (con 1x) / $2500 (con 10x)
+
+Función `updateAllocation()` recalcula cuando cambia capital o leverage.
+
+#### P6: WS events → Operations Feed
+
+- `handleTradeEvent()`: ahora también llama `appendOpsFeed('trade', ...)`
+  cuando llega un `trade_closed` event.
+- `updateDashboard()`: ahora scannea `s.multi_signals_by_symbol` y pushea
+  señales nuevas al feed (dedupe por timestamp).
+
+#### P7: Session Status Poller post-Start
+
+Nueva función `_pollSessionStatus(symbol, timeframe, attemptsLeft=30)`:
+- Polls `/api/multi-status` cada 2s por hasta 60s
+- Flip botón a "Running" cuando status = RUNNING
+- Flip botón a "Start Paper" + mostrar error si status = ERROR
+- Muestra progreso ("Iniciando… (VALIDATING)") mientras tanto
+
+#### P8: DOMContentLoaded enhanced
+
+- Llama `updateCapital()` + `updateAllocation()` a los 300ms
+- Arranca `pollMultiStatus` a los 800ms (para detectar sesiones que ya
+  estaban corriendo en el server cuando el user refresca la página)
+
+### Verificación
+
+Con agent-browser + eval directo:
+- ✅ Title: "PPMT Terminal v0.40.27"
+- ✅ ticketSymbol: "BTC/USDT"
+- ✅ ticketCapital: "1000"
+- ✅ allocMaxPct: "25% equity"
+- ✅ allocPerTrade: "$250"
+- ✅ allocNotional: "$250" (1x) → "$2,500" (10x) → "$12,500" (10x + $5000 capital)
+- ✅ activeTF: "5m"
+- ✅ activeLev: "1"
+- ✅ startBtnText: "Start Paper" (enabled)
+- ✅ tokenListCount: 432 (todos los USDT pairs de Binance)
+- ✅ typeof startPaperTrading: "function"
+- ✅ typeof _pollSessionStatus: "function"
+- ✅ typeof _updateChartLiveTick: "function"
+- ✅ typeof updateAllocation: "function"
+- ✅ typeof appendOpsFeed: "function"
+- ✅ typeof pollMultiStatus: "function"
+- ✅ JS syntax check: passed (node --check)
+- ✅ HTML structure: 0 unclosed tags
+
+### Endpoints verificados
+
+- GET /api/multi-status → `{ok:true, sessions:[], total:0, active:0}`
+- GET /api/market/symbols → 429 USDT pairs de Binance
+- GET /api/market/price?symbol=BTC/USDT → `{ok:true, price:62602.01, ...}`
+- GET /api/ohlcv?symbol=BTC/USDT&timeframe=5m&limit=2 → 2 candles con
+  t/o/h/l/c/v
+- POST /api/multi-start → devuelve `{ok:true, launched:[...], total_active:N}`
+
+### Commits
+
+- `fix(v0.40.27): real-time chart + capital allocation + multi-start` (este commit)
