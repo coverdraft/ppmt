@@ -445,6 +445,12 @@ class PPMTStorage:
         """
         Save a serialized Trie to the database.
 
+        FASE 1 Tarea 1.3 (dual-sax compatibility): Trie nodes may now have
+        string keys containing '|' (e.g., 'a|x' for dual price+volume symbols).
+        These serialize naturally via JSON — no special handling needed.
+        Backwards-compatible: old tries with single-symbol keys ('a', 'b', ...)
+        continue to load correctly.
+
         Args:
             symbol: Trading pair
             level: Trie level ('n1', 'n2', 'n3', 'n4')

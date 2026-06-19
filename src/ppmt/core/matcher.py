@@ -25,7 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from ppmt.core.sax import SAXEncoder
+from ppmt.core.sax import SAXEncoder, SAXDualEncoder, make_symbol_key, parse_symbol_key
 from ppmt.core.trie import PPMTTrie, TrieNode
 
 
@@ -104,7 +104,7 @@ class FuzzyMatcher:
 
     def __init__(
         self,
-        sax_encoder: SAXEncoder,
+        sax_encoder: SAXEncoder | SAXDualEncoder,
         threshold: float = 0.85,
         max_edit_distance: int = 2,
         min_similarity: float = 0.70,
@@ -129,6 +129,49 @@ class FuzzyMatcher:
         self.max_edit_distance = max_edit_distance
         self.min_similarity = min_similarity
         self.min_confidence = min_confidence
+
+        # FASE 1 Tarea 1.3: Dual-SAX support.
+        # When the encoder is SAXDualEncoder, alphabet enumeration and
+        # symbol distance computation must handle tuple symbols.
+        self._is_dual = isinstance(sax_encoder, SAXDualEncoder)
+        if self._is_dual:
+            # Pre-compute the alphabet list as string keys for edit-distance
+            self._alphabet_keys = [make_symbol_key(s) for s in sax_encoder.get_alphabet_list()]
+        else:
+            self._alphabet_keys = None
+
+    def _get_alphabet(self) -> list[str]:
+        """Get the alphabet list for edit-distance enumeration.
+
+        FASE 1 Tarea 1.3: For SAXDualEncoder, returns the Cartesian product
+        of price × volume symbols as string keys (e.g., ['a|a', 'a|b', 'b|a', 'b|b']).
+        For SAXEncoder, returns the standard alphabet (e.g., ['a', 'b', 'c']).
+        """
+        if self._is_dual and self._alphabet_keys is not None:
+            return self._alphabet_keys
+        return [chr(ord('a') + i) for i in range(self.sax.alphabet_size)]
+
+    def _symbol_distance(self, a_key: str, b_key: str) -> float:
+        """Compute distance between two symbol keys (single or dual).
+
+        FASE 1 Tarea 1.3: For dual symbols stored as string keys like 'a|x',
+        parses them back to tuples and uses SAXDualEncoder.symbol_distance()
+        which computes a weighted sum of price and volume distances.
+        """
+        if self._is_dual:
+            a_parsed = parse_symbol_key(a_key)
+            b_parsed = parse_symbol_key(b_key)
+            return self.sax.symbol_distance(a_parsed, b_parsed)
+        return self.sax.symbol_distance(a_key, b_key)
+
+    def _get_max_dist(self) -> float:
+        """Get maximum possible symbol distance for similarity normalization."""
+        if self._is_dual:
+            # For dual encoder, max_dist is 1.0 (symbol_distance returns normalized [0,1])
+            return 1.0
+        if len(self.sax.breakpoints) > 0:
+            return self.sax.breakpoints[-1] * 2
+        return 1.0
 
     def _passes_gate(self, similarity: float, confidence: float) -> bool:
         """
@@ -215,7 +258,7 @@ class FuzzyMatcher:
 
         best_score = 0.0
         best_result = MatchResult(matched=False, symbols=symbols)
-        alphabet = [chr(ord('a') + i) for i in range(self.sax.alphabet_size)]
+        alphabet = self._get_alphabet()
 
         for i in range(len(symbols)):
             original = symbols[i]
@@ -230,8 +273,8 @@ class FuzzyMatcher:
                 node = trie.search(candidate)
                 if node is not None and node.metadata.historical_count > 0:
                     # Compute similarity: penalize by SAX distance
-                    symbol_dist = self.sax.symbol_distance(original, replacement)
-                    max_dist = self.sax.breakpoints[-1] * 2 if len(self.sax.breakpoints) > 0 else 1.0
+                    symbol_dist = self._symbol_distance(original, replacement)
+                    max_dist = self._get_max_dist()
                     similarity = max(0.0, 1.0 - symbol_dist / max(max_dist, 1e-10))
 
                     confidence = node.metadata.confidence
@@ -271,7 +314,7 @@ class FuzzyMatcher:
 
         best_score = 0.0
         best_result = MatchResult(matched=False, symbols=symbols)
-        alphabet = [chr(ord('a') + i) for i in range(self.sax.alphabet_size)]
+        alphabet = self._get_alphabet()
 
         for i in range(len(symbols)):
             for j in range(i + 1, len(symbols)):
@@ -292,9 +335,9 @@ class FuzzyMatcher:
                         node = trie.search(candidate)
                         if node is not None and node.metadata.historical_count > 0:
                             # Combined similarity from both edits
-                            dist_i = self.sax.symbol_distance(orig_i, repl_i)
-                            dist_j = self.sax.symbol_distance(orig_j, repl_j)
-                            max_dist = self.sax.breakpoints[-1] * 2 if len(self.sax.breakpoints) > 0 else 1.0
+                            dist_i = self._symbol_distance(orig_i, repl_i)
+                            dist_j = self._symbol_distance(orig_j, repl_j)
+                            max_dist = self._get_max_dist()
                             sim_i = max(0.0, 1.0 - dist_i / max(max_dist, 1e-10))
                             sim_j = max(0.0, 1.0 - dist_j / max(max_dist, 1e-10))
 
@@ -452,8 +495,8 @@ class FuzzyMatcher:
             best_conf = 0.0
 
             for cont_sym in continuation_symbols:
-                dist = self.sax.symbol_distance(next_symbol, cont_sym)
-                max_dist = self.sax.breakpoints[-1] * 2 if len(self.sax.breakpoints) > 0 else 1.0
+                dist = self._symbol_distance(next_symbol, cont_sym)
+                max_dist = self._get_max_dist()
                 sim = max(0.0, 1.0 - dist / max(max_dist, 1e-10))
 
                 if sim > best_sim:
@@ -486,10 +529,10 @@ class FuzzyMatcher:
             # Find the closest continuation symbol even if below threshold
             closest_dist = float('inf')
             for cont_sym in continuation_symbols:
-                dist = self.sax.symbol_distance(next_symbol, cont_sym)
+                dist = self._symbol_distance(next_symbol, cont_sym)
                 if dist < closest_dist:
                     closest_dist = dist
-            max_dist = self.sax.breakpoints[-1] * 2 if len(self.sax.breakpoints) > 0 else 1.0
+            max_dist = self._get_max_dist()
             break_score = max(0.0, 1.0 - closest_dist / max(max_dist, 1e-10))
             # Scale down: unknown block = low break score
             break_score *= 0.3

@@ -28,6 +28,7 @@ from scipy.stats import norm
 # These are the z-score boundaries that divide a normal distribution
 # into equal-probability regions
 SAX_BREAKPOINTS: dict[int, np.ndarray] = {
+    2: np.array([0.0]),  # Binary split: below/above median
     3: np.array([-0.43, 0.43]),
     4: np.array([-0.67, 0.0, 0.67]),
     5: np.array([-0.84, -0.25, 0.25, 0.84]),
@@ -138,7 +139,7 @@ class SAXConfig:
     """Configuration for SAX encoding."""
     alphabet_size: int = 8
     window_size: int = 10  # PAA window: candles per SAX block
-    strategy: Literal["ohlcv", "close", "typical_price"] = "ohlcv"
+    strategy: Literal["ohlcv", "close", "typical_price", "volume"] = "ohlcv"
 
 
 class SAXEncoder:
@@ -191,6 +192,28 @@ class SAXEncoder:
 
         elif self.strategy == "typical_price":
             return ((df["high"] + df["low"] + df["close"]) / 3.0).values.astype(float)
+
+        elif self.strategy == "volume":
+            # FASE 1 Tarea 1.3: Pure volume encoding for SAX Dual.
+            #
+            # Unlike the 'ohlcv' strategy where volume is just 25% of a
+            # composite, this strategy encodes ONLY volume information.
+            # The resulting symbols represent volume patterns independently
+            # from price — enabling the dual encoder to preserve volume
+            # signals that the single-composite approach loses.
+            #
+            # The encoding normalizes volume as a ratio vs its local moving
+            # average, clipped to [0.5, 5.0]. This produces a near-Gaussian
+            # distribution after z-scoring, which matches SAX assumptions.
+            v = df["volume"].values.astype(float) if "volume" in df.columns else np.ones(len(df))
+
+            vol_window = min(20, len(v))
+            if vol_window > 0 and len(v) > 0:
+                vol_mean = np.convolve(v, np.ones(vol_window) / vol_window, mode="same")
+                vol_mean = np.where(vol_mean == 0, 1.0, vol_mean)
+                vol_ratio = np.clip(v / vol_mean, 0.5, 5.0)
+                return vol_ratio
+            return np.ones_like(v)
 
         elif self.strategy == "ohlcv":
             # Additive composite capturing candlestick body, wicks, and volume.
@@ -517,3 +540,210 @@ class SAXEncoder:
 
         total = sum(self.symbol_distance(a, b) for a, b in zip(seq_a, seq_b))
         return total / len(seq_a)
+
+
+# ===================================================================== #
+# FASE 1 Tarea 1.3: SAX Dual Encoder (Precio + Volumen)
+# ===================================================================== #
+
+# Separator for converting tuple symbols to string keys.
+# Must not conflict with SAX_ALPHABET characters (a-z lowercase).
+DUAL_SYMBOL_SEPARATOR = "|"
+
+
+def make_symbol_key(symbol) -> str:
+    """Convert a symbol (str or tuple) to a string key for Trie storage.
+
+    Single symbols pass through unchanged: 'a' -> 'a'
+    Tuple symbols are joined with DUAL_SYMBOL_SEPARATOR:
+        ('a', 'x') -> 'a|x'
+
+    This enables the Trie's children dict (str keys) to store dual
+    symbols without modifying Trie internals.
+    """
+    if isinstance(symbol, tuple):
+        return DUAL_SYMBOL_SEPARATOR.join(str(s) for s in symbol)
+    return str(symbol)
+
+
+def parse_symbol_key(key: str):
+    """Parse a string key back into a symbol or tuple.
+
+    Keys without the separator pass through: 'a' -> 'a'
+    Keys with the separator become tuples: 'a|x' -> ('a', 'x')
+
+    This is the inverse of make_symbol_key().
+    """
+    if DUAL_SYMBOL_SEPARATOR in key:
+        return tuple(key.split(DUAL_SYMBOL_SEPARATOR))
+    return key
+
+
+class SAXDualEncoder:
+    """Dual SAX encoder that produces independent price and volume symbols.
+
+    FASE 1 Tarea 1.3: Instead of a single composite symbol per position
+    (where volume contributes only 25%), each position is a TUPLE of
+    (price_symbol, volume_symbol). This preserves volume information
+    that the single-composite approach loses.
+
+    Example (α_price=3, α_vol=2, window=7):
+        Input:  100 candles of OHLCV data
+        Output: [('a','x'), ('b','y'), ('a','x'), ('c','z'), ('b','x')]
+
+    The tuples become KEYS in the Trie's children dict, converted to
+    strings like 'a|x' via make_symbol_key(). This means the Trie
+    internals don't need to change at all.
+
+    Composite alphabet size = α_price × α_vol (for compatibility with
+    code that queries alphabet_size, e.g. FuzzyMatcher's alphabet
+    enumeration).
+    """
+
+    def __init__(
+        self,
+        price_alphabet_size: int = 3,
+        volume_alphabet_size: int = 2,
+        window_size: int = 7,
+        price_strategy: str = "ohlcv",
+    ):
+        self.price_encoder = SAXEncoder(
+            alphabet_size=price_alphabet_size,
+            window_size=window_size,
+            strategy=price_strategy,
+        )
+        self.volume_encoder = SAXEncoder(
+            alphabet_size=volume_alphabet_size,
+            window_size=window_size,
+            strategy="volume",
+        )
+        self.price_alphabet_size = price_alphabet_size
+        self.volume_alphabet_size = volume_alphabet_size
+        self.window_size = window_size
+        self.strategy = price_strategy  # for compatibility
+
+    @property
+    def alphabet_size(self) -> int:
+        """Composite alphabet size (α_price × α_vol).
+
+        Used by FuzzyMatcher for alphabet enumeration and distance
+        computation. The effective symbol space is the Cartesian product
+        of price × volume symbols.
+        """
+        return self.price_alphabet_size * self.volume_alphabet_size
+
+    @property
+    def breakpoints(self) -> np.ndarray:
+        """Breakpoints from the price encoder (for compatibility)."""
+        return self.price_encoder.breakpoints
+
+    def encode(self, df: pd.DataFrame) -> list[tuple[str, str]]:
+        """Encode OHLCV DataFrame into dual symbols.
+
+        Returns a list of (price_symbol, volume_symbol) tuples.
+        Both encoders use the same window_size, so the output lists
+        have equal length.
+        """
+        price_symbols = self.price_encoder.encode(df)
+        volume_symbols = self.volume_encoder.encode(df)
+        min_len = min(len(price_symbols), len(volume_symbols))
+        return [(price_symbols[i], volume_symbols[i]) for i in range(min_len)]
+
+    def encode_with_normalization(
+        self,
+        df: pd.DataFrame,
+        paa_mean: float | None = None,
+        paa_std: float | None = None,
+    ) -> tuple[list[tuple[str, str]], float, float]:
+        """Encode with explicit z-score normalization (price encoder stats).
+
+        Returns (dual_symbols, paa_mean, paa_std) where stats come from
+        the price encoder for backwards compatibility.
+        """
+        price_symbols, p_mean, p_std = self.price_encoder.encode_with_normalization(
+            df, paa_mean=paa_mean, paa_std=paa_std,
+        )
+        volume_symbols, _, _ = self.volume_encoder.encode_with_normalization(df)
+        min_len = min(len(price_symbols), len(volume_symbols))
+        dual = [(price_symbols[i], volume_symbols[i]) for i in range(min_len)]
+        return dual, p_mean, p_std
+
+    def encode_incremental(
+        self,
+        new_candles: pd.DataFrame,
+        buffer: list[float] | None = None,
+        paa_mean: float | None = None,
+        paa_std: float | None = None,
+    ) -> tuple[list[tuple[str, str]], list[float]]:
+        """Incremental dual encoding for streaming.
+
+        Maintains separate buffers for price and volume encoders.
+        Returns (new_dual_symbols, updated_price_buffer).
+
+        Note: the returned buffer is the price encoder's buffer. The
+        volume encoder's buffer is maintained internally.
+        """
+        if buffer is None:
+            buffer = []
+
+        # Maintain separate volume buffer
+        if not hasattr(self, '_vol_buffer'):
+            self._vol_buffer: list[float] = []
+
+        price_symbols, updated_price_buffer = self.price_encoder.encode_incremental(
+            new_candles, buffer,
+            paa_mean=paa_mean, paa_std=paa_std,
+        )
+        volume_symbols, self._vol_buffer = self.volume_encoder.encode_incremental(
+            new_candles, self._vol_buffer,
+        )
+
+        # Pair up symbols
+        min_len = min(len(price_symbols), len(volume_symbols))
+        dual = [(price_symbols[i], volume_symbols[i]) for i in range(min_len)]
+
+        return dual, updated_price_buffer
+
+    def symbol_distance(self, a, b) -> float:
+        """Compute distance between two symbols (single or dual).
+
+        For dual symbols (tuples), the distance is a weighted sum:
+          distance = 0.6 × price_distance + 0.4 × volume_distance
+
+        Price gets higher weight because it's more predictive for
+        trading decisions. Volume is confirming signal.
+
+        For single symbols, delegates to the price encoder.
+        """
+        if isinstance(a, tuple) and isinstance(b, tuple):
+            price_dist = self.price_encoder.symbol_distance(a[0], b[0])
+            vol_dist = self.volume_encoder.symbol_distance(a[1], b[1])
+            # Normalize each distance to [0, 1] range for fair weighting
+            max_price_dist = self.price_encoder.breakpoints[-1] * 2 if len(self.price_encoder.breakpoints) > 0 else 1.0
+            max_vol_dist = self.volume_encoder.breakpoints[-1] * 2 if len(self.volume_encoder.breakpoints) > 0 else 1.0
+            norm_price = min(price_dist / max(max_price_dist, 1e-10), 1.0)
+            norm_vol = min(vol_dist / max(max_vol_dist, 1e-10), 1.0)
+            return 0.6 * norm_price + 0.4 * norm_vol
+        # Single symbol: delegate to price encoder
+        a_str = a[0] if isinstance(a, tuple) else a
+        b_str = b[0] if isinstance(b, tuple) else b
+        return self.price_encoder.symbol_distance(a_str, b_str)
+
+    def sequence_distance(self, seq_a: list, seq_b: list) -> float:
+        """Compute distance between two dual-symbol sequences."""
+        if len(seq_a) != len(seq_b):
+            raise ValueError("Sequences must be equal length")
+        if len(seq_a) == 0:
+            return 0.0
+        total = sum(self.symbol_distance(a, b) for a, b in zip(seq_a, seq_b))
+        return total / len(seq_a)
+
+    def get_alphabet_list(self) -> list[tuple[str, str]]:
+        """Get the full Cartesian product alphabet for dual symbols.
+
+        Returns list of all (price_sym, vol_sym) tuples.
+        Used by FuzzyMatcher for edit-distance enumeration.
+        """
+        price_syms = [SAX_ALPHABET[i] for i in range(self.price_alphabet_size)]
+        vol_syms = [SAX_ALPHABET[i] for i in range(self.volume_alphabet_size)]
+        return [(p, v) for p in price_syms for v in vol_syms]

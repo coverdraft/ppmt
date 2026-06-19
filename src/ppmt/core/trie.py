@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from ppmt.core.metadata import BlockLifecycleMetadata, DirectionStats, RegimeStats
+from ppmt.core.sax import make_symbol_key, parse_symbol_key
 
 
 @dataclass

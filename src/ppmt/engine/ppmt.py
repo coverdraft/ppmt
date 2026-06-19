@@ -48,7 +48,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from ppmt.core.sax import SAXEncoder, get_alpha_for_level
+from ppmt.core.sax import SAXEncoder, SAXDualEncoder, get_alpha_for_level, make_symbol_key
 from ppmt.core.trie import PPMTTrie, TrieNode, RegimePartitionedTrie
 from ppmt.core.matcher import FuzzyMatcher, MatchResult
 from ppmt.core.metadata import BlockLifecycleMetadata, compute_outcome_won
@@ -118,9 +118,22 @@ class PPMT:
         min_confidence: float = 0.60,
         min_risk_reward: float = 1.5,
         weight_profile: Optional[str] = None,
+        dual_sax: bool = True,
     ):
         self.symbol = symbol
         self.asset_class = asset_class
+
+        # FASE 1 Tarea 1.3: SAX Dual encoder (Precio + Volumen).
+        #
+        # When dual_sax=True, each SAX encoder produces TUPLE symbols
+        # (price_symbol, volume_symbol) instead of single composite symbols.
+        # This preserves volume information that the single-composite approach
+        # loses (volume was only 25% of the ohlcv composite).
+        #
+        # The tuples are converted to string keys via make_symbol_key() before
+        # insertion into the Trie, so Trie internals don't change.
+        # Example: ('a', 'x') → 'a|x' as the Trie children key.
+        self.dual_sax = dual_sax
 
         # FASE 1 Tarea 1.1: Per-level SAX encoders with differentiated alphabet sizes.
         #
@@ -137,26 +150,57 @@ class PPMT:
         n3_alpha = get_alpha_for_level("n3", asset_class, calibrated_alpha=sax_alphabet_size)
         n4_alpha = get_alpha_for_level("n4", asset_class, calibrated_alpha=sax_alphabet_size)
 
-        self.sax_n1 = SAXEncoder(
-            alphabet_size=n1_alpha,
-            window_size=sax_window_size,
-            strategy=sax_strategy,
-        )
-        self.sax_n2 = SAXEncoder(
-            alphabet_size=n2_alpha,
-            window_size=sax_window_size,
-            strategy=sax_strategy,
-        )
-        self.sax_n3 = SAXEncoder(
-            alphabet_size=n3_alpha,
-            window_size=sax_window_size,
-            strategy=sax_strategy,
-        )
-        self.sax_n4 = SAXEncoder(
-            alphabet_size=n4_alpha,
-            window_size=sax_window_size,
-            strategy=sax_strategy,
-        )
+        if dual_sax:
+            # FASE 1 Tarea 1.3: Wrap each encoder in SAXDualEncoder.
+            # Volume alphabet is α=2 (low/high volume) — coarse but effective
+            # because volume patterns are simpler than price patterns.
+            vol_alpha = 2
+            self.sax_n1 = SAXDualEncoder(
+                price_alphabet_size=n1_alpha,
+                volume_alphabet_size=vol_alpha,
+                window_size=sax_window_size,
+                price_strategy=sax_strategy,
+            )
+            self.sax_n2 = SAXDualEncoder(
+                price_alphabet_size=n2_alpha,
+                volume_alphabet_size=vol_alpha,
+                window_size=sax_window_size,
+                price_strategy=sax_strategy,
+            )
+            self.sax_n3 = SAXDualEncoder(
+                price_alphabet_size=n3_alpha,
+                volume_alphabet_size=vol_alpha,
+                window_size=sax_window_size,
+                price_strategy=sax_strategy,
+            )
+            self.sax_n4 = SAXDualEncoder(
+                price_alphabet_size=n4_alpha,
+                volume_alphabet_size=vol_alpha,
+                window_size=sax_window_size,
+                price_strategy=sax_strategy,
+            )
+        else:
+            # Legacy single-composite encoding
+            self.sax_n1 = SAXEncoder(
+                alphabet_size=n1_alpha,
+                window_size=sax_window_size,
+                strategy=sax_strategy,
+            )
+            self.sax_n2 = SAXEncoder(
+                alphabet_size=n2_alpha,
+                window_size=sax_window_size,
+                strategy=sax_strategy,
+            )
+            self.sax_n3 = SAXEncoder(
+                alphabet_size=n3_alpha,
+                window_size=sax_window_size,
+                strategy=sax_strategy,
+            )
+            self.sax_n4 = SAXEncoder(
+                alphabet_size=n4_alpha,
+                window_size=sax_window_size,
+                strategy=sax_strategy,
+            )
 
         # Backwards compatibility: self.sax = N3's encoder
         self.sax = self.sax_n3
@@ -382,6 +426,22 @@ class PPMT:
         if isinstance(self.trie_n4, RegimePartitionedTrie):
             self.trie_n4.set_current_regime(regime)
 
+    def _encode_and_convert(self, encoder, df: pd.DataFrame) -> list[str]:
+        """Encode OHLCV data and convert tuple symbols to string keys.
+
+        FASE 1 Tarea 1.3: When dual_sax is enabled, SAXDualEncoder.encode()
+        returns tuples like ('a', 'x'). This method converts them to string
+        keys like 'a|x' via make_symbol_key() so the Trie can store them
+        without any internal modification.
+
+        When dual_sax is disabled, SAXEncoder.encode() returns plain strings
+        which pass through unchanged.
+        """
+        symbols = encoder.encode(df)
+        if self.dual_sax and isinstance(encoder, SAXDualEncoder):
+            return [make_symbol_key(s) for s in symbols]
+        return symbols
+
     def build(self, df: pd.DataFrame, pattern_length: int = 5) -> int:
         """
         Build the 4-level Trie from historical OHLCV data.
@@ -406,10 +466,14 @@ class PPMT:
         #
         # These are DIFFERENT patterns stored in DIFFERENT tries. During match(),
         # the current price data is re-encoded with each level's encoder.
-        symbols_n1 = self.sax_n1.encode(df)
-        symbols_n2 = self.sax_n2.encode(df)
-        symbols_n3 = self.sax_n3.encode(df)
-        symbols_n4 = self.sax_n4.encode(df)
+        #
+        # FASE 1 Tarea 1.3: When dual_sax=True, encode() returns tuples like
+        # ('a', 'x'). We convert them to string keys ('a|x') via
+        # make_symbol_key() so the Trie can store them without modification.
+        symbols_n1 = self._encode_and_convert(self.sax_n1, df)
+        symbols_n2 = self._encode_and_convert(self.sax_n2, df)
+        symbols_n3 = self._encode_and_convert(self.sax_n3, df)
+        symbols_n4 = self._encode_and_convert(self.sax_n4, df)
 
         # Use N3's symbol count as the reference (same window_size for all levels)
         if len(symbols_n3) < pattern_length:
