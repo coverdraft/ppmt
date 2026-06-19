@@ -6901,3 +6901,196 @@ El problema NO es el detector (Bollinger / ADX+EMA+BB / EMA slope). El problema 
 | FIX-17 (mejorar RegimeDetector) | Alta | **ABORTAR** | La partición por régimen no aporta en 1m crypto |
 | FIX terminal | Pendiente | **Mantener pendiente** | Ídem |
 
+
+---
+
+## v0.40.17-audit (2026-06-19) — AUDITORÍA LONG vs CONFIDENCE: verdict NEGATIVO
+
+### Contexto
+
+Antes de implementar FIX-15 (filtrar LONG por confidence), el usuario pidió verificar
+la hipótesis base: **¿confidence realmente predice edge en LONG?**
+
+Si la respuesta es NO, FIX-15 sería un parche inútil: filtraría cantidad sin mejorar
+calidad. Si la respuesta es SÍ, FIX-15 está justificado.
+
+### Metodología
+
+- **Walk-forward 70k train / 30k test** por token (mismo setup que layer1_fix14).
+- **8 tokens**: BTC, ETH, SOL, BNB, XRP, LINK, PEPE, ARB (800k velas).
+- **Sin filtro MIN_CONFIDENCE** — capturamos TODAS las señales que el trie puede
+  producir, para que el análisis por decil sea representativo.
+- Para cada señal se registró: direction, confidence, expected_move_pct,
+  historical_count, historical_win_rate, regime, actual_move_pct, pnl_pct, won.
+- PnL sin fees: LONG gana si sube, SHORT gana si baja.
+- Métricas por decil de confidence (0-10, 10-20, ..., 90-100) × direction:
+  n, WR, PnL medio, PnL total, expectancy (= WR·avg_win + (1-WR)·avg_loss).
+- Análisis complementario por umbrales concretos (>{0.15, 0.20, 0.25, 0.30,
+  0.35, 0.40, 0.50}) y por banda (low/mid/high) por token.
+- Correlación Spearman y Pearson entre confidence y PnL/won.
+
+### Resultados clave
+
+**Total señales**: 34,206 (LONG=16,772, SHORT=17,434).
+
+#### Distribución de confidence
+
+| Direction | mean | std | min | 25% | 50% | 75% | max |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| LONG  | 0.3174 | 0.0766 | 0.0950 | 0.2651 | 0.3175 | 0.3713 | 0.6839 |
+| SHORT | 0.2132 | 0.0518 | 0.0792 | 0.1732 | 0.2087 | 0.2534 | 0.4174 |
+
+> LONG tiene confidence sustancialmente más alta que SHORT (0.32 vs 0.21). El trie
+> es sistemáticamente más "confiado" en LONG. Pero eso no se traduce en rentabilidad.
+
+#### Curva LONG: PnL medio por umbral de confidence
+
+| Umbral | n | WR | PnL medio | PnL total |
+|---|---:|---:|---:|---:|
+| `>0.00` | 16772 | 0.4695 | **-0.0189** | -316.69 |
+| `>0.15` | 16647 | 0.4696 | -0.0191 | -317.80 |
+| `>0.20` | 15740 | 0.4713 | -0.0174 | -274.40 |
+| `>0.25` | 13560 | 0.4723 | **-0.0169** | -229.26 |
+| `>0.30` |  9679 | 0.4726 | -0.0197 | -190.93 |
+| `>0.35` |  5403 | 0.4690 | -0.0269 | -145.55 |
+| `>0.40` |  2558 | 0.4797 | -0.0120 |  -30.82 |
+| `>0.50` |   134 | 0.4552 | +0.0346 |   +4.64 |
+
+> **LONG pierde dinero en TODOS los umbrales hasta 0.40.** Solo >0.50 da positivo,
+> pero con n=134 (0.8% de las señales) — estadísticamente ruidoso.
+
+#### Curva SHORT (referencia)
+
+| Umbral | n | WR | PnL medio | PnL total |
+|---|---:|---:|---:|---:|
+| `>0.00` | 17434 | 0.4867 | **+0.0125** | +218.43 |
+| `>0.15` | 15260 | 0.4868 | +0.0132 | +200.78 |
+| `>0.20` |  9883 | 0.4886 | +0.0132 | +130.14 |
+| `>0.25` |  4448 | 0.5018 | +0.0173 |  +76.99 |
+| `>0.30` |   906 | 0.5055 | +0.0057 |   +5.16 |
+
+> **SHORT es rentable en todos los umbrales hasta 0.30.** La asimetría es estructural:
+> SHORT+0.15 conf = +0.0132%, LONG+0.15 conf = -0.0191%. Delta ~0.032pp por señal.
+
+#### Correlación confidence vs outcome
+
+| Direction | n | Spearman conf↔PnL | p-value | Spearman conf↔won | p-value |
+|---|---:|---:|---:|---:|---:|
+| LONG  | 16772 | **-0.0077** | 0.32 | +0.0080 | 0.30 |
+| SHORT | 17434 | +0.0079 | 0.29 | +0.0073 | 0.34 |
+
+> Las correlaciones son **prácticamente cero** y **no significativas** (p > 0.29 en
+> todos los casos). Confidence NO explica ni PnL ni WR.
+
+#### LONG por banda × token
+
+| Token | low WR | low PnL | mid WR | mid PnL | high WR | high PnL |
+|---|---:|---:|---:|---:|---:|---:|
+| BTCUSDT | 0.45 | -0.038 | 0.51 | -0.002 | 0.48 | -0.031 |
+| ETHUSDT | 0.42 | -0.027 | 0.48 | -0.040 | 0.48 | -0.010 |
+| SOLUSDT | 0.51 | -0.009 | 0.50 | -0.021 | 0.49 | -0.027 |
+| BNBUSDT | 0.51 | +0.047 | 0.49 | -0.004 | 0.50 | +0.000 |
+| XRPUSDT | 0.49 | -0.034 | 0.50 | +0.025 | 0.46 | -0.016 |
+| LINKUSDT| 0.43 | -0.049 | 0.50 | +0.008 | 0.52 | +0.009 |
+| PEPEUSDT| 0.38 | -0.084 | 0.39 | -0.023 | 0.39 | -0.042 |
+| ARBUSDT | 0.46 | -0.055 | 0.45 | -0.044 | 0.44 | -0.053 |
+
+> **Ningún token muestra un patrón claro donde más confidence → más PnL.**
+> BNB y LINK son marginalmente mejores en mid que en low/high, pero la diferencia
+> es ruido, no señal.
+
+### Respuestas a las 3 preguntas del usuario
+
+**1. ¿LONG >0.25 son rentables?**
+NO. n=13,560 señales, WR=47.23%, PnL medio = **-0.0169%**. Pierden dinero.
+
+**2. ¿Umbral claro donde LONG pasa de − a +?**
+NO existe umbral claro. LONG es negativo en >0.00, >0.15, >0.20, >0.25, >0.30,
+>0.35, >0.40. Solo >0.50 da +0.0346%, pero son solo 134 señales (0.8% del total)
+> — no es un umbral útil operativamente.
+
+**3. ¿LONG pierde dinero incluso con confidence alta?**
+SÍ. LONG >0.40 (n=2,558) pierde -0.012%. LONG >0.35 (n=5,403) pierde -0.027%.
+Solo cuando subimos a >0.50 (donde el n ya no es estadísticamente sólido) aparece
+un PnL positivo marginal.
+
+### Veredicto
+
+**Código: WEAK_NEGATIVE** (en la práctica, NEGATIVE).
+
+- LONG pierde dinero en todos los umbrales operativos de confidence (>0.00 a >0.40).
+- Correlación Spearman confidence↔PnL = -0.008 (p=0.32). Estadísticamente cero.
+- SHORT en cambio es rentable en todos los umbrales operativos.
+- **Confidence NO predice edge para LONG.**
+- Por tanto, **FIX-15 (filtrar LONG por confidence) NO resolverá el problema**.
+  Filtrar LONG >0.25 solo reduciría el universo de 16,772 → 13,560 señales (−19%)
+  manteniendo PnL medio en -0.017%. Filtrado cosmético.
+
+### Implicación estratégica
+
+El problema LONG **no es de calidad de señal (confidence), es estructural**:
+- El trie produce LONG cuando `expected_move_pct > 0`, pero `expected_move_pct`
+  en train no se traduce en edge en test.
+- Como SHORT sí funciona, el problema es **asimétrico**: hay algo en la dinámica
+  del precio 1m que el trie captura para SHORT pero no para LONG.
+
+**Hipótesis a investigar (en lugar de FIX-15)**:
+
+1. **Sesgo direccional en `expected_move_pct`**:
+   El cálculo de `move_pct` en build del trie usa `(exit-entry)/entry*100`. En
+   crypto 1m, los movimientos bajistas suelen ser más rápidos y violentos que
+   los alcistas. Verificar si `expected_move_pct` para LONG tiende a sobreestimar.
+
+2. **Asimetría en `won` (win_rate histórico)**:
+   En build, `won = move_pct > 0`. Esto es válido para LONG pero no para SHORT.
+   El trie hereda `won` del movimiento observado, sin distinguir dirección. Esto
+   podría inflar artificialmente el win_rate de patrones LONG observados en
+   ventanas bajistas.
+
+3. **Diferencia de horizonte vs realidad del motor**:
+   El walk-forward asume hold=PATTERN_LEN·WINDOW = 35 velas. El motor real
+   usa SL/TP dinámico. La rentabilidad LONG con SL/TP podría ser distinta.
+   → Validar con backtest del motor completo.
+
+4. **Bias de selección de patrón**:
+   Los patrones que producen LONG son aquellos donde el expected_move en train
+   fue positivo. En 1m crypto, las ventanas con move_pct > 0 son típicamente
+   retrocesos dentro de un trend bajista → el "LONG" se dispara cuando el
+   precio viene subiendo pero el trend macro es bajista. SHORT se beneficia
+   del inverso.
+
+### Artefactos producidos
+
+- `scripts/long_confidence_audit.py` — script reproducible
+- `download/long_confidence_audit/signals_raw.csv` — 34,206 señales individuales
+- `download/long_confidence_audit/decile_summary.csv` — métricas por decil × direction
+- `download/long_confidence_audit/threshold_summary.csv` — métricas por umbral × direction
+- `download/long_confidence_audit/per_token_long_bands.csv` — breakdown por token × banda
+- `download/long_confidence_audit/audit.json` — todo estructurado
+- `download/long_confidence_audit/audit.md` — reporte legible
+
+### Re-priorización FIX propuesta (actualizada)
+
+| FIX | Estado anterior | Estado nuevo | Razón |
+|---|---|---|---|
+| FIX-14 (N4 routing por régimen) | ABORTAR | ABORTAR | Empíricamente no aporta |
+| FIX-15 (filtrar LONG por confidence) | Alta | **ABORTAR** | Confidence no predice edge en LONG |
+| FIX-16 (per-asset LONG/SHORT enable) | ABORTAR | ABORTAR | Depende de régimen |
+| FIX-17 (mejorar RegimeDetector) | ABORTAR | ABORTAR | La partición no aporta |
+| FIX-A (revisar `won` asimétrico) | — | **Nueva, alta** | Sesgo direccional en metadata |
+| FIX-B (revisar `expected_move_pct` para LONG) | — | **Nueva, alta** | Sobreestimación direccional |
+| FIX-C (backtest motor completo con SL/TP) | — | **Nueva, alta** | Validar si el problema es del walk-forward o del motor |
+| FIX-D (SL/TP dinámico por ATR o por dd/fav histórico) | Pendiente | **Alta** | Independiente de confidence |
+| FIX-E (filtros horarios / volumen) | Pendiente | **Media** | Independiente de confidence |
+
+### Próximo paso sugerido
+
+Antes de tocar el motor, validar **FIX-A** (sesgo de `won`):
+- En build del trie, cambiar `won = move_pct > 0` por `won = move_pct en dirección
+  correcta`. Para patrones LONG, won debe ser `move_pct > 0`. Para SHORT, won debe
+  ser `move_pct < 0`. Como el trie no sabe la dirección al insertar, esto requiere
+  refactor: insertar el patrón dos veces (una como LONG-instance, una como
+  SHORT-instance) o agregar `direction` al metadata.
+
+Si FIX-A muestra que el win_rate histórico estaba efectivamente sesgado para LONG,
+el siguiente paso es FIX-B (revisar `expected_move_pct`).
