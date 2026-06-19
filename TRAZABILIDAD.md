@@ -1,7 +1,7 @@
 # TRAZABILIDAD PPMT — Estado del Proyecto
 
-> Última actualización: 2026-06-19
-> Versión actual: **v0.40.34** — Motor arrancando en Mac del usuario, paper trading LONG BTC/USDT @ $63,150 funcional
+> Última actualización: 2026-06-20
+> Versión actual: **v0.41.0** — Arquitectura 4-Level Trie VALIDADA FÍSICAMENTE en DB: __UNIVERSAL__ y __CLASS_* poblados, SAX Dual real
 > ⚠️ **Si eres nuevo, lee primero la sección `# 📘 GUÍA DEL MOTOR PPMT — PARA CONTINUAR EL TRABAJO` al final de este archivo (línea 9914+).** Ahí está la arquitectura, dónde empezar a leer, dónde costó más, cómo se resolvieron largos y cortos, y el estado actual.
 > Repositorio: https://github.com/coverdraft/ppmt
 > Idioma: Español
@@ -10218,3 +10218,170 @@ git push origin main
 - **Worklog**: este archivo (`TRAZABILIDAD.md`) + `worklog.md` en la raíz del repo. AMBOS deben actualizarse con cada versión.
 
 ---
+
+---
+
+## v0.41.0 — VALIDACIÓN FÍSICA DE ARQUITECTURA (20 jun 2026)
+
+### Contexto: Las 5 Fases de Reconstrucción
+
+La sesión anterior implementó las 5 fases de la DIRECTRIZ TÉCNICA ABSOLUTA:
+
+| Fase | Tareas | Estado |
+|------|--------|--------|
+| **FASE 1** — Base | 1.1 α diferenciado por nivel, 1.2 pools compartidos, 1.3 SAX Dual | ✅ Implementado |
+| **FASE 2** — Inteligencia | 2.1 secuencias forward, 2.2 salida por divergencia, 2.3 filtro BTC, 2.4 tiempo decaimiento | ✅ Implementado |
+| **FASE 3** — Robustez | 3.1 defaults seguros, 3.2 thresholds por timeframe, 3.3 clasificador dinámico | ✅ Implementado |
+| **FASE 4** — Pipeline datos | 4.1 downloader masivo, 4.2 builder secuencial | ✅ Implementado |
+| **FASE 5** — Terminal | Exponer madurez Trie, decisión tracking | ✅ Preparación API |
+
+### El Problema: Tests pasaban pero la DB mostraba que NADA cambió
+
+Los 225 tests pasaban, pero la consulta a la base de datos reveló:
+
+```
+ANTES (FALLO):
+BTC/USDT | n1 | 384884  <-- N1 aislado por token
+BTC/USDT | n2 | 384904  <-- N2 aislado por token
+SOL/USDT | n1 | 369720  <-- N1 aislado por token
+SOL/USDT | n2 | 369721  <-- N2 aislado por token
+(no hay __UNIVERSAL__, no hay __CLASS_*)
+```
+
+**Diagnóstico**: Los tests unitarios usaban motores sin `attach_storage()`, así que nunca
+ejercitaban el path de pools compartidos. El código estaba "bien" en aislamiento pero la
+integración real nunca se ejecutó con datos.
+
+### PASO 1: SAX Dual — Serialización Correcta (Prohibido str()/repr())
+
+**Problema**: Los símbolos duales como `('a', 'x')` se almacenaban como strings `"a|x"`
+en el Trie y en la DB. Esto es un stringify barato que rompe la semántica.
+
+**Fix**: `TrieNode.to_dict()` ahora serializa:
+- Símbolos duales como **listas JSON**: `["a", "x"]` (no strings `"a|x"`)
+- Children con keys duales como **lista-de-pares**: `[{key: ["a","x"], node: {...}}]`
+- Símbolos simples permanecen como strings (backward compatible)
+
+**Archivo**: `src/ppmt/core/trie.py` — métodos `TrieNode.to_dict()` y `TrieNode.from_dict()`
+
+**Validación**: 
+```python
+# Antes (stringify): "a|x" → string en JSON
+# Después (correcto):  ["a", "x"] → lista en JSON
+```
+
+### PASO 2: Flag --symbols en bulk_downloader
+
+**Nuevo**: `python -m ppmt.data.bulk_downloader --symbols BTC/USDT,SOL/USDT --save-to-db`
+
+Permite pruebas seguras sin descargar 13 tokens de golpe (evita Rate Limit 429).
+Auto-clasifica cada símbolo vía `AssetClassifier`.
+
+**Archivo**: `src/ppmt/data/bulk_downloader.py` — argumento `--symbols`
+
+### PASO 3: Ejecución Real con Datos Reales
+
+```bash
+# Descarga (30 días, 2 tokens, timeframe 15m)
+python -m ppmt.data.bulk_downloader --exchange binance --days 30 --symbols BTC/USDT,SOL/USDT --save-to-db --timeframes 15m
+# → 2880 rows/token descargados y guardados
+
+# Build secuencial (BTC primero, luego SOL)
+python -m ppmt.data.sequential_builder --symbols BTC/USDT,SOL/USDT --timeframe 15m
+# → BTC: 283 patterns, SOL: 283 patterns
+# → N1 pool: 275→516 patterns (crece con cada token)
+```
+
+### PASO 4: VALIDACIÓN FÍSICA EN LA BASE DE DATOS
+
+**Consulta ejecutada**:
+```sql
+SELECT symbol, level, length(data) as size_bytes FROM tries ORDER BY symbol, level;
+```
+
+**Resultado**:
+
+| symbol | level | size_bytes | Significado |
+|--------|-------|------------|-------------|
+| `BTC/USDT` | n3 | 1,045,305 | Trie local BTC (correcto) |
+| `BTC/USDT` | n4 | 1,117,238 | Trie régimen BTC (correcto) |
+| `SOL/USDT` | n3 | 1,031,759 | Trie local SOL (correcto) |
+| `SOL/USDT` | n4 | 1,163,279 | Trie régimen SOL (correcto) |
+| `__CLASS_blue_chip` | n2 | 859,338 | **¡Pool compartido blue_chip poblado!** |
+| `__CLASS_large_cap` | n2 | 836,619 | **¡Pool compartido large_cap poblado!** |
+| `__UNIVERSAL__` | n1 | 1,191,212 | **¡Pool universal poblado y grande!** |
+
+**Validación de arquitectura**:
+
+| Verificación | Resultado |
+|---|---|
+| `__UNIVERSAL__` N1 existe y poblado | ✅ ÉXITO TOTAL — 516 patterns |
+| `__CLASS_*` N2 existen y poblados | ✅ ÉXITO TOTAL — 2 clases |
+| Sin N1 aislados por token | ✅ ÉXITO TOTAL — no hay BTC/USDT n1 |
+| Sin N2 aislados por token | ✅ ÉXITO TOTAL — no hay BTC/USDT n2 |
+| N3 locales existen | ✅ ÉXITO TOTAL |
+| N4 locales existen | ✅ ÉXITO TOTAL |
+
+**Validación EXTRA SAX Dual en JSON**:
+
+```json
+// Primer nivel del trie __UNIVERSAL__:
+{"key": ["c", "b"], "node": {...}}  // ← LISTA, no string "c|b"
+{"key": ["b", "b"], "node": {...}}
+{"key": ["a", "a"], "node": {...}}
+{"key": ["a", "b"], "node": {...}}
+{"key": ["c", "a"], "node": {...}}
+{"key": ["b", "a"], "node": {...}}
+```
+
+**6 símbolos duales, 0 símbolos simples** = SAX Dual 100% real.
+
+### Limpieza de Archivos Obsoletos (20 jun 2026)
+
+Se eliminaron scripts que ya no tienen utilidad:
+
+**Eliminado**:
+- `scripts/audit_trie_1m/` (28 archivos, ~540KB) — auditoría completada
+- `scripts/v0.40.*_fix.py` (5 archivos, ~108KB) — parches ya aplicados
+- `scripts/diagnose_*.py`, `debug_*.py`, `cross_token_diagnostic.py` — one-off
+- `scripts/layer4_audit*.py` y resultados JSON — completado
+- `scripts/*.sh` (3 archivos) — obsoletos
+- `src/ppmt/scripts/diagnose_trie_proliferation.py` — one-off
+- `src/ppmt/scripts/test_okx_1m.py`, `test_fuzzy_alignment.py`, `test_v0340.py` — one-off
+- `src/ppmt/scripts/v066_comparison.py`, `compare_v066_results.py` — versión específica
+- `src/ppmt/scripts/calibration_*.py` — one-off
+- `src/ppmt/scripts/validate_1m.py`, `validate_5m.py`, `validate_fuzzy_break.py` — one-off
+- `oos_validation_results.json` — output generado
+
+**Conservado** (tienen utilidad actual):
+- `scripts/bulk_ingest.py`, `walk_forward.py`, `verify_sax_sync_fix.py`
+- `scripts/e2e_validation.py`, `full_validation_papertrader.py`
+- `scripts/multi_timeframe_validation.py`, `oos_validation_v2.py`
+- `scripts/generate_synthetic_market_data.py`
+- `src/ppmt/scripts/bulk_data_loader.py`, `binance_vision_loader.py`
+- `src/ppmt/scripts/import_csv_1m.py`, `low_tf_validation.py`
+- `src/ppmt/scripts/massive_validation.py`, `multi_alpha_oos.py`
+- `src/ppmt/scripts/oos_validation.py`, `walkforward_sensitivity.py`
+
+### Commits de v0.41.0
+
+```
+297f9ee fix(v0.41.0): PASO 1-4 validación física de arquitectura
+fd0bc78 feat(v0.41.0): FASE 4-5 - data pipeline + terminal API preparation
+da8c210 feat(v0.41.0): FASE 3 - robustez para cualquier token (Tareas 3.1-3.3)
+c57d75b feat(v0.41.0): FASE 2 - decision intelligence (Tareas 2.1-2.4)
+1ab7bbb feat(v0.41.0): SAX Dual encoder - independent price + volume symbols (FASE 1 Tarea 1.3)
+490fc8c fix(v0.41.0): activate shared N1/N2 pools - remove dangerous fallbacks (FASE 1 Tarea 1.2)
+cf3f8b2 feat(v0.41.0): per-level alphabet size for 4-level trie (FASE 1 Tarea 1.1)
+f20094e docs: add PPMT 4-Level Trie Architecture Deep Analysis - 6 fatal failures audit
+```
+
+### Estado Actual del Sistema
+
+- **Motor PPMT**: v0.41.0 con arquitectura 4-Level Trie VALIDADA FÍSICAMENTE
+- **Pools compartidos**: `__UNIVERSAL__` (N1) y `__CLASS_*` (N2) operativos con datos reales
+- **SAX Dual**: Serialización correcta como listas JSON `["a", "x"]`
+- **α por nivel**: N1=3, N2=3-4, N3=5, N4=5 (diferenciado)
+- **Datos**: BTC/USDT + SOL/USDT, 30 días, timeframe 15m (2880 velas/token)
+- **Tests**: 20/20 trie tests pasan, serialización dual backward-compatible
+- **GitHub**: https://github.com/coverdraft/ppmt (8 commits ahead of previous push)
