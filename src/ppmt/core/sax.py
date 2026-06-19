@@ -43,6 +43,96 @@ SAX_BREAKPOINTS: dict[int, np.ndarray] = {
 SAX_ALPHABET = "abcdefghijklmnopqrstuvwxyz"
 
 
+# === Per-Level Alphabet Size Configuration (FASE 1 Tarea 1.1) ===
+#
+# The 4-level Trie architecture needs DIFFERENT alphabet sizes per level:
+#
+#   N1 (Universal): shared across ALL tokens — small α so patterns fill fast.
+#     α=3 → 3^5 = 243 patterns. With 5M+ observations from all assets,
+#     every pattern gets 20,000+ repetitions → rock-solid confidence.
+#
+#   N2 (Asset Class): shared within asset class — α depends on class density.
+#     meme/new_launch have fewer tokens → α=3 (243 patterns, fills well).
+#     blue_chip/large_cap/mid_cap/defi have more tokens → α=4 (1024 patterns).
+#
+#   N3 (Per-Token): token-specific patterns — more granularity with specific data.
+#     α=4-5 depending on calibration. Uses the token's calibrated alpha.
+#
+#   N4 (Per-Token+Regime): same as N3 — regime sub-tries share the token's alpha.
+#
+# WHY: With a single α=5 (3125 patterns), N1 never fills — it's a useless
+# safety net. With α=3, N1 has only 243 patterns and accumulates observations
+# from every token in the system, making it a truly universal pattern database.
+LEVEL_ALPHA_CONFIG: dict[str, int] = {
+    "n1": 3,          # Universal: 243 patterns, fills fast
+    "n2_meme": 3,     # Asset class meme/new_launch
+    "n2_new_launch": 3,  # Asset class new_launch
+    "n2_default": 4,  # Asset class blue_chip/large_cap/mid_cap/defi
+    "n3": 5,          # Per-token: more granularity with specific data
+    "n4": 5,          # Per-token+regime: same as N3
+}
+
+
+def get_alpha_for_level(
+    level: str,
+    asset_class: str = "default",
+    calibrated_alpha: int | None = None,
+) -> int:
+    """
+    Get the alphabet size for a given trie level and asset class.
+
+    FASE 1 Tarea 1.1: Per-level differentiated alphabet sizes.
+
+    Args:
+        level: Trie level — "n1", "n2", "n3", or "n4".
+        asset_class: Asset class — used for N2 differentiation.
+        calibrated_alpha: Token's calibrated alpha (from CalibrationEngine).
+            If provided, used for N3/N4 instead of the default.
+
+    Returns:
+        Alphabet size (int) for the SAXEncoder at this level.
+
+    Examples:
+        >>> get_alpha_for_level("n1")
+        3
+        >>> get_alpha_for_level("n2", "meme")
+        3
+        >>> get_alpha_for_level("n2", "blue_chip")
+        4
+        >>> get_alpha_for_level("n3")
+        5
+        >>> get_alpha_for_level("n3", calibrated_alpha=4)
+        4
+        >>> get_alpha_for_level("n4", calibrated_alpha=4)
+        4
+    """
+    if level == "n1":
+        return LEVEL_ALPHA_CONFIG["n1"]
+
+    elif level == "n2":
+        # Meme and new_launch get α=3 (fewer tokens in class, need fewer patterns)
+        if asset_class in ("meme", "new_launch"):
+            return LEVEL_ALPHA_CONFIG["n2_meme"]
+        else:
+            # blue_chip, large_cap, mid_cap, defi, default → α=4
+            return LEVEL_ALPHA_CONFIG["n2_default"]
+
+    elif level == "n3":
+        # Per-token: use calibrated alpha if available, else default
+        if calibrated_alpha is not None:
+            return calibrated_alpha
+        return LEVEL_ALPHA_CONFIG["n3"]
+
+    elif level == "n4":
+        # Per-token+regime: same as N3
+        if calibrated_alpha is not None:
+            return calibrated_alpha
+        return LEVEL_ALPHA_CONFIG["n4"]
+
+    else:
+        raise ValueError(f"Unknown trie level: {level!r}. Must be one of: n1, n2, n3, n4")
+
+
 @dataclass
 class SAXConfig:
     """Configuration for SAX encoding."""

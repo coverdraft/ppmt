@@ -47,7 +47,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from ppmt.core.sax import SAXEncoder
+from ppmt.core.sax import SAXEncoder, get_alpha_for_level
 from ppmt.core.trie import PPMTTrie, TrieNode, RegimePartitionedTrie
 from ppmt.core.matcher import FuzzyMatcher, MatchResult
 from ppmt.core.metadata import BlockLifecycleMetadata, compute_outcome_won
@@ -119,18 +119,66 @@ class PPMT:
         self.symbol = symbol
         self.asset_class = asset_class
 
-        # SAX encoder
-        self.sax = SAXEncoder(
-            alphabet_size=sax_alphabet_size,
+        # FASE 1 Tarea 1.1: Per-level SAX encoders with differentiated alphabet sizes.
+        #
+        # Each trie level uses its own SAXEncoder with an alphabet size
+        # appropriate for its data density:
+        #   N1 (Universal): α=3 → 243 patterns, fills fast as universal safety net
+        #   N2 (Asset Class): α=3 for meme/new_launch, α=4 for blue_chip/large_cap
+        #   N3 (Per-Token): α = sax_alphabet_size (the constructor arg, or calibrated)
+        #   N4 (Per-Token+Regime): same as N3
+        #
+        # `self.sax` is preserved as N3's encoder for backwards compatibility.
+        n1_alpha = get_alpha_for_level("n1", asset_class)
+        n2_alpha = get_alpha_for_level("n2", asset_class)
+        n3_alpha = get_alpha_for_level("n3", asset_class, calibrated_alpha=sax_alphabet_size)
+        n4_alpha = get_alpha_for_level("n4", asset_class, calibrated_alpha=sax_alphabet_size)
+
+        self.sax_n1 = SAXEncoder(
+            alphabet_size=n1_alpha,
+            window_size=sax_window_size,
+            strategy=sax_strategy,
+        )
+        self.sax_n2 = SAXEncoder(
+            alphabet_size=n2_alpha,
+            window_size=sax_window_size,
+            strategy=sax_strategy,
+        )
+        self.sax_n3 = SAXEncoder(
+            alphabet_size=n3_alpha,
+            window_size=sax_window_size,
+            strategy=sax_strategy,
+        )
+        self.sax_n4 = SAXEncoder(
+            alphabet_size=n4_alpha,
             window_size=sax_window_size,
             strategy=sax_strategy,
         )
 
-        # Fuzzy matcher
-        self.matcher = FuzzyMatcher(
-            sax_encoder=self.sax,
+        # Backwards compatibility: self.sax = N3's encoder
+        self.sax = self.sax_n3
+
+        # Fuzzy matchers — one per level, each using its level's SAX encoder
+        # for alphabet-aware distance computation (symbol_distance, breakpoints).
+        self.matcher_n1 = FuzzyMatcher(
+            sax_encoder=self.sax_n1,
             threshold=fuzzy_threshold,
         )
+        self.matcher_n2 = FuzzyMatcher(
+            sax_encoder=self.sax_n2,
+            threshold=fuzzy_threshold,
+        )
+        self.matcher_n3 = FuzzyMatcher(
+            sax_encoder=self.sax_n3,
+            threshold=fuzzy_threshold,
+        )
+        self.matcher_n4 = FuzzyMatcher(
+            sax_encoder=self.sax_n4,
+            threshold=fuzzy_threshold,
+        )
+
+        # Backwards compatibility: self.matcher = N3's matcher
+        self.matcher = self.matcher_n3
 
         # Signal generator
         self.signal_generator = SignalGenerator(
@@ -300,20 +348,41 @@ class PPMT:
         Returns:
             Number of patterns inserted
         """
-        # Encode entire history to SAX symbols
-        symbols = self.sax.encode(df)
+        # FASE 1 Tarea 1.1: Encode with EACH level's SAX encoder.
+        #
+        # Each level has a different alphabet_size, so the same price data
+        # produces DIFFERENT symbol sequences at each level. For example:
+        #   N3 (α=5): "abcde"  (5 distinct symbols)
+        #   N1 (α=3): "abcae"  (only 3 possible symbols, so different mapping)
+        #
+        # These are DIFFERENT patterns stored in DIFFERENT tries. During match(),
+        # the current price data is re-encoded with each level's encoder.
+        symbols_n1 = self.sax_n1.encode(df)
+        symbols_n2 = self.sax_n2.encode(df)
+        symbols_n3 = self.sax_n3.encode(df)
+        symbols_n4 = self.sax_n4.encode(df)
 
-        if len(symbols) < pattern_length:
+        # Use N3's symbol count as the reference (same window_size for all levels)
+        if len(symbols_n3) < pattern_length:
             return 0
 
         # Create overlapping sequences
         count = 0
-        for i in range(len(symbols) - pattern_length):
-            pattern = symbols[i:i + pattern_length]
-            next_sym = symbols[i + pattern_length] if i + pattern_length < len(symbols) else None
+        for i in range(len(symbols_n3) - pattern_length):
+            # Per-level patterns (each level has its own symbol sequence)
+            pattern_n1 = symbols_n1[i:i + pattern_length]
+            pattern_n2 = symbols_n2[i:i + pattern_length]
+            pattern_n3 = symbols_n3[i:i + pattern_length]
+            pattern_n4 = symbols_n4[i:i + pattern_length]
+
+            # Next symbol for continuation (per-level)
+            next_sym_n1 = symbols_n1[i + pattern_length] if i + pattern_length < len(symbols_n1) else None
+            next_sym_n2 = symbols_n2[i + pattern_length] if i + pattern_length < len(symbols_n2) else None
+            next_sym_n3 = symbols_n3[i + pattern_length] if i + pattern_length < len(symbols_n3) else None
+            next_sym_n4 = symbols_n4[i + pattern_length] if i + pattern_length < len(symbols_n4) else None
 
             # Compute metadata from the actual price data
-            # Map SAX window indices to candle indices
+            # Map SAX window indices to candle indices (all levels share window_size)
             start_candle = i * self.sax.window_size
             end_candle = (i + pattern_length) * self.sax.window_size
 
@@ -384,7 +453,7 @@ class PPMT:
             # from a young universal pool). N1/N2 universal pools will have
             # many more observations and could provide tighter SL/TP, but
             # that's a v0.40.25+ optimization — for now we keep it simple.
-            existing_node = self.trie_n3.search(pattern) if hasattr(self, 'trie_n3') else None
+            existing_node = self.trie_n3.search(pattern_n3) if hasattr(self, 'trie_n3') else None
             if existing_node is not None and existing_node.metadata.historical_count > 0:
                 existing_meta = existing_node.metadata
                 sl_pct_for_outcome = abs(existing_meta.max_drawdown_pct) * 1.5
@@ -443,65 +512,89 @@ class PPMT:
             # When no storage is attached (single-symbol backwards-compat mode),
             # N1/N2 receive the observation locally — same as v0.40.2 — and
             # remain structurally identical to N3.
+            # FASE 1 Tarea 1.1: Insert per-level patterns into per-level tries.
+            #
+            # Each level's trie gets its own symbol sequence (encoded with
+            # that level's SAX alphabet_size). The metadata (move_pct, drawdown,
+            # etc.) is derived from the SAME raw price data for all levels.
             if self._storage is not None:
                 # FIX-1B: accumulate in in-memory buffers (fast)
                 self._n1_buffer.insert_with_observations(
-                    symbols=pattern,
+                    symbols=pattern_n1,
                     move_pct=move_pct,
                     drawdown_pct=drawdown_pct,
                     favorable_pct=favorable_pct,
                     duration=duration,
                     won=won,
-                    next_symbol=next_sym,
+                    next_symbol=next_sym_n1,
                     regime=regime,
                 )
                 self._n2_buffer.insert_with_observations(
-                    symbols=pattern,
+                    symbols=pattern_n2,
                     move_pct=move_pct,
                     drawdown_pct=drawdown_pct,
                     favorable_pct=favorable_pct,
                     duration=duration,
                     won=won,
-                    next_symbol=next_sym,
+                    next_symbol=next_sym_n2,
                     regime=regime,
                 )
                 # N3 (per-symbol) — local insert only
                 self.trie_n3.insert_with_observations(
-                    symbols=pattern,
+                    symbols=pattern_n3,
                     move_pct=move_pct,
                     drawdown_pct=drawdown_pct,
                     favorable_pct=favorable_pct,
                     duration=duration,
                     won=won,
-                    next_symbol=next_sym,
+                    next_symbol=next_sym_n3,
                     regime=regime,
                 )
             else:
-                # Backwards-compat (no storage): N1/N2/N3 all receive locally.
-                # They remain structurally identical in single-symbol op.
-                for trie in [self.trie_n1, self.trie_n2, self.trie_n3]:
-                    trie.insert_with_observations(
-                        symbols=pattern,
-                        move_pct=move_pct,
-                        drawdown_pct=drawdown_pct,
-                        favorable_pct=favorable_pct,
-                        duration=duration,
-                        won=won,
-                        next_symbol=next_sym,
-                        regime=regime,
-                    )
+                # Backwards-compat (no storage): N1/N2/N3 receive locally,
+                # each with its own per-level pattern.
+                self.trie_n1.insert_with_observations(
+                    symbols=pattern_n1,
+                    move_pct=move_pct,
+                    drawdown_pct=drawdown_pct,
+                    favorable_pct=favorable_pct,
+                    duration=duration,
+                    won=won,
+                    next_symbol=next_sym_n1,
+                    regime=regime,
+                )
+                self.trie_n2.insert_with_observations(
+                    symbols=pattern_n2,
+                    move_pct=move_pct,
+                    drawdown_pct=drawdown_pct,
+                    favorable_pct=favorable_pct,
+                    duration=duration,
+                    won=won,
+                    next_symbol=next_sym_n2,
+                    regime=regime,
+                )
+                self.trie_n3.insert_with_observations(
+                    symbols=pattern_n3,
+                    move_pct=move_pct,
+                    drawdown_pct=drawdown_pct,
+                    favorable_pct=favorable_pct,
+                    duration=duration,
+                    won=won,
+                    next_symbol=next_sym_n3,
+                    regime=regime,
+                )
 
             # N4: insert into the regime-matched sub-trie only.
             # RegimePartitionedTrie.insert_with_observations routes via
             # the `regime` kwarg internally.
             self.trie_n4.insert_with_observations(
-                symbols=pattern,
+                symbols=pattern_n4,
                 move_pct=move_pct,
                 drawdown_pct=drawdown_pct,
                 favorable_pct=favorable_pct,
                 duration=duration,
                 won=won,
-                next_symbol=next_sym,
+                next_symbol=next_sym_n4,
                 regime=regime,
             )
 
@@ -581,6 +674,10 @@ class PPMT:
         self,
         current_symbols: list[str],
         current_price: float = 0.0,
+        current_symbols_n1: Optional[list[str]] = None,
+        current_symbols_n2: Optional[list[str]] = None,
+        current_symbols_n3: Optional[list[str]] = None,
+        current_symbols_n4: Optional[list[str]] = None,
     ) -> PPMTResult:
         """
         Raw 4-level match without signal generation.
@@ -590,20 +687,36 @@ class PPMT:
         but does NOT generate a trading signal (that's done by the
         PaperTrader's own entry logic).
 
+        FASE 1 Tarea 1.1: Each level now uses its own SAXEncoder for
+        matching. The caller can provide per-level symbol sequences
+        directly. If not provided, falls back to current_symbols for
+        all levels (backwards compatibility).
+
         Args:
-            current_symbols: Current SAX symbol sequence
+            current_symbols: Current SAX symbol sequence (N3 encoding, backwards compat)
             current_price: Current market price (unused, for compatibility)
+            current_symbols_n1: N1-encoded symbols (if None, uses current_symbols)
+            current_symbols_n2: N2-encoded symbols (if None, uses current_symbols)
+            current_symbols_n3: N3-encoded symbols (if None, uses current_symbols)
+            current_symbols_n4: N4-encoded symbols (if None, uses current_symbols)
 
         Returns:
             PPMTResult with match details and weighted confidence
         """
         start_time = time.perf_counter()
 
-        # Search all 4 levels
-        n1_match = self.matcher.best_match(self.trie_n1, current_symbols)
-        n2_match = self.matcher.best_match(self.trie_n2, current_symbols)
-        n3_match = self.matcher.best_match(self.trie_n3, current_symbols)
-        n4_match = self.matcher.best_match(self.trie_n4, current_symbols)
+        # FASE 1 Tarea 1.1: Use per-level matchers with per-level symbols.
+        # Each matcher knows its level's alphabet size for fuzzy distance.
+        syms_n1 = current_symbols_n1 if current_symbols_n1 is not None else current_symbols
+        syms_n2 = current_symbols_n2 if current_symbols_n2 is not None else current_symbols
+        syms_n3 = current_symbols_n3 if current_symbols_n3 is not None else current_symbols
+        syms_n4 = current_symbols_n4 if current_symbols_n4 is not None else current_symbols
+
+        # Search all 4 levels with per-level matchers
+        n1_match = self.matcher_n1.best_match(self.trie_n1, syms_n1)
+        n2_match = self.matcher_n2.best_match(self.trie_n2, syms_n2)
+        n3_match = self.matcher_n3.best_match(self.trie_n3, syms_n3)
+        n4_match = self.matcher_n4.best_match(self.trie_n4, syms_n4)
 
         # Get confidence from each level
         n1_conf = n1_match.node.metadata.confidence if n1_match.node else 0.0
@@ -642,6 +755,10 @@ class PPMT:
         current_price: float,
         is_in_position: bool = False,
         entry_price: Optional[float] = None,
+        current_symbols_n1: Optional[list[str]] = None,
+        current_symbols_n2: Optional[list[str]] = None,
+        current_symbols_n3: Optional[list[str]] = None,
+        current_symbols_n4: Optional[list[str]] = None,
     ) -> PPMTResult:
         """
         Match current SAX sequence against all 4 Trie levels.
@@ -651,24 +768,37 @@ class PPMT:
 
         This is the main real-time method called on each new candle.
 
+        FASE 1 Tarea 1.1: Each level uses its own SAXEncoder for
+        matching. The caller can provide per-level symbol sequences
+        directly. If not provided, falls back to current_symbols for
+        all levels (backwards compatibility).
+
         Args:
-            current_symbols: Current SAX symbol sequence
+            current_symbols: Current SAX symbol sequence (N3 encoding, backwards compat)
             current_price: Current market price
             is_in_position: Whether we already have an open position
             entry_price: Entry price of current position (if any)
+            current_symbols_n1: N1-encoded symbols (if None, uses current_symbols)
+            current_symbols_n2: N2-encoded symbols (if None, uses current_symbols)
+            current_symbols_n3: N3-encoded symbols (if None, uses current_symbols)
+            current_symbols_n4: N4-encoded symbols (if None, uses current_symbols)
 
         Returns:
             PPMTResult with signal and matching details
         """
         start_time = time.perf_counter()
 
-        # Search all 4 levels
-        n1_match = self.matcher.best_match(self.trie_n1, current_symbols)
-        n2_match = self.matcher.best_match(self.trie_n2, current_symbols)
-        n3_match = self.matcher.best_match(self.trie_n3, current_symbols)
+        # FASE 1 Tarea 1.1: Use per-level matchers with per-level symbols.
+        syms_n1 = current_symbols_n1 if current_symbols_n1 is not None else current_symbols
+        syms_n2 = current_symbols_n2 if current_symbols_n2 is not None else current_symbols
+        syms_n3 = current_symbols_n3 if current_symbols_n3 is not None else current_symbols
+        syms_n4 = current_symbols_n4 if current_symbols_n4 is not None else current_symbols
 
-        # N4: regime-specific trie
-        n4_match = self.matcher.best_match(self.trie_n4, current_symbols)
+        # Search all 4 levels with per-level matchers
+        n1_match = self.matcher_n1.best_match(self.trie_n1, syms_n1)
+        n2_match = self.matcher_n2.best_match(self.trie_n2, syms_n2)
+        n3_match = self.matcher_n3.best_match(self.trie_n3, syms_n3)
+        n4_match = self.matcher_n4.best_match(self.trie_n4, syms_n4)
 
         # Get confidence from each level
         n1_conf = n1_match.node.metadata.confidence if n1_match.node else 0.0
@@ -707,15 +837,27 @@ class PPMT:
             # v0.6.5: Fuzzy Pattern Break — graduated continuation across levels
             pnl_pct = ((current_price - entry_price) / entry_price) * 100.0
 
-            last_sym = current_symbols[-1] if current_symbols else ""
+            last_sym_n1 = syms_n1[-1] if syms_n1 else ""
+            last_sym_n2 = syms_n2[-1] if syms_n2 else ""
+            last_sym_n3 = syms_n3[-1] if syms_n3 else ""
+            last_sym_n4 = syms_n4[-1] if syms_n4 else ""
 
             # Check continuation at all 4 levels, pick best break score
-            cont_results = []
-            for trie in [self.trie_n1, self.trie_n2, self.trie_n3, self.trie_n4]:
-                cont = self.matcher.check_continuation(
-                    trie, current_symbols[:-1], last_sym
-                )
-                cont_results.append(cont)
+            # FASE 1 Tarea 1.1: use per-level matchers for distance computation
+            cont_results = [
+                self.matcher_n1.check_continuation(
+                    self.trie_n1, syms_n1[:-1], last_sym_n1
+                ),
+                self.matcher_n2.check_continuation(
+                    self.trie_n2, syms_n2[:-1], last_sym_n2
+                ),
+                self.matcher_n3.check_continuation(
+                    self.trie_n3, syms_n3[:-1], last_sym_n3
+                ),
+                self.matcher_n4.check_continuation(
+                    self.trie_n4, syms_n4[:-1], last_sym_n4
+                ),
+            ]
 
             # Select the continuation result with the highest pattern_break_score
             best_cont = max(cont_results, key=lambda c: c.pattern_break_score)
@@ -788,43 +930,81 @@ class PPMT:
         """
         from ppmt.engine.buffer import StreamingPatternBuffer
 
-        # Initialize streaming buffer on first call
+        # FASE 1 Tarea 1.1: Initialize 4 streaming buffers (one per level)
+        # Each buffer tracks its own SAX symbol stream for its level's encoder.
         if not hasattr(self, '_streaming_buffer') or self._streaming_buffer is None:
             self._streaming_buffer = StreamingPatternBuffer(
                 pattern_length=5,  # default, should match build() pattern_length
                 max_buffer_length=0,  # auto
             )
+        if not hasattr(self, '_streaming_buffer_n1') or self._streaming_buffer_n1 is None:
+            self._streaming_buffer_n1 = StreamingPatternBuffer(
+                pattern_length=5, max_buffer_length=0,
+            )
+        if not hasattr(self, '_streaming_buffer_n2') or self._streaming_buffer_n2 is None:
+            self._streaming_buffer_n2 = StreamingPatternBuffer(
+                pattern_length=5, max_buffer_length=0,
+            )
+        if not hasattr(self, '_streaming_buffer_n4') or self._streaming_buffer_n4 is None:
+            self._streaming_buffer_n4 = StreamingPatternBuffer(
+                pattern_length=5, max_buffer_length=0,
+            )
 
-        buf = self._streaming_buffer
+        buf = self._streaming_buffer  # N3 buffer (primary, backwards compat)
+        buf_n1 = self._streaming_buffer_n1
+        buf_n2 = self._streaming_buffer_n2
+        buf_n4 = self._streaming_buffer_n4
 
-        # Incremental SAX encoding (v0.19.1: fixed z-score bug)
-        new_symbols, updated_sax_buffer = self.sax.encode_incremental(
+        # Incremental SAX encoding — one per level
+        new_symbols_n3, updated_sax_buffer_n3 = self.sax_n3.encode_incremental(
             candle_df, buf.sax_buffer,
             paa_mean=paa_mean, paa_std=paa_std,
         )
+        new_symbols_n1, updated_sax_buffer_n1 = self.sax_n1.encode_incremental(
+            candle_df, buf_n1.sax_buffer,
+            paa_mean=paa_mean, paa_std=paa_std,
+        )
+        new_symbols_n2, updated_sax_buffer_n2 = self.sax_n2.encode_incremental(
+            candle_df, buf_n2.sax_buffer,
+            paa_mean=paa_mean, paa_std=paa_std,
+        )
+        new_symbols_n4, updated_sax_buffer_n4 = self.sax_n4.encode_incremental(
+            candle_df, buf_n4.sax_buffer,
+            paa_mean=paa_mean, paa_std=paa_std,
+        )
 
-        # Update streaming buffer with new symbols
-        matchable = buf.update(new_symbols, updated_sax_buffer)
+        # Update streaming buffers with new symbols
+        matchable_n3 = buf.update(new_symbols_n3, updated_sax_buffer_n3)
+        buf_n1.update(new_symbols_n1, updated_sax_buffer_n1)
+        buf_n2.update(new_symbols_n2, updated_sax_buffer_n2)
+        buf_n4.update(new_symbols_n4, updated_sax_buffer_n4)
 
-        if not matchable or not buf.has_pattern():
+        if not matchable_n3 or not buf.has_pattern():
             return None
 
-        # Get current pattern for matching
-        current_pattern = buf.get_pattern()
+        # Get current patterns for matching (per-level)
+        current_pattern_n3 = buf.get_pattern()
+        current_pattern_n1 = buf_n1.get_pattern()
+        current_pattern_n2 = buf_n2.get_pattern()
+        current_pattern_n4 = buf_n4.get_pattern()
 
-        # Run 4-level match
+        # Run 4-level match with per-level symbols
         result = self.match(
-            current_symbols=current_pattern,
+            current_symbols=current_pattern_n3,
             current_price=current_price,
             is_in_position=is_in_position,
             entry_price=entry_price,
+            current_symbols_n1=current_pattern_n1 or None,
+            current_symbols_n2=current_pattern_n2 or None,
+            current_symbols_n3=current_pattern_n3,
+            current_symbols_n4=current_pattern_n4 or None,
         )
 
         # Record match/break in buffer
         if result.signal.signal_type != SignalType.NO_SIGNAL:
             buf.record_match(
                 confidence=result.weighted_confidence,
-                matched_pattern=current_pattern,
+                matched_pattern=current_pattern_n3,
             )
 
         return result

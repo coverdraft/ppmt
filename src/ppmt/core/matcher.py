@@ -78,11 +78,22 @@ class FuzzyMatcher:
     v0.6.5: best_match() now evaluates all strategies and returns the
     true best match (highest score), not the first passing waterfall.
 
-    Usage:
-        matcher = FuzzyMatcher(sax_encoder, threshold=0.85)
+    FASE 1 Tarea 1.1: Each trie level now uses its own FuzzyMatcher
+    with the level's SAXEncoder. This ensures:
+      - alphabet_size matches the trie's symbol space (α=3 for N1, etc.)
+      - symbol_distance() uses the correct breakpoints for the level
+      - one_edit_match / two_edit_match enumerate the right alphabet
 
-        # Find best match across all strategies
-        result = matcher.best_match(trie, ['a', 'd', 'b'])
+    Usage:
+        # Per-level matchers (FASE 1 Tarea 1.1)
+        matcher_n1 = FuzzyMatcher(sax_encoder_n1, threshold=0.85)  # α=3
+        matcher_n3 = FuzzyMatcher(sax_encoder_n3, threshold=0.85)  # α=5
+
+        # Search N1 with N1's encoder → alphabet = {a, b, c}
+        result_n1 = matcher_n1.best_match(trie_n1, n1_symbols)
+
+        # Search N3 with N3's encoder → alphabet = {a, b, c, d, e}
+        result_n3 = matcher_n3.best_match(trie_n3, n3_symbols)
 
         # Check continuation with graduated break score
         result = matcher.check_continuation(trie, ['a', 'd', 'b'], 'e')

@@ -19,6 +19,10 @@ The buffer tracks:
   - Symbol statistics (counts, entropy)
   - Pattern history for Living Trie updates
 
+FASE 1 Tarea 1.1: Added MultiLevelStreamingBuffer that manages
+4 parallel StreamingPatternBuffers (one per trie level), each
+driven by its own SAXEncoder with a differentiated alphabet size.
+
 v0.13.0: New module — extracted from RealtimeTrader for reusability.
 """
 
@@ -366,3 +370,164 @@ class StreamingPatternBuffer:
             f"Matched: {self._patterns_matched} | "
             f"Broken: {self._patterns_broken}"
         )
+
+
+class MultiLevelStreamingBuffer:
+    """
+    Manages 4 parallel StreamingPatternBuffers for the 4-level Trie.
+
+    FASE 1 Tarea 1.1: Each trie level has its own SAXEncoder with a
+    different alphabet_size. This class wraps 4 StreamingPatternBuffers,
+    one per level, and provides a unified interface for incremental
+    encoding and pattern retrieval.
+
+    Usage:
+        from ppmt.core.sax import SAXEncoder, get_alpha_for_level
+
+        sax_n1 = SAXEncoder(alphabet_size=get_alpha_for_level("n1", "blue_chip"))
+        sax_n2 = SAXEncoder(alphabet_size=get_alpha_for_level("n2", "blue_chip"))
+        sax_n3 = SAXEncoder(alphabet_size=4)
+        sax_n4 = SAXEncoder(alphabet_size=4)
+
+        mlb = MultiLevelStreamingBuffer(
+            sax_encoders={"n1": sax_n1, "n2": sax_n2, "n3": sax_n3, "n4": sax_n4},
+            pattern_length=5,
+        )
+
+        # Process a candle
+        patterns = mlb.process_candle(candle_df)
+        if patterns:
+            result = engine.match(
+                current_symbols=patterns["n3"],
+                current_price=price,
+                current_symbols_n1=patterns["n1"],
+                current_symbols_n2=patterns["n2"],
+                current_symbols_n4=patterns["n4"],
+            )
+    """
+
+    def __init__(
+        self,
+        sax_encoders: dict[str, "SAXEncoder"],
+        pattern_length: int = 5,
+        max_buffer_length: int = 0,
+        track_history: bool = True,
+        max_history: int = 1000,
+    ):
+        """
+        Initialize multi-level streaming buffer.
+
+        Args:
+            sax_encoders: Dict mapping level name ("n1","n2","n3","n4")
+                to SAXEncoder instances. Each encoder has its own alphabet_size.
+            pattern_length: Number of SAX symbols per pattern.
+            max_buffer_length: Max symbols per buffer. 0 = auto.
+            track_history: Whether to record pattern events.
+            max_history: Max events per buffer.
+        """
+        self._encoders = sax_encoders
+        self._buffers: dict[str, StreamingPatternBuffer] = {}
+        for level in ("n1", "n2", "n3", "n4"):
+            self._buffers[level] = StreamingPatternBuffer(
+                pattern_length=pattern_length,
+                max_buffer_length=max_buffer_length,
+                track_history=track_history,
+                max_history=max_history,
+            )
+
+    @property
+    def n1(self) -> StreamingPatternBuffer:
+        """N1 (Universal) buffer."""
+        return self._buffers["n1"]
+
+    @property
+    def n2(self) -> StreamingPatternBuffer:
+        """N2 (Asset Class) buffer."""
+        return self._buffers["n2"]
+
+    @property
+    def n3(self) -> StreamingPatternBuffer:
+        """N3 (Per-Token) buffer — primary, backwards compat."""
+        return self._buffers["n3"]
+
+    @property
+    def n4(self) -> StreamingPatternBuffer:
+        """N4 (Per-Token+Regime) buffer."""
+        return self._buffers["n4"]
+
+    def process_candle(
+        self,
+        candle_df: "pd.DataFrame",
+        paa_mean: float | None = None,
+        paa_std: float | None = None,
+    ) -> dict[str, list[str]] | None:
+        """
+        Encode a new candle with all 4 SAX encoders and update buffers.
+
+        Args:
+            candle_df: Single-row DataFrame with OHLCV data.
+            paa_mean: Training PAA mean for consistent z-scoring.
+            paa_std: Training PAA std for consistent z-scoring.
+
+        Returns:
+            Dict mapping level names to pattern lists if N3 has a matchable
+            pattern, None otherwise. E.g. {"n1": [...], "n2": [...],
+            "n3": [...], "n4": [...]}. If a level's buffer doesn't have
+            enough symbols yet, its value is an empty list.
+        """
+        for level in ("n1", "n2", "n3", "n4"):
+            encoder = self._encoders[level]
+            buf = self._buffers[level]
+
+            new_symbols, updated_sax_buffer = encoder.encode_incremental(
+                candle_df, buf.sax_buffer,
+                paa_mean=paa_mean, paa_std=paa_std,
+            )
+            buf.update(new_symbols, updated_sax_buffer)
+
+        # Return patterns only if N3 (primary) has a matchable pattern
+        if not self._buffers["n3"].has_pattern():
+            return None
+
+        return {
+            level: self._buffers[level].get_pattern()
+            for level in ("n1", "n2", "n3", "n4")
+        }
+
+    def has_pattern(self) -> bool:
+        """Check if N3 (primary) buffer has a matchable pattern."""
+        return self._buffers["n3"].has_pattern()
+
+    def get_patterns(self) -> dict[str, list[str]]:
+        """Get current patterns from all levels (empty list if not enough symbols)."""
+        return {
+            level: self._buffers[level].get_pattern()
+            for level in ("n1", "n2", "n3", "n4")
+        }
+
+    def record_match(self, confidence: float, matched_pattern: list[str],
+                     metadata: Optional[dict] = None) -> None:
+        """Record a match in the N3 (primary) buffer."""
+        self._buffers["n3"].record_match(confidence, matched_pattern, metadata)
+
+    def get_state(self) -> dict:
+        """Serialize all buffer states for persistence."""
+        return {
+            level: self._buffers[level].get_state()
+            for level in ("n1", "n2", "n3", "n4")
+        }
+
+    def restore_state(self, state: dict) -> None:
+        """Restore all buffer states from persistence."""
+        for level in ("n1", "n2", "n3", "n4"):
+            if level in state:
+                self._buffers[level].restore_state(state[level])
+
+    def format_summary(self) -> str:
+        """Format summary for all levels."""
+        parts = []
+        for level in ("n1", "n2", "n3", "n4"):
+            buf = self._buffers[level]
+            alpha = self._encoders[level].alphabet_size
+            parts.append(f"  {level}(α={alpha}): {buf.format_summary()}")
+        return "MultiLevelBuffer:\n" + "\n".join(parts)
