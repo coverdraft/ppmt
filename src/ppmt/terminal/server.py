@@ -811,6 +811,12 @@ async def start_trading(req: StartTradingRequest) -> dict:
                     # N2→class pool, N3→per-symbol, N4→per-symbol+regime)
                     count = builder.build(df, pattern_length=5)
                     logger.info(f"Built {count} patterns; N1 universal + N2 class pools updated")
+                    # v0.41.0 FIX-1B: verify shared pools were actually saved
+                    pool_status = builder.ensure_shared_pools(storage)
+                    if not pool_status["n1_universal"]["exists"]:
+                        logger.warning(f"N1 universal pool MISSING after build of {req.symbol}")
+                    if not pool_status["n2_class"]["exists"]:
+                        logger.warning(f"N2 class pool MISSING after build of {req.symbol}")
                     # Reload via load_all_tries so N1/N2 are the cross-asset
                     # pools (builder.trie_n1/trie_n2 are empty in storage mode).
                     all_tries = storage.load_all_tries(req.symbol, asset_class=_info.asset_class)
@@ -1791,6 +1797,12 @@ async def validate_token(req: ValidateRequest) -> dict:
                     # FIX-1D: contribute to universal N1 + class N2 pools
                     builder.attach_storage(storage)
                     count = builder.build(df, pattern_length=5)
+                    # v0.41.0 FIX-1B: verify shared pools were actually saved
+                    pool_status = builder.ensure_shared_pools(storage)
+                    if not pool_status["n1_universal"]["exists"]:
+                        logger.warning(f"N1 universal pool MISSING after auto-setup build of {req.symbol}")
+                    if not pool_status["n2_class"]["exists"]:
+                        logger.warning(f"N2 class pool MISSING after auto-setup build of {req.symbol}")
                     # No need to save_trie per level — build() already did it
                     # to the universal/class/per-symbol/per-symbol+regime keys.
             except Exception as e:
@@ -2932,6 +2944,12 @@ async def multi_tf_analysis(req: MultiTFRequest) -> dict:
                         # FIX-1D: contribute to universal N1 + class N2 pools
                         builder.attach_storage(storage)
                         builder.build(df, pattern_length=5)
+                        # v0.41.0 FIX-1B: verify shared pools were saved
+                        pool_status = builder.ensure_shared_pools(storage)
+                        if not pool_status["n1_universal"]["exists"]:
+                            logger.warning(f"N1 universal pool MISSING after multi-tf build of {req.symbol} {tf}")
+                        if not pool_status["n2_class"]["exists"]:
+                            logger.warning(f"N2 class pool MISSING after multi-tf build of {req.symbol} {tf}")
                         # build() already persisted to all 4 storage keys
                 except Exception:
                     pass

@@ -37,6 +37,7 @@ import numpy as np
 
 from ppmt.data.storage import PPMTStorage
 from ppmt.data.classifier import AssetClassifier
+from ppmt.core.trie import PPMTTrie
 from ppmt.core.sax import SAXEncoder
 from ppmt.core.regime import RegimeDetector, RegimeInfo
 from ppmt.core.profiles import TokenProfile, TIMEFRAME_ALPHA_DEFAULTS, TradingCalibrationEngine
@@ -919,21 +920,40 @@ class PaperTrader:
             engine.build(df, pattern_length=cfg.pattern_length)
             # Reload N1/N2 from cross-asset pools (engine.trie_n1/2 are empty
             # in storage mode)
+            # v0.41.0 FIX-1B: DO NOT fall back to engine.trie_n1/n2 — those
+            # are empty in storage mode and would mask a missing shared pool.
+            # Empty pools correctly get 0 confidence, allowing weight
+            # redistribution to N2/N3 via AdaptiveWeights.
             all_tries = storage.load_all_tries(cfg.symbol, asset_class=info.asset_class)
-            trie_n1 = all_tries["n1"] or engine.trie_n1
-            trie_n2 = all_tries["n2"] or engine.trie_n2
+            trie_n1 = all_tries.get("n1")
+            trie_n2 = all_tries.get("n2")
+            if trie_n1 is None:
+                console.print("[yellow]WARNING: N1 universal pool is empty after build. Only N2/N3/N4 available.[/yellow]")
+                trie_n1 = PPMTTrie(name="universal_empty")
+            if trie_n2 is None:
+                console.print(f"[yellow]WARNING: N2 class pool for {info.asset_class} is empty after build.[/yellow]")
+                trie_n2 = PPMTTrie(name=f"class_empty:{info.asset_class}")
             trie_n3 = engine.trie_n3
             trie_n4 = engine.trie_n4
             has_multi_level = True
         else:
             initial_pattern_count = trie_n3.pattern_count
             console.print(f"[green]Loaded N3 Trie for {cfg.symbol} ({trie_n3.pattern_count} patterns)[/green]")
+            # v0.41.0 FIX-1B: Replace None N1/N2 with empty tries instead of
+            # running in single-level mode. This ensures the 4-level matching
+            # pipeline always runs, with empty levels getting 0 confidence.
+            if trie_n1 is None:
+                console.print("[yellow]WARNING: N1 universal pool not found. Using empty trie.[/yellow]")
+                trie_n1 = PPMTTrie(name="universal_empty")
+            if trie_n2 is None:
+                console.print(f"[yellow]WARNING: N2 class pool for {info.asset_class} not found. Using empty trie.[/yellow]")
+                trie_n2 = PPMTTrie(name=f"class_empty:{info.asset_class}")
             if has_multi_level:
                 console.print(f"[green]All 4 levels loaded: N1={trie_n1.pattern_count}, "
                               f"N2={trie_n2.pattern_count}, N3={trie_n3.pattern_count}, "
                               f"N4={trie_n4.pattern_count}[/green]")
             else:
-                console.print(f"[yellow]Only N3 trie available — running in single-level mode[/yellow]")
+                console.print(f"[yellow]N1/N2 loaded (possibly empty). N4 unavailable — running 3-level mode.[/yellow]")
 
         # Primary trie for PredictionEngine + Living Trie
         trie = trie_n3

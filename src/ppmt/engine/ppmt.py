@@ -40,6 +40,7 @@ Architecture:
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -55,6 +56,8 @@ from ppmt.core.regime import RegimeDetector
 from ppmt.engine.weights import AdaptiveWeights, LevelStats, WEIGHT_PROFILES
 from ppmt.engine.signal import SignalGenerator, Signal, SignalType
 from ppmt.data.storage import UNIVERSAL_POOL_KEY, class_pool_key
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -257,6 +260,52 @@ class PPMT:
         # (Re)initialize buffers in case attach_storage is called between builds
         self._n1_buffer = PPMTTrie(name="universal_buffer")
         self._n2_buffer = PPMTTrie(name=f"class_buffer:{self.asset_class}")
+
+    def ensure_shared_pools(self, storage) -> dict:
+        """
+        v0.41.0 FIX-1B: Check if N1 and N2 shared pools exist and have data.
+
+        Call this after ``attach_storage(storage)`` and ``build()`` to verify
+        that the cross-asset pools were actually populated.  Returns a dict
+        with pool status that callers can log or act on.
+
+        Returns:
+            Dict with keys ``n1_universal`` and ``n2_class``, each containing
+            ``exists`` (bool) and ``pattern_count`` (int).
+        """
+        status = {
+            "n1_universal": {"exists": False, "pattern_count": 0},
+            "n2_class": {"exists": False, "pattern_count": 0},
+        }
+        try:
+            n1 = storage.load_trie(UNIVERSAL_POOL_KEY, "n1")
+            if n1 is not None:
+                status["n1_universal"] = {
+                    "exists": True,
+                    "pattern_count": n1.pattern_count,
+                }
+        except Exception as e:
+            logger.warning(f"ensure_shared_pools: N1 check failed: {e}")
+
+        try:
+            n2_key = class_pool_key(self.asset_class)
+            n2 = storage.load_trie(n2_key, "n2")
+            if n2 is not None:
+                status["n2_class"] = {
+                    "exists": True,
+                    "pattern_count": n2.pattern_count,
+                }
+        except Exception as e:
+            logger.warning(f"ensure_shared_pools: N2 check failed: {e}")
+
+        if not status["n1_universal"]["exists"]:
+            logger.warning("ensure_shared_pools: N1 universal pool is MISSING")
+        if not status["n2_class"]["exists"]:
+            logger.warning(
+                f"ensure_shared_pools: N2 class pool for {self.asset_class} is MISSING"
+            )
+
+        return status
 
     @staticmethod
     def _infer_weight_profile(asset_class: str) -> str:
@@ -667,6 +716,36 @@ class PPMT:
             # Reset buffers for next build() call
             self._n1_buffer = PPMTTrie(name="universal_buffer")
             self._n2_buffer = PPMTTrie(name=f"class_buffer:{self.asset_class}")
+
+            # v0.41.0 FIX-1B: Verify pools were actually saved to storage.
+            # This catches silent save failures that would otherwise go
+            # undetected until N1/N2 load as None in paper_trader/realtime.
+            try:
+                saved_n1 = self._storage.load_trie(UNIVERSAL_POOL_KEY, "n1")
+                if saved_n1 is not None and saved_n1.pattern_count > 0:
+                    logger.info(
+                        f"N1 universal pool verified: {saved_n1.pattern_count} patterns"
+                    )
+                else:
+                    logger.warning(
+                        "N1 universal pool save verification FAILED — "
+                        "pool is empty or missing after build!"
+                    )
+
+                n2_key = class_pool_key(self.asset_class)
+                saved_n2 = self._storage.load_trie(n2_key, "n2")
+                if saved_n2 is not None and saved_n2.pattern_count > 0:
+                    logger.info(
+                        f"N2 class pool ({self.asset_class}) verified: "
+                        f"{saved_n2.pattern_count} patterns"
+                    )
+                else:
+                    logger.warning(
+                        f"N2 class pool ({self.asset_class}) save verification FAILED — "
+                        f"pool is empty or missing after build!"
+                    )
+            except Exception as e:
+                logger.warning(f"Pool verification error (non-fatal): {e}")
 
         return count
 
