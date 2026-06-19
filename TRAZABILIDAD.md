@@ -7433,3 +7433,135 @@ una dirección.
 en metadata.py pero NO integrado al motor todavía. Los callers siguen
 usando `meta.confidence` y `meta.expected_move_pct` (legacy). Para activar
 el edge hay que hacer la integración del paso 1 arriba.
+
+---
+
+## v0.40.20-audit (2026-06-19) — Análisis separación LONG/SHORT: medir antes de integrar
+
+**Contexto**: Tras FIX-A v1 (v0.40.19, commit e13be4c) el usuario pidió PAUSAR
+la integración al motor y MEDIR primero cuánta información direccional se pierde
+hoy por agregación LONG/SHORT en la metadata.
+
+### Setup experimental
+
+- 8 tokens × 70k train / 30k test velas 1m = **34,206 señales** de test
+- α=4, W=7, PL=5 (idéntico a long_confidence_audit.py)
+- Trie N3 per-asset sobre train, walk-forward sobre test
+- Sin fees, sin SL/TP, hold = PATTERN_LEN × WINDOW = 35 velas
+
+### Análisis 1: Distribución de |long_wr - short_wr| por patrón único
+
+**8,190 patrones únicos** analizados:
+
+| Métrica | Valor |
+|---|---|
+| Media | 42.61 pts |
+| Mediana | 38.28 pts |
+| P10 | 7.69 pts |
+| P50 | 38.28 pts |
+| P90 | 87.50 pts |
+
+% de patrones con diferencia superior a:
+
+| Umbral | % |
+|---|---|
+| >10 pts | 86.34% |
+| >20 pts | 70.53% |
+| >30 pts | 59.30% |
+| >40 pts | 46.28% |
+
+**Conclusión**: Solo 13.66% de patrones son cuasi-simétricos. La asimetría
+direccional es la norma, no la excepción. La información existe en los datos.
+
+### Análisis 2: Comparativa de 8 políticas offline
+
+| Política | N tomadas | Skip % | WR | PnL total | PnL medio | LONG PnL medio | SHORT PnL medio |
+|---|---|---|---|---|---|---|---|
+| **P1_current** (baseline) | 34,206 | 0% | 47.83% | -98.27 | -0.0029 | -0.0189 | +0.0125 |
+| P2_majority_simple | 34,206 | 0% | 47.58% | -322.28 | -0.0094 | -0.0232 | +0.0068 |
+| P3_majority_min5 | 32,508 | 4.96% | 47.59% | -318.86 | -0.0098 | -0.0220 | +0.0045 |
+| P4_current+asym_filter_020 | 24,282 | 29.01% | 47.55% | -206.56 | -0.0085 | -0.0208 | +0.0036 |
+| P5_alt_thr60_strict_min10 | 4,833 | 85.87% | 47.47% | -107.04 | -0.0221 | -0.0131 | -0.0323 |
+| **P6_majority_avg_move** ⭐ | 34,203 | 0.01% | 47.90% | **+81.05** | **+0.0024** | -0.0136 | +0.0176 |
+| P7_avg_move_thr_030_min5 | 11,073 | 67.63% | 45.80% | -156.42 | -0.0141 | -0.0170 | -0.0109 |
+| P8_weighted_score | 34,203 | 0.01% | 47.83% | -98.08 | -0.0029 | -0.0189 | +0.0125 |
+
+**Definiciones**:
+- P1 (current): `dir = sign(expected_move_pct)` ← motor actual
+- P2 (majority_simple): `dir = LONG si long_wr > short_wr, sino SHORT`
+- P5 (user's policy): `LONG si long_count>=10 & long_wr>0.60; SHORT análogo; sino SKIP`
+- P6 (majority_avg_move): `dir = LONG si long_avg_move > |short_avg_move|, sino SHORT`
+- P8 (weighted_score): `dir = sign(long_count*long_avg + short_count*short_avg)` (≡ P1)
+
+### Hallazgos críticos
+
+1. **La implementación actual de DirectionStats (FIX-A v1) NO aporta información nueva.**
+   Define `long_count = #(move_pct>0)` y `long_wr = long_count/N` — matemáticamente
+   equivalente al `win_rate` legacy. Por eso P2 (majority_simple) PEORA el PnL
+   (-322 vs -98) y P5 (política del usuario) descarta 85.87% de señales sin mejorar.
+
+2. **La información "destruida por promediar" es avg_move por dirección, NO win_rate.**
+   P6 usa `long_avg_move` vs `|short_avg_move|` (magnitud esperada del move por
+   dirección) y gana: +81 PnL total vs -98 baseline (+179pp delta), manteniendo
+   coverage (34,203 vs 34,206 señales) y mejorando AMBAS direcciones:
+   - LONG: -0.0189 → -0.0136 (mejoró +0.0053pp)
+   - SHORT: +0.0125 → +0.0176 (mejoró +0.0051pp)
+
+3. **La especificación del usuario con `win_rate=0.82` (18/22 largos ganaron)
+   requiere definir "win" con threshold.** En FIX-A v1, `win_rate_long = 1.0`
+   siempre (por construcción). Para que `win_rate=0.82` tenga sentido, "win"
+   debe ser `move_pct > X` con X > 0 — no contemplado en FIX-A v1.
+
+### Veredicto y recomendación
+
+| Pregunta | Respuesta |
+|---|---|
+| ¿La mayoría de patrones son simétricos? | NO — solo 13.66%. |
+| ¿La info direccional existe? | SÍ — mediana 38 pts. |
+| ¿Política simple `long_wr > 0.60` la explota? | NO — empeora. |
+| ¿Existe política que sí la explote? | SÍ — P6 (majority_avg_move), +179pp PnL. |
+| ¿FIX-A v1 aporta valor? | PARCIAL — campos existen, motor aún no los usa. |
+
+**Recomendación al usuario**:
+- **NO integrar P5** (política simple del usuario): empeora el sistema.
+- **SÍ integrar P6** (~5 líneas en `signal.py`):
+  ```python
+  if meta.long_count > 0 and meta.short_count > 0:
+      long_strength = meta.avg_move_long           # positivo
+      short_strength = abs(meta.avg_move_short)    # también positivo
+      direction = "LONG" if long_strength > short_strength else "SHORT"
+  elif meta.long_count > 0:
+      direction = "LONG"
+  elif meta.short_count > 0:
+      direction = "SHORT"
+  else:
+      return None
+  ```
+- **Validación adicional sugerida antes de integrar**: walk-forward con múltiples
+  seeds temporales, test con SL/TP dinámico real, breakdown per-token.
+
+### Artefactos
+
+- `/home/z/my-project/scripts/long_short_separation_analysis.py` (también en
+  `ppmt/scripts/audit_trie_1m/`)
+- `/home/z/my-project/scripts/long_short_policy_comparison.py` (también en
+  `ppmt/scripts/audit_trie_1m/`)
+- `/home/z/my-project/download/long_short_separation/`:
+  * `per_pattern_stats.csv` — 8,190 patrones únicos
+  * `per_signal_rich.csv` — 34,206 señales con todos los campos
+  * `per_signal_comparison.csv` — formato previo
+  * `policy_comparison.csv` — tabla comparativa de 8 políticas
+  * `policy_comparison.json` — JSON estructurado
+  * `analysis.md` / `analysis.json` — reporte del primer script
+  * `REPORTE_FINAL.md` — reporte consolidado legible
+
+### Estado del repo
+
+- Commit 7ba7e41 pusheado a `coverdraft/ppmt`.
+- NO se modificó el motor. NO se hicieron commits a `src/ppmt/`.
+- Existen cambios WIP sin commitear en `src/ppmt/core/trie.py`,
+  `src/ppmt/engine/ppmt.py`, `src/ppmt/engine/signal.py` de un intento previo
+  de integración de FIX-A al motor (implementan `long_edge = win_rate_long ×
+  avg_move_long` vs `short_edge` — variante de P6 con peso por win_rate).
+  Pendiente: decidir si se commitean, se refinan o se descartan en base a la
+  decisión del usuario sobre P6.
