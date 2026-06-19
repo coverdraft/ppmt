@@ -9594,3 +9594,99 @@ Con agent-browser + eval directo:
 ### Commits
 
 - `fix(v0.40.27): real-time chart + capital allocation + multi-start` (este commit)
+
+---
+
+## v0.40.28 — Real-time chart + Binance spot-only fix + state-desync fixes
+
+**Fecha:** 2026-06-19
+**Trigger:** Usuario reportó que v0.40.27 mostraba "STOPPED" en el header aunque el motor dijera RUNNING (en el feed de operaciones), el chart no se actualizaba en tiempo real (precio stale en $63,760), y el server logueaba `Failed to connect: binance GET https://fapi.binance.com/fapi/v1/exchangeInfo`.
+
+### Problemas diagnosticados
+
+1. **Binance futures endpoint bloqueado** — `ccxt_async.binance.load_markets()` por defecto carga spot + USD-M futures + COIN-M futures. El endpoint `fapi.binance.com` está siendo bloqueado intermitentemente desde esta red EU. Cuando falla, `load_markets()` lanza excepción, el engine retorna early, y NUNCA arranca el polling loop → no hay actualizaciones de precio → chart stays stale.
+
+2. **Estado desincronizado RUNNING ↔ STOPPED** — El engine llamaba `_update_terminal_state(is_running=True)` en la línea ~2224 ANTES de intentar conectar al exchange. `_state_cb` flipaba el status a RUNNING prematuramente. Cuando load_markets fallaba, el status iba a STOPPED sin mensaje. El frontend veía "Motor RUNNING" en el feed pero el header decía STOPPED.
+
+3. **Status atascado en CONNECTING** — La lógica de transición de status en `_state_cb` solo promovía STARTING/STARTING_TRADER → RUNNING cuando llegaba `is_running=True`. Una vez que el status pasaba a CONNECTING, jamás llegaba a RUNNING aunque el polling ya estuviera funcionando.
+
+4. **`_pollSessionStatus` no actualizaba el header badge** — Solo llamaba `updateTradingBadge('LIVE')` (que actualiza el badge chico del Trading tab) pero NO actualizaba `headerTradingBadge` (el badge grande en el header superior).
+
+5. **Chart sin feed cuando no hay sesión activa** — Aún con todo lo demás arreglado, el chart necesitaba un feed de precios en vivo. Si no había sesión RUNNING, el chart estaba frozen.
+
+6. **`poll_exchange` leak** — El `finally` block del engine solo cerraba `exchange` (order execution), NO `poll_exchange` (REST polling). Cada multi-stop dejaba una sesión aiohttp abierta → "Unclosed client session" warnings → eventualmente mataba el server.
+
+7. **Bybit bloqueado** — El toolbar del chart tenía Binance + Bybit. Bybit retorna 403 Forbidden desde esta red. Falta MEXC que sí funciona.
+
+### Fixes aplicados (8 patches en 3 archivos)
+
+**`src/ppmt/engine/realtime.py`:**
+
+- **P1:** Configurar `poll_exchange` con `options={'defaultType': 'spot', 'fetchMarkets': ['spot']}` cuando el exchange es binance. Esto hace que `load_markets()` solo hit `api.binance.com/api/v3/exchangeInfo` (spot) y NUNCA `fapi.binance.com` (futures). Verificado: load_markets carga 3600 mercados (solo spot) vs 4431 (spot+futures+delivery) antes.
+
+- **P2:** Cambiar `_update_terminal_state(is_running=True)` inicial a `is_running=False` con `websocket_status="connecting"`. El `is_running=True` ahora solo se setea cuando el polling loop arranca (línea 2606).
+
+- **P3:** Capturar failure de `load_markets()` y propagar via `_update_terminal_state(error=...)`. Antes el engine retornaba silenciosamente; ahora la sesión queda con `status=ERROR` + mensaje explicativo.
+
+- **P7 (nuevo):** Inicializar `poll_exchange = None` antes del try block + agregar `if poll_exchange is not None: await poll_exchange.close()` en el finally block. Esto previene el "Unclosed client session" leak que mataba el server tras varios start/stop.
+
+**`src/ppmt/terminal/server.py`:**
+
+- **P4:** Aplicar la misma config spot-only a los endpoints `/api/ohlcv` y `/api/market/price` (que usan sync ccxt). Aunque sync ccxt no había fallado todavía, aplicamos la misma robustez.
+
+- **P8 (nuevo):** En `_state_cb`, promover CONNECTING y WARMING_UP a RUNNING cuando llega `is_running=True` (antes solo STARTING y STARTING_TRADER se promovían). Fixea sesiones atascadas en CONNECTING aunque el polling estuviera funcionando.
+
+**`src/ppmt/terminal/static/index.html`:**
+
+- **P5:** Agregar MEXC al dropdown `chartExchange` (entre Binance y Bybit). Verificado: MEXC funciona, Bybit retorna 403.
+
+- **P6:** `_pollSessionStatus` ahora actualiza AMBOS badges (header + trading tab) cuando detecta RUNNING/ERROR/STOPPED. Antes solo actualizaba el chico. También agregada transición STOPPED (cuando la sesión va STARTING → STOPPED directamente sin pasar por RUNNING).
+
+- **P7 (nuevo):** Agregada función `_startChartTicker()` que polla `/api/market/price` cada 2s para el símbolo del chart y alimenta el resultado a `_updateChartLiveTick()`. Esto hace que el chart se actualice en vivo incluso cuando:
+  - La página acaba de cargar (sin sesión activa)
+  - La sesión está en warmup (10-15s antes del primer current_price)
+  - La sesión falló (el usuario sigue viendo precios live)
+  El ticker se arranca desde DOMContentLoaded + desde `_pollSessionStatus` en cada transition.
+
+- **P8:** Llamar `_startChartTicker()` desde DOMContentLoaded (después de un setTimeout 500ms).
+
+- Version bump v0.40.27 → v0.40.28 en 5 lugares: title HTML, logo, footer, banner CLI, pyproject.toml, FastAPI app metadata.
+
+### Verificación end-to-end
+
+**Test 1: Binance spot-only connection**
+- `ccxt_async.binance({options: {defaultType: 'spot', fetchMarkets: ['spot']}}).load_markets()` → 3600 markets, no `fapi.binance.com` hits.
+- `fetch_ohlcv('BTC/USDT', '1m', limit=2)` → 2 candles con timestamps correctos.
+- MEXC: `ccxt_async.mexc.load_markets()` → 3265 markets OK.
+- Bybit: 403 Forbidden (confirmado bloqueado).
+
+**Test 2: Single TF lifecycle (1m)**
+- POST /api/multi-start BTC/USDT 1m → `{"ok":true,"launched":[{"node_id":"btc_1m","status":"LAUNCHED"}]}`
+- Wait 22s → status=RUNNING, price=$62,450.00, candles=201, regime=ranging.
+- POST /api/multi-stop?node_id=btc_1m → `{"ok":true,"stopped":["btc_1m"]}`.
+- Server sobrevive el stop (gracias al fix P7 de poll_exchange.close()).
+
+**Test 3: All 5 TFs sequential**
+- 1m → RUNNING price=$62,566.00 candles=201 ✓
+- 5m → RUNNING price=$62,536.00 candles=201 ✓
+- 15m → RUNNING price=$62,546.01 candles=201 ✓
+- 30m → RUNNING price=$62,553.78 candles=201 ✓ (con INSUFFICIENT_DATA warning pero procede en paper)
+- 1h → RUNNING price=$62,568.94 candles=201 ✓
+
+**Test 4: Real-time price updates**
+- T=0s: $62,727.66
+- T=30s: $62,798.00 (candle 202, polling activo)
+- T=60s: $62,776.00 (sigue actualizando)
+
+**Test 5: UI features**
+- Title: "PPMT Terminal v0.40.28" ✓
+- Logo: v0.40.28 ✓
+- Footer: "PPMT v0.40.28" ✓
+- chartExchange dropdown: Binance / MEXC / Bybit ✓
+- JS functions: _startChartTicker ✓, _stopChartTicker ✓, _updateChartLiveTick ✓, _pollSessionStatus ✓, updateAllocation ✓, startPaperTrading ✓, stopTrading ✓, loadChart ✓
+- 9 markers "v0.40.28" en el HTML.
+
+### Commits
+
+- `fix(v0.40.28): spot-only ccxt + real-time chart ticker + state-desync fixes` (este commit)
+

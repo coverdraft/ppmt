@@ -58,7 +58,7 @@ async def _lifespan(app: FastAPI):
         logger.debug("Could not capture event loop on startup: %s", _e)
     yield
 
-app = FastAPI(title="PPMT Terminal", version="0.40.11", lifespan=_lifespan)
+app = FastAPI(title="PPMT Terminal", version="0.40.28", lifespan=_lifespan)
 
 # Global terminal state (shared with engine)
 terminal_state: TerminalState = get_terminal_state()
@@ -494,7 +494,12 @@ async def get_ohlcv(
         ex = getattr(ccxt, exchange, None)
         if ex is None:
             return {"ok": False, "error": f"Exchange '{exchange}' not found"}
-        exc = ex()
+        # v0.40.28: spot-only for binance — avoids fapi.binance.com block.
+        _opts = {}
+        if exchange.lower() == 'binance':
+            _opts = {'enableRateLimit': True,
+                     'options': {'defaultType': 'spot', 'fetchMarkets': ['spot']}}
+        exc = ex(_opts)
         try:
             ohlcv = exc.fetch_ohlcv(symbol, timeframe, limit=min(limit, 1000))
             candles = []
@@ -526,7 +531,12 @@ async def get_market_price(
         ex = getattr(ccxt, exchange, None)
         if ex is None:
             return {"ok": False, "error": f"Exchange '{exchange}' not found"}
-        exc = ex()
+        # v0.40.28: spot-only for binance — same fapi fix as /api/ohlcv.
+        _opts = {}
+        if exchange.lower() == 'binance':
+            _opts = {'enableRateLimit': True,
+                     'options': {'defaultType': 'spot', 'fetchMarkets': ['spot']}}
+        exc = ex(_opts)
         try:
             ticker = exc.fetch_ticker(symbol)
             return {
@@ -1268,7 +1278,13 @@ async def multi_start(req: MultiStartRequest) -> dict:
                                 s["signals"] = max(s.get("signals", 0) + 1, len(s["signals_history"]))
                     s["last_update_ts"] = time.time()
                     # Status transitions driven by what we just learned
-                    if kwargs.get("is_running") and s["status"] in ("STARTING_TRADER", "STARTING"):
+                    # v0.40.28: also promote CONNECTING/WARMING_UP to RUNNING
+                    # when is_running=True arrives (previously only STARTING
+                    # and STARTING_TRADER would promote, leaving sessions
+                    # stuck in CONNECTING forever once they hit that state).
+                    if kwargs.get("is_running") and s["status"] in (
+                        "STARTING_TRADER", "STARTING", "CONNECTING", "WARMING_UP",
+                    ):
                         s["status"] = "RUNNING"
                     elif (kwargs.get("websocket_status") == "connecting"
                           and s["status"] in ("STARTING_TRADER", "STARTING")):

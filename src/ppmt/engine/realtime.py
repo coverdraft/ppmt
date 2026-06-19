@@ -2221,8 +2221,12 @@ class RealtimeTrader:
         console.print()
 
         # v0.15.0: Initialize TerminalState for live dashboard
+        # v0.40.28: is_running=False until the polling loop actually
+        # delivers the first price tick. Previously this was True, which
+        # made _state_cb flip the session to RUNNING prematurely —
+        # misleading the user when load_markets() then failed.
         self._update_terminal_state(
-            is_running=True,
+            is_running=False,
             mode="live",
             started_at=time.time(),
             symbol=cfg.symbol,
@@ -2253,6 +2257,11 @@ class RealtimeTrader:
                 def update(self, *a, **kw): pass
 
             live_ctx = Live(console=console, refresh_per_second=2) if not headless else _NullLive()
+
+            # v0.40.28: initialize poll_exchange to None so the finally
+            # block can safely close it even if we never entered the
+            # REST polling branch (e.g. CancelledError during warmup).
+            poll_exchange = None
 
             with live_ctx as live_display:
 
@@ -2449,11 +2458,23 @@ class RealtimeTrader:
                         storage.close()
                         return result
 
-                    exchange_config = {}
+                    exchange_config = {'enableRateLimit': True}
                     if cfg.api_key:
                         exchange_config['apiKey'] = cfg.api_key
                     if cfg.api_secret:
                         exchange_config['secret'] = cfg.api_secret
+                    # v0.40.28: spot-only markets. Without this, ccxt's
+                    # binance.load_markets() also hits fapi.binance.com
+                    # (USD-M futures) + dapi.binance.com (COIN-M futures).
+                    # fapi is intermittently blocked from EU networks —
+                    # when it 403s, the whole load_markets() raises and
+                    # the engine returns early with no polling, no live
+                    # prices, no chart updates. Restricting to spot avoids
+                    # the futures endpoints entirely.
+                    if cfg.exchange.lower() == 'binance':
+                        exchange_config.setdefault('options', {})
+                        exchange_config['options']['defaultType'] = 'spot'
+                        exchange_config['options']['fetchMarkets'] = ['spot']
 
                     poll_exchange = exchange_class(exchange_config)
                     if cfg.testnet:
@@ -2463,7 +2484,19 @@ class RealtimeTrader:
                         await poll_exchange.load_markets()
                         console.print(f"[green]Connected to {cfg.exchange} (REST polling)[/green]")
                     except Exception as e:
+                        # v0.40.28: Capture the failure as a session ERROR
+                        # so the dashboard can show WHY the motor stopped
+                        # (was previously silent — UI just showed STOPPED).
+                        _err_msg = f"Exchange connection failed: {e}"
                         console.print(f"[red]Failed to connect: {e}[/red]")
+                        try:
+                            self._update_terminal_state(
+                                is_running=False,
+                                websocket_status="disconnected",
+                                error=_err_msg,
+                            )
+                        except Exception:
+                            pass
                         await poll_exchange.close()
                         storage.close()
                         return result
@@ -2638,6 +2671,16 @@ class RealtimeTrader:
             if exchange is not None:
                 try:
                     await exchange.close()
+                except Exception:
+                    pass
+            # v0.40.28: also close poll_exchange (REST polling exchange).
+            # Previously only `exchange` (order-execution) was closed, but
+            # `poll_exchange` was leaked — causing "Unclosed client session"
+            # warnings + eventual server death when many sessions were
+            # started/stopped in sequence.
+            if poll_exchange is not None:
+                try:
+                    await poll_exchange.close()
                 except Exception:
                     pass
 

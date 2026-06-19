@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>PPMT Terminal v0.40.27</title>
+<title>PPMT Terminal v0.40.28</title>
 <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -829,7 +829,7 @@ tr:hover td{background:rgba(95,168,245,.07)}
 <!-- ========== HEADER ========== -->
 <header class="header">
   <div class="header-left">
-    <span class="logo">PPMT<span class="logo-ver">v0.40.27</span></span>
+    <span class="logo">PPMT<span class="logo-ver">v0.40.28</span></span>
     <span class="status-dot stopped" id="headerDot"></span>
     <span id="headerStatus" style="font-family:var(--mono);font-size:10px;color:var(--text2)">DETENIDO</span>
   </div>
@@ -866,8 +866,9 @@ tr:hover td{background:rgba(95,168,245,.07)}
         <option value="1d">1d</option>
       </select>
       <label>Exchange</label>
-      <select id="chartExchange" style="width:70px">
+      <select id="chartExchange" style="width:90px">
         <option value="binance" selected>Binance</option>
+        <option value="mexc">MEXC</option>
         <option value="bybit">Bybit</option>
       </select>
       <button class="btn btn-ghost btn-sm" onclick="loadChart()">Reload</button>
@@ -1289,7 +1290,7 @@ tr:hover td{background:rgba(95,168,245,.07)}
     <div class="status-item" style="margin-left:12px"><span id="statusMessage" style="color:var(--text3)">Listo.</span></div>
   </div>
   <div class="status-right">
-    <span>PPMT v0.40.27</span>
+    <span>PPMT v0.40.28</span>
     <div class="status-item"><span class="label">Uptime:</span><span class="value" id="btmUptime">00:00:00</span></div>
   </div>
 </footer>
@@ -1883,6 +1884,62 @@ function _updateChartLiveTick(price, symbol, timeframe) {
 }
 
 // ============================================================
+// v0.40.28: CHART FALLBACK TICKER
+// ============================================================
+// When no active trading session is pushing current_price for the
+// chart's symbol (e.g. page just loaded, no session running, or
+// session errored out), the chart's last candle would stay frozen.
+// This ticker polls /api/market/price every 2s for the chart's
+// symbol and feeds the result to _updateChartLiveTick. Once a
+// session's WS snapshot starts delivering current_price for the
+// matching symbol, the ticker backs off (becomes a no-op) to
+// avoid duplicate updates.
+let _chartTickerHandle = null;
+let _chartTickerLastPrice = 0;
+function _startChartTicker() {
+  if (_chartTickerHandle) return; // already running
+  _chartTickerHandle = setInterval(async () => {
+    try {
+      const symbol = (document.getElementById('chartSymbol') || {}).value;
+      const tf = (document.getElementById('chartTimeframe') || {}).value || '5m';
+      const exch = (document.getElementById('chartExchange') || {}).value || 'binance';
+      if (!symbol) return;
+      const url = `${API}/api/market/price?symbol=${encodeURIComponent(symbol)}&exchange=${encodeURIComponent(exch)}`;
+      const res = await fetch(url);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (!data || !data.ok || !data.price) return;
+      const price = parseFloat(data.price);
+      if (!price || price <= 0) return;
+      // If the price hasn't changed, skip the chart update (the WS
+      // snapshot may have already updated it for us).
+      if (price === _chartTickerLastPrice) return;
+      _chartTickerLastPrice = price;
+      // Update the chart's last candle.
+      if (typeof _updateChartLiveTick === 'function') {
+        _updateChartLiveTick(price, symbol, tf);
+      }
+      // Also update the header price if no session is broadcasting.
+      const headerPrice = document.getElementById('headerPrice');
+      if (headerPrice && headerPrice.textContent === '--') {
+        headerPrice.textContent = (typeof formatPrice === 'function') ? formatPrice(price) : price.toString();
+      }
+      // Also update the ticket-side live price stat.
+      const ctrlPrice = document.getElementById('ctrlPrice');
+      if (ctrlPrice) ctrlPrice.textContent = (typeof formatPrice === 'function') ? formatPrice(price) : price.toString();
+    } catch (e) {
+      // network blip — non-critical
+    }
+  }, 2000);
+}
+function _stopChartTicker() {
+  if (_chartTickerHandle) {
+    clearInterval(_chartTickerHandle);
+    _chartTickerHandle = null;
+  }
+}
+
+// ============================================================
 // v0.40.27: SESSION STATUS POLLER (post-Start)
 // ============================================================
 // After /api/multi-start returns, the session goes through states:
@@ -1912,22 +1969,58 @@ function _pollSessionStatus(symbol, timeframe, attemptsLeft = 30) {
       if (st === 'RUNNING') {
         if (btn) { btn.textContent = 'Running'; btn.disabled = true; }
         document.getElementById('btnStopTrading').disabled = false;
+        // v0.40.28: update BOTH badges (header + trading tab) so the
+        // header at the top of the screen also shows LIVE.
         updateTradingBadge('LIVE');
+        const headerTB = document.getElementById('headerTradingBadge');
+        if (headerTB) { headerTB.textContent = 'LIVE'; headerTB.className = 'badge badge-live'; }
+        const headerDot = document.getElementById('headerDot');
+        if (headerDot) headerDot.className = 'status-dot live';
+        const headerStatus = document.getElementById('headerStatus');
+        if (headerStatus) { headerStatus.textContent = 'LIVE'; headerStatus.style.color = 'var(--green)'; }
         showStatusMsg(`Motor operando: ${symbol} ${timeframe} — esperando señales…`);
         if (typeof appendOpsFeed === 'function') {
           appendOpsFeed('info', `Motor RUNNING — ${symbol} ${timeframe} — analizando velas…`);
         }
+        // v0.40.28: kick off the chart fallback ticker — the chart
+        // needs a live price feed even when the engine is slow to
+        // deliver the first current_price (warmup can take 10-15s).
+        if (typeof _startChartTicker === 'function') _startChartTicker();
         return; // stop polling
       }
       if (st === 'ERROR' || st === 'VALIDATION_FAILED') {
         if (btn) { btn.textContent = 'Start Paper'; btn.disabled = false; }
         document.getElementById('btnStopTrading').disabled = true;
         updateTradingBadge('ERROR');
+        const headerTB = document.getElementById('headerTradingBadge');
+        if (headerTB) { headerTB.textContent = 'ERROR'; headerTB.className = 'badge badge-error'; }
         const errMsg = sess.error || st;
         showStatusMsg(`Error iniciando: ${errMsg}`);
         if (typeof appendOpsFeed === 'function') {
           appendOpsFeed('info', `Error: ${errMsg}`);
         }
+        // v0.40.28: even on engine error, kick off the chart ticker
+        // so the chart shows live prices (just without trading signals).
+        if (typeof _startChartTicker === 'function') _startChartTicker();
+        return;
+      }
+      if (st === 'STOPPED') {
+        // v0.40.28: handle the case where the session went STARTING ->
+        // STOPPED directly (e.g. validation returned early, or load_markets
+        // failed before _state_cb set is_running=True).
+        if (btn) { btn.textContent = 'Start Paper'; btn.disabled = false; }
+        document.getElementById('btnStopTrading').disabled = true;
+        updateTradingBadge('STOPPED');
+        const headerTB = document.getElementById('headerTradingBadge');
+        if (headerTB) { headerTB.textContent = 'STOPPED'; headerTB.className = 'badge badge-stopped'; }
+        const errMsg = sess.error || 'Session stopped unexpectedly';
+        if (errMsg && errMsg.indexOf('WARNING') === -1) {
+          showStatusMsg(`Motor detenido: ${errMsg}`);
+          if (typeof appendOpsFeed === 'function') {
+            appendOpsFeed('info', `Motor STOPPED: ${errMsg}`);
+          }
+        }
+        if (typeof _startChartTicker === 'function') _startChartTicker();
         return;
       }
       // Still starting — update button text to show progress
@@ -5332,6 +5425,11 @@ document.addEventListener('DOMContentLoaded', () => {
       pollMultiStatus();
     }
   }, 800);
+  // v0.40.28: kick off the chart fallback ticker so the chart shows
+  // live prices even before any trading session is started.
+  setTimeout(() => {
+    if (typeof _startChartTicker === 'function') _startChartTicker();
+  }, 500);
 });
 
 // Append operations feed items (called by WS handler when signals/trades arrive)
