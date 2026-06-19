@@ -240,6 +240,22 @@ class SignalThresholds:
 # Regime thresholds
 # -------------------------------------------------------------------- #
 
+# Per-timeframe simple mode cutoffs (FASE 3 Tarea 3.2)
+# Lower timeframes need tighter cutoffs because:
+# - 1m candles rarely move 2% (the old default simple_move_cutoff)
+# - Most 1m candles would be classified as 'ranging'
+# - N4 needs balanced regime distribution to be useful
+TIMEFRAME_REGIME_CUTOFFS = {
+    "1m":  {"simple_vol_cutoff": 0.025, "simple_move_cutoff": 0.008},
+    "5m":  {"simple_vol_cutoff": 0.035, "simple_move_cutoff": 0.012},
+    "15m": {"simple_vol_cutoff": 0.050, "simple_move_cutoff": 0.018},
+    "30m": {"simple_vol_cutoff": 0.060, "simple_move_cutoff": 0.020},
+    "1h":  {"simple_vol_cutoff": 0.080, "simple_move_cutoff": 0.020},  # Historical defaults
+    "4h":  {"simple_vol_cutoff": 0.120, "simple_move_cutoff": 0.030},
+    "1d":  {"simple_vol_cutoff": 0.150, "simple_move_cutoff": 0.040},
+}
+
+
 @dataclass(frozen=True)
 class RegimeThresholds:
     """
@@ -276,3 +292,27 @@ class RegimeThresholds:
     def default(cls) -> "RegimeThresholds":
         """Crypto-calibrated defaults (matches RegimeDetector v0.11.0)."""
         return cls()
+
+    @classmethod
+    def for_timeframe(cls, timeframe: str) -> "RegimeThresholds":
+        """Create thresholds calibrated for a specific timeframe.
+
+        Lower timeframes need tighter cutoffs because:
+        - 1m candles rarely move 2% (the old default)
+        - Most 1m candles would be classified as 'ranging'
+        - N4 needs balanced regime distribution to be useful
+
+        Args:
+            timeframe: Candle interval string (e.g. '1m', '5m', '15m', '1h', '4h', '1d').
+                       Unknown timeframes fall back to 1h defaults.
+
+        Returns:
+            RegimeThresholds with timeframe-appropriate simple-mode cutoffs.
+        """
+        cutoffs = TIMEFRAME_REGIME_CUTOFFS.get(timeframe, {
+            "simple_vol_cutoff": 0.080, "simple_move_cutoff": 0.020
+        })
+        return cls(
+            simple_vol_cutoff=cutoffs["simple_vol_cutoff"],
+            simple_move_cutoff=cutoffs["simple_move_cutoff"],
+        )

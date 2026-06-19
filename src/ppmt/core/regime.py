@@ -149,7 +149,7 @@ class RegimeDetector:
     # the full RegimeDetector.
     # ---------------------------------------------------------------- #
 
-    def detect_simple(self, window_df) -> str:
+    def detect_simple(self, window_df, timeframe: str = None) -> str:
         """
         Lightweight regime detection from a window of OHLCV data.
 
@@ -162,9 +162,16 @@ class RegimeDetector:
         Cutoffs come from RegimeThresholds (default 0.08 / 0.02, matching
         the historical hardcoded values in ppmt.py v0.38.7).
 
+        v0.41.0 (FASE 3, Tarea 3.2): Accepts optional `timeframe` parameter.
+        When provided, uses RegimeThresholds.for_timeframe() which applies
+        calibrated cutoffs for each timeframe (e.g. tighter cutoffs for 1m/5m
+        candles so they don't all classify as 'ranging').
+
         Args:
             window_df: pd.DataFrame with columns 'close', 'high', 'low'
                        (any length >= 2; the caller picks the window size).
+            timeframe: Optional candle interval string (e.g. '1m', '5m', '1h').
+                       When None, uses RegimeThresholds.default().
 
         Returns:
             One of: 'trending_up', 'trending_down', 'volatile', 'ranging'.
@@ -174,7 +181,10 @@ class RegimeDetector:
 
         # Lazy import to avoid hard coupling at module load time.
         from ppmt.core.thresholds import RegimeThresholds
-        rt = RegimeThresholds.default()
+        if timeframe:
+            rt = RegimeThresholds.for_timeframe(timeframe)
+        else:
+            rt = RegimeThresholds.default()
 
         entry = window_df["close"].iloc[0]
         exit_price = window_df["close"].iloc[-1]

@@ -235,6 +235,66 @@ class AdaptiveWeights:
 
         return weighted_sum / total_weight
 
+    def safe_default_weights(self, n3_pattern_count: int, n4_pattern_count: int) -> 'AdaptiveWeights':
+        """Compute safe weights for tokens with immature local tries.
+
+        If N3 has < 20 patterns, redistribute its weight to N1/N2.
+        If N4 has < 10 patterns, redistribute its weight to N1/N2.
+        Also reduce sizing_multiplier proportionally to immaturity.
+
+        This prevents immature N3/N4 tries (which have very few observations
+        and thus unreliable statistics) from dominating the weighted confidence.
+        Instead, their weight is redistributed to N1 and N2 which have data
+        from other tokens (cross-asset universal and class pools).
+
+        Args:
+            n3_pattern_count: Number of patterns in the per-asset (N3) trie.
+            n4_pattern_count: Number of patterns in the per-asset+regime (N4) trie.
+
+        Returns:
+            self (for chaining)
+        """
+        MIN_N3_PATTERNS = 20
+        MIN_N4_PATTERNS = 10
+
+        n3_weight = self.n3_per_asset
+        n4_weight = self.n4_per_asset_regime
+
+        if n3_pattern_count < MIN_N3_PATTERNS:
+            # Redistribute N3 weight proportionally to N1/N2
+            redistribute = n3_weight * (1 - n3_pattern_count / MIN_N3_PATTERNS)
+            n3_weight -= redistribute
+            # Proportional split to N1/N2 based on their current weights
+            total_n1n2 = self.n1_universal + self.n2_asset_class
+            if total_n1n2 > 0:
+                self.n1_universal += redistribute * (self.n1_universal / total_n1n2)
+                self.n2_asset_class += redistribute * (self.n2_asset_class / total_n1n2)
+            self.n3_per_asset = n3_weight
+
+        if n4_pattern_count < MIN_N4_PATTERNS:
+            redistribute = n4_weight * (1 - n4_pattern_count / MIN_N4_PATTERNS)
+            n4_weight -= redistribute
+            total_n1n2 = self.n1_universal + self.n2_asset_class
+            if total_n1n2 > 0:
+                self.n1_universal += redistribute * (self.n1_universal / total_n1n2)
+                self.n2_asset_class += redistribute * (self.n2_asset_class / total_n1n2)
+            self.n4_per_asset_regime = n4_weight
+
+        self.normalize()
+        return self
+
+    @property
+    def immaturity_factor(self) -> float:
+        """0-1 factor: 0 = fully mature, 1 = completely immature.
+        Used to reduce position sizing for new tokens."""
+        n3_ratio = min(1.0, self.n3_per_asset / 0.20)  # 20% weight = mature
+        return max(0.0, 1.0 - n3_ratio)
+
+    @property
+    def sizing_multiplier(self) -> float:
+        """Position sizing multiplier. Lower for immature tries."""
+        return 1.0 - (self.immaturity_factor * 0.7)  # Max 70% reduction
+
     def should_graduate(self, n3_observations: int, n4_observations: int) -> bool:
         """
         Check if an asset should graduate to 'default' weights.

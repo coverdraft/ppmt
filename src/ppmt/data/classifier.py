@@ -119,6 +119,91 @@ class AssetClassifier:
         except (yaml.YAMLError, OSError):
             pass  # Fall back to defaults
 
+    def classify_dynamic(self, symbol: str, age_hours: float = None,
+                         max_volume_spike: float = None,
+                         market_cap_usd: float = None) -> AssetInfo:
+        """Classify a token with dynamic market data.
+
+        v0.41.0 (FASE 3, Tarea 3.3): Extended classification that uses
+        real-time market metadata (age, volume spikes, market cap) to
+        produce more accurate classifications than the static lookup +
+        heuristic approach.
+
+        Priority order:
+        1. Known symbols from the static lookup table (highest priority)
+        2. Token < 24h old → force new_launch
+        3. Token < 7 days old + volume spike > 20x → meme
+        4. Market cap based classification (blue_chip/large_cap/mid_cap)
+        5. Fallback to heuristic classification
+
+        Args:
+            symbol: Trading pair (e.g., 'BTC/USDT')
+            age_hours: Hours since first listing (None = unknown)
+            max_volume_spike: Maximum volume spike ratio vs average (None = unknown)
+            market_cap_usd: Market cap in USD (None = unknown)
+
+        Returns:
+            AssetInfo with classification and weight profile
+        """
+        # Normalize symbol
+        symbol = symbol.upper().strip()
+
+        # 1. Check known symbols first (highest priority)
+        for asset_class, symbols in self.classifications.items():
+            if symbol in [s.upper() for s in symbols]:
+                return AssetInfo(
+                    symbol=symbol,
+                    asset_class=asset_class,
+                    weight_profile=self._get_weight_profile(asset_class),
+                    confidence=1.0,
+                )
+
+        # 2. NEW RULE: Token < 24h → force new_launch
+        if age_hours is not None and age_hours < 24:
+            return AssetInfo(
+                symbol=symbol,
+                asset_class="new_launch",
+                weight_profile="new_launch",
+                confidence=0.9,  # High confidence in this classification
+            )
+
+        # 3. NEW RULE: Token < 7 days + volume spike > 20x → meme
+        if age_hours is not None and age_hours < 168:  # 7 days = 168 hours
+            if max_volume_spike is not None and max_volume_spike > 20.0:
+                return AssetInfo(
+                    symbol=symbol,
+                    asset_class="meme",
+                    weight_profile="meme",
+                    confidence=0.8,
+                )
+
+        # 4. Market cap based classification
+        if market_cap_usd is not None:
+            if market_cap_usd >= 100e9:
+                return AssetInfo(
+                    symbol=symbol,
+                    asset_class="blue_chip",
+                    weight_profile="blue_chip",
+                    confidence=0.7,
+                )
+            elif market_cap_usd >= 10e9:
+                return AssetInfo(
+                    symbol=symbol,
+                    asset_class="large_cap",
+                    weight_profile="default",
+                    confidence=0.7,
+                )
+            elif market_cap_usd >= 1e9:
+                return AssetInfo(
+                    symbol=symbol,
+                    asset_class="mid_cap",
+                    weight_profile="default",
+                    confidence=0.7,
+                )
+
+        # 5. Fallback to heuristic
+        return self._heuristic_classify(symbol)
+
     def classify(self, symbol: str) -> AssetInfo:
         """
         Classify a trading pair into an asset class.

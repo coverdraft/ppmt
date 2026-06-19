@@ -119,9 +119,17 @@ class PPMT:
         min_risk_reward: float = 1.5,
         weight_profile: Optional[str] = None,
         dual_sax: bool = True,
+        timeframe: Optional[str] = None,
     ):
         self.symbol = symbol
         self.asset_class = asset_class
+
+        # v0.41.0 (FASE 3, Tarea 3.2): Timeframe for regime threshold calibration.
+        # When set, detect_simple() uses timeframe-specific cutoffs instead of
+        # the historical 0.08/0.02 defaults (which were calibrated for 1h candles).
+        # Lower timeframes (1m, 5m, 15m) need tighter cutoffs to avoid
+        # classifying 92%+ of candles as 'ranging', which makes N4 useless.
+        self.timeframe = timeframe
 
         # FASE 1 Tarea 1.3: SAX Dual encoder (Precio + Volumen).
         #
@@ -614,7 +622,9 @@ class PPMT:
             # This pipes regime into insert_with_observations (was dead code before)
             # v0.38.8: Now uses self.regime_detector.detect_simple() (delegates
             # to RegimeDetector with RegimeThresholds.simple_*_cutoff).
-            regime = self.regime_detector.detect_simple(window_df)
+            # v0.41.0 (FASE 3, Tarea 3.2): Pass timeframe to detect_simple
+            # for calibrated regime thresholds.
+            regime = self.regime_detector.detect_simple(window_df, timeframe=self.timeframe)
 
             # v0.40.2 FIX-1: Differentiate the 4 tries structurally.
             #
@@ -898,8 +908,21 @@ class PPMT:
             n4_conf, n4_match.node.metadata.last_seen_timestamp
         ) if n4_match.node and n4_conf > 0 else n4_conf
 
+        # v0.41.0 (FASE 3, Tarea 3.1): Apply safe default weights for
+        # immature local tries. If N3 has < 20 patterns or N4 has < 10,
+        # redistribute their weight to N1/N2 which have cross-asset data.
+        # This prevents unreliable N3/N4 from dominating confidence.
+        n3_count = self.trie_n3.pattern_count
+        n4_count = self.trie_n4.pattern_count if hasattr(self.trie_n4, 'pattern_count') else 0
+        safe_weights = AdaptiveWeights.from_profile(self.weights.profile)
+        safe_weights.n1_universal = self.weights.n1_universal
+        safe_weights.n2_asset_class = self.weights.n2_asset_class
+        safe_weights.n3_per_asset = self.weights.n3_per_asset
+        safe_weights.n4_per_asset_regime = self.weights.n4_per_asset_regime
+        safe_weights.safe_default_weights(n3_pattern_count=n3_count, n4_pattern_count=n4_count)
+
         # Compute weighted confidence
-        weighted_conf = self.weights.compute_weighted_confidence(
+        weighted_conf = safe_weights.compute_weighted_confidence(
             n1_confidence=n1_conf,
             n2_confidence=n2_conf,
             n3_confidence=n3_conf,
@@ -996,8 +1019,20 @@ class PPMT:
             n4_conf, n4_match.node.metadata.last_seen_timestamp
         ) if n4_match.node and n4_conf > 0 else n4_conf
 
+        # v0.41.0 (FASE 3, Tarea 3.1): Apply safe default weights for
+        # immature local tries. If N3 has < 20 patterns or N4 has < 10,
+        # redistribute their weight to N1/N2 which have cross-asset data.
+        n3_count = self.trie_n3.pattern_count
+        n4_count = self.trie_n4.pattern_count if hasattr(self.trie_n4, 'pattern_count') else 0
+        safe_weights = AdaptiveWeights.from_profile(self.weights.profile)
+        safe_weights.n1_universal = self.weights.n1_universal
+        safe_weights.n2_asset_class = self.weights.n2_asset_class
+        safe_weights.n3_per_asset = self.weights.n3_per_asset
+        safe_weights.n4_per_asset_regime = self.weights.n4_per_asset_regime
+        safe_weights.safe_default_weights(n3_pattern_count=n3_count, n4_pattern_count=n4_count)
+
         # Compute weighted confidence
-        weighted_conf = self.weights.compute_weighted_confidence(
+        weighted_conf = safe_weights.compute_weighted_confidence(
             n1_confidence=n1_conf,
             n2_confidence=n2_conf,
             n3_confidence=n3_conf,
