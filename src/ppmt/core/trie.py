@@ -241,6 +241,7 @@ class PPMTTrie:
         next_symbol: Optional[str] = None,
         regime: Optional[str] = None,
         regime_confidence: Optional[float] = None,
+        next_3_symbols: Optional[tuple[str, ...]] = None,
     ) -> TrieNode:
         """
         Insert a pattern and update metadata from a single observation.
@@ -258,6 +259,9 @@ class PPMTTrie:
             next_symbol: What followed this pattern (for continuation tracking)
             regime: Market regime at time of observation (V4 fix: was not piped)
             regime_confidence: Confidence of regime detection [0, 1]
+            next_3_symbols: Tuple of 3 SAX symbols that followed this pattern
+                (v0.41.0 FASE 2, Tarea 2.1).  Used to populate
+                ``expected_sequences`` in the node's metadata.
         """
         node = self.insert(symbols)
 
@@ -275,6 +279,7 @@ class PPMTTrie:
             next_symbol=next_symbol,
             regime=regime,
             regime_confidence=regime_confidence,
+            next_3_symbols=next_3_symbols,
         )
 
         return node
@@ -1019,6 +1024,7 @@ class RegimePartitionedTrie:
         next_symbol: Optional[str] = None,
         regime: Optional[str] = None,
         regime_confidence: Optional[float] = None,
+        next_3_symbols: Optional[tuple[str, ...]] = None,
     ):
         """Insert observation into the sub-trie matching `regime`."""
         target = self._trie_for_regime(regime)
@@ -1032,6 +1038,7 @@ class RegimePartitionedTrie:
             next_symbol=next_symbol,
             regime=regime,
             regime_confidence=regime_confidence,
+            next_3_symbols=next_3_symbols,
         )
 
     def insert(self, symbols: list[str], metadata=None):

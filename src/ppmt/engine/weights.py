@@ -21,6 +21,7 @@ Weight redistribution rules:
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -266,3 +267,38 @@ class AdaptiveWeights:
             f"N4={self.n4_per_asset_regime:.0%}, "
             f"profile='{self.profile}')"
         )
+
+
+# ================================================================
+# v0.41.0 (FASE 2, Tarea 2.4): Time Decay Function
+# ================================================================
+
+def apply_time_decay(
+    confidence: float,
+    last_seen_timestamp: float,
+    half_life_days: float = 30.0,
+) -> float:
+    """Apply exponential time decay to confidence.
+
+    Patterns seen recently should have higher confidence than old ones.
+
+    Args:
+        confidence: Original confidence (0-1)
+        last_seen_timestamp: Unix timestamp when pattern was last observed
+        half_life_days: Days for confidence to decay by 50%. Default 30 days.
+
+    Returns:
+        Decay-adjusted confidence
+    """
+    if last_seen_timestamp <= 0:
+        return confidence  # No timestamp, no decay
+
+    now = time.time()
+    days_since = (now - last_seen_timestamp) / 86400.0
+
+    if days_since < 0:
+        return confidence  # Future timestamp? Don't decay
+
+    # Exponential decay: conf * 0.5^(days/half_life)
+    decay_factor = 0.5 ** (days_since / half_life_days)
+    return confidence * decay_factor

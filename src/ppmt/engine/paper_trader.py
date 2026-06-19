@@ -45,6 +45,7 @@ from ppmt.core.matcher import FuzzyMatcher
 from ppmt.engine.ppmt import PPMT
 from ppmt.engine.prediction import PredictionEngine
 from ppmt.engine.signal import SignalType, Signal
+from ppmt.engine.divergence_monitor import PatternDivergenceMonitor
 from ppmt.risk.manager import RiskManager, RiskConfig
 
 
@@ -487,6 +488,20 @@ class PaperTraderConfig:
 
     verbose: bool = True
     """Whether to print step-by-step details."""
+
+    divergence_monitor_enabled: bool = True
+    """v0.41.0 (FASE 2, Tarea 2.2): Enable pattern divergence monitoring.
+    When True, the divergence monitor compares real SAX sequences with
+    the expected_sequences from the entry node. If divergence exceeds
+    threshold, triggers an exit with reason='pattern_broken'.
+    This is complementary to the existing pattern-break check (which
+    only checks if the next symbol exists as a child node). The
+    divergence monitor checks the full forward sequence prediction."""
+
+    divergence_threshold: float = 0.667
+    """v0.41.0 (FASE 2, Tarea 2.2): Fraction of symbols that must differ
+    to trigger pattern_broken via divergence monitor. 0.667 = 2/3 symbols
+    different from the expected sequence."""
 
 
 @dataclass
@@ -1070,6 +1085,13 @@ class PaperTrader:
         # v0.2.9: Pattern break grace period tracking
         consecutive_breaks = 0
 
+        # v0.41.0 (FASE 2, Tarea 2.2): Pattern divergence monitor
+        divergence_monitor = PatternDivergenceMonitor(
+            divergence_threshold=cfg.divergence_threshold
+        ) if cfg.divergence_monitor_enabled else None
+        # Track how many post-entry symbols we've seen for divergence checking
+        post_entry_symbols: list[str] = []
+
         # v0.2.9: Re-entry cooldown after losing trades
         last_losing_trade_sym_idx = -999  # Symbol index of last losing trade
         cooldown_filter_count = 0
@@ -1379,6 +1401,54 @@ class PaperTrader:
 
                 # Update position unrealized P&L (at end of window)
                 risk_mgr.update_position(cfg.symbol, current_price)
+
+                # v0.41.0 (FASE 2, Tarea 2.2): Pattern divergence monitoring.
+                # After the position is open, collect post-entry SAX symbols
+                # and compare with the expected_sequences from the entry node.
+                # If divergence exceeds threshold → exit with pattern_broken.
+                if divergence_monitor is not None and divergence_monitor.expected_sequence is not None:
+                    # Accumulate post-entry symbols (skip the first symbol = entry symbol)
+                    if current_symbols:
+                        post_entry_symbols.append(current_symbols[-1])
+                    # Only check once we have at least 1 real symbol to compare
+                    if len(post_entry_symbols) >= 1:
+                        div_result = divergence_monitor.check_divergence(post_entry_symbols)
+                        if div_result['diverged']:
+                            current_price = df_close[last_candle_idx]
+                            _, pnl = risk_mgr.close_position(cfg.symbol, current_price)
+                            current_position.exit_price = current_price
+                            current_position.exit_time = current_time
+                            current_position.pnl = pnl
+                            if current_position.direction == "LONG":
+                                current_position.pnl_pct = (current_price - current_position.entry_price) / current_position.entry_price * 100
+                            else:
+                                current_position.pnl_pct = (current_position.entry_price - current_price) / current_position.entry_price * 100
+                            current_position.actual_move_pct = current_position.pnl_pct
+                            current_position.exit_reason = "pattern_broken"
+
+                            if cfg.living_trie and current_position.matched_pattern:
+                                next_sym = all_sax_symbols[sym_idx] if sym_idx < len(all_sax_symbols) else None
+                                obs_result = _record_observation(
+                                    trie, current_position, sym_idx, next_sym,
+                                    fuzzy_matcher=fuzzy_matcher,
+                                )
+                                trie_observations_recorded += obs_result["observations"]
+                                trie_new_nodes_created += obs_result["new_nodes"]
+
+                            if current_position.pnl_pct <= 0:
+                                last_losing_trade_sym_idx = sym_idx
+
+                            result.trades.append(current_position)
+                            trade_counter += 1
+                            current_position = None
+                            consecutive_breaks = 0
+                            post_entry_symbols = []  # Reset for next position
+
+                            result.equity_curve.append(risk_mgr.capital)
+                            result.capital_history.append(risk_mgr.capital)
+                            if risk_mgr.capital > peak_capital:
+                                peak_capital = risk_mgr.capital
+                            continue
 
             # ================================================================
             # PHASE 2: Pattern break check with fuzzy matcher + grace period
@@ -1828,6 +1898,18 @@ class PaperTrader:
                             regime=node_regime,
                             regime_confidence=node_regime_conf,
                         )
+
+                        # v0.41.0 (FASE 2, Tarea 2.2): Set divergence monitor's
+                        # expected sequence from the entry node's metadata.
+                        if divergence_monitor is not None:
+                            try:
+                                # Look up the matched node's metadata
+                                entry_node = trie.search(current_symbols)
+                                if entry_node and entry_node.metadata.expected_sequences:
+                                    divergence_monitor.set_expected(entry_node.metadata)
+                                    post_entry_symbols = []  # Reset for new position
+                            except Exception:
+                                pass
                     else:
                         risk_reject_reasons[reason] = risk_reject_reasons.get(reason, 0) + 1
 

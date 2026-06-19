@@ -494,6 +494,13 @@ class PPMT:
             next_sym_n3 = symbols_n3[i + pattern_length] if i + pattern_length < len(symbols_n3) else None
             next_sym_n4 = symbols_n4[i + pattern_length] if i + pattern_length < len(symbols_n4) else None
 
+            # v0.41.0 (FASE 2, Tarea 2.1): Next 3 symbols for forward sequences.
+            # Only populated when there are ≥3 symbols after the pattern.
+            next_3_n1 = tuple(symbols_n1[i + pattern_length : i + pattern_length + 3]) if i + pattern_length + 3 <= len(symbols_n1) else None
+            next_3_n2 = tuple(symbols_n2[i + pattern_length : i + pattern_length + 3]) if i + pattern_length + 3 <= len(symbols_n2) else None
+            next_3_n3 = tuple(symbols_n3[i + pattern_length : i + pattern_length + 3]) if i + pattern_length + 3 <= len(symbols_n3) else None
+            next_3_n4 = tuple(symbols_n4[i + pattern_length : i + pattern_length + 3]) if i + pattern_length + 3 <= len(symbols_n4) else None
+
             # Compute metadata from the actual price data
             # Map SAX window indices to candle indices (all levels share window_size)
             start_candle = i * self.sax.window_size
@@ -641,6 +648,7 @@ class PPMT:
                     won=won,
                     next_symbol=next_sym_n1,
                     regime=regime,
+                    next_3_symbols=next_3_n1,
                 )
                 self._n2_buffer.insert_with_observations(
                     symbols=pattern_n2,
@@ -651,6 +659,7 @@ class PPMT:
                     won=won,
                     next_symbol=next_sym_n2,
                     regime=regime,
+                    next_3_symbols=next_3_n2,
                 )
                 # N3 (per-symbol) — local insert only
                 self.trie_n3.insert_with_observations(
@@ -662,6 +671,7 @@ class PPMT:
                     won=won,
                     next_symbol=next_sym_n3,
                     regime=regime,
+                    next_3_symbols=next_3_n3,
                 )
             else:
                 # Backwards-compat (no storage): N1/N2/N3 receive locally,
@@ -675,6 +685,7 @@ class PPMT:
                     won=won,
                     next_symbol=next_sym_n1,
                     regime=regime,
+                    next_3_symbols=next_3_n1,
                 )
                 self.trie_n2.insert_with_observations(
                     symbols=pattern_n2,
@@ -685,6 +696,7 @@ class PPMT:
                     won=won,
                     next_symbol=next_sym_n2,
                     regime=regime,
+                    next_3_symbols=next_3_n2,
                 )
                 self.trie_n3.insert_with_observations(
                     symbols=pattern_n3,
@@ -695,6 +707,7 @@ class PPMT:
                     won=won,
                     next_symbol=next_sym_n3,
                     regime=regime,
+                    next_3_symbols=next_3_n3,
                 )
 
             # N4: insert into the regime-matched sub-trie only.
@@ -709,6 +722,7 @@ class PPMT:
                 won=won,
                 next_symbol=next_sym_n4,
                 regime=regime,
+                next_3_symbols=next_3_n4,
             )
 
             count += 1
@@ -861,11 +875,28 @@ class PPMT:
         n3_match = self.matcher_n3.best_match(self.trie_n3, syms_n3)
         n4_match = self.matcher_n4.best_match(self.trie_n4, syms_n4)
 
-        # Get confidence from each level
+        # Get confidence from each level (match_raw)
         n1_conf = n1_match.node.metadata.confidence if n1_match.node else 0.0
         n2_conf = n2_match.node.metadata.confidence if n2_match.node else 0.0
         n3_conf = n3_match.node.metadata.confidence if n3_match.node else 0.0
         n4_conf = n4_match.node.metadata.confidence if n4_match.node else 0.0
+
+        # v0.41.0 (FASE 2, Tarea 2.4): Apply time decay to each level's
+        # confidence using the node's last_seen_timestamp. Patterns that
+        # haven't been observed recently get reduced confidence.
+        from ppmt.engine.weights import apply_time_decay
+        n1_conf = apply_time_decay(
+            n1_conf, n1_match.node.metadata.last_seen_timestamp
+        ) if n1_match.node and n1_conf > 0 else n1_conf
+        n2_conf = apply_time_decay(
+            n2_conf, n2_match.node.metadata.last_seen_timestamp
+        ) if n2_match.node and n2_conf > 0 else n2_conf
+        n3_conf = apply_time_decay(
+            n3_conf, n3_match.node.metadata.last_seen_timestamp
+        ) if n3_match.node and n3_conf > 0 else n3_conf
+        n4_conf = apply_time_decay(
+            n4_conf, n4_match.node.metadata.last_seen_timestamp
+        ) if n4_match.node and n4_conf > 0 else n4_conf
 
         # Compute weighted confidence
         weighted_conf = self.weights.compute_weighted_confidence(
@@ -943,11 +974,27 @@ class PPMT:
         n3_match = self.matcher_n3.best_match(self.trie_n3, syms_n3)
         n4_match = self.matcher_n4.best_match(self.trie_n4, syms_n4)
 
-        # Get confidence from each level
+        # Get confidence from each level (match)
         n1_conf = n1_match.node.metadata.confidence if n1_match.node else 0.0
         n2_conf = n2_match.node.metadata.confidence if n2_match.node else 0.0
         n3_conf = n3_match.node.metadata.confidence if n3_match.node else 0.0
         n4_conf = n4_match.node.metadata.confidence if n4_match.node else 0.0
+
+        # v0.41.0 (FASE 2, Tarea 2.4): Apply time decay to each level's
+        # confidence using the node's last_seen_timestamp.
+        from ppmt.engine.weights import apply_time_decay
+        n1_conf = apply_time_decay(
+            n1_conf, n1_match.node.metadata.last_seen_timestamp
+        ) if n1_match.node and n1_conf > 0 else n1_conf
+        n2_conf = apply_time_decay(
+            n2_conf, n2_match.node.metadata.last_seen_timestamp
+        ) if n2_match.node and n2_conf > 0 else n2_conf
+        n3_conf = apply_time_decay(
+            n3_conf, n3_match.node.metadata.last_seen_timestamp
+        ) if n3_match.node and n3_conf > 0 else n3_conf
+        n4_conf = apply_time_decay(
+            n4_conf, n4_match.node.metadata.last_seen_timestamp
+        ) if n4_match.node and n4_conf > 0 else n4_conf
 
         # Compute weighted confidence
         weighted_conf = self.weights.compute_weighted_confidence(

@@ -373,7 +373,33 @@ class BlockLifecycleMetadata:
     continuation_nodes: list[str] = field(default_factory=list)
     """SAX symbols that historically continued this pattern.
     If the next observed block is in this list → continue holding.
-    These represent the 'forward' metadata — what comes after."""
+    These represent the 'forward' metadata — what comes after.
+
+    .. deprecated:: v0.41.0
+        Use ``expected_sequences`` instead.  This field is kept for
+        backwards compatibility but only records the *single* next
+        symbol; ``expected_sequences`` records full 3-symbol
+        continuations with frequency counts."""
+
+    expected_sequences: dict[tuple[str, ...], int] = field(default_factory=dict)
+    """v0.41.0 (FASE 2, Tarea 2.1): Expected sequences of 3 future symbols.
+
+    Maps a 3-tuple of SAX symbols → frequency count.  Example:
+    ``{('f','g','h'): 35, ('f','x','y'): 12}``.  When a pattern
+    is matched, the most frequent sequence is the expected
+    continuation, used by PatternDivergenceMonitor (Tarea 2.2)
+    to detect pattern breaks early.
+
+    Only populated when there are ≥3 symbols after the pattern
+    in the observation window.  Shorter suffixes fall back to
+    ``continuation_nodes``."""
+
+    last_seen_timestamp: float = 0.0
+    """v0.41.0 (FASE 2, Tarea 2.4): Unix timestamp of the most recent
+    observation of this pattern.  Used by ``apply_time_decay()`` to
+    reduce confidence for stale patterns.  Unlike
+    ``last_observation_time`` (which tracks any observation), this
+    is specifically the last time the *full pattern* was observed."""
 
     break_nodes: list[str] = field(default_factory=list)
     """SAX symbols that historically broke this pattern.
@@ -776,6 +802,7 @@ class BlockLifecycleMetadata:
         next_symbol: Optional[str] = None,
         regime: Optional[str] = None,
         regime_confidence: Optional[float] = None,
+        next_3_symbols: Optional[tuple[str, ...]] = None,
     ) -> None:
         """
         Update metadata with a new observation using incremental statistics.
@@ -787,6 +814,10 @@ class BlockLifecycleMetadata:
         Each observation can carry the market regime under which it
         was observed, building the regime_distribution histogram.
 
+        v0.41.0 (FASE 2): Now also records ``expected_sequences`` and
+        ``last_seen_timestamp`` for forward-sequence tracking and
+        temporal decay.
+
         Args:
             move_pct: Actual percentage move observed
             drawdown_pct: Maximum drawdown observed during pattern
@@ -797,6 +828,9 @@ class BlockLifecycleMetadata:
             regime: Market regime at time of observation
                     (trending_up, trending_down, ranging, volatile)
             regime_confidence: Confidence of the regime detection [0, 1]
+            next_3_symbols: Tuple of 3 SAX symbols that followed this
+                    pattern (if available).  Used to populate
+                    ``expected_sequences`` (Tarea 2.1).
         """
         n = self.historical_count
         self.historical_count += 1
@@ -826,6 +860,18 @@ class BlockLifecycleMetadata:
         if next_symbol is not None:
             if next_symbol not in self.continuation_nodes:
                 self.continuation_nodes.append(next_symbol)
+
+        # v0.41.0 (FASE 2, Tarea 2.1): Track expected sequences of 3 future symbols.
+        # When there are ≥3 symbols after the pattern, record the 3-tuple
+        # as a key in expected_sequences and increment its frequency count.
+        if next_3_symbols is not None and len(next_3_symbols) == 3:
+            self.expected_sequences[next_3_symbols] = (
+                self.expected_sequences.get(next_3_symbols, 0) + 1
+            )
+
+        # v0.41.0 (FASE 2, Tarea 2.4): Set last_seen_timestamp for time decay.
+        import time as _time_for_ts
+        self.last_seen_timestamp = _time_for_ts.time()
 
         # V4.4 (P7-FaseC, v0.40.23): Track per-direction statistics with
         # outcome-based `won` flag (SL/TP first-touch) instead of hardcoded
@@ -1196,6 +1242,11 @@ class BlockLifecycleMetadata:
             "sl_price": self.sl_price,
             "tp_price": self.tp_price,
             "continuation_nodes": self.continuation_nodes,
+            # v0.41.0 (FASE 2, Tarea 2.1): Expected sequences of 3 future symbols.
+            # JSON keys must be strings, so we join tuples with '|'.
+            "expected_sequences": {
+                "|".join(k): v for k, v in self.expected_sequences.items()
+            },
             "break_nodes": self.break_nodes,
             # V3: Computed sizing signals for Risk Manager
             "confidence": round(self.confidence, 4),
@@ -1221,6 +1272,8 @@ class BlockLifecycleMetadata:
             # V4.2: Observation freshness
             "last_observation_time": self.last_observation_time,
             "observation_timespan": self.observation_timespan,
+            # v0.41.0 (FASE 2, Tarea 2.4): Last seen timestamp for time decay
+            "last_seen_timestamp": self.last_seen_timestamp,
         }
 
     @classmethod
@@ -1238,6 +1291,12 @@ class BlockLifecycleMetadata:
             sl_price=data.get("sl_price"),
             tp_price=data.get("tp_price"),
             continuation_nodes=data.get("continuation_nodes", []),
+            # v0.41.0 (FASE 2, Tarea 2.1): Deserialize expected_sequences.
+            # Keys are stored as "a|b|c" strings in JSON; convert back to tuples.
+            expected_sequences={
+                tuple(k.split("|")): v
+                for k, v in data.get("expected_sequences", {}).items()
+            },
             break_nodes=data.get("break_nodes", []),
             # V4: Regime-aware node metadata
             regime=data.get("regime", ""),
@@ -1262,4 +1321,6 @@ class BlockLifecycleMetadata:
             # V4.2: Observation freshness
             last_observation_time=data.get("last_observation_time", 0.0),
             observation_timespan=data.get("observation_timespan", 0.0),
+            # v0.41.0 (FASE 2, Tarea 2.4): Last seen timestamp for time decay
+            last_seen_timestamp=data.get("last_seen_timestamp", 0.0),
         )
