@@ -4,173 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>PPMT Terminal v0.40.26</title>
-<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js">
-// ============================================================
-// v0.40.26 — TRADING TAB (Token List + Ticket + Operations Feed)
-// ============================================================
-
-let _allSymbols = [];
-let _selectedToken = null;
-let _selectedTF = '5m';
-
-// Render the left-sidebar token list from the symbols array
-function renderTokenList(symbols) {
-  _allSymbols = Array.isArray(symbols) ? symbols : [];
-  const list = document.getElementById('tokenList');
-  const countEl = document.getElementById('tokenListCount');
-  if (!list) return;
-  if (!_allSymbols.length) {
-    list.innerHTML = '<div class="token-list-empty">No hay tokens disponibles</div>';
-    if (countEl) countEl.textContent = '—';
-    return;
-  }
-  if (countEl) countEl.textContent = _allSymbols.length + ' tokens';
-  // Default-select BTC/USDT or first symbol so the chart has a target
-  if (!_selectedToken) _selectedToken = _allSymbols.includes('BTC/USDT') ? 'BTC/USDT' : _allSymbols[0];
-  renderTokenListHTML(_allSymbols);
-}
-
-function renderTokenListHTML(symbols) {
-  const list = document.getElementById('tokenList');
-  if (!list) return;
-  if (!symbols.length) {
-    list.innerHTML = '<div class="token-list-empty">Sin resultados</div>';
-    return;
-  }
-  list.innerHTML = symbols.map(s => {
-    const sel = s === _selectedToken ? ' selected' : '';
-    return `<div class="token-item${sel}" data-symbol="${s}" onclick="selectToken('${s}')">
-      <span class="tk-name">${s}</span>
-      <span class="tk-price" data-symbol="${s}">—</span>
-    </div>`;
-  }).join('');
-  // Async-load prices for the visible tokens (rate-limited: 10 at a time)
-  refreshTokenPrices(symbols.slice(0, 30));
-}
-
-function filterTokens() {
-  const q = (document.getElementById('tokenSearch') || {}).value || '';
-  const ql = q.toLowerCase().trim();
-  const filtered = !ql ? _allSymbols
-    : _allSymbols.filter(s => s.toLowerCase().includes(ql));
-  renderTokenListHTML(filtered);
-}
-
-function selectToken(symbol) {
-  _selectedToken = symbol;
-  // Update visual selection
-  document.querySelectorAll('.token-item').forEach(el => {
-    el.classList.toggle('selected', el.dataset.symbol === symbol);
-  });
-  // Update the ticket display
-  const ticket = document.getElementById('ticketSymbol');
-  if (ticket) ticket.textContent = symbol;
-  // Update the chart toolbar so the chart loads
-  const selC = document.getElementById('chartSymbol');
-  if (selC) selC.value = symbol;
-  // Update chart TF to match ticket selection
-  const selT = document.getElementById('chartTimeframe');
-  if (selT) selT.value = _selectedTF;
-  // Load chart for the selected token
-  if (typeof loadChart === 'function') loadChart();
-  // Enable Start button now that a token is selected
-  const btnStart = document.getElementById('btnStartTrading');
-  if (btnStart) btnStart.disabled = false;
-}
-
-// Fetch and display prices for a list of symbols (best-effort, non-blocking)
-async function refreshTokenPrices(symbols) {
-  for (const sym of symbols) {
-    try {
-      const res = await fetch(`${API}/api/market/price?symbol=${encodeURIComponent(sym)}&exchange=binance`);
-      if (!res.ok) continue;
-      const data = await res.json();
-      const price = data.price;
-      if (price === undefined || price === null) continue;
-      // Format price nicely
-      const fmt = price > 100 ? price.toFixed(2) : price > 1 ? price.toFixed(4) : price.toPrecision(4);
-      document.querySelectorAll(`.tk-price[data-symbol="${sym}"]`).forEach(el => {
-        el.textContent = '$' + fmt;
-      });
-    } catch (e) {
-      // silent: best-effort price loading
-    }
-  }
-}
-
-// Timeframe selector (button group)
-function setTF(tf) {
-  _selectedTF = tf;
-  document.querySelectorAll('#ticketTFGroup .tg-btn').forEach(b => {
-    b.classList.toggle('active', b.dataset.tf === tf);
-  });
-  // Sync chart toolbar TF
-  const selT = document.getElementById('chartTimeframe');
-  if (selT) selT.value = tf;
-  // If a token is selected, reload the chart with the new TF
-  if (_selectedToken && typeof loadChart === 'function') loadChart();
-}
-
-// Mode selector (Manual / Auto)
-function setMode(isAuto) {
-  autoMode = !!isAuto;
-  const m = document.getElementById('modeManual');
-  const a = document.getElementById('modeAuto');
-  if (m) m.classList.toggle('active', !autoMode);
-  if (a) a.classList.toggle('active', autoMode);
-}
-
-// Capital input → push to server so all child nodes share it
-async function updateCapital() {
-  const inp = document.getElementById('ticketCapital');
-  if (!inp) return;
-  const val = parseFloat(inp.value) || 1000;
-  // v0.40.26: also update Money Management display
-  const mm = document.getElementById('mmTotalCapital');
-  if (mm) mm.textContent = '$' + val.toLocaleString('en-US', {minimumFractionDigits: 0, maximumFractionDigits: 2});
-  // Persist to server (best-effort)
-  try {
-    await fetch(`${API}/api/nodes/capital`, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({total_capital: val})
-    });
-  } catch (e) {
-    // silent — UI still reflects user input
-  }
-}
-
-// Initialize on DOMContentLoaded: trigger capital sync + ensure token list is loaded
-document.addEventListener('DOMContentLoaded', () => {
-  // Set initial capital display
-  setTimeout(() => { updateCapital(); }, 500);
-});
-
-// Append operations feed items (called by WS handler when signals/trades arrive)
-function appendOpsFeed(type, msg, pnl, time) {
-  const feed = document.getElementById('liveSignalsFeed');
-  if (!feed) return;
-  // Clear empty-state on first append
-  if (feed.querySelector('.ops-feed-empty')) feed.innerHTML = '';
-  const cls = type === 'signal' ? 'signal'
-            : (msg || '').toLowerCase().includes('short') ? 'trade-short'
-            : 'trade-long';
-  const t = time || new Date().toLocaleTimeString('es-ES', {hour12: false});
-  const pnlHtml = pnl !== undefined && pnl !== null
-    ? `<span class="of-pnl ${pnl >= 0 ? 'pos' : 'neg'}">${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%</span>`
-    : '<span class="of-pnl"></span>';
-  const item = document.createElement('div');
-  item.className = `ops-feed-item ${cls}`;
-  item.innerHTML = `<span class="of-time">${t}</span><span class="of-msg">${msg}</span>${pnlHtml}`;
-  feed.insertBefore(item, feed.firstChild);
-  // Cap at 50 items
-  while (feed.children.length > 50) feed.removeChild(feed.lastChild);
-  // Update count
-  const cnt = document.getElementById('liveOpsCount');
-  if (cnt) cnt.textContent = feed.children.length + ' eventos';
-}
-
-</script>
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -1424,6 +1258,11 @@ let killSwitchActive = false;
 let validationPassed = false;
 let isTrading = false;
 let tradeHistoryData = [];
+// v0.40.26 — Trading tab state (declared as `var` to avoid TDZ if
+// script execution is interrupted; hoisted with init to undefined).
+var _allSymbols = [];
+var _selectedToken = null;
+var _selectedTF = '5m';
 // v0.32.6: Track which token's validation/setup we're currently viewing.
 // The WS broadcasts GLOBAL state (one validation_result, one auto_setup_status
 // for the whole server). Without filtering, switching tokens re-renders the
@@ -5086,6 +4925,171 @@ async function opsStopAll() {
 
 // Initial load — fetch fresh data and render Operations tab
 refreshOperationsTab();
+
+
+// ============================================================
+// v0.40.26 — TRADING TAB (Token List + Ticket + Operations Feed)
+// ============================================================
+// v0.40.26-fix: _allSymbols / _selectedToken / _selectedTF declarations
+// MOVED to top of script (right after other top-level lets) to avoid
+// TDZ if script execution is interrupted before this line.
+
+// Render the left-sidebar token list from the symbols array
+function renderTokenList(symbols) {
+  _allSymbols = Array.isArray(symbols) ? symbols : [];
+  const list = document.getElementById('tokenList');
+  const countEl = document.getElementById('tokenListCount');
+  if (!list) return;
+  if (!_allSymbols.length) {
+    list.innerHTML = '<div class="token-list-empty">No hay tokens disponibles</div>';
+    if (countEl) countEl.textContent = '—';
+    return;
+  }
+  if (countEl) countEl.textContent = _allSymbols.length + ' tokens';
+  // Default-select BTC/USDT or first symbol so the chart has a target
+  if (!_selectedToken) _selectedToken = _allSymbols.includes('BTC/USDT') ? 'BTC/USDT' : _allSymbols[0];
+  renderTokenListHTML(_allSymbols);
+}
+
+function renderTokenListHTML(symbols) {
+  const list = document.getElementById('tokenList');
+  if (!list) return;
+  if (!symbols.length) {
+    list.innerHTML = '<div class="token-list-empty">Sin resultados</div>';
+    return;
+  }
+  list.innerHTML = symbols.map(s => {
+    const sel = s === _selectedToken ? ' selected' : '';
+    return `<div class="token-item${sel}" data-symbol="${s}" onclick="selectToken('${s}')">
+      <span class="tk-name">${s}</span>
+      <span class="tk-price" data-symbol="${s}">—</span>
+    </div>`;
+  }).join('');
+  // Async-load prices for the visible tokens (rate-limited: 10 at a time)
+  refreshTokenPrices(symbols.slice(0, 30));
+}
+
+function filterTokens() {
+  const q = (document.getElementById('tokenSearch') || {}).value || '';
+  const ql = q.toLowerCase().trim();
+  const filtered = !ql ? _allSymbols
+    : _allSymbols.filter(s => s.toLowerCase().includes(ql));
+  renderTokenListHTML(filtered);
+}
+
+function selectToken(symbol) {
+  _selectedToken = symbol;
+  // Update visual selection
+  document.querySelectorAll('.token-item').forEach(el => {
+    el.classList.toggle('selected', el.dataset.symbol === symbol);
+  });
+  // Update the ticket display
+  const ticket = document.getElementById('ticketSymbol');
+  if (ticket) ticket.textContent = symbol;
+  // Update the chart toolbar so the chart loads
+  const selC = document.getElementById('chartSymbol');
+  if (selC) selC.value = symbol;
+  // Update chart TF to match ticket selection
+  const selT = document.getElementById('chartTimeframe');
+  if (selT) selT.value = _selectedTF;
+  // Load chart for the selected token
+  if (typeof loadChart === 'function') loadChart();
+  // Enable Start button now that a token is selected
+  const btnStart = document.getElementById('btnStartTrading');
+  if (btnStart) btnStart.disabled = false;
+}
+
+// Fetch and display prices for a list of symbols (best-effort, non-blocking)
+async function refreshTokenPrices(symbols) {
+  for (const sym of symbols) {
+    try {
+      const res = await fetch(`${API}/api/market/price?symbol=${encodeURIComponent(sym)}&exchange=binance`);
+      if (!res.ok) continue;
+      const data = await res.json();
+      const price = data.price;
+      if (price === undefined || price === null) continue;
+      // Format price nicely
+      const fmt = price > 100 ? price.toFixed(2) : price > 1 ? price.toFixed(4) : price.toPrecision(4);
+      document.querySelectorAll(`.tk-price[data-symbol="${sym}"]`).forEach(el => {
+        el.textContent = '$' + fmt;
+      });
+    } catch (e) {
+      // silent: best-effort price loading
+    }
+  }
+}
+
+// Timeframe selector (button group)
+function setTF(tf) {
+  _selectedTF = tf;
+  document.querySelectorAll('#ticketTFGroup .tg-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.tf === tf);
+  });
+  // Sync chart toolbar TF
+  const selT = document.getElementById('chartTimeframe');
+  if (selT) selT.value = tf;
+  // If a token is selected, reload the chart with the new TF
+  if (_selectedToken && typeof loadChart === 'function') loadChart();
+}
+
+// Mode selector (Manual / Auto)
+function setMode(isAuto) {
+  autoMode = !!isAuto;
+  const m = document.getElementById('modeManual');
+  const a = document.getElementById('modeAuto');
+  if (m) m.classList.toggle('active', !autoMode);
+  if (a) a.classList.toggle('active', autoMode);
+}
+
+// Capital input → push to server so all child nodes share it
+async function updateCapital() {
+  const inp = document.getElementById('ticketCapital');
+  if (!inp) return;
+  const val = parseFloat(inp.value) || 1000;
+  // v0.40.26: also update Money Management display
+  const mm = document.getElementById('mmTotalCapital');
+  if (mm) mm.textContent = '$' + val.toLocaleString('en-US', {minimumFractionDigits: 0, maximumFractionDigits: 2});
+  // Persist to server (best-effort)
+  try {
+    await fetch(`${API}/api/nodes/capital`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({total_capital: val})
+    });
+  } catch (e) {
+    // silent — UI still reflects user input
+  }
+}
+
+// Initialize on DOMContentLoaded: trigger capital sync + ensure token list is loaded
+document.addEventListener('DOMContentLoaded', () => {
+  // Set initial capital display
+  setTimeout(() => { updateCapital(); }, 500);
+});
+
+// Append operations feed items (called by WS handler when signals/trades arrive)
+function appendOpsFeed(type, msg, pnl, time) {
+  const feed = document.getElementById('liveSignalsFeed');
+  if (!feed) return;
+  // Clear empty-state on first append
+  if (feed.querySelector('.ops-feed-empty')) feed.innerHTML = '';
+  const cls = type === 'signal' ? 'signal'
+            : (msg || '').toLowerCase().includes('short') ? 'trade-short'
+            : 'trade-long';
+  const t = time || new Date().toLocaleTimeString('es-ES', {hour12: false});
+  const pnlHtml = pnl !== undefined && pnl !== null
+    ? `<span class="of-pnl ${pnl >= 0 ? 'pos' : 'neg'}">${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}%</span>`
+    : '<span class="of-pnl"></span>';
+  const item = document.createElement('div');
+  item.className = `ops-feed-item ${cls}`;
+  item.innerHTML = `<span class="of-time">${t}</span><span class="of-msg">${msg}</span>${pnlHtml}`;
+  feed.insertBefore(item, feed.firstChild);
+  // Cap at 50 items
+  while (feed.children.length > 50) feed.removeChild(feed.lastChild);
+  // Update count
+  const cnt = document.getElementById('liveOpsCount');
+  if (cnt) cnt.textContent = feed.children.length + ' eventos';
+}
 
 </script>
 

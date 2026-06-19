@@ -9362,3 +9362,66 @@ Verificado con agent-browser + VLM:
 ### Commits
 
 - `feat(v0.40.26-trading-redesign): 3-col HIG layout + chart fix + responsive` (este commit)
+
+---
+
+## v0.40.26-fix — Fix "Cargando tokens…" (script tag + TDZ)
+
+**Fecha:** 2026-06-19
+**Commit:** `fix(v0.40.26): token list stuck — script tag + TDZ bugs`
+
+### Bug crítico: token list stuck on "Cargando tokens…"
+
+**Síntoma:** Después de v0.40.26, la Trading tab mostraba "Cargando
+tokens…" permanentemente. La lista nunca se poblaba.
+
+### Causa raíz #1: script tag roto
+
+En v0.40.26 usé `src.replace("</script>", NEW_JS + "\n</script>", 1)`
+para insertar el JS nuevo. Esto reemplazó el PRIMER `</script>` del
+archivo — que era el cierre del tag de la librería `lightweight-charts`
+(línea 7). Como resultado, todo el JS nuevo (164 líneas: renderTokenList,
+selectToken, setTF, etc.) quedó dentro del body de un `<script src="...">`
+tag. Los navegadores IGNOREN el body de un script tag con `src=`, así
+que las funciones eran inalcanzables.
+
+Cuando `loadSymbols()` hacía `if (typeof renderTokenList === 'function')`,
+la verificación devolvía `false` → la lista nunca se poblaba.
+
+**Fix:** Extraje el JS mal ubicado y lo moví al final del `<script>`
+block principal (línea 1245-5090). El tag de la librería ahora es
+self-contained: `<script src="..."></script>`.
+
+### Causa raíz #2: TDZ en _allSymbols
+
+Después del fix #1, `renderTokenList` ya era accesible pero tiraba:
+`ReferenceError: Cannot access '_allSymbols' before initialization`
+
+**Causa:** `let _allSymbols = []` estaba en línea ~4929 (casi al final
+del script). La ejecución del script se interrumpía antes de llegar a
+esa línea (probablemente por un rejection no manejado de
+`refreshOperationsTab()` async llamado sin await en línea 4922).
+Cuando la ejecución se interrumpe antes de un `let`, la variable
+entra en Temporal Dead Zone (TDZ) — cualquier acceso tira ReferenceError.
+
+**Fix:** Moví las 3 declaraciones (`_allSymbols`, `_selectedToken`,
+`_selectedTF`) al inicio del script (después de `tradeHistoryData`
+en línea ~1260). Las cambié de `let` a `var` como belt-and-suspenders:
+`var` es hoisted CON inicialización a `undefined`, así que NO tiene
+TDZ — incluso si la ejecución se interrumpe, las variables son
+`undefined` en vez de tirar error.
+
+### Verificación
+
+Con agent-browser + VLM (glm-4.6v):
+- Token List muestra 8 tokens (BTC, ETH, SOL, XRP, DOGE, ADA, AVAX, LINK)
+- Search field visible
+- BTC/USDT highlighted como selected
+- Center ticket muestra "BTC/USDT" como Token Seleccionado
+- Capital $1000 visible
+- TF + leverage button groups visibles
+- Start Paper button enabled (no greyed out)
+
+### Commits
+
+- `fix(v0.40.26): token list stuck — script tag + TDZ bugs` (este commit)
