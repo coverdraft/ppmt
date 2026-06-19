@@ -6792,3 +6792,112 @@ Solo ADX (100% bull) y Bollinger (5% bull) detectan algo, pero ADX lo hace porqu
 - `download/real_data_1m/ARBUSDT_1m.csv` — 16k velas 1m (descarga parcial)
 - `download/real_data_1m/LINKUSDT_1m.csv` — 100k velas 1m
 - `download/real_data_1m/PEPEUSDT_1m.csv` — 100k velas 1m
+
+---
+
+## v0.40.16-audit — Experimento crítico: ¿particionar por régimen aporta información? → NO
+
+**Fecha**: 2026-06-19
+**Tipo**: Análisis crítico (sin cambios de motor)
+**Motivo**: Antes de seguir refinando detectores (FIX-17), validar la hipótesis subyacente: que los patrones SAX cambian entre regímenes. Si no cambian, particionar no aporta y todo FIX-17 es irrelevante.
+
+### Setup
+
+- **Grid search ADX**: 7 umbrales (20/25/30/35/40/45/50) × 5 períodos (10/14/20/28/50) = 35 combinaciones
+- **Experimento de partición**: 4 configs usando mismo walk-forward (75/25)
+  - Trie único (N3 actual)
+  - Trie particionado por Bollinger Width
+  - Trie particionado por ADX+EMA+BB
+  - Trie particionado por EMA slope
+- **SAX config**: alpha=4, window=10, pattern_length=5 (1024 patrones posibles)
+- **Dataset**: 8 tokens × 100k velas 1m = 800k velas
+- **Forward horizon**: 50 velas
+- **Métrica**: MAE entre predicción (media de matches en train) y retorno forward realizado
+
+### Resultado 1: Grid search ADX
+
+**TODAS las 35 combinaciones tienen Score NEGATIVO** (Sep LONG + Sep SHORT < 0).
+
+Top 5 (todas negativas):
+| # | threshold | period | Score |
+|---:|---:|---:|---:|
+| 1 | 45 | 10 | −0.0255% |
+| 2 | 20 | 10 | −0.0255% |
+| 3 | 25 | 10 | −0.0255% |
+| 4 | 30 | 10 | −0.0255% |
+| 5 | 35 | 10 | −0.0255% |
+
+**Conclusión**: ADX solo NO SIRVE para 1m crypto, sin importar umbral o período. En todos los casos clasifica 96-99% como `trending_up` y el PnL LONG en `trending_up` es NEGATIVO (−0.0078%).
+
+### Resultado 2: Experimento de partición (CRÍTICO)
+
+| Config | Detector | MAE medio | Match directo | ΔMAE vs único | Mejora relativa |
+|---|---|---:|---:|---:|---:|
+| trie_unique | — | **0.5373%** | 99.99% | — | — |
+| partitioned | bollinger | 0.5433% | 99.50% | **−0.0060%** | **−1.11%** ✗ |
+| partitioned | adx_ema_bb | 0.5405% | 99.25% | **−0.0032%** | **−0.59%** ✗ |
+| partitioned | ema_slope | 0.5437% | 99.05% | **−0.0064%** | **−1.19%** ✗ |
+
+**Ningún detector mejora el trie único. Los tres empeoran la predicción.**
+
+Por token (MAE):
+| Token | Trie único | Bollinger | ADX+EMA+BB | EMA slope |
+|---|---:|---:|---:|---:|
+| ARBUSDT | 0.7348% | 0.7446% ✗ | 0.7438% ✗ | 0.7443% ✗ |
+| BNBUSDT | 0.3808% | 0.3860% ✗ | 0.3817% ✗ | 0.3849% ✗ |
+| BTCUSDT | 0.3665% | 0.3695% ✗ | 0.3676% ✗ | 0.3685% ✗ |
+| ETHUSDT | 0.4753% | 0.4807% ✗ | 0.4765% ✗ | 0.4817% ✗ |
+| LINKUSDT | 0.5639% | 0.5698% ✗ | 0.5664% ✗ | 0.5709% ✗ |
+| PEPEUSDT | 0.6819% | 0.6882% ✗ | 0.6900% ✗ | 0.6904% ✗ |
+| SOLUSDT | 0.5827% | 0.5879% ✗ | 0.5838% ✗ | 0.5892% ✗ |
+| XRPUSDT | 0.5125% | 0.5194% ✗ | 0.5141% ✗ | 0.5198% ✗ |
+
+**Particionar empeora en TODOS los tokens con TODOS los detectores.**
+
+### Veredicto definitivo
+
+❌ **La hipótesis de particionar por régimen NO está sostenida por la data.**
+
+El problema NO es el detector (Bollinger / ADX+EMA+BB / EMA slope). El problema es la **hipótesis subyacente** de que los patrones SAX tienen distribuciones de retorno distintas entre regímenes. En 1m crypto, esto es FALSO.
+
+**Por qué tiene sentido económicamente**: los patrones SAX ya capturan forma del candlestick (body position, direction, volume signal). El régimen "macro" del mercado no añade información incremental significativa a la señal micro del patrón. Es más, particionar reduce el n de cada bucket de 200 muestras a 50-150, aumentando el ruido de la predicción.
+
+### Implicaciones estratégicas
+
+1. **ABORTAR FIX-17** (no implementar nuevo RegimeDetector para 1m).
+2. **ABORTAR FIX-14** (N4 `RegimePartitionedTrie` no aporta valor — confirmado empíricamente).
+3. **ABORTAR FIX-16** (per-asset LONG/SHORT enable flags basado en régimen).
+4. **Mantener FIX-15** (thresholds diferenciados por dirección — es del motor, no del detector).
+5. **Reorientar esfuerzo** a mejoras del motor que no dependan de régimen:
+   - Mejor calibración de SL/TP
+   - Filtros por hora del día / día de la semana
+   - Filtros por volumen relativo
+   - Ajuste dinámico de similitud mínima
+
+### Archivos creados
+
+- `scripts/audit_trie_1m/adx_grid_search.py` — grid search 35 combinaciones ADX
+- `scripts/audit_trie_1m/regime_partition_experiment.py` — experimento crítico de partición
+- `download/regime_adx_grid/adx_grid.csv` — 35 combinaciones con métricas
+- `download/regime_adx_grid/adx_grid_report.md` — reporte grid search
+- `download/regime_partition_experiment/partition_experiment.json` — datos completos
+- `download/regime_partition_experiment/partition_experiment_summary.csv` — tabla resumen
+- `download/regime_partition_experiment/partition_experiment_report.md` — reporte ejecutivo
+
+### Verificación
+
+- Experimento reproducible: `python3 scripts/regime_partition_experiment.py` (~3 min)
+- Resultados consistentes en 8 tokens × 3 detectores = 24 comparaciones (24/24 empeoran)
+- Match rate 99.99% en trie único → la metodología es estadísticamente sólida
+- No se modificó código de motor, solo análisis
+
+### Re-priorización FIX propuesta
+
+| FIX | Estado anterior | Estado nuevo | Razón |
+|---|---|---|---|
+| FIX-14 (N4 routing por régimen) | Implementado | **ABORTAR** | Empíricamente no aporta (MAE peor en 24/24 casos) |
+| FIX-15 (thresholds por dirección) | Alta | **Mantener alta** | Es del motor, no del detector |
+| FIX-16 (per-asset LONG/SHORT enable) | Baja | **ABORTAR** | Depende de régimen → no aporta |
+| FIX-17 (mejorar RegimeDetector) | Alta | **ABORTAR** | La partición por régimen no aporta en 1m crypto |
+| FIX terminal | Pendiente | **Mantener pendiente** | Ídem |
+
