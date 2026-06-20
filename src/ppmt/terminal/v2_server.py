@@ -24,7 +24,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from ppmt.data.storage import PPMTStorage
 from ppmt.engine.ppmt import PPMT, PPMTResult
-from ppmt.terminal.paper_executor import PaperExecutor, PositionState
+from ppmt.terminal.paper_executor import PaperExecutor
+from ppmt.execution.models import PositionState
+from ppmt.execution.interfaces import IExecutor
+from ppmt.execution.mexc_futures import MexcFuturesExecutor
 
 logger = logging.getLogger("ppmt.v2")
 logging.basicConfig(
@@ -196,8 +199,8 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
         await websocket.close()
         return
 
-    # ─── 2. Initialize PaperExecutor ─────────────────────────
-    executor = PaperExecutor(capital_usdt=100.0)
+    # ─── 2. Initialize PaperExecutor (via IExecutor interface) ──
+    executor: IExecutor = PaperExecutor(capital_usdt=100.0)
 
     # ─── 3. Initialize Exchange Poller ────────────────────────
     from ppmt.engine.realtime import _DirectPollExchange
@@ -432,16 +435,22 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                 }
                 await websocket.send_json(brain_msg)
 
-                # ─── Signal → Open position ───────────────────
-                if result and result.signal and result.signal.is_entry and not executor.is_in_position:
+                # ─── Signal → Routed execution ────────────────
+                # PAPER: await executor.open_position() → in-memory
+                # LIVE:  await executor.open_position() → MEXC API
+                # Same IExecutor interface, different backend.
+                if result and result.signal and result.signal.is_entry and not (isinstance(executor, PaperExecutor) and executor.is_in_position):
                     sig = result.signal
                     try:
-                        pos = executor.open_position(
+                        pos = await executor.open_position(
                             symbol=symbol,
                             direction=sig.direction or "LONG",
-                            entry_price=current_price,
-                            expected_move_pct=sig.expected_move_pct or 1.0,
-                            predicted_path_symbols=sig.predicted_path_symbols if sig.predicted_path else None,
+                            size_usdt=100.0,
+                            metadata={
+                                "entry_price": current_price,
+                                "expected_move_pct": sig.expected_move_pct or 1.0,
+                                "predicted_path_symbols": sig.predicted_path_symbols if sig.predicted_path else None,
+                            },
                         )
                         logger.info(
                             f"[WS] SIGNAL {sig.signal_type.value} @ {current_price:.6f} "
@@ -500,6 +509,228 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
         except Exception:
             pass
         logger.info(f"[WS] Session closed: {symbol}/{timeframe}")
+
+
+# ─── WebSocket: Live Trading (MEXC Futures) ───────────────────
+@app.websocket("/ws/live-trading/{symbol}/{timeframe}")
+async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: str):
+    """
+    Real-money trading WebSocket via MEXC Futures.
+
+    Same engine loop as paper-live, but the executor is MexcFuturesExecutor.
+    The frontend MUST send an auth message as the first WebSocket message
+    containing the MEXC API key and secret.
+    """
+
+    await websocket.accept()
+
+    # ─── 0. Auth: wait for credentials ─────────────────────────
+    try:
+        auth_raw = await asyncio.wait_for(websocket.receive_json(), timeout=15.0)
+    except asyncio.TimeoutError:
+        await websocket.send_json({"type": "error", "data": {"message": "Auth timeout — send {type:auth, api_key:..., api_secret:...} within 15s"}})
+        await websocket.close()
+        return
+
+    if auth_raw.get("type") != "auth" or not auth_raw.get("api_key") or not auth_raw.get("api_secret"):
+        await websocket.send_json({"type": "error", "data": {"message": "First message must be {type:auth, api_key:..., api_secret:...}"}})
+        await websocket.close()
+        return
+
+    # ─── 1. Instantiate MexcFuturesExecutor with user keys ─────
+    executor: IExecutor = MexcFuturesExecutor(
+        api_key=auth_raw["api_key"],
+        secret=auth_raw["api_secret"],
+    )
+    logger.info(f"[WS-LIVE] Auth OK — MexcFuturesExecutor created")
+    await websocket.send_json({"type": "auth_ok"})
+
+    # ─── 2. Same engine init as paper-live ─────────────────────
+    internal_symbol = symbol.replace("-", "/")
+    api_symbol = internal_symbol.replace("/", "")
+    symbol = internal_symbol
+
+    logger.info(f"[WS-LIVE] Connected: {symbol}/{timeframe}")
+    storage = get_storage()
+
+    try:
+        asset_class = "meme"
+        weight_profile = "meme"
+        try:
+            from ppmt.data.classifier import AssetClassifier
+            classifier = AssetClassifier()
+            info = classifier.classify(symbol)
+            asset_class = info.asset_class
+            weight_profile = info.weight_profile
+        except Exception as e:
+            logger.warning(f"[WS-LIVE] AssetClassifier unavailable ({e}), defaulting to 'meme'")
+
+        engine = PPMT(
+            symbol=symbol, asset_class=asset_class,
+            weight_profile=weight_profile, dual_sax=True,
+            min_confidence=0.08, timeframe=timeframe,
+        )
+
+        tries = storage.load_all_tries(symbol, asset_class)
+        n1, n2, n3, n4 = tries.get("n1"), tries.get("n2"), tries.get("n3"), tries.get("n4")
+        n1c = n1.pattern_count if n1 else 0
+        n2c = n2.pattern_count if n2 else 0
+        n3c = n3.pattern_count if n3 else 0
+        n4c = n4.pattern_count if hasattr(n4, 'pattern_count') and n4 else 0
+        logger.info(f"[WS-LIVE] Loaded N1: {n1c} N2: {n2c} N3: {n3c} N4: {n4c}")
+
+        if n1 or n2 or n3:
+            from ppmt.core.trie import RegimePartitionedTrie
+            engine.set_tries(
+                trie_n1=n1 or engine.trie_n1,
+                trie_n2=n2 or engine.trie_n2,
+                trie_n3=n3 or engine.trie_n3,
+                trie_n4=n4 if n4 is not None else engine.trie_n4,
+            )
+    except Exception as e:
+        logger.error(f"[WS-LIVE] Engine init failed: {e}")
+        await websocket.send_json({"type": "error", "data": {"message": f"Engine init failed: {e}"}})
+        await websocket.close()
+        return
+
+    # ─── 3. Exchange poller + warmup (same as paper) ───────────
+    from ppmt.engine.realtime import _DirectPollExchange
+    exchange = _DirectPollExchange("binance")
+
+    try:
+        ohlcv_raw = await exchange.fetch_ohlcv(api_symbol, timeframe, limit=500)
+        if ohlcv_raw:
+            df = pd.DataFrame(ohlcv_raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
+            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+            df.set_index("timestamp", inplace=True)
+            for i in range(len(df) - 1):
+                engine.process_new_candle(candle_df=df.iloc[[i]], current_price=float(df["close"].iloc[i]))
+            for i in range(max(0, len(df) - 50), len(df)):
+                r = df.iloc[i]
+                await websocket.send_json({"type": "candle", "data": {"time": int(df.index[i].timestamp()), "open": float(r["open"]), "high": float(r["high"]), "low": float(r["low"]), "close": float(r["close"])}})
+    except Exception as e:
+        logger.warning(f"[WS-LIVE] Warmup failed: {e}")
+
+    tf_seconds = {"1m": 5, "5m": 10, "15m": 15, "1h": 30}
+    poll_interval = tf_seconds.get(timeframe, 5)
+    last_candle_ts = 0
+
+    # ─── 4. Main poll loop — routed execution ───────────────────
+    try:
+        while True:
+            try:
+                ohlcv_raw = await exchange.fetch_ohlcv(api_symbol, timeframe, limit=2)
+                if not ohlcv_raw:
+                    await asyncio.sleep(poll_interval)
+                    continue
+
+                latest = ohlcv_raw[-1]
+                ts_ms, o, h, l, c, v = latest
+                ts_sec = int(ts_ms / 1000)
+                if ts_sec <= last_candle_ts:
+                    await asyncio.sleep(poll_interval)
+                    continue
+                last_candle_ts = ts_sec
+                current_price = float(c)
+
+                await websocket.send_json({"type": "candle", "data": {"time": ts_sec, "open": float(o), "high": float(h), "low": float(l), "close": float(c)}})
+
+                candle_df = pd.DataFrame(
+                    {"open": [o], "high": [h], "low": [l], "close": [c], "volume": [v]},
+                    index=pd.DatetimeIndex([datetime.fromtimestamp(ts_sec, tz=timezone.utc)]),
+                )
+
+                # Check position state for IExecutor (async-compatible)
+                _in_pos = isinstance(executor, PaperExecutor) and executor.is_in_position
+                _entry = executor.position.entry_price if (isinstance(executor, PaperExecutor) and executor.position) else None
+
+                result = engine.process_new_candle(
+                    candle_df=candle_df, current_price=current_price,
+                    is_in_position=_in_pos, entry_price=_entry,
+                )
+
+                # brain_update (identical logic)
+                current_sax, active_path_ids = [], ["root"]
+                n1_conf, n2_conf, weighted_conf, signal_type = 0.0, 0.0, 0.0, "NO_SIGNAL"
+
+                if result is not None:
+                    if result.sax_symbols:
+                        last_sym = result.sax_symbols[-1]
+                        current_sax = [str(s) for s in last_sym] if isinstance(last_sym, (tuple, list)) else [str(last_sym)]
+                    best_match, best_level = None, None
+                    for level, match in [("n3", result.n3_match), ("n2", result.n2_match), ("n4", result.n4_match), ("n1", result.n1_match)]:
+                        if match and match.node:
+                            conf = match.node.metadata.confidence if match.node.metadata else 0.0
+                            if best_match is None or conf > (best_match.node.metadata.confidence if best_match.node and best_match.node.metadata else 0.0):
+                                best_match, best_level = match, level
+                    if best_match and best_match.node:
+                        active_path_ids = _build_active_path_ids(best_match.node.get_backward_path())
+                    n1_conf, n2_conf, weighted_conf = result.n1_confidence, result.n2_confidence, result.weighted_confidence
+                    signal_type = result.signal.signal_type.value if result.signal else "NO_SIGNAL"
+                else:
+                    buf = getattr(engine, '_streaming_buffer', None)
+                    if buf and buf._pattern_buffer:
+                        last_sym = buf._pattern_buffer[-1]
+                        current_sax = [str(s) for s in last_sym] if isinstance(last_sym, (tuple, list)) else [str(last_sym)]
+                    if buf and buf.has_pattern():
+                        try:
+                            qr = engine.match(current_symbols=buf.get_pattern(), current_price=current_price, is_in_position=_in_pos, entry_price=_entry)
+                            if qr:
+                                n1_conf, n2_conf, weighted_conf = qr.n1_confidence, qr.n2_confidence, qr.weighted_confidence
+                                for level, match in [("n3", qr.n3_match), ("n2", qr.n2_match), ("n4", qr.n4_match), ("n1", qr.n1_match)]:
+                                    if match and match.node:
+                                        conf = match.node.metadata.confidence if match.node.metadata else 0.0
+                                        if best_match is None or conf > (best_match.node.metadata.confidence if best_match.node and best_match.node.metadata else 0.0):
+                                            best_match, best_level = match, level
+                                if best_match and best_match.node:
+                                    active_path_ids = _build_active_path_ids(best_match.node.get_backward_path())
+                        except Exception:
+                            pass
+
+                await websocket.send_json({"type": "brain_update", "data": {"current_sax_symbol": current_sax, "active_path_ids": active_path_ids, "n1_confidence": round(n1_conf, 4), "n2_confidence": round(n2_conf, 4), "weighted_confidence": round(weighted_conf, 4), "signal_type": signal_type}})
+
+                # ── ROUTED EXECUTION: paper vs live ────────────
+                if result and result.signal and result.signal.is_entry and not _in_pos:
+                    sig = result.signal
+                    try:
+                        # LIVE: await executor.open_position() → MEXC API
+                        # PAPER: await executor.open_position() → in-memory
+                        # Same IExecutor interface, different backend.
+                        pos = await executor.open_position(
+                            symbol=symbol,
+                            direction=sig.direction or "LONG",
+                            size_usdt=100.0,
+                            metadata={
+                                "entry_price": current_price,
+                                "expected_move_pct": sig.expected_move_pct or 1.0,
+                                "predicted_path_symbols": sig.predicted_path_symbols if sig.predicted_path else None,
+                            },
+                        )
+                        logger.info(
+                            f"[WS-LIVE] SIGNAL {sig.signal_type.value} @ {current_price:.6f} "
+                            f"conf={sig.confidence:.3f} SL={pos.current_sl:.6f} TP={pos.current_tp:.6f}"
+                        )
+                        await websocket.send_json({"type": "position_update", "data": pos.to_dict()})
+                    except Exception as e:
+                        logger.error(f"[WS-LIVE] Failed to open position: {e}")
+                        await websocket.send_json({"type": "error", "data": {"message": str(e)}})
+
+            except WebSocketDisconnect:
+                break
+            except Exception as e:
+                logger.error(f"[WS-LIVE] Poll loop error: {e}", exc_info=True)
+
+            await asyncio.sleep(poll_interval)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        try:
+            await exchange.close()
+        except Exception:
+            pass
+        if isinstance(executor, MexcFuturesExecutor):
+            await executor.close()
+        logger.info(f"[WS-LIVE] Session closed: {symbol}/{timeframe}")
 
 
 # ─── Run directly ─────────────────────────────────────────────
