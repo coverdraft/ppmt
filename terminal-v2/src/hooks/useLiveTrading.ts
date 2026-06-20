@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useRef, useState, useCallback } from 'react';
 import { buildAuthPayload } from '../utils/credentialCrypto';
 import type {
   WSMessage,
@@ -6,7 +6,6 @@ import type {
   BrainUpdateMessage,
   PositionUpdateMessage,
   PositionStateWire,
-  AuthOkMessage,
 } from '../types/ws';
 import type { PositionState, PositionStatus } from '../types/position';
 
@@ -33,9 +32,10 @@ function wireToPosition(wire: PositionStateWire): PositionState {
   };
 }
 
+export type LiveConnectionStatus = 'idle' | 'connecting' | 'authenticating' | 'connected' | 'error';
+
 export interface LiveTradingState {
-  connected: boolean;
-  authenticated: boolean;
+  status: LiveConnectionStatus;
   candles: CandleMessage['data'][];
   brainUpdate: BrainUpdateMessage['data'] | null;
   position: PositionState | null;
@@ -45,20 +45,19 @@ export interface LiveTradingState {
 /**
  * useLiveTrading — WebSocket hook for LIVE TRADING mode (MEXC Futures).
  *
- * v0.45.0: ENTREGABLE 6 — Encrypted credentials.
+ * v0.46.0: ENTREGABLE 7 — Manual connect() API.
  *
- * Connects to ws://localhost:8000/ws/live-trading/{symbol}/{timeframe}
- * Sends Fernet-encrypted API keys as the first message.
- * Returns live candle, brain, and position state.
+ * State machine: idle → connecting → authenticating → connected
+ *                                                    → error
+ *
+ * Usage:
+ *   const { state, connect, disconnect } = useLiveTrading(symbol, timeframe);
+ *   // User fills credentials modal, then:
+ *   connect(sessionPassword, apiKey, apiSecret);
  */
-export function useLiveTrading(
-  symbol: string | null,
-  timeframe: string,
-  credentials: { apiKey: string; apiSecret: string; sessionPassword: string } | null,
-) {
+export function useLiveTrading(symbol: string | null, timeframe: string) {
   const [state, setState] = useState<LiveTradingState>({
-    connected: false,
-    authenticated: false,
+    status: 'idle',
     candles: [],
     brainUpdate: null,
     position: null,
@@ -66,119 +65,120 @@ export function useLiveTrading(
   });
 
   const wsRef = useRef<WebSocket | null>(null);
-  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const connect = useCallback(() => {
-    if (!symbol || !credentials) return;
-
-    // Close existing connection
+  /** Disconnect and reset state */
+  const disconnect = useCallback(() => {
     if (wsRef.current) {
       wsRef.current.close();
       wsRef.current = null;
     }
-
-    // Symbol in URL: "DOGE/USDT" → "DOGE-USDT"
-    const urlSymbol = symbol.replace(/\//g, '-');
-    const wsUrl = `ws://localhost:8000/ws/live-trading/${urlSymbol}/${timeframe}`;
-    const ws = new WebSocket(wsUrl);
-
-    ws.onopen = () => {
-      setState((prev) => ({ ...prev, connected: true, error: null }));
-
-      // ── Send ENCRYPTED auth as first message ──
-      const authPayload = buildAuthPayload(
-        credentials.apiKey,
-        credentials.apiSecret,
-        credentials.sessionPassword,
-      );
-      ws.send(JSON.stringify(authPayload));
-    };
-
-    ws.onmessage = (event) => {
-      try {
-        const msg: WSMessage = JSON.parse(event.data);
-
-        switch (msg.type) {
-          case 'auth_ok':
-            setState((prev) => ({ ...prev, authenticated: true }));
-            break;
-
-          case 'candle':
-            setState((prev) => ({
-              ...prev,
-              candles: [...prev.candles.slice(-199), msg.data],
-            }));
-            break;
-
-          case 'brain_update':
-            setState((prev) => ({
-              ...prev,
-              brainUpdate: msg.data,
-            }));
-            break;
-
-          case 'position_update':
-            setState((prev) => ({
-              ...prev,
-              position: wireToPosition(msg.data),
-            }));
-            break;
-
-          case 'error':
-            setState((prev) => ({
-              ...prev,
-              error: msg.data.message,
-            }));
-            break;
-        }
-      } catch (e) {
-        console.error('[useLiveTrading] Parse error:', e);
-      }
-    };
-
-    ws.onclose = () => {
-      setState((prev) => ({ ...prev, connected: false, authenticated: false }));
-      // Auto-reconnect after 3 seconds
-      reconnectTimeoutRef.current = setTimeout(() => {
-        connect();
-      }, 3000);
-    };
-
-    ws.onerror = () => {
-      setState((prev) => ({
-        ...prev,
-        connected: false,
-        authenticated: false,
-        error: 'Connection failed — is the backend running?',
-      }));
-    };
-
-    wsRef.current = ws;
-  }, [symbol, timeframe, credentials]);
-
-  // Connect on mount / when symbol changes
-  useEffect(() => {
     setState({
-      connected: false,
-      authenticated: false,
+      status: 'idle',
       candles: [],
       brainUpdate: null,
       position: null,
       error: null,
     });
+  }, []);
 
-    connect();
+  /** Open WS, send encrypted auth, start listening */
+  const connect = useCallback(
+    (sessionPassword: string, apiKey: string, apiSecret: string) => {
+      if (!symbol) return;
 
-    return () => {
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-      }
+      // Close any existing connection
       if (wsRef.current) {
         wsRef.current.close();
         wsRef.current = null;
       }
-    };
-  }, [connect]);
 
-  return state;
+      setState({
+        status: 'connecting',
+        candles: [],
+        brainUpdate: null,
+        position: null,
+        error: null,
+      });
+
+      const urlSymbol = symbol.replace(/\//g, '-');
+      const wsUrl = `ws://localhost:8000/ws/live-trading/${urlSymbol}/${timeframe}`;
+      const ws = new WebSocket(wsUrl);
+
+      ws.onopen = () => {
+        // WS is open → send encrypted auth
+        setState((prev) => ({ ...prev, status: 'authenticating' }));
+
+        const authPayload = buildAuthPayload(apiKey, apiSecret, sessionPassword);
+        ws.send(JSON.stringify(authPayload));
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const msg: WSMessage = JSON.parse(event.data);
+
+          switch (msg.type) {
+            case 'auth_ok':
+              setState((prev) => ({ ...prev, status: 'connected', error: null }));
+              break;
+
+            case 'candle':
+              setState((prev) => ({
+                ...prev,
+                candles: [...prev.candles.slice(-199), msg.data],
+              }));
+              break;
+
+            case 'brain_update':
+              setState((prev) => ({
+                ...prev,
+                brainUpdate: msg.data,
+              }));
+              break;
+
+            case 'position_update':
+              setState((prev) => ({
+                ...prev,
+                position: wireToPosition(msg.data),
+              }));
+              break;
+
+            case 'error':
+              setState((prev) => ({
+                ...prev,
+                status: 'error',
+                error: msg.data.message,
+              }));
+              break;
+          }
+        } catch (e) {
+          console.error('[useLiveTrading] Parse error:', e);
+        }
+      };
+
+      ws.onclose = () => {
+        setState((prev) => {
+          // Only reset to idle if we were previously connected (not manual disconnect)
+          if (prev.status === 'connected' || prev.status === 'authenticating') {
+            return { ...prev, status: 'error', error: 'Connection lost' };
+          }
+          return prev;
+        });
+        wsRef.current = null;
+      };
+
+      ws.onerror = () => {
+        setState((prev) => ({
+          ...prev,
+          status: 'error',
+          error: 'Connection failed — is the backend running?',
+        }));
+      };
+
+      wsRef.current = ws;
+    },
+    [symbol, timeframe],
+  );
+
+  // Cleanup on unmount
+  return { state, connect, disconnect, _wsRef: wsRef };
 }

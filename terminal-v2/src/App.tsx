@@ -1,10 +1,13 @@
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useEffect } from 'react';
 import type { OperationMode, PositionState } from './types/position';
 import { getMockPosition } from './mock/candles';
 import TopBar from './components/TopBar';
 import TradingChart from './components/TradingChart';
 import RightPanel from './components/RightPanel';
+import AuthModal from './components/AuthModal';
 import { usePaperLive } from './hooks/usePaperLive';
+import { useLiveTrading } from './hooks/useLiveTrading';
+import type { LiveConnectionStatus } from './hooks/useLiveTrading';
 
 /** Default token for PAPER LIVE mode */
 const DEFAULT_SYMBOL = 'DOGE/USDT';
@@ -12,15 +15,96 @@ const DEFAULT_TIMEFRAME = '1m';
 
 export default function App() {
   const [mode, setMode] = useState<OperationMode>('PAPER_LIVE');
+  const [showAuthModal, setShowAuthModal] = useState(false);
 
   // Mock position state (used in ANALYSIS mode and as fallback)
   const [mockPosition, setMockPosition] = useState<PositionState>(getMockPosition);
 
-  // Live WebSocket connection (PAPER LIVE mode)
-  const live = usePaperLive(
+  // ─── PAPER LIVE hook ────────────────────────────────────────
+  const paperLive = usePaperLive(
     mode === 'PAPER_LIVE' ? DEFAULT_SYMBOL : null,
     DEFAULT_TIMEFRAME
   );
+
+  // ─── LIVE TRADING hook (manual connect) ─────────────────────
+  const { state: liveState, connect: liveConnect, disconnect: liveDisconnect, _wsRef: liveWsRef } = useLiveTrading(
+    mode === 'LIVE_TRADING' ? DEFAULT_SYMBOL : null,
+    DEFAULT_TIMEFRAME
+  );
+
+  // Cleanup live WS on unmount
+  useEffect(() => {
+    return () => {
+      if (liveWsRef.current) {
+        liveWsRef.current.close();
+        liveWsRef.current = null;
+      }
+    };
+  }, [liveWsRef]);
+
+  // ─── Mode change handler ────────────────────────────────────
+  const handleModeChange = useCallback((newMode: OperationMode) => {
+    if (newMode === 'LIVE_TRADING') {
+      // Switch to LIVE mode → show auth modal (don't connect yet)
+      setMode('LIVE_TRADING');
+      setShowAuthModal(true);
+      liveDisconnect(); // Reset any previous live state
+    } else {
+      // Leaving LIVE mode → disconnect
+      if (mode === 'LIVE_TRADING') {
+        liveDisconnect();
+      }
+      setMode(newMode);
+      setShowAuthModal(false);
+    }
+  }, [mode, liveDisconnect]);
+
+  // ─── Auth modal handlers ────────────────────────────────────
+  const handleAuthConnect = useCallback(
+    (sessionPassword: string, apiKey: string, apiSecret: string) => {
+      liveConnect(sessionPassword, apiKey, apiSecret);
+    },
+    [liveConnect]
+  );
+
+  const handleAuthCancel = useCallback(() => {
+    setShowAuthModal(false);
+    // If not connected, revert to PAPER mode
+    if (liveState.status !== 'connected') {
+      setMode('PAPER_LIVE');
+    }
+  }, [liveState.status]);
+
+  // Close modal when auth succeeds
+  useEffect(() => {
+    if (liveState.status === 'connected' && showAuthModal) {
+      setShowAuthModal(false);
+    }
+  }, [liveState.status, showAuthModal]);
+
+  // ─── Determine which data source to use ─────────────────────
+  const isLive = mode === 'PAPER_LIVE' || mode === 'LIVE_TRADING';
+  const isLiveTrading = mode === 'LIVE_TRADING';
+  const isLiveConnected = isLiveTrading && liveState.status === 'connected';
+
+  const candles = useMemo(() => {
+    if (isLiveTrading) return liveState.candles;
+    return paperLive.candles;
+  }, [isLiveTrading, liveState.candles, paperLive.candles]);
+
+  const brainUpdate = useMemo(() => {
+    if (isLiveTrading) return liveState.brainUpdate;
+    return paperLive.brainUpdate;
+  }, [isLiveTrading, liveState.brainUpdate, paperLive.brainUpdate]);
+
+  const position = useMemo(() => {
+    if (isLiveTrading && liveState.position) return liveState.position;
+    if (mode === 'PAPER_LIVE' && paperLive.position) return paperLive.position;
+    return mockPosition;
+  }, [isLiveTrading, liveState.position, mode, paperLive.position, mockPosition]);
+
+  const connected = isLiveTrading ? liveState.status === 'connected' : paperLive.connected;
+  const error = isLiveTrading ? liveState.error : paperLive.error;
 
   const handlePositionUpdate = useCallback(
     (updater: (prev: PositionState) => PositionState) => {
@@ -29,16 +113,21 @@ export default function App() {
     []
   );
 
-  // ─── Determine which position and candles to use ────────────
-  const isLive = mode === 'PAPER_LIVE';
-  const position = useMemo(() => {
-    if (isLive && live.position) return live.position;
-    return mockPosition;
-  }, [isLive, live.position, mockPosition]);
+  // ─── Live status badge text ─────────────────────────────────
+  const liveStatusText = useMemo((): { label: string; color: string } => {
+    if (!isLiveTrading) return { label: '', color: '' };
+    switch (liveState.status) {
+      case 'idle': return { label: 'OFFLINE', color: 'text-gray-500' };
+      case 'connecting': return { label: 'CONNECTING...', color: 'text-yellow-400' };
+      case 'authenticating': return { label: 'AUTHENTICATING...', color: 'text-yellow-400' };
+      case 'connected': return { label: 'LIVE', color: 'text-red-400' };
+      case 'error': return { label: 'ERROR', color: 'text-red-500' };
+    }
+  }, [isLiveTrading, liveState.status]);
 
   return (
     <div className="h-screen flex flex-col bg-terminal-bg overflow-hidden">
-      <TopBar mode={mode} onModeChange={setMode} />
+      <TopBar mode={mode} onModeChange={handleModeChange} />
 
       {/* Main content area */}
       <main className="flex-1 flex overflow-hidden">
@@ -66,22 +155,23 @@ export default function App() {
                     DOGE/USDT
                   </span>
                   <span className="text-[10px] text-gray-500 font-mono">1m</span>
-                  {isLive && (
-                    <span className={`flex items-center gap-1 text-[10px] font-mono ${
-                      live.connected ? 'text-emerald-400' : 'text-red-400'
-                    }`}>
-                      <span className={`w-1.5 h-1.5 rounded-full ${
-                        live.connected ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'
-                      }`} />
-                      {live.connected ? 'LIVE' : 'DISCONNECTED'}
-                    </span>
-                  )}
+                  {/* Connection status indicator */}
+                  <span className={`flex items-center gap-1 text-[10px] font-mono ${
+                    connected ? 'text-emerald-400' : 'text-red-400'
+                  }`}>
+                    <span className={`w-1.5 h-1.5 rounded-full ${
+                      connected
+                        ? isLiveTrading ? 'bg-red-500 animate-pulse' : 'bg-emerald-500 animate-pulse'
+                        : 'bg-red-500'
+                    }`} />
+                    {isLiveTrading ? liveStatusText.label : (connected ? 'LIVE' : 'DISCONNECTED')}
+                  </span>
                 </div>
                 <div className="flex items-center gap-2 text-[10px] font-mono text-gray-600">
                   <span>
-                    {mode === 'LIVE_TRADING' ? 'LIVE MEXC' : 'PAPER'}
+                    {isLiveTrading ? 'LIVE MEXC' : 'PAPER'}
                   </span>
-                  {mode === 'LIVE_TRADING' && (
+                  {isLiveTrading && liveState.status === 'connected' && (
                     <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
                   )}
                 </div>
@@ -89,14 +179,23 @@ export default function App() {
               <TradingChart
                 position={position}
                 onPositionUpdate={handlePositionUpdate}
-                liveCandles={live.candles}
+                liveCandles={candles}
                 isLive={isLive}
               />
               {/* Error display */}
-              {isLive && live.error && (
+              {error && (
                 <div className="mt-1 px-2 py-1 bg-red-900/20 border border-red-800/30 rounded text-red-400 text-[10px] font-mono">
-                  {live.error}
+                  {error}
                 </div>
+              )}
+              {/* Reconnect button for LIVE mode errors */}
+              {isLiveTrading && liveState.status === 'error' && (
+                <button
+                  onClick={() => setShowAuthModal(true)}
+                  className="mt-2 px-3 py-1.5 bg-red-600/20 border border-red-500/30 rounded text-red-400 text-xs font-mono hover:bg-red-600/30 transition-colors"
+                >
+                  REINTENTAR CONEXIÓN
+                </button>
               )}
             </div>
 
@@ -104,13 +203,23 @@ export default function App() {
             <div className="w-[40%] min-w-0">
               <RightPanel
                 position={position}
-                brainUpdate={live.brainUpdate}
+                brainUpdate={brainUpdate}
                 isLive={isLive}
               />
             </div>
           </div>
         )}
       </main>
+
+      {/* ─── Auth Modal (LIVE TRADING) ─────────────────────────── */}
+      {showAuthModal && isLiveTrading && (
+        <AuthModal
+          onConnect={handleAuthConnect}
+          onCancel={handleAuthCancel}
+          status={liveState.status}
+          error={liveState.error}
+        />
+      )}
     </div>
   );
 }

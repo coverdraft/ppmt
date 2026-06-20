@@ -517,6 +517,20 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
 # ─── WebSocket: Live Trading (MEXC Futures) ───────────────────
 # v0.45.0: ENTREGABLE 6 — Encrypted credentials + Walk-Forward Loop
 
+# Helper: normalize a SAX symbol (str, list, or tuple) to a flat string
+# for safe comparison across trie levels (N1/N2 produce str, N3/N4 produce tuple).
+def _norm_sax(sym) -> str:
+    """Normalize a SAX symbol to a flat string for comparison.
+    
+    'a'       → 'a'
+    ['d','x'] → 'd'   (price dimension only)
+    ('a','y') → 'a'
+    """
+    if isinstance(sym, (tuple, list)):
+        return str(sym[0])  # price symbol only
+    return str(sym)
+
+
 # Helper: check if any IExecutor has an active position
 def _executor_in_position(executor: IExecutor) -> bool:
     """Check if executor has an active (open) position — works for all IExecutor impls."""
@@ -762,12 +776,20 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
                 #   1. Compare current SAX symbol vs expected_sequence[index]
                 #   2. DIVERGE → close position
                 #   3. MATCH  → advance index, move SL/TP
+                #
+                # v0.46.0 FIX: Normalize both sides with _norm_sax() before
+                # comparison to prevent false divergences when one side is a
+                # string ('a') and the other is a list/tuple (['a','x']).
                 if _in_pos and current_sax:
                     pos = _executor_position(executor)
                     if pos and pos.sequence_index < len(pos.expected_sequence):
                         expected = pos.expected_sequence[pos.sequence_index]
 
-                        if current_sax == expected or (len(current_sax) == 1 and len(expected) == 1 and current_sax[0] == expected[0]):
+                        # Normalize: extract price dimension from both sides
+                        cur_norm = _norm_sax(current_sax[0]) if current_sax else ""
+                        exp_norm = _norm_sax(expected[0]) if expected else ""
+
+                        if cur_norm == exp_norm:
                             # ── MATCH: Advance sequence ──────────
                             pos.sequence_index += 1
                             idx = pos.sequence_index  # 1-based after increment

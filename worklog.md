@@ -1870,3 +1870,31 @@ Stage Summary:
 - IExecutor polymorphism: same open_position() call, different backend
 - No API keys in URL — only in WS message body (secure)
 - Git synced, worklog updated
+
+---
+Task ID: 6
+Agent: super-z (main)
+Task: ENTREGABLE 6 — Credential encryption (Fernet) + Walk-Forward Loop
+
+Work Log:
+- Created ppmt/execution/crypto.py: Fernet-based encrypt/decrypt with PBKDF2-SHA256 (480k iterations)
+- Updated v2_server.py live-trading endpoint: decrypt_auth_payload → del api_key/api_secret after executor creation
+- Added _executor_in_position/_executor_position helpers for IExecutor-agnostic position state
+- Implemented full Walk-Forward Loop in live-trading WS handler:
+  - SAX vs expected_sequence comparison on every candle
+  - DIVERGE → close_position(CLOSED_BY_DIVERGENCE)
+  - MATCH #1 → SL to break-even (BREAK_EVEN_SECURED)
+  - MATCH #2+ → TP extension (TP_EXTENDED)
+  - Price-based SL/TP/Catastrophic hit detection
+- Created frontend credentialCrypto.ts: crypto-js Fernet-compatible encryption (same PBKDF2 params)
+- Created useLiveTrading.ts hook: sends encrypted auth as first WS message
+- Updated ws.ts types with AuthOkMessage
+- Tests: 16/16 passing (12 crypto + 4 mexc executor)
+- Version bumped to v0.45.0, pyproject.toml updated with cryptography>=42.0.0
+- Git commit 4fa0057, pushed to GitHub
+
+Stage Summary:
+- API keys never travel in plaintext over WebSocket
+- Full position lifecycle now monitored: open → walk-forward → close
+- Frontend has encrypted auth flow ready for UI integration
+- All tests green, TypeScript compiles clean
