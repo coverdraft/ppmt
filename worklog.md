@@ -1740,3 +1740,23 @@ Stage Summary:
 - TRAZABILIDAD.md ahora tiene la GUÍA DEL MOTOR al final — un nuevo agente puede empezar leyendo esa sección y entender todo el sistema en 15 minutos.
 - Repo está limpio y actualizado en GitHub main con commits hasta v0.40.34.
 - Siguiente: commit + push de esta actualización de docs. Luego esperar al usuario para feedback de v0.40.34 en su Mac.
+
+---
+Task ID: github-push-v043
+Agent: main
+Task: Guardar trazabilidad y pushear a GitHub
+
+Work Log:
+- Configurado remote con token de acceso GitHub
+- Verificado que TRAZABILIDAD.md ya contiene secciones v0.42.0 y v0.43.0 completas
+- Header actualizado a v0.43.0
+- Resuelto conflicto de histories divergentes (local UUID commits vs remote descriptive commits)
+- Reset a origin/main (f505717) — remote ya tenía todo el código v0.43.0 + TRAZABILIDAD actualizada
+- Push exitoso a https://github.com/coverdraft/ppmt — Everything up-to-date
+
+Stage Summary:
+- GitHub https://github.com/coverdraft/ppmt actualizado con v0.43.0
+- TRAZABILIDAD.md documentado hasta v0.43.0 (SAX Estratificado N1 price-only)
+- N1: 243 patterns, avg confidence 0.721, avg obs/node 27.0
+- Transfer Learning PEPE OOS: +4.76% P&L en 1m
+- Esperando nuevas instrucciones del usuario
