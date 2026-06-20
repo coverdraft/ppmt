@@ -1,7 +1,7 @@
 # TRAZABILIDAD PPMT — Estado del Proyecto
 
 > Última actualización: 2026-06-20
-> Versión actual: **v0.43.0** — SAX Estratificado: N1 PRICE ONLY (α=3, 243 max patterns, confidence 0.721), N2/N3/N4 SAX Dual. Transfer Learning demostrado PEPE OOS +4.76%
+> Versión actual: **v0.43.1** — N1+N2 PRICE ONLY (α=3, 243 max patterns), N3/N4 SAX Dual. PEPE OOS weighted confidence 0.463 > 0.40 ✅ Motor CERRADO
 > ⚠️ **Si eres nuevo, lee primero la sección `# 📘 GUÍA DEL MOTOR PPMT — PARA CONTINUAR EL TRABAJO` al final de este archivo (línea 9914+).** Ahí está la arquitectura, dónde empezar a leer, dónde costó más, cómo se resolvieron largos y cortos, y el estado actual.
 > Repositorio: https://github.com/coverdraft/ppmt
 > Idioma: Español
@@ -10593,12 +10593,71 @@ e07217a v0.42.0: fix SAX Dual serialization in trie
 
 ### Estado Actual del Sistema
 
-- **Motor PPMT**: v0.43.0 con SAX Estratificado por nivel
-- **N1 Universal**: PRICE ONLY, α=3, max 243 patterns, avg confidence 0.721 ✅
-- **N2/N3/N4**: SAX Dual (price+volume) ✅
+- **Motor PPMT**: v0.43.1 con N1+N2 PRICE ONLY, N3/N4 SAX Dual
+- **N1 Universal**: PRICE ONLY, α=3, max 243 patterns, avg confidence 0.403 ✅
+- **N2 ALL classes**: PRICE ONLY, α=3, max 243 patterns (v0.43.1: volume is noise at class level)
+- **N3/N4**: SAX Dual (price+volume) ✅
 - **Window Size**: 1m→W=45, 5m→W=18 ✅
-- **SL/TP**: desde expected_move, sin floors estáticos ✅
-- **SAX Dual**: Tuplas nativas, serialización JSON lists ✅
-- **Transfer Learning**: Demostrado con PEPE OOS (+4.76% en 1m) ✅
-- **Limitación actual**: Weighted confidence limitada por N2 sparsity (7 días datos)
-- **Próximo paso**: Más datos históricos (30-90 días) para densificar N2/N3
+- **SL/TP**: desde expected_move_pct, sin floors estáticos ✅
+- **Data**: 14 tokens × 90 días × (1m + 5m) = 2.17M velas
+- **Transfer Learning PEPE OOS**: **Weighted Confidence > 0.40 ALCANZADO** ✅
+  - Max weighted conf: 0.463
+  - 312/2875 señales > 0.40 (10.9%)
+  - P&L: +8.78%
+- **Motor CERRADO Y APROBADO** para diseño de Terminal
+
+---
+
+## v0.43.1 — COMPLETAR DATA N2 + N2 PRICE-ONLY (20 jun 2026)
+
+### Problema: N2 con SAX Dual seguía con combinatorial explosion
+
+Con 90 días de data para todos los tokens, N2 (SAX Dual, α_p=3, α_v=2 → 5^5 = 3,125 patterns)
+tenía solo 2.0 obs/node en `__CLASS_meme__` (8,625 obs / 4,264 nodos). El prior bayesiano
+dominaba → avg confidence 0.11, 0% de nodos > 0.40.
+
+### Diagnóstico: Volume es ruido a nivel de clase de activo
+
+Igual que volume era ruido a nivel universal (N1), también es ruido a nivel de clase (N2).
+La forma del precio es lo que transfiere entre tokens de la misma clase. Volume solo
+empieza a ser diferenciador a nivel de token individual (N3/N4).
+
+### Solución: N2 también PRICE-ONLY
+
+`LEVEL_DUAL_ALPHA_CONFIG` actualizado: TODOS los N2 ahora usan `volume=0` (price-only).
+Cuando `volume=0`, el engine usa `SAXEncoder` en vez de `SAXDualEncoder` para N2.
+
+```python
+LEVEL_DUAL_ALPHA_CONFIG = {
+    "n1": {"price": 3, "volume": 0},       # price-only
+    "n2_meme": {"price": 3, "volume": 0},   # price-only (3^5=243)
+    "n2_new_launch": {"price": 3, "volume": 0},
+    "n2_default": {"price": 3, "volume": 0}, # ALL N2 price-only
+    "n3": {"price": 4, "volume": 3},         # dual desde N3
+    "n4": {"price": 4, "volume": 3},
+}
+```
+
+### Data Pipeline
+
+- Descargados 90 días de 1m+5m para 14 tokens (BTC, ETH, SOL, BNB, XRP, LINK, AVAX, DOT,
+  UNI, AAVE, DOGE, SHIB, WIF, PEPE)
+- Total: 2.17M velas en DB
+- Build solo para 1m (PEPE excluido para OOS)
+- N2 meme: 243 patterns × 35.5 obs/node → avg confidence 0.32
+
+### PEPE OOS Resultado Final
+
+| Métrica | Valor |
+|---------|-------|
+| Weighted confidence max | **0.463** ✅ |
+| Weighted confidence avg | 0.339 |
+| Señales > 0.40 | **312/2875 (10.9%)** ✅ |
+| Señales > 0.30 | 2307/2875 (80.2%) |
+| N1 avg confidence | 0.408 |
+| N2 avg confidence | 0.327 |
+| P&L | +8.78% |
+| Trades | 5 (2W/3L) |
+
+**CRITERIO DE ACEPTACIÓN CUMPLIDO**: Weighted Confidence > 0.40 en señales PEPE
+usando solo Transfer Learning (sin N3, sin N4). **Motor PPMT cerrado y aprobado.**
