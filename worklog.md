@@ -1760,3 +1760,53 @@ Stage Summary:
 - N1: 243 patterns, avg confidence 0.721, avg obs/node 27.0
 - Transfer Learning PEPE OOS: +4.76% P&L en 1m
 - Esperando nuevas instrucciones del usuario
+
+---
+Task ID: v0.43.1-data-n2-fix
+Agent: main
+Task: DIRECTRIZ FINAL: Completar data de N2 y cerrar pruebas
+
+Work Log:
+- Descargados 90 días de datos 1m+5m para 14 tokens (2.17M velas totales)
+- Identificado que N2 con SAX Dual seguía con combinatorial explosion (2.0 obs/node)
+- Diagnóstico: volume es ruido a nivel de clase de activo (igual que en N1 universal)
+- Cambio de config: LEVEL_DUAL_ALPHA_CONFIG → todos los N2 usan volume=0 (price-only)
+- Cambio en ppmt.py: N2 con volume=0 usa SAXEncoder en vez de SAXDualEncoder
+- Rebuild completo: N1=243 patterns, N2 meme=243 patterns, N2 large_cap=243 patterns
+- N2 meme density: 35.5 obs/node, avg confidence 0.32 (was 2.0 obs/node, 0.11)
+- PEPE OOS 1m: weighted confidence max=0.463, 312 señales > 0.40 (10.9%), P&L +8.78%
+- CRITERIO DE ACEPTACIÓN CUMPLIDO: weighted confidence > 0.40 ✅
+- Push a GitHub: commit bbc67f5
+
+Stage Summary:
+- Motor PPMT v0.43.1 CERRADO Y APROBADO
+- PEPE genera señales con confidence > 0.40 usando solo Transfer Learning
+- N1+N2 price-only (α=3, 243 max patterns), N3/N4 SAX Dual
+- 14 tokens × 90 días × 1m+5m = 2.17M velas
+- Listo para diseño de Terminal
+
+---
+Task ID: env-cleanup-v0431
+Agent: super-z (main)
+Task: DIRECTRIZ: LIMPIEZA CRÍTICA DE ENTORNO Y PREPARACIÓN PARA TERMINAL
+
+Work Log:
+- Investigated duplicate source directories: /home/z/my-project/src/ppmt/ (outside repo) vs /home/z/my-project/ppmt/src/ppmt/ (inside repo, correct)
+- Found Python was importing from the git repo path (correct) but the duplicate had a different n2_default config
+- Fixed sax.py n2_default: changed volume=2 to volume=0 to align with accepted V1 architecture (N1/N2 = Price-Only)
+- Committed ppmt.py SAXEncoder fallback for N2 when volume=0 (was unstaged working tree change)
+- Removed duplicate /home/z/my-project/src/ppmt/ directory entirely
+- Removed stale /home/z/my-project/pyproject.toml
+- Cleaned all __pycache__ and .pyc files across project
+- Updated pyproject.toml version from 0.40.34 to 0.43.1
+- Ran PEPE OOS smoke test: confirmed weighted_conf max=0.463, 312 steps >= 0.40 (matches previous report)
+- Created ARCHITECTURE_V1.md with complete motor documentation
+- Updated TRAZABILIDAD.md with v0.43.1-post cleanup section
+- Committed and pushed all changes to GitHub (5ef279c)
+
+Stage Summary:
+- Environment is now clean: single code location at /home/z/my-project/ppmt/src/ppmt/
+- No duplicates, no __pycache__, git synced with remote
+- ARCHITECTURE_V1.md exists in repo root
+- Smoke test confirms engine produces identical results (weighted_conf max 0.463, 312 steps >= 0.40)
+- Motor PPMT officially CLOSED — Terminal phase can begin
