@@ -35,11 +35,16 @@ class TrieNode:
     the pattern broke → Unknown Block = Predictive Exit signal.
     """
 
-    symbol: str
-    """The SAX symbol this node represents (a, b, c, ...)."""
+    symbol: str | tuple[str, str]
+    """The SAX symbol this node represents.
+    Single: 'a', 'b', 'c' ...
+    Dual: ('a', 'x'), ('b', 'y') ... (price_symbol, volume_symbol)
+    """
 
-    children: dict[str, TrieNode] = field(default_factory=dict)
+    children: dict[str | tuple[str, str], TrieNode] = field(default_factory=dict)
     """Child nodes keyed by their SAX symbol.
+    Single-symbol keys: 'a', 'b', 'c' ...
+    Dual-symbol keys: ('a', 'x'), ('b', 'y') ...
     These represent the 'continuation_nodes' in metadata —
     known patterns that historically followed this block."""
 
@@ -56,15 +61,15 @@ class TrieNode:
 
     # === Navigation Methods ===
 
-    def has_child(self, symbol: str) -> bool:
+    def has_child(self, symbol: str | tuple[str, str]) -> bool:
         """Check if a continuation symbol exists as a child."""
         return symbol in self.children
 
-    def get_child(self, symbol: str) -> Optional[TrieNode]:
+    def get_child(self, symbol: str | tuple[str, str]) -> Optional[TrieNode]:
         """Get child node for a symbol, or None if unknown."""
         return self.children.get(symbol)
 
-    def add_child(self, symbol: str) -> TrieNode:
+    def add_child(self, symbol: str | tuple[str, str]) -> TrieNode:
         """Add a new child node and return it."""
         if symbol not in self.children:
             child = TrieNode(
@@ -96,34 +101,36 @@ class TrieNode:
     def to_dict(self) -> dict:
         """Serialize this node and all descendants to a dictionary.
 
-        SAX Dual serialization (PASO 1 validation):
-        Dual symbols stored as "a|x" internally are serialized to JSON lists
-        ["a", "x"] so the DB never contains stringified tuples. Single
-        symbols remain as strings. Children dict keys follow the same rule:
-        when dual symbols exist, children become a list of {"key", "node"}
-        pairs with list keys; otherwise the traditional dict format is kept
-        for backward compatibility and smaller payload.
+        v0.42.0: SAX Dual symbols are now stored as TUPLES internally.
+        Serialization converts:
+          - tuple ('a', 'x') → JSON list ["a", "x"]
+          - str 'a' → JSON string "a"
+        Children with tuple keys use list-of-pairs format;
+        children with string keys use traditional dict format.
         """
-        # Symbol: list for dual ("a|x" -> ["a", "x"]), string for single
+        # Symbol: tuple → list, string → string
         sym_out: str | list
-        if isinstance(self.symbol, str) and "|" in self.symbol:
-            sym_out = self.symbol.split("|")
+        if isinstance(self.symbol, tuple):
+            sym_out = list(self.symbol)  # ('a', 'x') → ["a", "x"]
         else:
             sym_out = self.symbol
 
-        # Children: detect if any dual-symbol keys exist
-        has_dual = any(
-            isinstance(k, str) and "|" in k for k in self.children
-        )
-        if has_dual:
-            # List-of-pairs format so dual keys serialize as lists
-            children_out = [
-                {
-                    "key": k.split("|") if "|" in k else k,
-                    "node": child.to_dict(),
-                }
-                for k, child in self.children.items()
-            ]
+        # Children: detect if any tuple keys exist
+        has_tuple_keys = any(isinstance(k, tuple) for k in self.children)
+        if has_tuple_keys:
+            # List-of-pairs format for tuple keys
+            children_out = []
+            for k, child in self.children.items():
+                if isinstance(k, tuple):
+                    children_out.append({
+                        "key": list(k),  # ('a', 'x') → ["a", "x"]
+                        "node": child.to_dict(),
+                    })
+                else:
+                    children_out.append({
+                        "key": k,
+                        "node": child.to_dict(),
+                    })
         else:
             # Traditional dict format (backward compat, smaller)
             children_out = {
@@ -141,14 +148,19 @@ class TrieNode:
     def from_dict(cls, data: dict, parent: Optional[TrieNode] = None) -> TrieNode:
         """Deserialize a node and all descendants from a dictionary.
 
-        Handles both serialization formats:
-        - New format: symbol as list ["a", "x"], children as list of pairs
-        - Old format: symbol as string "a|x", children as dict with string keys
+        v0.42.0: Dual symbols are now stored as TUPLES, not strings.
+        Handles all formats:
+        - New format: symbol as list ["a", "x"] → tuple ('a', 'x')
+        - Old format: symbol as string "a|x" → tuple ('a', 'x')
+        - Single: symbol as string "a" → string 'a'
         """
-        # Symbol: list -> join with "|", string -> pass through
+        # Symbol: list → tuple, "a|x" string → tuple, plain string → string
         sym_raw = data["symbol"]
         if isinstance(sym_raw, list):
-            symbol = "|".join(str(s) for s in sym_raw)
+            symbol = tuple(str(s) for s in sym_raw)  # ["a", "x"] → ('a', 'x')
+        elif isinstance(sym_raw, str) and "|" in sym_raw:
+            # Backward compat: old DB had "a|x" strings
+            symbol = tuple(sym_raw.split("|"))  # "a|x" → ('a', 'x')
         else:
             symbol = str(sym_raw)
 
@@ -165,7 +177,9 @@ class TrieNode:
             for entry in children_data:
                 key_raw = entry["key"]
                 if isinstance(key_raw, list):
-                    key = "|".join(str(s) for s in key_raw)
+                    key = tuple(str(s) for s in key_raw)  # ["a", "x"] → ('a', 'x')
+                elif isinstance(key_raw, str) and "|" in key_raw:
+                    key = tuple(key_raw.split("|"))  # "a|x" → ('a', 'x')
                 else:
                     key = str(key_raw)
                 child = TrieNode.from_dict(entry["node"], parent=node)
@@ -173,6 +187,9 @@ class TrieNode:
         else:
             # Dict format (old or single-symbol tries)
             for key, child_data in children_data.items():
+                # Old DB may have "a|x" string keys in dict format
+                if isinstance(key, str) and "|" in key:
+                    key = tuple(key.split("|"))
                 child = TrieNode.from_dict(child_data, parent=node)
                 node.children[key] = child
 
@@ -235,7 +252,7 @@ class PPMTTrie:
 
     def insert(
         self,
-        symbols: list[str],
+        symbols: list[str | tuple[str, str]],
         metadata: Optional[BlockLifecycleMetadata] = None,
     ) -> TrieNode:
         """
@@ -292,7 +309,7 @@ class PPMTTrie:
 
     def insert_with_observations(
         self,
-        symbols: list[str],
+        symbols: list[str | tuple[str, str]],
         move_pct: float = 0.0,
         drawdown_pct: float = 0.0,
         favorable_pct: float = 0.0,
@@ -344,7 +361,7 @@ class PPMTTrie:
 
         return node
 
-    def search(self, symbols: list[str]) -> Optional[TrieNode]:
+    def search(self, symbols: list[str | tuple[str, str]]) -> Optional[TrieNode]:
         """
         Search for a pattern in the Trie.
 
@@ -362,7 +379,7 @@ class PPMTTrie:
             node = child
         return node
 
-    def search_prefix(self, symbols: list[str]) -> tuple[Optional[TrieNode], int]:
+    def search_prefix(self, symbols: list[str | tuple[str, str]]) -> tuple[Optional[TrieNode], int]:
         """
         Search for the longest matching prefix in the Trie.
 
@@ -1081,7 +1098,7 @@ class RegimePartitionedTrie:
 
     def insert_with_observations(
         self,
-        symbols: list[str],
+        symbols: list[str | tuple[str, str]],
         move_pct: float = 0.0,
         drawdown_pct: float = 0.0,
         favorable_pct: float = 0.0,
@@ -1111,11 +1128,11 @@ class RegimePartitionedTrie:
         """Insert with explicit symbols into the current-regime sub-trie."""
         return self.sub_tries[self._current_regime].insert(symbols, metadata)
 
-    def search(self, symbols: list[str]):
+    def search(self, symbols: list[str | tuple[str, str]]):
         """Search in the CURRENT regime's sub-trie."""
         return self.sub_tries[self._current_regime].search(symbols)
 
-    def search_prefix(self, symbols: list[str]):
+    def search_prefix(self, symbols: list[str | tuple[str, str]]):
         """Longest matching prefix in the CURRENT regime's sub-trie."""
         return self.sub_tries[self._current_regime].search_prefix(symbols)
 

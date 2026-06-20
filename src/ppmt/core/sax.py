@@ -51,26 +51,59 @@ SAX_ALPHABET = "abcdefghijklmnopqrstuvwxyz"
 #   N1 (Universal): shared across ALL tokens — small α so patterns fill fast.
 #     α=3 → 3^5 = 243 patterns. With 5M+ observations from all assets,
 #     every pattern gets 20,000+ repetitions → rock-solid confidence.
+#     IMPORTANT: N1 uses ONLY PRICE (no volume) — Transfer Learning is about
+#     price SHAPE, not volume. Volume adds noise at the universal level.
 #
-#   N2 (Asset Class): shared within asset class — α depends on class density.
-#     meme/new_launch have fewer tokens → α=3 (243 patterns, fills well).
-#     blue_chip/large_cap/mid_cap/defi have more tokens → α=4 (1024 patterns).
+#   N2 (Asset Class): shared within asset class — SAX DUAL (price+volume).
+#     α_price=3 (meme/new_launch) or 4 (default), α_vol=2.
+#     Volume starts to matter here because we know the asset class context.
 #
-#   N3 (Per-Token): token-specific patterns — more granularity with specific data.
-#     α=4-5 depending on calibration. Uses the token's calibrated alpha.
+#   N3 (Per-Token): SAX DUAL. α_price=4, α_vol=3.
+#     Token-specific data allows more granularity.
 #
-#   N4 (Per-Token+Regime): same as N3 — regime sub-tries share the token's alpha.
+#   N4 (Per-Token+Regime): SAX DUAL, same as N3.
 #
-# WHY: With a single α=5 (3125 patterns), N1 never fills — it's a useless
-# safety net. With α=3, N1 has only 243 patterns and accumulates observations
-# from every token in the system, making it a truly universal pattern database.
+# WHY: When N1 used SAXDualEncoder (α_price=3, α_vol=2), the effective
+# alphabet was 3×2=6 symbols, creating 6^5=7,776 possible patterns.
+# With ~11,000 observations, each node had ~1.4 obs → the Bayesian prior
+# (strength=10) dominated and confidence never exceeded 0.19.
+# By making N1 PRICE-ONLY (α=3, max 243 patterns), each node gets ~45 obs
+# and confidence > 0.6 becomes achievable. This is the key mathematical fix.
 LEVEL_ALPHA_CONFIG: dict[str, int] = {
-    "n1": 3,          # Universal: 243 patterns, fills fast
-    "n2_meme": 3,     # Asset class meme/new_launch
-    "n2_new_launch": 3,  # Asset class new_launch
-    "n2_default": 4,  # Asset class blue_chip/large_cap/mid_cap/defi
-    "n3": 5,          # Per-token: more granularity with specific data
-    "n4": 5,          # Per-token+regime: same as N3
+    "n1": 3,          # Universal: PRICE-ONLY, 3^5 = 243 patterns max
+    "n2_meme": 3,     # Asset class meme/new_launch (price alpha for dual)
+    "n2_new_launch": 3,  # Asset class new_launch (price alpha for dual)
+    "n2_default": 4,  # Asset class blue_chip/large_cap/mid_cap/defi (price alpha for dual)
+    "n3": 4,          # Per-token: price alpha for dual (vol=3 separately)
+    "n4": 4,          # Per-token+regime: same as N3
+}
+
+# === Per-Level Dual SAX Configuration (v0.43.0) ===
+#
+# N1 is PRICE-ONLY — uses SAXEncoder, not SAXDualEncoder.
+# N2/N3/N4 use SAXDualEncoder with these (price_alpha, volume_alpha) pairs.
+#
+# The key insight: volume is NOISE at the universal level (N1) but
+# becomes useful when we know the asset class (N2) or specific token (N3/N4).
+# This prevents the combinatorial explosion that was killing N1 confidence.
+#
+# Effective alphabet sizes per level:
+#   N1: α=3 → 3^5 = 243 patterns (PRICE ONLY, Transfer Learning)
+#   N2 (meme):      3×2=6 → 6^5 = 7,776 patterns (but class-specific, fills OK)
+#   N2 (default):   4×2=8 → 8^5 = 32,768 patterns (class-specific, more tokens)
+#   N3:             4×3=12 → 12^5 = 248,832 (per-token, unique patterns)
+#   N4:             4×3=12 → same as N3 (regime-partitioned, even more specific)
+#
+# N1 density is the critical metric: 11,000 obs / 243 nodes ≈ 45 obs/node → conf > 0.6
+# N2 density: ~2,000 obs / 7,776 nodes ≈ 0.26 obs/node → sparse, but N2 has lower weight
+#   and receives observations from multiple tokens of the same class.
+LEVEL_DUAL_ALPHA_CONFIG: dict[str, dict[str, int]] = {
+    "n1": {"price": 3, "volume": 0},       # volume=0 means NO volume encoder (price-only)
+    "n2_meme": {"price": 3, "volume": 2},
+    "n2_new_launch": {"price": 3, "volume": 2},
+    "n2_default": {"price": 4, "volume": 2},
+    "n3": {"price": 4, "volume": 3},
+    "n4": {"price": 4, "volume": 3},
 }
 
 
@@ -82,6 +115,9 @@ def get_alpha_for_level(
     """
     Get the alphabet size for a given trie level and asset class.
 
+    v0.43.0: N3/N4 default changed from 5 to 4 (used as price_alpha for dual).
+    The calibrated_alpha still overrides for N3/N4 when provided.
+
     FASE 1 Tarea 1.1: Per-level differentiated alphabet sizes.
 
     Args:
@@ -92,6 +128,8 @@ def get_alpha_for_level(
 
     Returns:
         Alphabet size (int) for the SAXEncoder at this level.
+            For N1: price-only α (no volume).
+            For N2/N3/N4: price α (volume α is separate, see get_dual_alpha_for_level).
 
     Examples:
         >>> get_alpha_for_level("n1")
@@ -101,11 +139,9 @@ def get_alpha_for_level(
         >>> get_alpha_for_level("n2", "blue_chip")
         4
         >>> get_alpha_for_level("n3")
+        4
+        >>> get_alpha_for_level("n3", calibrated_alpha=5)
         5
-        >>> get_alpha_for_level("n3", calibrated_alpha=4)
-        4
-        >>> get_alpha_for_level("n4", calibrated_alpha=4)
-        4
     """
     if level == "n1":
         return LEVEL_ALPHA_CONFIG["n1"]
@@ -129,6 +165,57 @@ def get_alpha_for_level(
         if calibrated_alpha is not None:
             return calibrated_alpha
         return LEVEL_ALPHA_CONFIG["n4"]
+
+    else:
+        raise ValueError(f"Unknown trie level: {level!r}. Must be one of: n1, n2, n3, n4")
+
+
+def get_dual_alpha_for_level(
+    level: str,
+    asset_class: str = "default",
+    calibrated_alpha: int | None = None,
+) -> dict[str, int]:
+    """
+    Get the dual SAX (price, volume) alphabet sizes for a given trie level.
+
+    v0.43.0: Stratified SAX Dual — N1 is price-only (volume=0),
+    N2/N3/N4 use dual encoding with different (price, volume) alphas.
+
+    Returns:
+        Dict with keys "price" and "volume". When volume=0, the level
+        should use a plain SAXEncoder (no volume dimension).
+
+    Examples:
+        >>> get_dual_alpha_for_level("n1")
+        {'price': 3, 'volume': 0}
+        >>> get_dual_alpha_for_level("n2", "meme")
+        {'price': 3, 'volume': 2}
+        >>> get_dual_alpha_for_level("n2", "blue_chip")
+        {'price': 4, 'volume': 2}
+        >>> get_dual_alpha_for_level("n3")
+        {'price': 4, 'volume': 3}
+        >>> get_dual_alpha_for_level("n4")
+        {'price': 4, 'volume': 3}
+    """
+    if level == "n1":
+        return LEVEL_DUAL_ALPHA_CONFIG["n1"]
+
+    elif level == "n2":
+        if asset_class in ("meme", "new_launch"):
+            return LEVEL_DUAL_ALPHA_CONFIG["n2_meme"]
+        else:
+            return LEVEL_DUAL_ALPHA_CONFIG["n2_default"]
+
+    elif level == "n3":
+        if calibrated_alpha is not None:
+            # Override price alpha with calibrated value, keep volume=3
+            return {"price": calibrated_alpha, "volume": LEVEL_DUAL_ALPHA_CONFIG["n3"]["volume"]}
+        return LEVEL_DUAL_ALPHA_CONFIG["n3"]
+
+    elif level == "n4":
+        if calibrated_alpha is not None:
+            return {"price": calibrated_alpha, "volume": LEVEL_DUAL_ALPHA_CONFIG["n4"]["volume"]}
+        return LEVEL_DUAL_ALPHA_CONFIG["n4"]
 
     else:
         raise ValueError(f"Unknown trie level: {level!r}. Must be one of: n1, n2, n3, n4")
@@ -554,12 +641,13 @@ DUAL_SYMBOL_SEPARATOR = "|"
 def make_symbol_key(symbol) -> str:
     """Convert a symbol (str or tuple) to a string key for Trie storage.
 
+    DEPRECATED (v0.42.0): The trie now uses tuple keys natively.
+    This function is kept ONLY for backward-compatible deserialization
+    of old DB entries. Do NOT use in new code.
+
     Single symbols pass through unchanged: 'a' -> 'a'
     Tuple symbols are joined with DUAL_SYMBOL_SEPARATOR:
         ('a', 'x') -> 'a|x'
-
-    This enables the Trie's children dict (str keys) to store dual
-    symbols without modifying Trie internals.
     """
     if isinstance(symbol, tuple):
         return DUAL_SYMBOL_SEPARATOR.join(str(s) for s in symbol)
@@ -568,6 +656,9 @@ def make_symbol_key(symbol) -> str:
 
 def parse_symbol_key(key: str):
     """Parse a string key back into a symbol or tuple.
+
+    DEPRECATED (v0.42.0): Only used for backward-compatible deserialization.
+    New code uses tuples directly.
 
     Keys without the separator pass through: 'a' -> 'a'
     Keys with the separator become tuples: 'a|x' -> ('a', 'x')

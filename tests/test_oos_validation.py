@@ -183,8 +183,9 @@ def run_simplified_oos(
         sax_window_size=window_size,
         sax_strategy="ohlcv",
         weight_profile=info.weight_profile,
+        dual_sax=False,  # v0.42.0: test uses single SAXEncoder, not dual
     )
-    engine.build(train_df, pattern_length=pattern_length, symbols=train_symbols)
+    engine.build(train_df, pattern_length=pattern_length)
 
     trie = engine.trie_n3
     trie.propagate_metadata()
@@ -437,8 +438,10 @@ class TestTrainTestDegradation:
 
     def test_is_and_oos_both_produce_trades(self):
         """Both IS and OOS should produce at least some trades."""
+        # v0.42.0: Lowered alphabet_size to 3 so patterns repeat enough
+        # for historical_count >= 3 (with α=8, 210 symbols → all singletons).
         df = generate_trending_up(n_candles=3000, seed=42)
-        result = run_simplified_oos(df, symbol="SYNTH/USDT")
+        result = run_simplified_oos(df, symbol="SYNTH/USDT", alphabet_size=3, window_size=10)
 
         assert result["is_trades"] > 0, "In-sample should produce trades"
         # OOS trades may be 0 if patterns don't match — that's valid info

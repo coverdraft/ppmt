@@ -25,7 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from ppmt.core.sax import SAXEncoder, SAXDualEncoder, make_symbol_key, parse_symbol_key
+from ppmt.core.sax import SAXEncoder, SAXDualEncoder
 from ppmt.core.trie import PPMTTrie, TrieNode
 
 
@@ -39,7 +39,7 @@ class MatchResult:
     node: Optional[TrieNode] = None
     """The best matching TrieNode (if any)."""
 
-    symbols: list[str] = None  # type: ignore
+    symbols: list[str | tuple[str, str]] = None  # type: ignore
     """The matched SAX sequence."""
 
     similarity: float = 0.0
@@ -135,33 +135,32 @@ class FuzzyMatcher:
         # symbol distance computation must handle tuple symbols.
         self._is_dual = isinstance(sax_encoder, SAXDualEncoder)
         if self._is_dual:
-            # Pre-compute the alphabet list as string keys for edit-distance
-            self._alphabet_keys = [make_symbol_key(s) for s in sax_encoder.get_alphabet_list()]
+            # v0.42.0: Alphabet as real tuples, not string keys.
+            # The trie now uses tuple keys natively.
+            self._alphabet_keys = sax_encoder.get_alphabet_list()  # list[tuple[str, str]]
         else:
             self._alphabet_keys = None
 
-    def _get_alphabet(self) -> list[str]:
+    def _get_alphabet(self) -> list[str | tuple[str, str]]:
         """Get the alphabet list for edit-distance enumeration.
 
-        FASE 1 Tarea 1.3: For SAXDualEncoder, returns the Cartesian product
-        of price × volume symbols as string keys (e.g., ['a|a', 'a|b', 'b|a', 'b|b']).
-        For SAXEncoder, returns the standard alphabet (e.g., ['a', 'b', 'c']).
+        v0.42.0: For SAXDualEncoder, returns real tuples like [('a','a'), ('a','b'), ...].
+        For SAXEncoder, returns standard strings like ['a', 'b', 'c'].
         """
         if self._is_dual and self._alphabet_keys is not None:
             return self._alphabet_keys
         return [chr(ord('a') + i) for i in range(self.sax.alphabet_size)]
 
-    def _symbol_distance(self, a_key: str, b_key: str) -> float:
-        """Compute distance between two symbol keys (single or dual).
+    def _symbol_distance(self, a_key, b_key) -> float:
+        """Compute distance between two symbols (single str or dual tuple).
 
-        FASE 1 Tarea 1.3: For dual symbols stored as string keys like 'a|x',
-        parses them back to tuples and uses SAXDualEncoder.symbol_distance()
-        which computes a weighted sum of price and volume distances.
+        v0.42.0: For dual symbols, tuples are passed directly to
+        SAXDualEncoder.symbol_distance() which computes the weighted sum
+        of price and volume distances separately (60% price, 40% volume).
+        No string parsing needed.
         """
         if self._is_dual:
-            a_parsed = parse_symbol_key(a_key)
-            b_parsed = parse_symbol_key(b_key)
-            return self.sax.symbol_distance(a_parsed, b_parsed)
+            return self.sax.symbol_distance(a_key, b_key)
         return self.sax.symbol_distance(a_key, b_key)
 
     def _get_max_dist(self) -> float:
@@ -185,7 +184,7 @@ class FuzzyMatcher:
         """
         return bool(similarity >= self.min_similarity and confidence >= self.min_confidence)
 
-    def exact_match(self, trie: PPMTTrie, symbols: list[str]) -> MatchResult:
+    def exact_match(self, trie: PPMTTrie, symbols: list[str | tuple[str, str]]) -> MatchResult:
         """
         O(k) exact match. Fastest possible lookup.
 
@@ -210,7 +209,7 @@ class FuzzyMatcher:
             )
         return MatchResult(matched=False, symbols=symbols)
 
-    def prefix_match(self, trie: PPMTTrie, symbols: list[str]) -> MatchResult:
+    def prefix_match(self, trie: PPMTTrie, symbols: list[str | tuple[str, str]]) -> MatchResult:
         """
         Match the longest prefix of the symbol sequence.
 
@@ -241,7 +240,7 @@ class FuzzyMatcher:
             score=score,
         )
 
-    def one_edit_match(self, trie: PPMTTrie, symbols: list[str]) -> MatchResult:
+    def one_edit_match(self, trie: PPMTTrie, symbols: list[str | tuple[str, str]]) -> MatchResult:
         """
         O(k * a) match allowing one symbol substitution.
 
@@ -297,7 +296,7 @@ class FuzzyMatcher:
 
         return best_result
 
-    def two_edit_match(self, trie: PPMTTrie, symbols: list[str]) -> MatchResult:
+    def two_edit_match(self, trie: PPMTTrie, symbols: list[str | tuple[str, str]]) -> MatchResult:
         """
         O(k^2 * a^2) match allowing two symbol substitutions.
 
@@ -371,7 +370,7 @@ class FuzzyMatcher:
 
         return best_result
 
-    def best_match(self, trie: PPMTTrie, symbols: list[str]) -> MatchResult:
+    def best_match(self, trie: PPMTTrie, symbols: list[str | tuple[str, str]]) -> MatchResult:
         """
         Find the best match using ALL matching strategies.
 
@@ -445,8 +444,8 @@ class FuzzyMatcher:
     def check_continuation(
         self,
         trie: PPMTTrie,
-        current_pattern: list[str],
-        next_symbol: str,
+        current_pattern: list[str | tuple[str, str]],
+        next_symbol: str | tuple[str, str],
     ) -> MatchResult:
         """
         Check if the next symbol continues an existing pattern.
@@ -550,8 +549,8 @@ class FuzzyMatcher:
     def pattern_break_score(
         self,
         trie: PPMTTrie,
-        current_pattern: list[str],
-        next_symbol: str,
+        current_pattern: list[str | tuple[str, str]],
+        next_symbol: str | tuple[str, str],
     ) -> float:
         """
         Compute a graduated pattern break score (0-1).

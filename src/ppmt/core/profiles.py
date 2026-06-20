@@ -69,8 +69,8 @@ from ppmt.core.metadata import compute_outcome_won
 # gives the metadata real statistical grounding. SL/TP from compute_sl_tp()
 # becomes reliable because it's based on 7+ observations instead of 2.
 TIMEFRAME_ALPHA_DEFAULTS = {
-    "1m":  {"sax_alphabet_size": 4, "sax_window_size": 7},  # v0.40.8 FIX-13: era 5
-    "5m":  {"sax_alphabet_size": 4, "sax_window_size": 7},
+    "1m":  {"sax_alphabet_size": 3, "sax_window_size": 45},  # v0.42.0: W=45 (1h per symbol)
+    "5m":  {"sax_alphabet_size": 3, "sax_window_size": 18},  # v0.42.0: W=18 (1.5h per symbol)
     "15m": {"sax_alphabet_size": 4, "sax_window_size": 5},
     "30m": {"sax_alphabet_size": 4, "sax_window_size": 5},
     "1h":  {"sax_alphabet_size": 3, "sax_window_size": 7},
@@ -86,7 +86,7 @@ TIMEFRAME_ALPHA_DEFAULTS = {
 ASSET_CLASS_DEFAULTS = {
     "blue_chip": {
         "sax_alphabet_size": 3,
-        "sax_window_size": 10,
+        "sax_window_size": 10,  # overridden by TIMEFRAME_ALPHA_DEFAULTS for 1m/5m
         "catastrophic_loss_pct": 0.08,
         "max_position_pct": 0.10,
         "short_allowed": True,
@@ -121,8 +121,8 @@ ASSET_CLASS_DEFAULTS = {
         "min_candles_for_training": 1500,
     },
     "meme": {
-        "sax_alphabet_size": 5,
-        "sax_window_size": 5,
+        "sax_alphabet_size": 3,
+        "sax_window_size": 18,  # v0.42.0: sensible default for 5m; overridden by timeframe
         "catastrophic_loss_pct": 0.15,
         "max_position_pct": 0.03,
         "short_allowed": False,

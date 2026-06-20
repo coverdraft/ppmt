@@ -1763,14 +1763,18 @@ class PaperTrader:
                             tp_distance_pct = max(tp_distance_pct, 0.1)
                         else:
                             # compute_sl_tp returned None — fallback
-                            sl_distance_pct = max(min(expected_move_abs * 1.5, 5.0), 0.5)
-                            tp_distance_pct = expected_move_abs * 2.5
+                            sl_distance_pct = max(expected_move_abs * 1.5, 0.1)
+                            tp_distance_pct = max(expected_move_abs * 2.5, 0.15)
                             if tp_distance_pct < sl_distance_pct * 1.5:
                                 tp_distance_pct = sl_distance_pct * 1.5
                     else:
-                        # Fallback to old hardcoded rule if no metadata
-                        sl_distance_pct = max(min(expected_move_abs * 1.5, 5.0), 0.5)
-                        tp_distance_pct = expected_move_abs * 2.5
+                        # v0.42.0 ERROR 3 FIX: SL/TP based on expected_move
+                        # No static floors. If expected_move is tiny, SL/TP are tiny.
+                        # The metadata.compute_sl_tp() path above handles normal cases;
+                        # this fallback only fires when no metadata exists (very rare).
+                        sl_distance_pct = max(expected_move_abs * 1.5, 0.1)  # min 0.1%
+                        tp_distance_pct = max(expected_move_abs * 2.5, 0.15)  # min 0.15%
+                        # Ensure R:R >= 1.5
                         if tp_distance_pct < sl_distance_pct * 1.5:
                             tp_distance_pct = sl_distance_pct * 1.5
 

@@ -235,27 +235,35 @@ class AdaptiveWeights:
 
         return weighted_sum / total_weight
 
-    def safe_default_weights(self, n3_pattern_count: int, n4_pattern_count: int) -> 'AdaptiveWeights':
+    def safe_default_weights(self, n3_pattern_count: int, n4_pattern_count: int,
+                             n2_avg_obs: float = 0.0) -> 'AdaptiveWeights':
         """Compute safe weights for tokens with immature local tries.
 
         If N3 has < 20 patterns, redistribute its weight to N1/N2.
         If N4 has < 10 patterns, redistribute its weight to N1/N2.
-        Also reduce sizing_multiplier proportionally to immaturity.
 
-        This prevents immature N3/N4 tries (which have very few observations
-        and thus unreliable statistics) from dominating the weighted confidence.
-        Instead, their weight is redistributed to N1 and N2 which have data
-        from other tokens (cross-asset universal and class pools).
+        v0.43.0: When N2 is also sparse (avg_obs < 2), shift MORE weight
+        to N1 (universal pool) which is always dense (243 patterns, ~27 obs/node).
+        This prevents a sparse N2 from dominating confidence when N3/N4 are empty,
+        which was causing weighted_conf to stay below 0.20 even when N1 conf was 0.30+.
+
+        The redistribution logic:
+        1. N3/N4 weight → redistribute to N1/N2
+        2. If N2 is sparse (avg_obs < MIN_N2_OBS), redistribute N2 weight → N1
+        3. This gives N1 (dense, reliable) more weight for OOS tokens
 
         Args:
             n3_pattern_count: Number of patterns in the per-asset (N3) trie.
             n4_pattern_count: Number of patterns in the per-asset+regime (N4) trie.
+            n2_avg_obs: Average observations per node in N2 class pool.
+                When < 2, N2 is considered sparse and weight shifts to N1.
 
         Returns:
             self (for chaining)
         """
         MIN_N3_PATTERNS = 20
         MIN_N4_PATTERNS = 10
+        MIN_N2_OBS = 2.0  # Below this, N2 is considered sparse
 
         n3_weight = self.n3_per_asset
         n4_weight = self.n4_per_asset_regime
@@ -279,6 +287,21 @@ class AdaptiveWeights:
                 self.n1_universal += redistribute * (self.n1_universal / total_n1n2)
                 self.n2_asset_class += redistribute * (self.n2_asset_class / total_n1n2)
             self.n4_per_asset_regime = n4_weight
+
+        # v0.43.0: If N2 is sparse, shift its weight to N1.
+        # This is critical for Transfer Learning: N1 (universal) is always dense
+        # because it accumulates ALL token observations with α=3 (max 243 patterns).
+        # When N2 has < 2 obs/node, its confidence is dominated by the Bayesian prior
+        # and provides almost no signal. Shifting weight to N1 ensures the dense,
+        # reliable universal pool drives decisions.
+        if n2_avg_obs < MIN_N2_OBS and n2_avg_obs > 0:
+            # Shift N2 weight to N1 proportional to N2 sparsity
+            # If N2 has 0.5 avg_obs → shift 75% of N2 weight to N1
+            # If N2 has 1.5 avg_obs → shift 25% of N2 weight to N1
+            sparsity_factor = 1.0 - (n2_avg_obs / MIN_N2_OBS)
+            shift = self.n2_asset_class * sparsity_factor * 0.5  # Cap at 50% shift
+            self.n2_asset_class -= shift
+            self.n1_universal += shift
 
         self.normalize()
         return self

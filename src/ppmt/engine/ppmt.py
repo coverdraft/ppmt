@@ -48,7 +48,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from ppmt.core.sax import SAXEncoder, SAXDualEncoder, get_alpha_for_level, make_symbol_key
+from ppmt.core.sax import SAXEncoder, SAXDualEncoder, get_alpha_for_level, get_dual_alpha_for_level
 from ppmt.core.trie import PPMTTrie, TrieNode, RegimePartitionedTrie
 from ppmt.core.matcher import FuzzyMatcher, MatchResult
 from ppmt.core.metadata import BlockLifecycleMetadata, compute_outcome_won
@@ -124,76 +124,93 @@ class PPMT:
         self.symbol = symbol
         self.asset_class = asset_class
 
-        # v0.41.0 (FASE 3, Tarea 3.2): Timeframe for regime threshold calibration.
-        # When set, detect_simple() uses timeframe-specific cutoffs instead of
-        # the historical 0.08/0.02 defaults (which were calibrated for 1h candles).
-        # Lower timeframes (1m, 5m, 15m) need tighter cutoffs to avoid
-        # classifying 92%+ of candles as 'ranging', which makes N4 useless.
+        # v0.42.0: When timeframe is provided, override sax_alphabet_size
+        # and sax_window_size from TIMEFRAME_ALPHA_DEFAULTS if the caller
+        # didn't explicitly set them (i.e., they're still at defaults).
+        # This ensures the engine uses the correct W for each timeframe:
+        #   1m → W=45, α=3
+        #   5m → W=18, α=3
+        #   etc.
         self.timeframe = timeframe
+        if timeframe is not None:
+            from ppmt.core.profiles import TIMEFRAME_ALPHA_DEFAULTS
+            tf_config = TIMEFRAME_ALPHA_DEFAULTS.get(timeframe)
+            if tf_config is not None:
+                # Always override when timeframe is set — the caller should
+                # pass explicit sax_alphabet_size/sax_window_size if they want
+                # to override the timeframe-based defaults.
+                sax_alphabet_size = tf_config["sax_alphabet_size"]
+                sax_window_size = tf_config["sax_window_size"]
+                logger.info(
+                    f"Timeframe {timeframe}: α={sax_alphabet_size}, W={sax_window_size}"
+                )
 
-        # FASE 1 Tarea 1.3: SAX Dual encoder (Precio + Volumen).
+        # v0.43.0: STRATIFIED SAX Dual — N1 is PRICE-ONLY.
         #
-        # When dual_sax=True, each SAX encoder produces TUPLE symbols
-        # (price_symbol, volume_symbol) instead of single composite symbols.
-        # This preserves volume information that the single-composite approach
-        # loses (volume was only 25% of the ohlcv composite).
+        # The key mathematical insight: volume is noise at the universal level.
+        # When N1 used SAXDualEncoder (α_price=3, α_vol=2), the effective
+        # alphabet was 3×2=6 → 6^5=7,776 possible patterns. With ~11,000 obs,
+        # each node had ~1.4 obs → Bayesian prior dominated, confidence ≤0.19.
         #
-        # The tuples are converted to string keys via make_symbol_key() before
-        # insertion into the Trie, so Trie internals don't change.
-        # Example: ('a', 'x') → 'a|x' as the Trie children key.
+        # By making N1 price-only (α=3 → max 243 patterns), each node gets
+        # ~45 obs and confidence > 0.6 becomes achievable.
+        #
+        # N2/N3/N4 continue using SAXDualEncoder because volume becomes useful
+        # when we know the asset class or specific token.
         self.dual_sax = dual_sax
 
-        # FASE 1 Tarea 1.1: Per-level SAX encoders with differentiated alphabet sizes.
+        # v0.43.0: Per-level dual alpha configuration.
+        # Each level gets (price_alpha, volume_alpha) from LEVEL_DUAL_ALPHA_CONFIG.
+        # N1 has volume=0 → uses plain SAXEncoder (price only).
         #
-        # Each trie level uses its own SAXEncoder with an alphabet size
-        # appropriate for its data density:
-        #   N1 (Universal): α=3 → 243 patterns, fills fast as universal safety net
-        #   N2 (Asset Class): α=3 for meme/new_launch, α=4 for blue_chip/large_cap
-        #   N3 (Per-Token): α = sax_alphabet_size (the constructor arg, or calibrated)
-        #   N4 (Per-Token+Regime): same as N3
-        #
-        # `self.sax` is preserved as N3's encoder for backwards compatibility.
-        n1_alpha = get_alpha_for_level("n1", asset_class)
-        n2_alpha = get_alpha_for_level("n2", asset_class)
-        n3_alpha = get_alpha_for_level("n3", asset_class, calibrated_alpha=sax_alphabet_size)
-        n4_alpha = get_alpha_for_level("n4", asset_class, calibrated_alpha=sax_alphabet_size)
+        # IMPORTANT: Do NOT pass sax_alphabet_size as calibrated_alpha here.
+        # The TIMEFRAME_ALPHA_DEFAULTS sets sax_alphabet_size=3 for 1m/5m,
+        # but that was meant for a SINGLE encoder model. With stratified SAX,
+        # each level has its own FIXED alpha from LEVEL_DUAL_ALPHA_CONFIG:
+        #   N1: price=3 (no volume)
+        #   N2: price=3/4, vol=2 (depends on asset class)
+        #   N3: price=4, vol=3
+        #   N4: price=4, vol=3
+        # Only pass calibrated_alpha when the user explicitly set it AND
+        # it differs from the timeframe default (i.e., manual calibration).
+        n1_dual = get_dual_alpha_for_level("n1", asset_class)
+        n2_dual = get_dual_alpha_for_level("n2", asset_class)
+        n3_dual = get_dual_alpha_for_level("n3", asset_class)
+        n4_dual = get_dual_alpha_for_level("n4", asset_class)
+
+        # N1: PRICE-ONLY — uses SAXEncoder (no volume dimension).
+        # This is the critical fix: N1 max 243 patterns → ~45 obs/node → conf > 0.6.
+        self.sax_n1 = SAXEncoder(
+            alphabet_size=n1_dual["price"],
+            window_size=sax_window_size,
+            strategy=sax_strategy,
+        )
 
         if dual_sax:
-            # FASE 1 Tarea 1.3: Wrap each encoder in SAXDualEncoder.
-            # Volume alphabet is α=2 (low/high volume) — coarse but effective
-            # because volume patterns are simpler than price patterns.
-            vol_alpha = 2
-            self.sax_n1 = SAXDualEncoder(
-                price_alphabet_size=n1_alpha,
-                volume_alphabet_size=vol_alpha,
-                window_size=sax_window_size,
-                price_strategy=sax_strategy,
-            )
+            # N2/N3/N4: SAXDualEncoder with per-level (price, volume) alphas.
             self.sax_n2 = SAXDualEncoder(
-                price_alphabet_size=n2_alpha,
-                volume_alphabet_size=vol_alpha,
+                price_alphabet_size=n2_dual["price"],
+                volume_alphabet_size=n2_dual["volume"],
                 window_size=sax_window_size,
                 price_strategy=sax_strategy,
             )
             self.sax_n3 = SAXDualEncoder(
-                price_alphabet_size=n3_alpha,
-                volume_alphabet_size=vol_alpha,
+                price_alphabet_size=n3_dual["price"],
+                volume_alphabet_size=n3_dual["volume"],
                 window_size=sax_window_size,
                 price_strategy=sax_strategy,
             )
             self.sax_n4 = SAXDualEncoder(
-                price_alphabet_size=n4_alpha,
-                volume_alphabet_size=vol_alpha,
+                price_alphabet_size=n4_dual["price"],
+                volume_alphabet_size=n4_dual["volume"],
                 window_size=sax_window_size,
                 price_strategy=sax_strategy,
             )
         else:
             # Legacy single-composite encoding
-            self.sax_n1 = SAXEncoder(
-                alphabet_size=n1_alpha,
-                window_size=sax_window_size,
-                strategy=sax_strategy,
-            )
+            n2_alpha = get_alpha_for_level("n2", asset_class)
+            n3_alpha = get_alpha_for_level("n3", asset_class, calibrated_alpha=sax_alphabet_size)
+            n4_alpha = get_alpha_for_level("n4", asset_class, calibrated_alpha=sax_alphabet_size)
             self.sax_n2 = SAXEncoder(
                 alphabet_size=n2_alpha,
                 window_size=sax_window_size,
@@ -434,21 +451,30 @@ class PPMT:
         if isinstance(self.trie_n4, RegimePartitionedTrie):
             self.trie_n4.set_current_regime(regime)
 
-    def _encode_and_convert(self, encoder, df: pd.DataFrame) -> list[str]:
-        """Encode OHLCV data and convert tuple symbols to string keys.
+    def _encode(self, encoder, df: pd.DataFrame) -> list[str | tuple[str, str]]:
+        """Encode OHLCV data and return symbols directly.
 
-        FASE 1 Tarea 1.3: When dual_sax is enabled, SAXDualEncoder.encode()
-        returns tuples like ('a', 'x'). This method converts them to string
-        keys like 'a|x' via make_symbol_key() so the Trie can store them
-        without any internal modification.
-
-        When dual_sax is disabled, SAXEncoder.encode() returns plain strings
-        which pass through unchanged.
+        v0.43.0: N1 encoder is SAXEncoder → returns list[str].
+        N2/N3/N4 encoders are SAXDualEncoder → returns list[tuple[str, str]].
+        The Trie handles both key types natively.
         """
-        symbols = encoder.encode(df)
-        if self.dual_sax and isinstance(encoder, SAXDualEncoder):
-            return [make_symbol_key(s) for s in symbols]
-        return symbols
+        return encoder.encode(df)
+
+    def encode_all_levels(self, df: pd.DataFrame) -> dict[str, list]:
+        """Encode OHLCV data with ALL per-level encoders.
+
+        v0.43.0: Returns dict with keys 'n1', 'n2', 'n3', 'n4' containing
+        the per-level symbol sequences. N1 is list[str], N2/N3/N4 are
+        list[tuple[str, str]] when dual_sax=True.
+
+        This is the public API for OOS replay and real-time encoding.
+        """
+        return {
+            "n1": self._encode(self.sax_n1, df),
+            "n2": self._encode(self.sax_n2, df),
+            "n3": self._encode(self.sax_n3, df),
+            "n4": self._encode(self.sax_n4, df),
+        }
 
     def build(self, df: pd.DataFrame, pattern_length: int = 5) -> int:
         """
@@ -475,13 +501,14 @@ class PPMT:
         # These are DIFFERENT patterns stored in DIFFERENT tries. During match(),
         # the current price data is re-encoded with each level's encoder.
         #
-        # FASE 1 Tarea 1.3: When dual_sax=True, encode() returns tuples like
-        # ('a', 'x'). We convert them to string keys ('a|x') via
-        # make_symbol_key() so the Trie can store them without modification.
-        symbols_n1 = self._encode_and_convert(self.sax_n1, df)
-        symbols_n2 = self._encode_and_convert(self.sax_n2, df)
-        symbols_n3 = self._encode_and_convert(self.sax_n3, df)
-        symbols_n4 = self._encode_and_convert(self.sax_n4, df)
+        # v0.43.0: N1 is now PRICE-ONLY (SAXEncoder), so symbols_n1 is a list
+        # of strings like ['a', 'b', 'c', 'a', 'b']. N2/N3/N4 use SAXDualEncoder,
+        # so they return lists of tuples like [('a','x'), ('b','y'), ...].
+        # The Trie handles both key types (str and tuple) natively.
+        symbols_n1 = self._encode(self.sax_n1, df)
+        symbols_n2 = self._encode(self.sax_n2, df)
+        symbols_n3 = self._encode(self.sax_n3, df)
+        symbols_n4 = self._encode(self.sax_n4, df)
 
         # Use N3's symbol count as the reference (same window_size for all levels)
         if len(symbols_n3) < pattern_length:
@@ -926,14 +953,33 @@ class PPMT:
         # immature local tries. If N3 has < 20 patterns or N4 has < 10,
         # redistribute their weight to N1/N2 which have cross-asset data.
         # This prevents unreliable N3/N4 from dominating confidence.
+        # v0.43.0: Also pass N2 avg obs density so sparse N2 pools shift
+        # weight to the dense N1 universal pool.
         n3_count = self.trie_n3.pattern_count
         n4_count = self.trie_n4.pattern_count if hasattr(self.trie_n4, 'pattern_count') else 0
+
+        # Compute N2 average obs/node for density-aware weight redistribution
+        n2_avg_obs = 0.0
+        if self.trie_n2.pattern_count > 0:
+            # Compute avg obs/node from actual trie data (historical_count)
+            total_obs = 0
+            node_count = 0
+            for _pat, node in self.trie_n2.get_all_patterns(min_count=1):
+                total_obs += node.metadata.historical_count
+                node_count += 1
+            if node_count > 0:
+                n2_avg_obs = total_obs / node_count
+
         safe_weights = AdaptiveWeights.from_profile(self.weights.profile)
         safe_weights.n1_universal = self.weights.n1_universal
         safe_weights.n2_asset_class = self.weights.n2_asset_class
         safe_weights.n3_per_asset = self.weights.n3_per_asset
         safe_weights.n4_per_asset_regime = self.weights.n4_per_asset_regime
-        safe_weights.safe_default_weights(n3_pattern_count=n3_count, n4_pattern_count=n4_count)
+        safe_weights.safe_default_weights(
+            n3_pattern_count=n3_count,
+            n4_pattern_count=n4_count,
+            n2_avg_obs=n2_avg_obs,
+        )
 
         # Compute weighted confidence
         weighted_conf = safe_weights.compute_weighted_confidence(

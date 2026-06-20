@@ -14,10 +14,41 @@ emerge directly from the Trie without external indicators.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
+
+
+def _parse_es_key(k: str) -> tuple[str, ...]:
+    """Parse an expected_sequences key from JSON storage back to a tuple.
+
+    Handles two formats:
+    - v0.42.0+: JSON array string like '[["a","x"],["b","y"]]' → ('a', 'x', 'b', 'y')
+    - Legacy: pipe-delimited string like 'a|b|c' → ('a', 'b', 'c')
+    - Single symbols: 'a' → ('a',)
+    """
+    if k.startswith("["):
+        # v0.42.0 format: JSON array of arrays or flat array
+        try:
+            parsed = json.loads(k)
+            if isinstance(parsed, list):
+                # Flatten nested lists: [["a","x"],["b","y"]] → ("a", "x", "b", "y")
+                flat = []
+                for item in parsed:
+                    if isinstance(item, list):
+                        flat.extend(str(x) for x in item)
+                    else:
+                        flat.append(str(item))
+                return tuple(flat)
+        except (json.JSONDecodeError, TypeError):
+            pass
+    if "|" in k:
+        # Legacy format: "a|b|c" → ('a', 'b', 'c')
+        return tuple(k.split("|"))
+    # Single symbol
+    return (k,)
 
 
 # v0.40.23 (P7-FaseC): Bootstrap floors for outcome-SL/TP classification
@@ -1242,10 +1273,15 @@ class BlockLifecycleMetadata:
             "sl_price": self.sl_price,
             "tp_price": self.tp_price,
             "continuation_nodes": self.continuation_nodes,
-            # v0.41.0 (FASE 2, Tarea 2.1): Expected sequences of 3 future symbols.
-            # JSON keys must be strings, so we join tuples with '|'.
+            # v0.42.0: Expected sequences of 3 future symbols.
+            # JSON keys must be strings. For tuple keys like ('a','x','b','y'),
+            # we serialize as a JSON array string: '[["a","x"],["b","y"]]'.
+            # Single-symbol keys are kept as strings.
             "expected_sequences": {
-                "|".join(k): v for k, v in self.expected_sequences.items()
+                (
+                    str(list(k)) if isinstance(k, tuple) else k
+                ): v
+                for k, v in self.expected_sequences.items()
             },
             "break_nodes": self.break_nodes,
             # V3: Computed sizing signals for Risk Manager
@@ -1291,10 +1327,11 @@ class BlockLifecycleMetadata:
             sl_price=data.get("sl_price"),
             tp_price=data.get("tp_price"),
             continuation_nodes=data.get("continuation_nodes", []),
-            # v0.41.0 (FASE 2, Tarea 2.1): Deserialize expected_sequences.
-            # Keys are stored as "a|b|c" strings in JSON; convert back to tuples.
+            # v0.42.0: Deserialize expected_sequences.
+            # Keys are stored as JSON array strings like '[["a","x"],["b","y"]]'
+            # or legacy "a|b|c" pipe-delimited strings. Convert both to tuples.
             expected_sequences={
-                tuple(k.split("|")): v
+                _parse_es_key(k): v
                 for k, v in data.get("expected_sequences", {}).items()
             },
             break_nodes=data.get("break_nodes", []),
