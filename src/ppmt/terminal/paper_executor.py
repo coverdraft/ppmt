@@ -4,6 +4,11 @@ PaperExecutor — V2 Paper Trading Executor for the PPMT Terminal.
 In-memory executor that manages a single position per token.
 Mirrors the PositionState TypeScript interface exactly.
 
+v0.44.0: Now implements IExecutor from ppmt.execution.interfaces.
+The synchronous open_position / check_walk_forward / check_price
+methods are preserved for backwards compatibility. The async
+IExecutor methods wrap the synchronous logic.
+
 Rules (from V2 spec):
   - SL Initial   = Entry - (expected_move * 1.2)
   - TP Initial   = Entry + (expected_move * 2.5)
@@ -15,61 +20,23 @@ Rules (from V2 spec):
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, asdict
-from typing import Optional, Literal
+from typing import Optional
 from datetime import datetime, timezone
 
-
-PositionStatus = Literal[
-    "ACTIVE",
-    "BREAK_EVEN_SECURED",
-    "TP_EXTENDED",
-    "CLOSED_BY_TP",
-    "CLOSED_BY_SL",
-    "CLOSED_BY_DIVERGENCE",
-    "CLOSED_CATASTROPHIC",
-    "CLOSED_KILL_SWITCH",
-]
-
-Direction = Literal["LONG", "SHORT"]
+from ppmt.execution.models import PositionState, PositionStatus, Direction
+from ppmt.execution.interfaces import IExecutor
 
 
-@dataclass
-class PositionState:
-    """Exact mirror of the TypeScript PositionState interface."""
-
-    symbol: str
-    direction: Direction
-    status: PositionStatus
-
-    entry_price: float
-    entry_time: str
-    size_usdt: float
-
-    current_sl: float          # Dynamic — moves with Walk-Forward
-    current_tp: float          # Dynamic — extends with Walk-Forward
-    catastrophic_sl: float     # Static — NEVER moves
-
-    expected_sequence: list[list[str]]  # e.g. [['d','x'], ['e','y'], ['f','z']]
-    sequence_index: int        # 0 at start, advances with each match
-
-    close_price: Optional[float] = None
-    close_reason: Optional[str] = None
-    pnl_pct: Optional[float] = None
-    pnl_usdt: Optional[float] = None
-
-    def to_dict(self) -> dict:
-        """Serialize to JSON-safe dict matching the TS interface."""
-        return asdict(self)
-
-
-class PaperExecutor:
+class PaperExecutor(IExecutor):
     """
     In-memory paper trading executor for a single token.
 
+    Implements the IExecutor interface so the PPMT engine can swap
+    between paper and live execution transparently.
+
     Usage:
         executor = PaperExecutor(capital_usdt=100.0)
-        executor.open_position(signal, current_price)
+        await executor.open_position(symbol="DOGE/USDT", ...)
         executor.check_walk_forward(matched_symbol)
         executor.check_price(current_price)  # SL/TP hit?
     """
@@ -88,7 +55,64 @@ class PaperExecutor:
             "ACTIVE", "BREAK_EVEN_SECURED", "TP_EXTENDED"
         )
 
-    def open_position(
+    # ─── IExecutor async interface ───────────────────────────
+
+    async def open_position(
+        self,
+        symbol: str,
+        direction: str,
+        size_usdt: float,
+        metadata: dict,
+    ) -> PositionState:
+        """
+        IExecutor.open_position — async wrapper around sync logic.
+
+        metadata keys used:
+          - entry_price (float)
+          - expected_move_pct (float)
+          - predicted_path_symbols (list[str], optional)
+        """
+        return self._open_position_sync(
+            symbol=symbol,
+            direction=direction,
+            entry_price=metadata["entry_price"],
+            expected_move_pct=metadata.get("expected_move_pct", 1.0),
+            predicted_path_symbols=metadata.get("predicted_path_symbols"),
+            size_usdt=size_usdt,
+        )
+
+    async def update_position(
+        self,
+        position: PositionState,
+        new_sl: Optional[float] = None,
+        new_tp: Optional[float] = None,
+    ) -> bool:
+        """IExecutor.update_position — in-memory field update."""
+        if new_sl is not None:
+            position.current_sl = new_sl
+        if new_tp is not None:
+            position.current_tp = new_tp
+        return True
+
+    async def close_position(
+        self,
+        position: PositionState,
+        reason: str,
+    ) -> PositionState:
+        """IExecutor.close_position — in-memory close."""
+        close_price = position.current_sl if "SL" in reason else position.current_tp
+        return self._close_position_sync(close_price, reason)
+
+    async def close_all_positions(self) -> bool:
+        """IExecutor.close_all_positions — in-memory kill switch."""
+        if self._position and self.is_in_position:
+            self._close_position_sync(self._position.current_sl, "CLOSED_KILL_SWITCH")
+            return True
+        return True
+
+    # ─── Sync methods (backwards compat) ─────────────────────
+
+    def _open_position_sync(
         self,
         symbol: str,
         direction: Direction,
@@ -97,17 +121,7 @@ class PaperExecutor:
         predicted_path_symbols: list[str] | None = None,
         size_usdt: float | None = None,
     ) -> PositionState:
-        """
-        Open a new paper position.
-
-        Args:
-            symbol: e.g. "DOGE/USDT"
-            direction: "LONG" or "SHORT"
-            entry_price: Current price at signal time
-            expected_move_pct: Expected % move from signal metadata
-            predicted_path_symbols: Predicted SAX path for Walk-Forward
-            size_usdt: Position size (defaults to capital_usdt)
-        """
+        """Open a new paper position (synchronous)."""
         if self.is_in_position:
             raise RuntimeError(f"Already in position: {self._position}")
 
@@ -145,6 +159,26 @@ class PaperExecutor:
         )
 
         return self._position
+
+    # Keep the old sync signature as a public method for backwards compat
+    def open_position_sync(
+        self,
+        symbol: str,
+        direction: Direction,
+        entry_price: float,
+        expected_move_pct: float,
+        predicted_path_symbols: list[str] | None = None,
+        size_usdt: float | None = None,
+    ) -> PositionState:
+        """Backwards-compatible sync open_position."""
+        return self._open_position_sync(
+            symbol=symbol,
+            direction=direction,
+            entry_price=entry_price,
+            expected_move_pct=expected_move_pct,
+            predicted_path_symbols=predicted_path_symbols,
+            size_usdt=size_usdt,
+        )
 
     def check_walk_forward(
         self,
@@ -220,21 +254,21 @@ class PaperExecutor:
         if pos.direction == "LONG":
             # Catastrophic SL first (never moves)
             if current_price <= pos.catastrophic_sl:
-                return self._close_position(current_price, "CLOSED_CATASTROPHIC")
+                return self._close_position_sync(current_price, "CLOSED_CATASTROPHIC")
             # Normal SL
             if current_price <= pos.current_sl:
-                return self._close_position(current_price, "CLOSED_BY_SL")
+                return self._close_position_sync(current_price, "CLOSED_BY_SL")
             # TP
             if current_price >= pos.current_tp:
-                return self._close_position(current_price, "CLOSED_BY_TP")
+                return self._close_position_sync(current_price, "CLOSED_BY_TP")
 
         else:  # SHORT
             if current_price >= pos.catastrophic_sl:
-                return self._close_position(current_price, "CLOSED_CATASTROPHIC")
+                return self._close_position_sync(current_price, "CLOSED_CATASTROPHIC")
             if current_price >= pos.current_sl:
-                return self._close_position(current_price, "CLOSED_BY_SL")
+                return self._close_position_sync(current_price, "CLOSED_BY_SL")
             if current_price <= pos.current_tp:
-                return self._close_position(current_price, "CLOSED_BY_TP")
+                return self._close_position_sync(current_price, "CLOSED_BY_TP")
 
         return None
 
@@ -242,9 +276,9 @@ class PaperExecutor:
         """Force close position (kill switch)."""
         if self._position is None:
             return None
-        return self._close_position(current_price, reason)
+        return self._close_position_sync(current_price, reason)
 
-    def _close_position(self, close_price: float, reason: PositionStatus) -> PositionState:
+    def _close_position_sync(self, close_price: float, reason: PositionStatus) -> PositionState:
         """Close the position and compute P&L."""
         pos = self._position
         assert pos is not None

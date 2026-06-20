@@ -176,11 +176,13 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
         )
         
         if n1 or n2 or n3:
+            # N4 may be None — keep the default RegimePartitionedTrie instead
+            from ppmt.core.trie import PPMTTrie, RegimePartitionedTrie
             engine.set_tries(
-                trie_n1=n1,
-                trie_n2=n2,
-                trie_n3=n3,
-                trie_n4=n4,
+                trie_n1=n1 or engine.trie_n1,
+                trie_n2=n2 or engine.trie_n2,
+                trie_n3=n3 or engine.trie_n3,
+                trie_n4=n4 if n4 is not None else engine.trie_n4,
             )
             logger.info(f"[WS] Tries injected into engine — Transfer Learning ACTIVE")
         else:
