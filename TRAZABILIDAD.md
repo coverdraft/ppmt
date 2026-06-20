@@ -10661,3 +10661,52 @@ LEVEL_DUAL_ALPHA_CONFIG = {
 
 **CRITERIO DE ACEPTACIÓN CUMPLIDO**: Weighted Confidence > 0.40 en señales PEPE
 usando solo Transfer Learning (sin N3, sin N4). **Motor PPMT cerrado y aprobado.**
+
+---
+
+## v0.43.1-post — LIMPIEZA CRÍTICA DE ENTORNO (20 jun 2026)
+
+### Problema: Duplicación de código fuente
+
+Se descubrieron dos rutas de código PPMT:
+1. `/home/z/my-project/src/ppmt/` — fuera del repo Git
+2. `/home/z/my-project/ppmt/src/ppmt/` — dentro del repo Git (correcta)
+
+Python importaba desde la ruta #2 (repo), pero los edits se hacían en ambas rutas,
+creando un Frankenstein. Además, el repo tenía `n2_default: {price:3, volume:2}`
+mientras la copia externa tenía `n2_default: {price:3, volume:0}` (correcto para V1).
+
+### Acciones de limpieza
+
+1. **Unificación de código fuente**:
+   - Eliminada la carpeta duplicada `/home/z/my-project/src/ppmt/`
+   - Eliminado `/home/z/my-project/pyproject.toml` duplicado
+   - Todo el código ahora vive únicamente en `/home/z/my-project/ppmt/` (repo Git)
+
+2. **Fix de configuración N2**:
+   - `sax.py`: `n2_default` cambiado de `{price:3, volume:2}` a `{price:3, volume:0}`
+   - `ppmt.py`: Commit del fallback SAXEncoder para N2 cuando volume=0
+   - Ambos cambios alinean el código con la arquitectura V1 aceptada
+
+3. **Invalidación de caché Python**:
+   - Borrados todos los `__pycache__/` y `*.pyc` en el proyecto
+
+4. **Prueba de humo post-limpieza** (PEPE OOS 1m):
+   - Weighted confidence max: **0.463** ✅ (idéntico al reporte anterior)
+   - Steps con weighted_conf >= 0.40: **312** ✅ (idéntico al reporte anterior)
+   - N1: 243 patterns, avg conf 0.403, density 153.8 obs/node
+   - N2 meme: 243 patterns, avg conf 0.320, density 35.5 obs/node
+   - **Entorno limpio confirmado**
+
+5. **Documentación**:
+   - Creado `ARCHITECTURE_V1.md` en la raíz del repo
+   - Actualizado `pyproject.toml` a versión 0.43.1
+
+### Estado del repo post-limpieza
+
+- Código unificado en `/home/z/my-project/ppmt/src/ppmt/` ✅
+- Sin duplicados ✅
+- Sin `__pycache__` ✅
+- Git limpio y sincronizado ✅
+- ARCHITECTURE_V1.md creado ✅
+- **Motor cerrado oficialmente — Fase de Terminal puede comenzar**
