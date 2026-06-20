@@ -188,12 +188,21 @@ class PPMT:
 
         if dual_sax:
             # N2/N3/N4: SAXDualEncoder with per-level (price, volume) alphas.
-            self.sax_n2 = SAXDualEncoder(
-                price_alphabet_size=n2_dual["price"],
-                volume_alphabet_size=n2_dual["volume"],
-                window_size=sax_window_size,
-                price_strategy=sax_strategy,
-            )
+            # v0.43.1: N2 with volume=0 uses SAXEncoder (price-only), same as N1.
+            # This prevents combinatorial explosion in sparse pools like meme/new_launch.
+            if n2_dual["volume"] == 0:
+                self.sax_n2 = SAXEncoder(
+                    alphabet_size=n2_dual["price"],
+                    window_size=sax_window_size,
+                    strategy=sax_strategy,
+                )
+            else:
+                self.sax_n2 = SAXDualEncoder(
+                    price_alphabet_size=n2_dual["price"],
+                    volume_alphabet_size=n2_dual["volume"],
+                    window_size=sax_window_size,
+                    price_strategy=sax_strategy,
+                )
             self.sax_n3 = SAXDualEncoder(
                 price_alphabet_size=n3_dual["price"],
                 volume_alphabet_size=n3_dual["volume"],

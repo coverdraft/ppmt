@@ -99,9 +99,9 @@ LEVEL_ALPHA_CONFIG: dict[str, int] = {
 #   and receives observations from multiple tokens of the same class.
 LEVEL_DUAL_ALPHA_CONFIG: dict[str, dict[str, int]] = {
     "n1": {"price": 3, "volume": 0},       # volume=0 means NO volume encoder (price-only)
-    "n2_meme": {"price": 3, "volume": 2},
-    "n2_new_launch": {"price": 3, "volume": 2},
-    "n2_default": {"price": 4, "volume": 2},
+    "n2_meme": {"price": 3, "volume": 0},   # v0.43.1: price-only for memes too (3^5=243, not 5^5=3125)
+    "n2_new_launch": {"price": 3, "volume": 0},  # v0.43.1: same reasoning as memes
+    "n2_default": {"price": 3, "volume": 0},     # v0.43.1: ALL N2 price-only (volume is noise at class level)
     "n3": {"price": 4, "volume": 3},
     "n4": {"price": 4, "volume": 3},
 }
