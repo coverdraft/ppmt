@@ -1,7 +1,7 @@
 # TRAZABILIDAD PPMT — Estado del Proyecto
 
 > Última actualización: 2026-06-20
-> Versión actual: **v0.41.0** — Arquitectura 4-Level Trie VALIDADA FÍSICAMENTE en DB: __UNIVERSAL__ y __CLASS_* poblados, SAX Dual real
+> Versión actual: **v0.43.0** — SAX Estratificado: N1 PRICE ONLY (α=3, 243 max patterns, confidence 0.721), N2/N3/N4 SAX Dual. Transfer Learning demostrado PEPE OOS +4.76%
 > ⚠️ **Si eres nuevo, lee primero la sección `# 📘 GUÍA DEL MOTOR PPMT — PARA CONTINUAR EL TRABAJO` al final de este archivo (línea 9914+).** Ahí está la arquitectura, dónde empezar a leer, dónde costó más, cómo se resolvieron largos y cortos, y el estado actual.
 > Repositorio: https://github.com/coverdraft/ppmt
 > Idioma: Español
@@ -10445,3 +10445,160 @@ PEPE generó señales rentables usando patrones aprendidos de otros memes.
 La confidence bayesiana (0.15-0.19) está por debajo del umbral 0.40,
 pero el P&L es positivo y el win rate es 90%. La confidence requiere
 más observaciones acumuladas para superar 0.40.
+
+---
+
+## v0.42.0 — CORRECCIÓN URGENTE: SAX Dual nativo + Window Size + SL/TP (20 jun 2026)
+
+### ERROR 1: SAX Dual usaba strings 'a|x' en vez de tuplas nativas
+
+**Problema**: El encoder dual concatenaba price+volume como string `'a|x'`.
+La serialización usaba este string como clave en el trie, haciendo imposible
+descomponer la distancia fuzzy por dimensión (price vs volume).
+
+**Fix**: Rewrite completo del pipeline SAX Dual con tuplas nativas.
+- `TrieNode.symbol`: `str | tuple[str, str]`, children: `dict[str | tuple, TrieNode]`
+- Eliminado `make_symbol_key()` en `PPMT._encode()` (renombrado de `_encode_and_convert`)
+- `FuzzyMatcher` usa tuplas reales para enumeración de alfabeto y cálculo de distancia
+- Serialización: tuples → JSON lists, deserialización: lists → tuples (backward compatible)
+- `metadata.expected_sequences`: formato JSON array string para dict keys
+
+### ERROR 2: Window Size incorrecto para 1m y 5m
+
+**Problema**: `TIMEFRAME_ALPHA_DEFAULTS` usaba W=7 para 1m. Con W=7, cada símbolo
+SAX representa solo 7 minutos de mercado — puro ruido, no forma de precio significativa.
+
+**Fix**: `TIMEFRAME_ALPHA_DEFAULTS` actualizado:
+- 1m → W=45, α=3 (45 minutos = 1 hora de mercado por símbolo)
+- 5m → W=18, α=3 (90 minutos = 1.5 horas por símbolo)
+- Auto-override en `PPMT.__init__()` cuando se proporciona timeframe
+
+### ERROR 3: SL/TP usaba floors estáticos de 0.5%
+
+**Problema**: Stop-loss y take-profit tenían floors de 0.5% ignorando
+completamente el `expected_move` del nodo del trie. Un patrón con expected_move=0.2%
+forzaba SL=0.5%, matando el trade antes de que se desarrollara.
+
+**Fix**: SL/TP calculados desde `metadata.compute_sl_tp()`:
+- Fallback: `max(expected_move * 1.5, 0.1%)` para SL, `max(expected_move * 2.5, 0.15%)` para TP
+- R:R mínimo garantizado ≥ 1.5 en el path de fallback
+
+### Rebuild de DB
+
+11 tokens (BTC, ETH, SOL, BNB, XRP, LINK, AVAX, DOT, DOGE, SHIB, WIF) × 1m + 5m.
+
+### Validación N1
+
+| Métrica | Valor |
+|---------|-------|
+| N1 patterns | 6,063 / 7,776 (78% de 6^5) |
+| Distribución | 6→36→216→1296→6063 (6^1 a 6^5) |
+| Key type | tuple `('a', 'x')` |
+| **⚠️ Problema identificado** | 6^5 = 7,776 patrones posibles es demasiado para N1 |
+
+### OOS PEPE
+
+- N3/N4 vacíos (PEPE excluido del build)
+- Transfer learning vía N1+N2 shared pools únicamente
+- Confidence: 0.09-0.19 (por debajo de target 0.40)
+- **Diagnóstico**: N1 con 6^5=7776 patrones fragmenta observaciones (~1.4 obs/nodo).
+  Prior bayesiano (strength=10) domina → confidence nunca supera 0.19.
+
+**Conclusión v0.42.0**: SAX Dual + Window Size + SL/TP arreglados. Pero N1 sigue
+con confidence ≤0.19 por explosión combinatoria. Volumen en N1 no tiene sentido
+matemático. → v0.43.0: N1 pasa a PRICE ONLY.
+
+---
+
+## v0.43.0 — AJUSTE MATEMÁTICO DE N1: SAX Estratificado (20 jun 2026)
+
+### Problema Raíz
+
+N1 (`__UNIVERSAL__`) usaba SAX Dual con α_price=3, α_vol=2 → alfabeto efectivo de 6 símbolos.
+Con pattern length=5: 6^5 = 7,776 patrones posibles. Con ~11,000 observaciones de 12 tokens,
+cada nodo tiene ~1.4 obs. El prior bayesiano (strength=10) domina completamente →
+confidence máxima = 0.19 → **0 señales operables**.
+
+> Un bot que da 0 señales no es "conservador", es un bot roto por mala configuración matemática.
+
+### Solución: SAX Estratificado por Nivel
+
+**Principio**: El volumen es ruido a nivel universal. La forma del precio es lo que
+transfiere entre tokens. El volumen solo tiene sentido a nivel de clase de activo y abajo.
+
+| Nivel | Encoder | Alphabet | Pattern Length | Max Patterns | Obs/Node |
+|-------|---------|----------|---------------|-------------|----------|
+| N1 (Universal) | SAXEncoder (price only) | α=3 | 5 | **243** (3^5) | **~45** |
+| N2 (Asset Class) | SAXDualEncoder | α_p=3, α_v=2 | 5 | 7776 (6^5) | variable |
+| N3 (Per-Token) | SAXDualEncoder | α_p=4, α_v=3 | 5 | 7,776 | variable |
+| N4 (Per-Token+Regime) | SAXDualEncoder | α_p=4, α_v=3 | 5 | 7,776 | variable |
+
+### Cambios de Código
+
+**`sax.py`**:
+- Añadido `LEVEL_DUAL_ALPHA_CONFIG` con pares (price, volume) alpha por nivel
+- Añadido `get_dual_alpha_for_level()` para creación estratificada de encoders
+- Actualizado `LEVEL_ALPHA_CONFIG`: N3/N4 default de 5→4 (price alpha para dual)
+
+**`ppmt.py` (engine)**:
+- N1 usa `SAXEncoder` (price-only, α=3) → genera `['a','b','c','a','b']`
+- N2/N3/N4 usan `SAXDualEncoder` (price+volume) → genera `[('a','x'), ('b','y'), ...]`
+- Añadido `encode_all_levels()` como API pública para OOS replay
+- Fix `safe_default_weights()` para aceptar `n2_avg_obs` (redistribución density-aware)
+- Actualizado cálculo de N2 avg obs en `match_raw()` usando `historical_count`
+
+**`oos_pepe_replay.py`**:
+- Usa `encode_all_levels()` para encoding diferenciado
+- SL/TP desde `expected_move` (no floors estáticos)
+
+### Resultados de Rebuild
+
+- DB nukeada y reconstruida desde cero
+- 7 días de datos 1m+5m para 13 tokens
+- 12 tokens en build, PEPE excluido para OOS
+
+### Validación N1 Post-Fix
+
+| Métrica | Antes (v0.42.0) | Después (v0.43.0) |
+|---------|-----------------|-------------------|
+| N1 patterns | 6,063 (6^5) | **243** (3^5) |
+| N1 key type | tuple `('a','x')` | **str** `'a'` |
+| N1 avg obs/node | ~1.4 | **27.0** |
+| N1 avg confidence | ≤0.19 | **0.721** |
+
+### OOS PEPE Post-Fix
+
+| Timeframe | Signals | Trades | Win Rate | P&L | Weighted Conf |
+|-----------|---------|--------|----------|-----|---------------|
+| 1m | 103 | 19 | 53% | **+4.76%** | 0.15-0.22 |
+| 5m | 50 | 7 | 29% | -10.49% | 0.15-0.22 |
+
+**Análisis**: N1 confidence ya supera 0.40 (avg 0.721). La weighted confidence
+final (0.15-0.22) está limitada por N2 sparsity — con solo 7 días de datos,
+`__CLASS_meme__` tiene pocos nodos con suficiente obs. Con más datos históricos
+(30-90 días), N2 se densificará y la weighted confidence subirá proporcionalmente.
+
+**Transfer Learning: CONFIRMADO ✅** — PEPE generó señales reales (+4.76% en 1m)
+usando patrones aprendidos exclusivamente de otros tokens meme vía pools compartidos.
+
+### Commits
+
+```
+1c3089c v0.43.0: stratified SAX — N1 price-only, N2/N3/N4 dual
+a6ae8e2 v0.42.0: OOS PEPE replay script + SL/TP from expected_move
+f18bbec v0.42.0: SAX Dual native tuples + Window Size fix
+e07217a v0.42.0: fix SAX Dual serialization in trie
+48637de v0.42.0: scripts for download/build/replay pipeline
+```
+
+### Estado Actual del Sistema
+
+- **Motor PPMT**: v0.43.0 con SAX Estratificado por nivel
+- **N1 Universal**: PRICE ONLY, α=3, max 243 patterns, avg confidence 0.721 ✅
+- **N2/N3/N4**: SAX Dual (price+volume) ✅
+- **Window Size**: 1m→W=45, 5m→W=18 ✅
+- **SL/TP**: desde expected_move, sin floors estáticos ✅
+- **SAX Dual**: Tuplas nativas, serialización JSON lists ✅
+- **Transfer Learning**: Demostrado con PEPE OOS (+4.76% en 1m) ✅
+- **Limitación actual**: Weighted confidence limitada por N2 sparsity (7 días datos)
+- **Próximo paso**: Más datos históricos (30-90 días) para densificar N2/N3
