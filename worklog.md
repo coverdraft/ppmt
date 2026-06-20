@@ -1810,3 +1810,41 @@ Stage Summary:
 - ARCHITECTURE_V1.md exists in repo root
 - Smoke test confirms engine produces identical results (weighted_conf max 0.463, 312 steps >= 0.40)
 - Motor PPMT officially CLOSED — Terminal phase can begin
+
+---
+Task ID: 4
+Agent: super-z (main)
+Task: ENTREGABLE 4 — MEXC Futures Executor Architecture
+
+Work Log:
+- Cloned repo from GitHub (fresh session, no prior state)
+- Seeded ~/.ppmt/ppmt.db with synthetic tries (N1=31, N2=29, N3=16 patterns)
+- Fixed v2_server.py crash: N4=None passed to set_tries() → kept default RegimePartitionedTrie
+- Created execution module: src/ppmt/execution/
+  - models.py: PositionState with exchange_meta field (shared by all executors)
+  - interfaces.py: IExecutor ABC with 4 async methods (open/update/close/close_all)
+  - mexc_futures.py: Full MexcFuturesExecutor implementation
+    - HMAC-SHA256 manual signing (zero ccxt)
+    - Lazy symbol precision fetch (GET /api/v1/contract/detail, once per symbol)
+    - Lazy leverage set (POST /api/v1/leverage, once per symbol)
+    - open_position: market order + immediate SL/TP conditional orders
+    - update_position: cancel+replace SL/TP orders individually
+    - close_position: cancel pending + close-position endpoint
+    - close_all_positions: kill switch
+    - Rate-limit handling: 429 → sleep(1) + one retry
+- Refactored PaperExecutor to implement IExecutor (async wrappers around sync logic)
+- Backwards compat: open_position_sync(), check_walk_forward(), check_price() preserved
+- Created tests/test_mexc_executor.py with 4 test suites (mock data, no internet)
+- All tests PASS: payload structure, quantity rounding, HMAC signature, IExecutor compliance
+- Committed as v0.44.0, pushed to GitHub (d88664c)
+
+Stage Summary:
+- New module: src/ppmt/execution/ (4 files)
+- MexcFuturesExecutor: complete MEXC Futures API v2 integration (zero ccxt)
+- IExecutor interface: both PaperExecutor and MexcFuturesExecutor implement it
+- Payload validated: quantity=25000 (100 USDT * 20x / 0.080, rounded to qty_prec=0)
+- HMAC-SHA256 signature verified independently
+- SL/TP conditional order payloads: correct type (1=STOP, 2=TAKE_PROFIT), side (2=CLOSE_LONG)
+- PaperExecutor backwards compatible (sync methods preserved)
+- Fix: v2_server.py N4=None crash resolved
+- Git synced, worklog updated
