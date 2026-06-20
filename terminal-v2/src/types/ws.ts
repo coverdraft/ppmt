@@ -39,6 +39,11 @@ export interface ErrorMessage {
   data: { message: string };
 }
 
+/** v0.45.0: Auth confirmation from the live-trading endpoint. */
+export interface AuthOkMessage {
+  type: 'auth_ok';
+}
+
 /**
  * PositionState from the wire (snake_case, matching Python dataclass).
  * This is the EXACT shape sent by PaperExecutor.to_dict().
@@ -61,4 +66,4 @@ export interface PositionStateWire {
   pnl_usdt: number | null;
 }
 
-export type WSMessage = CandleMessage | BrainUpdateMessage | PositionUpdateMessage | ErrorMessage;
+export type WSMessage = CandleMessage | BrainUpdateMessage | PositionUpdateMessage | ErrorMessage | AuthOkMessage;

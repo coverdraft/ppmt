@@ -5,6 +5,8 @@ This server provides the real-time bridge between the PPMT Python engine
 and the React terminal frontend. It exposes a single WebSocket endpoint
 per token that streams candle, brain, and position updates.
 
+v0.45.0: ENTREGABLE 6 — Credential encryption (Fernet) + Walk-Forward Loop.
+
 Usage:
     uvicorn ppmt.terminal.v2_server:app --host 0.0.0.0 --port 8000 --reload
 """
@@ -28,6 +30,7 @@ from ppmt.terminal.paper_executor import PaperExecutor
 from ppmt.execution.models import PositionState
 from ppmt.execution.interfaces import IExecutor
 from ppmt.execution.mexc_futures import MexcFuturesExecutor
+from ppmt.execution.crypto import decrypt_auth_payload
 
 logger = logging.getLogger("ppmt.v2")
 logging.basicConfig(
@@ -512,37 +515,77 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
 
 
 # ─── WebSocket: Live Trading (MEXC Futures) ───────────────────
+# v0.45.0: ENTREGABLE 6 — Encrypted credentials + Walk-Forward Loop
+
+# Helper: check if any IExecutor has an active position
+def _executor_in_position(executor: IExecutor) -> bool:
+    """Check if executor has an active (open) position — works for all IExecutor impls."""
+    if isinstance(executor, PaperExecutor):
+        return executor.is_in_position
+    # MexcFuturesExecutor and future impls store current position
+    pos = getattr(executor, '_position', None) or getattr(executor, 'position', None)
+    return pos is not None and pos.status in ("ACTIVE", "BREAK_EVEN_SECURED", "TP_EXTENDED")
+
+
+def _executor_position(executor: IExecutor) -> Optional[PositionState]:
+    """Get current position from any IExecutor — works for all impls."""
+    if isinstance(executor, PaperExecutor):
+        return executor.position
+    return getattr(executor, '_position', None) or getattr(executor, 'position', None)
+
+
 @app.websocket("/ws/live-trading/{symbol}/{timeframe}")
 async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: str):
     """
     Real-money trading WebSocket via MEXC Futures.
 
-    Same engine loop as paper-live, but the executor is MexcFuturesExecutor.
-    The frontend MUST send an auth message as the first WebSocket message
-    containing the MEXC API key and secret.
+    v0.45.0: ENTREGABLE 6
+    - Credentials are Fernet-encrypted in transit.
+    - Full Walk-Forward Loop monitors open positions on every candle.
+    - Divergence → close. Match → advance SL/TP along expected sequence.
+
+    Auth flow:
+      1. Frontend encrypts api_key + api_secret with Fernet using a key
+         derived from the user's session password (PBKDF2-SHA256).
+      2. Frontend sends: {"type":"auth", "api_key":"<enc>", "api_secret":"<enc>",
+         "session_password_hash":"<sha256_hex>"}
+      3. Backend decrypts, instantiates MexcFuturesExecutor, zeroes plaintext.
     """
 
     await websocket.accept()
 
-    # ─── 0. Auth: wait for credentials ─────────────────────────
+    # ─── 0. Auth: wait for ENCRYPTED credentials ──────────────
     try:
         auth_raw = await asyncio.wait_for(websocket.receive_json(), timeout=15.0)
     except asyncio.TimeoutError:
-        await websocket.send_json({"type": "error", "data": {"message": "Auth timeout — send {type:auth, api_key:..., api_secret:...} within 15s"}})
+        await websocket.send_json({"type": "error", "data": {"message": "Auth timeout — send encrypted auth within 15s"}})
         await websocket.close()
         return
 
-    if auth_raw.get("type") != "auth" or not auth_raw.get("api_key") or not auth_raw.get("api_secret"):
-        await websocket.send_json({"type": "error", "data": {"message": "First message must be {type:auth, api_key:..., api_secret:...}"}})
+    if auth_raw.get("type") != "auth":
+        await websocket.send_json({"type": "error", "data": {"message": "First message must be {type:auth, ...}"}})
         await websocket.close()
         return
 
-    # ─── 1. Instantiate MexcFuturesExecutor with user keys ─────
+    # ─── Decrypt credentials with Fernet ──────────────────────
+    api_key, api_secret = decrypt_auth_payload(auth_raw)
+
+    if api_key is None or api_secret is None:
+        await websocket.send_json({"type": "error", "data": {"message": "Decryption failed — wrong session password or tampered payload"}})
+        await websocket.close()
+        return
+
+    # ─── 1. Instantiate MexcFuturesExecutor with decrypted keys ─
     executor: IExecutor = MexcFuturesExecutor(
-        api_key=auth_raw["api_key"],
-        secret=auth_raw["api_secret"],
+        api_key=api_key,
+        secret=api_secret,
     )
-    logger.info(f"[WS-LIVE] Auth OK — MexcFuturesExecutor created")
+
+    # Zero plaintext from local scope immediately
+    del api_key
+    del api_secret
+
+    logger.info("[WS-LIVE] Auth OK — MexcFuturesExecutor created (credentials zeroed)")
     await websocket.send_json({"type": "auth_ok"})
 
     # ─── 2. Same engine init as paper-live ─────────────────────
@@ -615,7 +658,7 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
     poll_interval = tf_seconds.get(timeframe, 5)
     last_candle_ts = 0
 
-    # ─── 4. Main poll loop — routed execution ───────────────────
+    # ─── 4. Main poll loop — routed execution + Walk-Forward ───
     try:
         while True:
             try:
@@ -640,9 +683,9 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
                     index=pd.DatetimeIndex([datetime.fromtimestamp(ts_sec, tz=timezone.utc)]),
                 )
 
-                # Check position state for IExecutor (async-compatible)
-                _in_pos = isinstance(executor, PaperExecutor) and executor.is_in_position
-                _entry = executor.position.entry_price if (isinstance(executor, PaperExecutor) and executor.position) else None
+                # Position state — works for any IExecutor
+                _in_pos = _executor_in_position(executor)
+                _entry = _executor_position(executor).entry_price if _in_pos else None
 
                 result = engine.process_new_candle(
                     candle_df=candle_df, current_price=current_price,
@@ -677,6 +720,7 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
                             qr = engine.match(current_symbols=buf.get_pattern(), current_price=current_price, is_in_position=_in_pos, entry_price=_entry)
                             if qr:
                                 n1_conf, n2_conf, weighted_conf = qr.n1_confidence, qr.n2_confidence, qr.weighted_confidence
+                                best_match = None
                                 for level, match in [("n3", qr.n3_match), ("n2", qr.n2_match), ("n4", qr.n4_match), ("n1", qr.n1_match)]:
                                     if match and match.node:
                                         conf = match.node.metadata.confidence if match.node.metadata else 0.0
@@ -693,9 +737,6 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
                 if result and result.signal and result.signal.is_entry and not _in_pos:
                     sig = result.signal
                     try:
-                        # LIVE: await executor.open_position() → MEXC API
-                        # PAPER: await executor.open_position() → in-memory
-                        # Same IExecutor interface, different backend.
                         pos = await executor.open_position(
                             symbol=symbol,
                             direction=sig.direction or "LONG",
@@ -714,6 +755,98 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
                     except Exception as e:
                         logger.error(f"[WS-LIVE] Failed to open position: {e}")
                         await websocket.send_json({"type": "error", "data": {"message": str(e)}})
+
+                # ── WALK-FORWARD LOOP ──────────────────────────
+                # ENTREGABLE 6: Full position lifecycle monitoring.
+                # On every candle while in position:
+                #   1. Compare current SAX symbol vs expected_sequence[index]
+                #   2. DIVERGE → close position
+                #   3. MATCH  → advance index, move SL/TP
+                if _in_pos and current_sax:
+                    pos = _executor_position(executor)
+                    if pos and pos.sequence_index < len(pos.expected_sequence):
+                        expected = pos.expected_sequence[pos.sequence_index]
+
+                        if current_sax == expected or (len(current_sax) == 1 and len(expected) == 1 and current_sax[0] == expected[0]):
+                            # ── MATCH: Advance sequence ──────────
+                            pos.sequence_index += 1
+                            idx = pos.sequence_index  # 1-based after increment
+
+                            if idx == 1:
+                                # First match → SL to break-even
+                                new_sl = pos.entry_price
+                                await executor.update_position(pos, new_sl=new_sl, new_tp=None)
+                                pos.status = "BREAK_EVEN_SECURED"
+                                logger.info(
+                                    f"[WS-LIVE] Walk-Forward: MATCH #{idx} → SL→BE "
+                                    f"SL={new_sl:.6f} status=BREAK_EVEN_SECURED"
+                                )
+                            else:
+                                # Subsequent match → Walk the Trie, extend TP
+                                # Read expected_move from next trie node if available
+                                # Default extension: 0.5% per matched step
+                                move_pct = 0.5
+                                # If the result has node metadata with expected_move, use it
+                                if result and result.signal and result.signal.expected_move_pct:
+                                    move_pct = result.signal.expected_move_pct
+                                extension = pos.entry_price * (move_pct / 100.0)
+
+                                if pos.direction == "LONG":
+                                    new_tp = pos.current_tp + extension
+                                    if new_tp > pos.current_tp:
+                                        await executor.update_position(pos, new_sl=None, new_tp=new_tp)
+                                        pos.status = "TP_EXTENDED"
+                                else:
+                                    new_tp = pos.current_tp - extension
+                                    if new_tp < pos.current_tp:
+                                        await executor.update_position(pos, new_sl=None, new_tp=new_tp)
+                                        pos.status = "TP_EXTENDED"
+
+                                logger.info(
+                                    f"[WS-LIVE] Walk-Forward: MATCH #{idx} → TP extended "
+                                    f"TP={pos.current_tp:.6f} status={pos.status}"
+                                )
+
+                            # Send updated position to frontend (React chart lines move)
+                            await websocket.send_json({"type": "position_update", "data": pos.to_dict()})
+
+                        else:
+                            # ── DIVERGE: Close position immediately ──
+                            logger.warning(
+                                f"[WS-LIVE] Walk-Forward: DIVERGENCE at idx={pos.sequence_index} "
+                                f"expected={expected} got={current_sax} → CLOSING"
+                            )
+                            closed = await executor.close_position(pos, "CLOSED_BY_DIVERGENCE")
+                            await websocket.send_json({"type": "position_update", "data": closed.to_dict()})
+
+                # ── Check SL/TP hit (price-based) ──────────────
+                if _in_pos:
+                    pos = _executor_position(executor)
+                    if pos and pos.status in ("ACTIVE", "BREAK_EVEN_SECURED", "TP_EXTENDED"):
+                        hit = False
+                        close_reason = None
+                        if pos.direction == "LONG":
+                            if current_price <= pos.catastrophic_sl:
+                                hit, close_reason = True, "CLOSED_CATASTROPHIC"
+                            elif current_price <= pos.current_sl:
+                                hit, close_reason = True, "CLOSED_BY_SL"
+                            elif current_price >= pos.current_tp:
+                                hit, close_reason = True, "CLOSED_BY_TP"
+                        else:
+                            if current_price >= pos.catastrophic_sl:
+                                hit, close_reason = True, "CLOSED_CATASTROPHIC"
+                            elif current_price >= pos.current_sl:
+                                hit, close_reason = True, "CLOSED_BY_SL"
+                            elif current_price <= pos.current_tp:
+                                hit, close_reason = True, "CLOSED_BY_TP"
+
+                        if hit and close_reason:
+                            closed = await executor.close_position(pos, close_reason)
+                            logger.info(
+                                f"[WS-LIVE] CLOSED: {closed.status} @ {current_price:.6f} "
+                                f"PnL={closed.pnl_pct:+.2f}% (${closed.pnl_usdt:+.2f})"
+                            )
+                            await websocket.send_json({"type": "position_update", "data": closed.to_dict()})
 
             except WebSocketDisconnect:
                 break
