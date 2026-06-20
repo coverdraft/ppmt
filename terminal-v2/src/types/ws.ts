@@ -44,6 +44,12 @@ export interface AuthOkMessage {
   type: 'auth_ok';
 }
 
+/** v0.47.0: Config message from frontend (dynamic capital allocation). */
+export interface ConfigMessage {
+  type: 'config';
+  allocated_usdt: number;
+}
+
 /**
  * PositionState from the wire (snake_case, matching Python dataclass).
  * This is the EXACT shape sent by PaperExecutor.to_dict().

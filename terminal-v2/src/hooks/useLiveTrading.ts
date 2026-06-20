@@ -45,15 +45,20 @@ export interface LiveTradingState {
 /**
  * useLiveTrading — WebSocket hook for LIVE TRADING mode (MEXC Futures).
  *
- * v0.46.0: ENTREGABLE 7 — Manual connect() API.
+ * v0.47.0: ENTREGABLE 8 — Dynamic capital allocation (allocatedUsdt).
  *
  * State machine: idle → connecting → authenticating → connected
  *                                                    → error
  *
+ * Auth flow:
+ *   1. Connect WS
+ *   2. Send encrypted auth payload
+ *   3. Wait for auth_ok
+ *   4. Send config message with allocated_usdt
+ *
  * Usage:
  *   const { state, connect, disconnect } = useLiveTrading(symbol, timeframe);
- *   // User fills credentials modal, then:
- *   connect(sessionPassword, apiKey, apiSecret);
+ *   connect(sessionPassword, apiKey, apiSecret, allocatedUsdt);
  */
 export function useLiveTrading(symbol: string | null, timeframe: string) {
   const [state, setState] = useState<LiveTradingState>({
@@ -81,9 +86,9 @@ export function useLiveTrading(symbol: string | null, timeframe: string) {
     });
   }, []);
 
-  /** Open WS, send encrypted auth, start listening */
+  /** Open WS, send encrypted auth, then send config with allocated_usdt */
   const connect = useCallback(
-    (sessionPassword: string, apiKey: string, apiSecret: string) => {
+    (sessionPassword: string, apiKey: string, apiSecret: string, allocatedUsdt: number = 50) => {
       if (!symbol) return;
 
       // Close any existing connection
@@ -119,6 +124,11 @@ export function useLiveTrading(symbol: string | null, timeframe: string) {
           switch (msg.type) {
             case 'auth_ok':
               setState((prev) => ({ ...prev, status: 'connected', error: null }));
+              // ── ENTREGABLE 8: Send config with allocated_usdt immediately after auth ──
+              ws.send(JSON.stringify({
+                type: 'config',
+                allocated_usdt: allocatedUsdt,
+              }));
               break;
 
             case 'candle':

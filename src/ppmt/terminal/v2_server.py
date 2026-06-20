@@ -5,7 +5,7 @@ This server provides the real-time bridge between the PPMT Python engine
 and the React terminal frontend. It exposes a single WebSocket endpoint
 per token that streams candle, brain, and position updates.
 
-v0.45.0: ENTREGABLE 6 — Credential encryption (Fernet) + Walk-Forward Loop.
+v0.47.0: ENTREGABLE 8 — Position heartbeat (MEXC sync) + dynamic capital allocation.
 
 Usage:
     uvicorn ppmt.terminal.v2_server:app --host 0.0.0.0 --port 8000 --reload
@@ -599,6 +599,19 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
     del api_key
     del api_secret
 
+    # ─── 1b. Wait for config message (allocated_usdt) ─────────
+    allocated_usdt: float = 100.0  # default fallback
+    try:
+        config_raw = await asyncio.wait_for(websocket.receive_json(), timeout=10.0)
+        if config_raw.get("type") == "config":
+            allocated_usdt = float(config_raw.get("allocated_usdt", 100.0))
+            if allocated_usdt <= 0:
+                allocated_usdt = 100.0
+            logger.info(f"[WS-LIVE] Config received: allocated_usdt={allocated_usdt}")
+        # If it's not a config message, it's unexpected but not fatal
+    except asyncio.TimeoutError:
+        logger.warning("[WS-LIVE] No config message received, defaulting to 100 USDT")
+
     logger.info("[WS-LIVE] Auth OK — MexcFuturesExecutor created (credentials zeroed)")
     await websocket.send_json({"type": "auth_ok"})
 
@@ -671,6 +684,7 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
     tf_seconds = {"1m": 5, "5m": 10, "15m": 15, "1h": 30}
     poll_interval = tf_seconds.get(timeframe, 5)
     last_candle_ts = 0
+    heartbeat_counter = 0  # ticks every loop iteration; used to throttle heartbeat
 
     # ─── 4. Main poll loop — routed execution + Walk-Forward ───
     try:
@@ -754,7 +768,7 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
                         pos = await executor.open_position(
                             symbol=symbol,
                             direction=sig.direction or "LONG",
-                            size_usdt=100.0,
+                            size_usdt=allocated_usdt,
                             metadata={
                                 "entry_price": current_price,
                                 "expected_move_pct": sig.expected_move_pct or 1.0,
@@ -840,6 +854,51 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
                             )
                             closed = await executor.close_position(pos, "CLOSED_BY_DIVERGENCE")
                             await websocket.send_json({"type": "position_update", "data": closed.to_dict()})
+
+                # ── HEARTBEAT: Check if position is still alive on MEXC ──
+                # v0.47.0: ENTREGABLE 8
+                # Every 3 iterations (~15-90s depending on timeframe), verify the
+                # position still exists on MEXC. If MEXC closed it (SL/TP hit
+                # physically), update local state and notify the frontend.
+                heartbeat_counter += 1
+                if _in_pos and heartbeat_counter % 3 == 0:
+                    pos = _executor_position(executor)
+                    if pos and isinstance(executor, MexcFuturesExecutor):
+                        alive = await executor.check_position_alive(symbol)
+                        if alive is None:
+                            # MEXC closed the position — determine why
+                            close_reason = "CLOSED_BY_SL"  # default assumption
+                            if pos.direction == "LONG":
+                                if current_price >= pos.current_tp:
+                                    close_reason = "CLOSED_BY_TP"
+                                elif current_price <= pos.catastrophic_sl:
+                                    close_reason = "CLOSED_CATASTROPHIC"
+                            else:
+                                if current_price <= pos.current_tp:
+                                    close_reason = "CLOSED_BY_TP"
+                                elif current_price >= pos.catastrophic_sl:
+                                    close_reason = "CLOSED_CATASTROPHIC"
+
+                            pos.close_price = current_price
+                            pos.close_reason = close_reason
+                            pos.status = close_reason
+                            if pos.direction == "LONG":
+                                pos.pnl_pct = ((current_price - pos.entry_price) / pos.entry_price) * 100.0
+                            else:
+                                pos.pnl_pct = ((pos.entry_price - current_price) / pos.entry_price) * 100.0
+                            pos.pnl_usdt = pos.size_usdt * (pos.pnl_pct / 100.0)
+
+                            # Remove from executor's internal tracking
+                            executor._positions.pop(symbol, None)
+
+                            logger.warning(
+                                f"[WS-LIVE] HEARTBEAT: MEXC closed position! "
+                                f"reason={close_reason} @ {current_price:.6f} "
+                                f"PnL={pos.pnl_pct:+.2f}%"
+                            )
+                            await websocket.send_json({"type": "position_update", "data": pos.to_dict()})
+                        elif isinstance(alive, dict) and alive.get("_error"):
+                            logger.debug("[WS-LIVE] Heartbeat API failed — skipping this cycle")
 
                 # ── Check SL/TP hit (price-based) ──────────────
                 if _in_pos:

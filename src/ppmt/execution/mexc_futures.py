@@ -2,12 +2,15 @@
 PPMT MEXC Futures Executor — Real-money executor for MEXC Futures API v2.
 
 v0.44.0: ENTREGABLE 4 — Cero ccxt. Código nuevo, limpio y aislado.
+v0.47.0: ENTREGABLE 8 — Position heartbeat (check_position_alive).
+v0.48.0: ENTREGABLE 9 — Parametrized base_url for testnet support.
 All HTTP requests are made directly with ``aiohttp`` (or ``requests``
 via ``asyncio.to_thread``). HMAC-SHA256 signatures are computed
 manually. No exchange abstraction library is used.
 
 MEXC Futures API v2 endpoints used:
   - GET  /api/v1/contract/detail          — symbol precision info
+  - GET  /api/v1/position/openPositions   — check if position still alive (heartbeat)
   - POST /api/v1/leverage                  — set leverage
   - POST /api/v1/order/place-order        — open market order
   - POST /api/v1/order/stop-order         — place SL/TP conditional orders
@@ -101,6 +104,11 @@ class MexcFuturesExecutor(IExecutor):
 
     Usage:
         executor = MexcFuturesExecutor(api_key="...", secret="...")
+        # Or for testnet:
+        executor = MexcFuturesExecutor(
+            api_key="...", secret="...",
+            base_url="https://testnet.mexc.com",
+        )
         pos = await executor.open_position(
             symbol="DOGE/USDT",
             direction="LONG",
@@ -109,17 +117,19 @@ class MexcFuturesExecutor(IExecutor):
         )
     """
 
-    BASE_URL = "https://contract.mexc.com"
+    DEFAULT_BASE_URL = "https://contract.mexc.com"
 
     def __init__(
         self,
         api_key: str,
         secret: str,
         default_leverage: int = 20,
+        base_url: str = "",
     ):
         self._api_key = api_key
         self._secret = secret
         self._default_leverage = default_leverage
+        self._base_url = base_url or self.DEFAULT_BASE_URL
 
         # Lazy-loaded precision cache: symbol → {price_precision, quantity_precision, ...}
         self._symbol_info: dict[str, dict] = {}
@@ -138,7 +148,7 @@ class MexcFuturesExecutor(IExecutor):
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(
-                base_url=self.BASE_URL,
+                base_url=self._base_url,
                 headers={"X-MEXC-APIKEY": self._api_key},
             )
         return self._session
@@ -268,6 +278,21 @@ class MexcFuturesExecutor(IExecutor):
         """Parse response and handle errors."""
         if resp.status == 429:
             raise MexcRateLimitError("MEXC rate limit (429)")
+
+        # Handle non-JSON responses (WAF blocks, CDN errors, etc.)
+        content_type = resp.headers.get("Content-Type", "")
+        if "application/json" not in content_type and "text/json" not in content_type:
+            text = await resp.text()
+            if resp.status == 403:
+                raise ConnectionError(
+                    f"MEXC returned 403 Forbidden (WAF/geo-block). "
+                    f"The API domain may be blocked from this server. "
+                    f"Response: {text[:200]}"
+                )
+            raise MexcApiError(
+                code=resp.status,
+                message=f"Non-JSON response (Content-Type: {content_type}): {text[:200]}",
+            )
 
         body = await resp.json(content_type=None)
 
@@ -738,6 +763,47 @@ class MexcFuturesExecutor(IExecutor):
                     logger.error(f"[MEXC] Kill switch failed for {symbol}: {e}")
                     all_success = False
         return all_success
+
+    # ─── Position heartbeat (exchange sync) ────────────────
+
+    async def check_position_alive(self, symbol: str) -> Optional[dict]:
+        """
+        Check whether a position for *symbol* is still open on MEXC.
+
+        Calls GET /api/v1/position/openPositions (signed) and filters
+        by the MEXC contract symbol. Returns None if no position exists
+        on the exchange, or a dict with 'symbol', 'unrealisedPnl',
+        'markPrice', etc. if it does.
+
+        This is the heartbeat that keeps local PositionState in sync
+        with the real MEXC position. If the exchange closed the
+        position (SL/TP triggered physically), this method lets us
+        detect it before the Walk-Forward logic operates on stale state.
+        """
+        mexc_sym = _symbol_to_mexc(symbol)
+
+        try:
+            resp = await self._request(
+                "GET",
+                "/api/v1/position/openPositions",
+                params={},  # no extra params — returns all open positions
+                signed=True,
+            )
+            positions = resp.get("data", [])
+            if not isinstance(positions, list):
+                return None
+
+            for p in positions:
+                if p.get("symbol") == mexc_sym:
+                    return p  # Position IS alive on MEXC
+
+            return None  # Symbol not found → MEXC closed it
+
+        except Exception as e:
+            logger.warning(f"[MEXC] check_position_alive failed: {e}")
+            # Return a sentinel to indicate "unknown" — don't close
+            # the local position based on a failed API call.
+            return {"_error": True, "message": str(e)}
 
     # ─── Test helpers (expose internals for unit testing) ─────
 

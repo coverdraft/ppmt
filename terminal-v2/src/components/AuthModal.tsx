@@ -2,7 +2,7 @@ import { useState } from 'react';
 
 interface AuthModalProps {
   /** Called when user submits valid credentials */
-  onConnect: (sessionPassword: string, apiKey: string, apiSecret: string) => void;
+  onConnect: (sessionPassword: string, apiKey: string, apiSecret: string, allocatedUsdt: number) => void;
   /** Called when user cancels */
   onCancel: () => void;
   /** Current connection status */
@@ -14,25 +14,32 @@ interface AuthModalProps {
 /**
  * AuthModal — Centered modal for MEXC Futures credentials.
  *
- * v0.46.0: ENTREGABLE 7
+ * v0.47.0: ENTREGABLE 8
  *
  * Dark terminal aesthetic, red accent for LIVE mode.
- * Fields: Session Password, API Key, Secret Key.
+ * Fields: Session Password, API Key, Secret Key, Capital to Trade (USDT).
  * Validates all fields non-empty before enabling the connect button.
  */
 export default function AuthModal({ onConnect, onCancel, status, error }: AuthModalProps) {
   const [sessionPassword, setSessionPassword] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [apiSecret, setApiSecret] = useState('');
+  const [allocatedUsdt, setAllocatedUsdt] = useState('50');
   const [showSecret, setShowSecret] = useState(false);
 
-  const isValid = sessionPassword.trim() !== '' && apiKey.trim() !== '' && apiSecret.trim() !== '';
+  const usdtValue = parseFloat(allocatedUsdt);
+  const isValid =
+    sessionPassword.trim() !== '' &&
+    apiKey.trim() !== '' &&
+    apiSecret.trim() !== '' &&
+    !isNaN(usdtValue) &&
+    usdtValue > 0;
   const isWorking = status === 'connecting' || status === 'authenticating';
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (isValid && !isWorking) {
-      onConnect(sessionPassword.trim(), apiKey.trim(), apiSecret.trim());
+      onConnect(sessionPassword.trim(), apiKey.trim(), apiSecret.trim(), usdtValue);
     }
   };
 
@@ -117,6 +124,26 @@ export default function AuthModal({ onConnect, onCancel, status, error }: AuthMo
                 {showSecret ? 'OCULTAR' : 'MOSTRAR'}
               </button>
             </div>
+          </div>
+
+          {/* Capital to Trade (USDT) — ENTREGABLE 8 */}
+          <div>
+            <label className="block text-xs font-mono text-gray-400 mb-1.5 uppercase tracking-wider">
+              Capital a operar (USDT)
+            </label>
+            <input
+              type="number"
+              min="1"
+              step="1"
+              value={allocatedUsdt}
+              onChange={(e) => setAllocatedUsdt(e.target.value)}
+              placeholder="50"
+              className="w-full px-3 py-2.5 bg-[#0a0a0f] border border-gray-800 rounded-lg text-white font-mono text-sm placeholder-gray-700 focus:outline-none focus:border-red-500/50 focus:ring-1 focus:ring-red-500/20 transition-colors"
+              disabled={isWorking}
+            />
+            <span className="text-[10px] text-gray-600 font-mono mt-1 block">
+              Monto en USDT asignado a cada operación (tamaño de posición dinámico)
+            </span>
           </div>
 
           {/* Error message */}
