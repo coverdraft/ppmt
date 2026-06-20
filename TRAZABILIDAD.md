@@ -10814,3 +10814,96 @@ terminal-v2/
 - TypeScript: `tsc --noEmit` → 0 errors ✅
 - Vite build: producción limpia, 0 warnings ✅
 - Sin backend, sin ccxt, sin código heredado ✅
+
+---
+
+## v2.0-ENT3 — FastAPI + WebSocket Bridge for PAPER LIVE
+
+> Fecha: 2026-06-20
+> Commit: `a5bfa0e`
+
+### Backend (Python)
+
+1. **paper_executor.py** — PaperExecutor con PositionState:
+   - `PositionState` dataclass: mirror exacto del TypeScript interface
+   - `PaperExecutor`: gestiona una posición por token en memoria
+   - Walk-Forward: primer match → SL a break-even, subsiguientes → TP se extiende
+   - SL/TP/Catastrófico checks en cada tick de precio
+   - `to_dict()` serializa snake_case directo al wire
+
+2. **v2_server.py** — FastAPI + WebSocket:
+   - `GET /api/health` — Health check
+   - `GET /api/symbols` — Lista de tokens disponibles
+   - `WS /ws/paper-live/{symbol}/{timeframe}` — Bridge principal
+   - Inicialización: carga tries de SQLite, crea PPMT engine, 500 velas warmup
+   - Loop: poll Binance REST → feed PPMT `process_new_candle()` → emit JSON
+   - 3 tipos de mensaje: `candle`, `brain_update`, `position_update`
+   - `_DirectPollExchange` (sin ccxt) para fetch_ohlcv + fetch_ticker
+   - CORS habilitado para React frontend
+
+### Frontend (React/TypeScript)
+
+1. **types/ws.ts** — Tipos de mensaje WebSocket:
+   - `CandleMessage`, `BrainUpdateMessage`, `PositionUpdateMessage`, `ErrorMessage`
+   - `PositionStateWire` — snake_case del wire → convertido a `PositionState`
+
+2. **hooks/usePaperLive.ts** — Custom hook WebSocket:
+   - Conecta a `ws://localhost:8000/ws/paper-live/{symbol}/{timeframe}`
+   - Auto-reconnect cada 3 segundos
+   - Actualiza `candles[]`, `brainUpdate`, `position` según type de mensaje
+
+3. **TradingChart.tsx** — Modo live:
+   - `liveCandles` prop → `series.update()` para velas incrementales
+   - SL/TP lines desde `position_update` via `applyOptions()` — sin flickering
+   - Botones de simulación solo visibles en modo mock
+
+4. **RightPanel.tsx** — Live brain data:
+   - N1/N2 confidence + weighted_confidence desde `brain_update`
+   - Current SAX symbol en Walk-Forward strip
+   - Trie Lab recibe `activePathIds` para glow dinámico
+
+5. **TrieLab.tsx** — `activePathIds` prop:
+   - Re-render del árbol D3 cuando cambia el camino activo
+   - Compatibilidad: usa `is_active_path` del mock + `activePathIds` del backend
+
+6. **App.tsx** — Integración:
+   - `PAPER_LIVE` → conecta WebSocket automáticamente
+   - Indicador LIVE/DISCONNECTED en header del chart
+   - Error display si el backend no está disponible
+
+### Validación en vivo (30 segundos)
+
+```
+Connecting to ws://127.0.0.1:8005/ws/paper-live/DOGEUSDT/1m...
+Connected! Collecting for 30s...
+
+  [CANDLE #1] t=1781959920 C=0.08378
+  [CANDLE #2] t=1781959980 C=0.08377
+  [CANDLE #3] t=1781960040 C=0.08378
+  [CANDLE #10] t=1781960460 C=0.08376
+  [CANDLE #20] t=1781961060 C=0.08385
+  [CANDLE #30] t=1781961660 C=0.08362
+  [CANDLE #40] t=1781962260 C=0.08330
+  [CANDLE #50] t=1781962860 C=0.08348
+  [BRAIN #1] sax=["('d', 'b')"] wc=0.000 sig=NO_SIGNAL
+  [BRAIN #2] sax=[] wc=0.000 sig=NO_SIGNAL
+
+=== Summary: 54 total, 52 candles, 2 brain, 0 positions ===
+```
+
+Backend log:
+```
+13:41:32 [ppmt.v2] INFO: [WS] Connected: DOGEUSDT/1m
+13:41:32 [ppmt.v2] WARNING: [WS] No tries found for DOGEUSDT, engine runs without tries
+13:41:33 [ppmt.v2] INFO: [WS] Warmup complete: 500 candles, 45 SAX outputs
+13:41:33 [ppmt.v2] INFO: [WS] Candle: 1781962860 O=0.083470 H=0.083490 L=0.083460 C=0.083480
+13:42:03 [ppmt.v2] INFO: [WS] Candle: 1781962920 O=0.083480 H=0.083480 L=0.083480 C=0.083480
+```
+
+### Nota: Sin tries pre-construidos
+
+El motor funciona sin tries (wc=0.000, NO_SIGNAL) porque no hay tries
+persistidos en SQLite para DOGEUSDT. Para señales reales se necesita:
+1. Ejecutar `bulk_ingest.py` o `download_90d.py` para poblar OHLCV
+2. Ejecutar `PaperTrader` para construir tries N1-N4
+3. Los tries se persisten en `~/.ppmt/ppmt.db` y se cargan automáticamente
