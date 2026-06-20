@@ -1,8 +1,7 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useCallback } from 'react';
 import {
   createChart,
   type IChartApi,
-  type ISeriesApi,
   type IPriceLine,
   type CandlestickData,
   type Time,
@@ -12,20 +11,25 @@ import {
 import { generateMockCandles, getMockPosition } from '../mock/candles';
 import type { PositionState, PositionStatus } from '../types/position';
 
+interface TradingChartProps {
+  position: PositionState;
+  onPositionUpdate: (updater: (prev: PositionState) => PositionState) => void;
+}
+
 /**
- * TradingChart — ENTREGABLE 1
- * 
- * Uses lightweight-charts to render candlestick data with animated
- * SL/TP price lines. Lines move via applyOptions() — NO re-render.
+ * TradingChart — Pure candlestick chart with animated SL/TP price lines.
+ *
+ * ENTREGABLE 1: Chart renders 100 fake DOGE candles with SL/TP/Catastrophic lines.
+ * ENTREGABLE 2: Position card moved to RightPanel. Chart stays lean.
+ *
+ * Lines move via applyOptions() — NO re-render, NO flickering.
  */
-export default function TradingChart() {
+export default function TradingChart({ position, onPositionUpdate }: TradingChartProps) {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const slLineRef = useRef<IPriceLine | null>(null);
   const tpLineRef = useRef<IPriceLine | null>(null);
-
-  const [position, setPosition] = useState<PositionState>(getMockPosition());
-  const [candles] = useState<CandlestickData<Time>[]>(generateMockCandles);
+  const candlesRef = useRef<CandlestickData<Time>[]>(generateMockCandles());
 
   // ─── Initialize Chart ──────────────────────────────────────
   useEffect(() => {
@@ -35,7 +39,7 @@ export default function TradingChart() {
       layout: {
         background: { type: ColorType.Solid, color: '#0a0a0f' },
         textColor: '#9ca3af',
-        fontSize: 12,
+        fontSize: 11,
       },
       grid: {
         vertLines: { color: '#1a1a2e' },
@@ -59,7 +63,6 @@ export default function TradingChart() {
 
     chartRef.current = chart;
 
-    // Candlestick series
     const candleSeries = chart.addCandlestickSeries({
       upColor: '#10b981',
       downColor: '#ef4444',
@@ -68,13 +71,13 @@ export default function TradingChart() {
       wickUpColor: '#10b981',
       wickDownColor: '#ef4444',
     });
-    candleSeries.setData(candles);
+    candleSeries.setData(candlesRef.current);
 
     // Entry marker
     const entryIdx = 40;
     candleSeries.setMarkers([
       {
-        time: candles[entryIdx]!.time,
+        time: candlesRef.current[entryIdx]!.time,
         position: 'belowBar',
         color: '#3b82f6',
         shape: 'arrowUp',
@@ -82,9 +85,10 @@ export default function TradingChart() {
       },
     ]);
 
-    // SL line (Red) — current_sl
+    // SL line (Red)
+    const initialPos = getMockPosition();
     const slLine = candleSeries.createPriceLine({
-      price: position.current_sl,
+      price: initialPos.current_sl,
       color: '#ef4444',
       lineWidth: 2,
       lineStyle: LineStyle.Solid,
@@ -93,9 +97,9 @@ export default function TradingChart() {
     });
     slLineRef.current = slLine;
 
-    // TP line (Green) — current_tp
+    // TP line (Green)
     const tpLine = candleSeries.createPriceLine({
-      price: position.current_tp,
+      price: initialPos.current_tp,
       color: '#10b981',
       lineWidth: 2,
       lineStyle: LineStyle.Solid,
@@ -104,9 +108,9 @@ export default function TradingChart() {
     });
     tpLineRef.current = tpLine;
 
-    // Catastrophic SL line (Gray dashed) — never moves
+    // Catastrophic SL line (Gray dashed)
     candleSeries.createPriceLine({
-      price: position.catastrophic_sl,
+      price: initialPos.catastrophic_sl,
       color: '#6b7280',
       lineWidth: 1,
       lineStyle: LineStyle.Dashed,
@@ -130,7 +134,6 @@ export default function TradingChart() {
       chart.remove();
       chartRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // ─── Animate Price Line (smooth, no re-render) ────────────
@@ -142,7 +145,6 @@ export default function TradingChart() {
       const animate = (currentTime: number) => {
         const elapsed = currentTime - startTime;
         const progress = Math.min(elapsed / duration, 1);
-        // easeOutCubic for smooth deceleration
         const eased = 1 - Math.pow(1 - progress, 3);
         const newPrice = startPrice + (targetPrice - startPrice) * eased;
 
@@ -165,142 +167,63 @@ export default function TradingChart() {
   const handleBreakEven = useCallback(() => {
     if (!slLineRef.current) return;
 
-    animatePriceLine(slLineRef.current, position.entry_price, 'SL Break-Even ✅');
+    animatePriceLine(slLineRef.current, position.entry_price, 'SL Break-Even \u2705');
 
-    setPosition((prev) => ({
+    onPositionUpdate((prev) => ({
       ...prev,
       current_sl: prev.entry_price,
       status: 'BREAK_EVEN_SECURED' as PositionStatus,
       sequence_index: prev.sequence_index + 1,
     }));
-  }, [animatePriceLine, position.entry_price]);
+  }, [animatePriceLine, position.entry_price, onPositionUpdate]);
 
   // ─── Walk-Forward: TP Extend ──────────────────────────────
   const handleTpExtend = useCallback(() => {
     if (!tpLineRef.current) return;
 
     const newTp = position.current_tp + 0.005;
-    animatePriceLine(tpLineRef.current, newTp, 'TP Extended 📈');
+    animatePriceLine(tpLineRef.current, newTp, 'TP Extended \uD83D\uDCC8');
 
-    setPosition((prev) => ({
+    onPositionUpdate((prev) => ({
       ...prev,
       current_tp: newTp,
       status: 'TP_EXTENDED' as PositionStatus,
       sequence_index: prev.sequence_index + 1,
     }));
-  }, [animatePriceLine, position.current_tp]);
+  }, [animatePriceLine, position.current_tp, onPositionUpdate]);
 
   return (
     <div className="flex flex-col h-full w-full">
-      {/* Chart container — fills available space */}
+      {/* Chart container */}
       <div
         ref={chartContainerRef}
-        className="flex-1 min-h-[400px] rounded-lg overflow-hidden border border-terminal-border"
+        className="flex-1 min-h-0 rounded-lg overflow-hidden border border-terminal-border"
       />
 
-      {/* Walk-Forward simulation controls */}
-      <div className="mt-4 flex flex-col gap-3">
-        {/* Position State Card */}
-        <div className="bg-terminal-surface border border-terminal-border rounded-lg p-4 font-mono text-sm">
-          <div className="flex items-center justify-between mb-3">
-            <span className="text-gray-400">Position State</span>
-            <span
-              className={`px-2 py-0.5 rounded text-xs font-semibold ${
-                position.status === 'ACTIVE'
-                  ? 'bg-blue-500/20 text-blue-400'
-                  : position.status === 'BREAK_EVEN_SECURED'
-                  ? 'bg-yellow-500/20 text-yellow-400'
-                  : 'bg-emerald-500/20 text-emerald-400'
-              }`}
-            >
-              {position.status}
-            </span>
-          </div>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
-            <div>
-              <span className="text-gray-500">Symbol</span>
-              <p className="text-white">{position.symbol}</p>
-            </div>
-            <div>
-              <span className="text-gray-500">Direction</span>
-              <p className={position.direction === 'LONG' ? 'text-emerald-400' : 'text-red-400'}>
-                {position.direction}
-              </p>
-            </div>
-            <div>
-              <span className="text-gray-500">Entry</span>
-              <p className="text-white">{position.entry_price.toFixed(6)}</p>
-            </div>
-            <div>
-              <span className="text-gray-500">Size</span>
-              <p className="text-white">${position.size_usdt}</p>
-            </div>
-            <div>
-              <span className="text-gray-500">Current SL</span>
-              <p className="text-red-400">{position.current_sl.toFixed(6)}</p>
-            </div>
-            <div>
-              <span className="text-gray-500">Current TP</span>
-              <p className="text-emerald-400">{position.current_tp.toFixed(6)}</p>
-            </div>
-            <div>
-              <span className="text-gray-500">Catastrófico</span>
-              <p className="text-gray-500">{position.catastrophic_sl.toFixed(6)}</p>
-            </div>
-            <div>
-              <span className="text-gray-500">Seq. Index</span>
-              <p className="text-white">{position.sequence_index}/{position.expected_sequence.length - 1}</p>
-            </div>
-          </div>
-        </div>
-
-        {/* Walk-Forward Sequence Strip */}
-        <div className="bg-terminal-surface border border-terminal-border rounded-lg p-3">
-          <span className="text-gray-500 text-xs font-mono mb-2 block">Walk-Forward Sequence</span>
-          <div className="flex gap-1.5 overflow-x-auto">
-            {position.expected_sequence.map((sym, idx) => (
-              <div
-                key={idx}
-                className={`flex-shrink-0 px-2.5 py-1.5 rounded text-xs font-mono border transition-all duration-300 ${
-                  idx < position.sequence_index
-                    ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-400'
-                    : idx === position.sequence_index
-                    ? 'bg-yellow-500/20 border-yellow-500/40 text-yellow-400 animate-pulse'
-                    : 'bg-gray-800/50 border-gray-700/50 text-gray-600'
-                }`}
-              >
-                {idx < position.sequence_index ? '✅' : idx === position.sequence_index ? '⏳' : '⬚'}{' '}
-                {sym[0]},{sym[1]}
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Simulation Buttons */}
-        <div className="flex gap-3">
-          <button
-            onClick={handleBreakEven}
-            disabled={position.status !== 'ACTIVE'}
-            className={`flex-1 px-4 py-3 rounded-lg font-mono text-sm font-semibold transition-all duration-200 ${
-              position.status === 'ACTIVE'
-                ? 'bg-yellow-500/10 border border-yellow-500/40 text-yellow-400 hover:bg-yellow-500/20 hover:border-yellow-500/60 cursor-pointer'
-                : 'bg-gray-800/30 border border-gray-700/30 text-gray-600 cursor-not-allowed'
-            }`}
-          >
-            Simular Walk-Forward: Mover SL a Break-Even ({position.entry_price.toFixed(3)})
-          </button>
-          <button
-            onClick={handleTpExtend}
-            disabled={position.status === 'ACTIVE'}
-            className={`flex-1 px-4 py-3 rounded-lg font-mono text-sm font-semibold transition-all duration-200 ${
-              position.status !== 'ACTIVE'
-                ? 'bg-emerald-500/10 border border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/20 hover:border-emerald-500/60 cursor-pointer'
-                : 'bg-gray-800/30 border border-gray-700/30 text-gray-600 cursor-not-allowed'
-            }`}
-          >
-            Simular Extensión de TP → {(position.current_tp + 0.005).toFixed(3)}
-          </button>
-        </div>
+      {/* Simulation buttons — compact, below chart */}
+      <div className="mt-2 flex gap-2 flex-shrink-0">
+        <button
+          onClick={handleBreakEven}
+          disabled={position.status !== 'ACTIVE'}
+          className={`flex-1 px-3 py-2 rounded-lg font-mono text-xs font-semibold transition-all duration-200 ${
+            position.status === 'ACTIVE'
+              ? 'bg-yellow-500/10 border border-yellow-500/40 text-yellow-400 hover:bg-yellow-500/20 cursor-pointer'
+              : 'bg-gray-800/30 border border-gray-700/30 text-gray-600 cursor-not-allowed'
+          }`}
+        >
+          Walk-Forward: SL \u2192 Break-Even ({position.entry_price.toFixed(3)})
+        </button>
+        <button
+          onClick={handleTpExtend}
+          disabled={position.status === 'ACTIVE'}
+          className={`flex-1 px-3 py-2 rounded-lg font-mono text-xs font-semibold transition-all duration-200 ${
+            position.status !== 'ACTIVE'
+              ? 'bg-emerald-500/10 border border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/20 cursor-pointer'
+              : 'bg-gray-800/30 border border-gray-700/30 text-gray-600 cursor-not-allowed'
+          }`}
+        >
+          Extender TP \u2192 {(position.current_tp + 0.005).toFixed(3)}
+        </button>
       </div>
     </div>
   );

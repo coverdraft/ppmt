@@ -10710,3 +10710,107 @@ mientras la copia externa tenía `n2_default: {price:3, volume:0}` (correcto par
 - Git limpio y sincronizado ✅
 - ARCHITECTURE_V1.md creado ✅
 - **Motor cerrado oficialmente — Fase de Terminal puede comenzar**
+
+---
+
+## v2.0-ENT1 + v2.0-ENT2 — PPMT V2 Terminal (React + lightweight-charts + D3.js)
+
+> Fecha: 2026-06-20
+> Rama: `main`
+> Commits: ENTREGABLE 1 (React + lightweight-charts) + ENTREGABLE 2 (RightPanel + D3.js Trie Lab)
+
+### ENTREGABLE 1 — React Container + TradingChart (Completado)
+
+1. **Scaffolding**:
+   - `terminal-v2/` dentro del repo con React + TypeScript + Vite + TailwindCSS
+   - `lightweight-charts ^4.2.2` instalado como dependencia
+
+2. **TradingChart.tsx**:
+   - 100 velas mock DOGE/USDT con micro-estructura realista
+   - Línea SL Inicial (roja) a 0.1626
+   - Línea TP Inicial (verde) a 0.1700
+   - Línea Catastrófico (gris discontinua) a 0.1590
+   - Animación SL→Break-Even (0.165) via `applyOptions()` — sin re-render
+   - Animación TP Extend (+0.005) via `applyOptions()` — sin re-render
+   - Zero flickering validado
+
+3. **PositionState**:
+   - Interfaz TypeScript mirror exacto del dataclass Python
+   - Walk-Forward sequence strip visual: [✅ d,x] [✅ e,y] [⏳ f,z]
+
+4. **TopBar.tsx**: Toggle 3 modos [ANÁLISIS] [PAPER LIVE] [LIVE TRADING (MEXC)]
+
+### ENTREGABLE 2 — Right Panel + Trie Lab D3.js (Completado)
+
+1. **trieData.ts** — Contrato de datos:
+   - `TrieNodeMock` interface: id, symbol, historical_count, confidence, children, is_active_path, win_rate
+   - Mock de 4 niveles de profundidad con camino activo (root → a → a-b → a-b-c → a-b-c-d)
+
+2. **TrieLab.tsx** — Árbol Radial D3.js:
+   - d3 + d3-hierarchy Radial Tree (360 grados)
+   - Grosor de links: `historical_count` → 1px–5px stroke
+   - Color de nodos: `confidence` → rojo (<0.4) → amarillo (0.5) → verde (>0.8)
+   - Radio de nodos: escala sqrt con `historical_count` (4–10px)
+   - Active path glow: SVG feGaussianBlur filter + CSS pulse animation
+   - Opacidad: active path 1.0 vs inactivo 0.4–0.6
+   - Tooltip flotante: Patrón, Observaciones, Confianza, Win Rate
+   - Responsive: ResizeObserver recalcula dimensiones
+
+3. **RightPanel.tsx** — 3 bloques apilados:
+   - Block A: Contexto BTC (10% altura) — fondo diferenciado, texto mono
+   - Block B: PositionCard + Walk-Forward strip (30% altura) — Dirección, P&L, Entry, Size, SL, TP
+   - Block C: Trie Lab D3.js (60% altura) — árbol radial con legend
+
+4. **Refactor TradingChart.tsx**:
+   - Position card y Walk-Forward strip movidos a RightPanel
+   - Chart queda limpio: solo velas + líneas SL/TP + botones de simulación
+   - Estado `position` elevado a App.tsx, compartido entre TradingChart y RightPanel
+
+5. **App.tsx** actualizado:
+   - Layout 60/40: Chart (60%) | RightPanel (40%)
+   - Estado PositionState centralizado
+   - Callbacks de actualización via `onPositionUpdate`
+
+### Stack del Terminal V2
+
+```
+terminal-v2/
+├── src/
+│   ├── App.tsx                    # Layout 60/40 + estado central
+│   ├── main.tsx
+│   ├── index.css                  # Tailwind + trie-pulse animation
+│   ├── components/
+│   │   ├── TopBar.tsx             # 3-mode toggle
+│   │   ├── TradingChart.tsx       # lightweight-charts + SL/TP anim
+│   │   ├── RightPanel.tsx         # 3-block panel (BTC + Position + Trie)
+│   │   └── TrieLab.tsx            # D3.js Radial Tree
+│   ├── mock/
+│   │   ├── candles.ts             # 100 fake DOGE candles
+│   │   └── trieData.ts            # TrieNodeMock + mock JSON
+│   ├── types/
+│   │   └── position.ts            # PositionState (mirror Python)
+│   └── vite-env.d.ts
+├── package.json
+├── tsconfig.json
+├── vite.config.ts
+├── tailwind.config.js
+└── index.html
+```
+
+### Dependencias
+
+| Paquete | Versión | Propósito |
+|---------|---------|-----------|
+| react | ^18.3.1 | UI framework |
+| react-dom | ^18.3.1 | DOM rendering |
+| lightweight-charts | ^4.2.2 | TradingView candlestick chart |
+| d3 | ^7.x | Trie Lab visualization |
+| d3-hierarchy | ^3.x | Radial tree layout |
+| tailwindcss | ^3.4.17 | Styling |
+| typescript | ~5.6.2 | Type safety |
+
+### Validación
+
+- TypeScript: `tsc --noEmit` → 0 errors ✅
+- Vite build: producción limpia, 0 warnings ✅
+- Sin backend, sin ccxt, sin código heredado ✅
