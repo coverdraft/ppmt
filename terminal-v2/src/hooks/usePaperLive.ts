@@ -67,7 +67,9 @@ export function usePaperLive(symbol: string | null, timeframe: string) {
       wsRef.current = null;
     }
 
-    const wsUrl = `ws://localhost:8000/ws/paper-live/${encodeURIComponent(symbol)}/${timeframe}`;
+    // Symbol in URL: "DOGE/USDT" → "DOGE-USDT" (no slashes in URL path segments)
+    const urlSymbol = symbol.replace(/\//g, '-');
+    const wsUrl = `ws://localhost:8000/ws/paper-live/${urlSymbol}/${timeframe}`;
     const ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {
