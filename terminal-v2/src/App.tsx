@@ -61,8 +61,8 @@ export default function App() {
 
   // ─── Auth modal handlers ────────────────────────────────────
   const handleAuthConnect = useCallback(
-    (sessionPassword: string, apiKey: string, apiSecret: string) => {
-      liveConnect(sessionPassword, apiKey, apiSecret);
+    (sessionPassword: string, apiKey: string, apiSecret: string, _allocatedUsdt: number, customBaseUrl?: string) => {
+      liveConnect(sessionPassword, apiKey, apiSecret, _allocatedUsdt, customBaseUrl);
     },
     [liveConnect]
   );

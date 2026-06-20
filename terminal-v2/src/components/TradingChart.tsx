@@ -223,6 +223,27 @@ export default function TradingChart({
     if (!position) return;
 
     const hasActivePos = ['ACTIVE', 'BREAK_EVEN_SECURED', 'TP_EXTENDED'].includes(position.status);
+    const isClosedPos = position.status.startsWith('CLOSED');
+
+    if (isClosedPos) {
+      // ── Position closed: remove SL/TP/Cat lines from chart ──
+      if (slLineRef.current) {
+        series.removePriceLine(slLineRef.current);
+        slLineRef.current = null;
+        slPriceRef.current = 0;
+      }
+      if (tpLineRef.current) {
+        series.removePriceLine(tpLineRef.current);
+        tpLineRef.current = null;
+        tpPriceRef.current = 0;
+      }
+      if (catSlLineRef.current) {
+        series.removePriceLine(catSlLineRef.current);
+        catSlLineRef.current = null;
+        catSlPriceRef.current = 0;
+      }
+      return;
+    }
 
     if (hasActivePos) {
       // Create or update SL line

@@ -88,7 +88,7 @@ export function useLiveTrading(symbol: string | null, timeframe: string) {
 
   /** Open WS, send encrypted auth, then send config with allocated_usdt */
   const connect = useCallback(
-    (sessionPassword: string, apiKey: string, apiSecret: string, allocatedUsdt: number = 50) => {
+    (sessionPassword: string, apiKey: string, apiSecret: string, allocatedUsdt: number = 50, customBaseUrl?: string) => {
       if (!symbol) return;
 
       // Close any existing connection
@@ -125,10 +125,15 @@ export function useLiveTrading(symbol: string | null, timeframe: string) {
             case 'auth_ok':
               setState((prev) => ({ ...prev, status: 'connected', error: null }));
               // ── ENTREGABLE 8: Send config with allocated_usdt immediately after auth ──
-              ws.send(JSON.stringify({
+              // ── ENTREGABLE 11: Also send custom_base_url if provided (proxy/VPN) ──
+              const configMsg: Record<string, unknown> = {
                 type: 'config',
                 allocated_usdt: allocatedUsdt,
-              }));
+              };
+              if (customBaseUrl) {
+                configMsg.custom_base_url = customBaseUrl;
+              }
+              ws.send(JSON.stringify(configMsg));
               break;
 
             case 'candle':

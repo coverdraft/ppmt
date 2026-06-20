@@ -5,7 +5,7 @@ This server provides the real-time bridge between the PPMT Python engine
 and the React terminal frontend. It exposes a single WebSocket endpoint
 per token that streams candle, brain, and position updates.
 
-v0.47.0: ENTREGABLE 8 — Position heartbeat (MEXC sync) + dynamic capital allocation.
+v0.50.0: ENTREGABLE 11 — Proxy/VPN URL support + Mock Live Test mode.
 
 Usage:
     uvicorn ppmt.terminal.v2_server:app --host 0.0.0.0 --port 8000 --reload
@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -27,7 +28,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from ppmt.data.storage import PPMTStorage
 from ppmt.engine.ppmt import PPMT, PPMTResult
 from ppmt.terminal.paper_executor import PaperExecutor
-from ppmt.execution.models import PositionState
+from ppmt.execution.models import PositionState, PositionStatus
 from ppmt.execution.interfaces import IExecutor
 from ppmt.execution.mexc_futures import MexcFuturesExecutor
 from ppmt.execution.crypto import decrypt_auth_payload
@@ -90,6 +91,14 @@ app.add_middleware(
 
 # ─── Global state ─────────────────────────────────────────────
 _storage: Optional[PPMTStorage] = None
+
+# v0.50.0: ENTREGABLE 11 — Mock Live Test mode.
+# When PPMT_MOCK_LIVE=1, the live-trading endpoint uses PaperExecutor
+# instead of MexcFuturesExecutor, and injects fake signals to test the
+# frontend chart + position card lifecycle without real money.
+MOCK_LIVE = os.environ.get("PPMT_MOCK_LIVE", "0") == "1"
+if MOCK_LIVE:
+    logger.warning("⚠️  PPMT_MOCK_LIVE=1 — Live trading uses PaperExecutor (NO REAL MONEY)")
 
 
 def get_storage() -> PPMTStorage:
@@ -568,52 +577,89 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
 
     await websocket.accept()
 
-    # ─── 0. Auth: wait for ENCRYPTED credentials ──────────────
-    try:
-        auth_raw = await asyncio.wait_for(websocket.receive_json(), timeout=15.0)
-    except asyncio.TimeoutError:
-        await websocket.send_json({"type": "error", "data": {"message": "Auth timeout — send encrypted auth within 15s"}})
-        await websocket.close()
-        return
+    # ─── 1. Instantiate executor ────────────────────────────────
+    # v0.50.0: ENTREGABLE 11 — If PPMT_MOCK_LIVE=1, use PaperExecutor
+    # instead of MexcFuturesExecutor to test the frontend without real money.
+    # Injected signals: entry at 10s, MATCH at 20s, DIVERGE at 30s.
+    allocated_usdt: float = 100.0
+    custom_base_url: str = ""
 
-    if auth_raw.get("type") != "auth":
-        await websocket.send_json({"type": "error", "data": {"message": "First message must be {type:auth, ...}"}})
-        await websocket.close()
-        return
+    if MOCK_LIVE:
+        # ── MOCK MODE: Skip auth entirely, use PaperExecutor ──
+        logger.info("[WS-LIVE-MOCK] Using PaperExecutor (Mock Live Test mode)")
+        executor: IExecutor = PaperExecutor(capital_usdt=allocated_usdt)
 
-    # ─── Decrypt credentials with Fernet ──────────────────────
-    api_key, api_secret = decrypt_auth_payload(auth_raw)
+        # Still send auth_ok so the frontend proceeds to config
+        await websocket.send_json({"type": "auth_ok"})
 
-    if api_key is None or api_secret is None:
-        await websocket.send_json({"type": "error", "data": {"message": "Decryption failed — wrong session password or tampered payload"}})
-        await websocket.close()
-        return
+        # Read config message (allocated_usdt + optional custom_base_url)
+        try:
+            config_raw = await asyncio.wait_for(websocket.receive_json(), timeout=10.0)
+            if config_raw.get("type") == "config":
+                allocated_usdt = float(config_raw.get("allocated_usdt", 100.0))
+                if allocated_usdt <= 0:
+                    allocated_usdt = 100.0
+                custom_base_url = str(config_raw.get("custom_base_url", "")).strip()
+                logger.info(f"[WS-LIVE-MOCK] Config: allocated_usdt={allocated_usdt}, custom_base_url={'<set>' if custom_base_url else '<default>'}")
+        except asyncio.TimeoutError:
+            logger.warning("[WS-LIVE-MOCK] No config message received")
 
-    # ─── 1. Instantiate MexcFuturesExecutor with decrypted keys ─
-    executor: IExecutor = MexcFuturesExecutor(
-        api_key=api_key,
-        secret=api_secret,
-    )
+        # Update PaperExecutor capital with the user's allocated amount
+        if isinstance(executor, PaperExecutor):
+            executor.capital_usdt = allocated_usdt
 
-    # Zero plaintext from local scope immediately
-    del api_key
-    del api_secret
+    else:
+        # ── PRODUCTION MODE: Real MEXC Futures ──
+        # Wait for encrypted credentials
+        try:
+            auth_raw = await asyncio.wait_for(websocket.receive_json(), timeout=15.0)
+        except asyncio.TimeoutError:
+            await websocket.send_json({"type": "error", "data": {"message": "Auth timeout — send encrypted auth within 15s"}})
+            await websocket.close()
+            return
 
-    # ─── 1b. Wait for config message (allocated_usdt) ─────────
-    allocated_usdt: float = 100.0  # default fallback
-    try:
-        config_raw = await asyncio.wait_for(websocket.receive_json(), timeout=10.0)
-        if config_raw.get("type") == "config":
-            allocated_usdt = float(config_raw.get("allocated_usdt", 100.0))
-            if allocated_usdt <= 0:
-                allocated_usdt = 100.0
-            logger.info(f"[WS-LIVE] Config received: allocated_usdt={allocated_usdt}")
-        # If it's not a config message, it's unexpected but not fatal
-    except asyncio.TimeoutError:
-        logger.warning("[WS-LIVE] No config message received, defaulting to 100 USDT")
+        if auth_raw.get("type") != "auth":
+            await websocket.send_json({"type": "error", "data": {"message": "First message must be {type:auth, ...}"}})
+            await websocket.close()
+            return
 
-    logger.info("[WS-LIVE] Auth OK — MexcFuturesExecutor created (credentials zeroed)")
-    await websocket.send_json({"type": "auth_ok"})
+        # Decrypt credentials
+        api_key, api_secret = decrypt_auth_payload(auth_raw)
+
+        if api_key is None or api_secret is None:
+            await websocket.send_json({"type": "error", "data": {"message": "Decryption failed — wrong session password or tampered payload"}})
+            await websocket.close()
+            return
+
+        # Defer executor creation until AFTER config (need custom_base_url)
+        _api_key = api_key
+        _api_secret = api_secret
+        del api_key
+        del api_secret
+
+        # Read config message (allocated_usdt + custom_base_url)
+        try:
+            config_raw = await asyncio.wait_for(websocket.receive_json(), timeout=10.0)
+            if config_raw.get("type") == "config":
+                allocated_usdt = float(config_raw.get("allocated_usdt", 100.0))
+                if allocated_usdt <= 0:
+                    allocated_usdt = 100.0
+                custom_base_url = str(config_raw.get("custom_base_url", "")).strip()
+                logger.info(f"[WS-LIVE] Config received: allocated_usdt={allocated_usdt}, custom_base_url={'<set>' if custom_base_url else '<default>'}")
+        except asyncio.TimeoutError:
+            logger.warning("[WS-LIVE] No config message received, defaulting to 100 USDT")
+
+        # Create MexcFuturesExecutor with optional custom_base_url
+        executor = MexcFuturesExecutor(
+            api_key=_api_key,
+            secret=_api_secret,
+            base_url=custom_base_url,
+        )
+        del _api_key
+        del _api_secret
+
+        logger.info(f"[WS-LIVE] Auth OK — MexcFuturesExecutor created (base_url={'custom' if custom_base_url else 'default'}, credentials zeroed)")
+        await websocket.send_json({"type": "auth_ok"})
 
     # ─── 2. Same engine init as paper-live ─────────────────────
     internal_symbol = symbol.replace("-", "/")
@@ -685,6 +731,94 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
     poll_interval = tf_seconds.get(timeframe, 5)
     last_candle_ts = 0
     heartbeat_counter = 0  # ticks every loop iteration; used to throttle heartbeat
+
+    # ─── v0.50.0: ENTREGABLE 11 — Mock Live Test state ────────
+    # The mock injection runs as a separate asyncio task so it fires
+    # independently of the candle poll loop (which may skip iterations
+    # when the same candle timestamp repeats on 1m+ timeframes).
+    mock_task: asyncio.Task | None = None
+    mock_t0 = time.monotonic()
+
+    async def _mock_inject_signals():
+        """Inject fake signals at 10s (entry), 20s (MATCH→BE), 30s (DIVERGE→close)."""
+        nonlocal mock_t0
+        mock_injected_entry = False
+        mock_injected_match = False
+        mock_injected_diverge = False
+
+        while True:
+            await asyncio.sleep(1)  # check every second
+            elapsed = time.monotonic() - mock_t0
+
+            # +10s: Inject ENTRY signal
+            if not mock_injected_entry and elapsed >= 10.0:
+                _ip = _executor_in_position(executor)
+                if not _ip:
+                    mock_injected_entry = True
+                    # Use latest known price from exchange, or a fallback
+                    mock_entry_price = 0.08350  # fallback DOGE price
+                    # Try to get the real current price from the last candle
+                    if last_candle_ts > 0:
+                        pass  # We already have current_price from the poll loop
+
+                    try:
+                        pos = await executor.open_position(
+                            symbol=symbol,
+                            direction="LONG",
+                            size_usdt=allocated_usdt,
+                            metadata={
+                                "entry_price": mock_entry_price,
+                                "expected_move_pct": 1.5,
+                                "predicted_path_symbols": ["a", "b", "c"],
+                            },
+                        )
+                        logger.info(
+                            f"[WS-LIVE-MOCK] INJECTED ENTRY @ {mock_entry_price:.6f} "
+                            f"SL={pos.current_sl:.6f} TP={pos.current_tp:.6f}"
+                        )
+                        await websocket.send_json({"type": "position_update", "data": pos.to_dict()})
+                    except Exception as e:
+                        logger.error(f"[WS-LIVE-MOCK] Failed to inject entry: {e}")
+
+            # +20s: Inject MATCH → SL moves to break-even
+            if mock_injected_entry and not mock_injected_match and elapsed >= 20.0:
+                _ip = _executor_in_position(executor)
+                if _ip:
+                    mock_injected_match = True
+                    pos = _executor_position(executor)
+                    if pos and pos.status == "ACTIVE":
+                        new_sl = pos.entry_price
+                        await executor.update_position(pos, new_sl=new_sl, new_tp=None)
+                        pos.status = "BREAK_EVEN_SECURED"
+                        pos.sequence_index = 1
+                        logger.info(
+                            f"[WS-LIVE-MOCK] INJECTED MATCH → SL→BE "
+                            f"SL={new_sl:.6f} status=BREAK_EVEN_SECURED"
+                        )
+                        await websocket.send_json({"type": "position_update", "data": pos.to_dict()})
+
+            # +30s: Inject DIVERGE → position closes
+            if mock_injected_match and not mock_injected_diverge and elapsed >= 30.0:
+                _ip = _executor_in_position(executor)
+                if _ip:
+                    mock_injected_diverge = True
+                    pos = _executor_position(executor)
+                    if pos and pos.status in ("ACTIVE", "BREAK_EVEN_SECURED", "TP_EXTENDED"):
+                        close_price = pos.current_tp  # close at TP for a positive PnL
+                        logger.warning(
+                            f"[WS-LIVE-MOCK] INJECTED DIVERGENCE → CLOSING @ {close_price:.6f}"
+                        )
+                        closed = await executor.close_position(pos, "CLOSED_BY_DIVERGENCE")
+                        await websocket.send_json({"type": "position_update", "data": closed.to_dict()})
+
+            # Stop after all injections
+            if mock_injected_diverge:
+                logger.info("[WS-LIVE-MOCK] All mock signals injected, task complete")
+                break
+
+    if MOCK_LIVE:
+        mock_task = asyncio.create_task(_mock_inject_signals())
+        logger.info("[WS-LIVE-MOCK] Mock signal injection task started (10s/20s/30s)")
 
     # ─── 4. Main poll loop — routed execution + Walk-Forward ───
     try:
@@ -938,6 +1072,13 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
     except WebSocketDisconnect:
         pass
     finally:
+        # Cancel mock injection task if running
+        if mock_task and not mock_task.done():
+            mock_task.cancel()
+            try:
+                await mock_task
+            except asyncio.CancelledError:
+                pass
         try:
             await exchange.close()
         except Exception:

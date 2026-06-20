@@ -79,12 +79,16 @@ export default function RightPanel({ position, brainUpdate, isLive = false }: Ri
                 ? 'bg-yellow-500/20 text-yellow-400'
                 : position.status === 'TP_EXTENDED'
                 ? 'bg-emerald-500/20 text-emerald-400'
+                : position.status === 'CLOSED_BY_DIVERGENCE'
+                ? 'bg-orange-500/20 text-orange-400'
                 : position.status.startsWith('CLOSED')
                 ? 'bg-gray-500/20 text-gray-400'
                 : 'bg-gray-800/20 text-gray-600'
             }`}
           >
-            {position.status}
+            {position.status === 'CLOSED_BY_DIVERGENCE'
+              ? 'CERRADA POR DIVERGENCIA'
+              : position.status}
           </span>
         </div>
 

@@ -45,9 +45,11 @@ export interface AuthOkMessage {
 }
 
 /** v0.47.0: Config message from frontend (dynamic capital allocation). */
+/** v0.50.0: ENTREGABLE 11 — Added custom_base_url for proxy/VPN support. */
 export interface ConfigMessage {
   type: 'config';
   allocated_usdt: number;
+  custom_base_url?: string;
 }
 
 /**
