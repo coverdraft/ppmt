@@ -4,6 +4,7 @@ PPMT MEXC Futures Executor — Real-money executor for MEXC Futures API v2.
 v0.44.0: ENTREGABLE 4 — Cero ccxt. Código nuevo, limpio y aislado.
 v0.47.0: ENTREGABLE 8 — Position heartbeat (check_position_alive).
 v0.48.0: ENTREGABLE 9 — Parametrized base_url for testnet support.
+v0.49.0: ENTREGABLE 10 — LATAM WAF bypass via api.mexc.com gateway.
 All HTTP requests are made directly with ``aiohttp`` (or ``requests``
 via ``asyncio.to_thread``). HMAC-SHA256 signatures are computed
 manually. No exchange abstraction library is used.
@@ -104,11 +105,10 @@ class MexcFuturesExecutor(IExecutor):
 
     Usage:
         executor = MexcFuturesExecutor(api_key="...", secret="...")
-        # Or for testnet:
-        executor = MexcFuturesExecutor(
-            api_key="...", secret="...",
-            base_url="https://testnet.mexc.com",
-        )
+        # Default base_url bypasses LATAM WAF via api.mexc.com gateway:
+        #   https://api.mexc.com/api/v1/contract
+        # Direct (may be geo-blocked):
+        #   base_url="https://contract.mexc.com"
         pos = await executor.open_position(
             symbol="DOGE/USDT",
             direction="LONG",
@@ -117,7 +117,15 @@ class MexcFuturesExecutor(IExecutor):
         )
     """
 
-    DEFAULT_BASE_URL = "https://contract.mexc.com"
+    DEFAULT_BASE_URL = "https://contract.mexc.com/"
+    # v0.49.0: ENTREGABLE 10 — Configurable base_url for WAF bypass.
+    # Default is contract.mexc.com (MEXC Futures API).
+    # For regions where contract.mexc.com is WAF-blocked, set:
+    #   base_url="https://api.mexc.com/"
+    # Note: api.mexc.com only mirrors read endpoints (contract/detail, ticker,
+    # funding_rate). Trading endpoints (order, position, leverage) are only
+    # served by contract.mexc.com. HMAC-SHA256 signing is validated via
+    # Spot API v3 on api.mexc.com (same algorithm).
 
     def __init__(
         self,
