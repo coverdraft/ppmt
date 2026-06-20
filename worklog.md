@@ -1848,3 +1848,25 @@ Stage Summary:
 - PaperExecutor backwards compatible (sync methods preserved)
 - Fix: v2_server.py N4=None crash resolved
 - Git synced, worklog updated
+
+---
+Task ID: 5
+Agent: super-z (main)
+Task: ENTREGABLE 5 — Execution Routing (Paper vs Live)
+
+Work Log:
+- Added /ws/live-trading/{symbol}/{timeframe} endpoint to v2_server.py
+- Auth flow: frontend sends {type:auth, api_key, api_secret} as first WS message
+- Backend waits 15s for auth, then instantiates MexcFuturesExecutor with keys
+- Both endpoints use IExecutor type annotation for executor variable
+- Signal routing: same await executor.open_position() — paper goes in-memory, live hits MEXC API
+- Paper endpoint refactored to use async IExecutor.open_position() too
+- Live endpoint: executor.close() called on session shutdown for aiohttp cleanup
+- Committed as v0.44.1, pushed to GitHub (060ca6e)
+
+Stage Summary:
+- Two WS endpoints: /ws/paper-live/ (PaperExecutor) and /ws/live-trading/ (MexcFuturesExecutor)
+- Auth flow validates {type:auth} first message, rejects/closes on timeout or missing keys
+- IExecutor polymorphism: same open_position() call, different backend
+- No API keys in URL — only in WS message body (secure)
+- Git synced, worklog updated
