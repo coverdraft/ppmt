@@ -3,6 +3,11 @@ import * as d3 from 'd3';
 import type { HierarchyPointNode } from 'd3-hierarchy';
 import { mockTrieData, type TrieNodeMock } from '../mock/trieData';
 
+interface TrieLabProps {
+  /** Active path IDs from brain_update — e.g. ["root", "a", "a-b", "a-b-c"] */
+  activePathIds?: string[];
+}
+
 /**
  * TrieLab — D3.js Radial Tree visualization of the PPMT Trie.
  *
@@ -14,7 +19,7 @@ import { mockTrieData, type TrieNodeMock } from '../mock/trieData';
  * - Tooltip on hover showing pattern, observations, confidence, win_rate
  * - Responsive via ResizeObserver
  */
-export default function TrieLab() {
+export default function TrieLab({ activePathIds }: TrieLabProps) {
   const svgRef = useRef<SVGSVGElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [tooltip, setTooltip] = useState<{
@@ -29,11 +34,10 @@ export default function TrieLab() {
   // ─── Build the full pattern path for a node ───────────────
   const getPatternPath = useCallback((d: HierarchyPointNode<TrieNodeMock>): string => {
     const ancestors = d.ancestors().reverse();
-    // Skip root (ancestors[0]) — start from its children
     return ancestors
       .slice(1)
       .map((a) => a.data.symbol ?? 'root')
-      .join(' → ');
+      .join(' \u2192 ');
   }, []);
 
   // ─── D3 Radial Tree Render ────────────────────────────────
@@ -57,7 +61,6 @@ export default function TrieLab() {
     // ─── SVG Defs: Glow filter for active path ────────────
     const defs = svg.append('defs');
 
-    // Glow filter (feGaussianBlur)
     const glowFilter = defs.append('filter').attr('id', 'glow');
     glowFilter
       .append('feGaussianBlur')
@@ -67,7 +70,6 @@ export default function TrieLab() {
     feMerge.append('feMergeNode').attr('in', 'coloredBlur');
     feMerge.append('feMergeNode').attr('in', 'SourceGraphic');
 
-    // Stronger glow for active nodes (pulse)
     const pulseFilter = defs.append('filter').attr('id', 'pulse-glow');
     pulseFilter
       .append('feGaussianBlur')
@@ -84,28 +86,32 @@ export default function TrieLab() {
         .map((d) => d.data.historical_count)
     );
 
-    // Line thickness: 1px–5px based on historical_count
     const strokeWidthScale = d3
       .scaleLinear()
       .domain([1, maxCount])
       .range([1, 5]);
 
-    // Node color: confidence → red → yellow → green
     const colorScale = d3
       .scaleLinear<string>()
       .domain([0, 0.4, 0.6, 0.8, 1.0])
       .range(['#ef4444', '#f59e0b', '#eab308', '#84cc16', '#10b981']);
 
-    // Node radius: 4–10px based on historical_count
     const radiusScale = d3
       .scaleSqrt()
       .domain([1, maxCount])
       .range([4, 10]);
 
+    // ─── Compute which IDs are active ─────────────────────
+    const activeSet = new Set(activePathIds ?? []);
+
+    // Mark nodes as active based on prop
+    function isActive(node: TrieNodeMock): boolean {
+      return activeSet.has(node.id) || !!node.is_active_path;
+    }
+
     // ─── Hierarchy ─────────────────────────────────────────
     const hierarchy = d3.hierarchy(mockTrieData);
 
-    // Radial size — use the smaller dimension to fit
     const radius = Math.min(width, height) / 2 - 40;
 
     const tree = d3
@@ -137,15 +143,14 @@ export default function TrieLab() {
       )
       .attr('fill', 'none')
       .attr('stroke', (d) => {
-        const isActive = d.target.data.is_active_path;
-        return isActive ? colorScale(d.target.data.confidence) : '#2a2a3e';
+        return isActive(d.target.data) ? colorScale(d.target.data.confidence) : '#2a2a3e';
       })
       .attr('stroke-width', (d) => strokeWidthScale(d.target.data.historical_count))
       .attr('stroke-opacity', (d) =>
-        d.target.data.is_active_path ? 1.0 : 0.4
+        isActive(d.target.data) ? 1.0 : 0.4
       )
       .attr('filter', (d) =>
-        d.target.data.is_active_path ? 'url(#glow)' : null
+        isActive(d.target.data) ? 'url(#glow)' : null
       );
 
     // ─── Nodes ─────────────────────────────────────────────
@@ -162,30 +167,29 @@ export default function TrieLab() {
       `
       );
 
-    // Node circles
     nodes
       .append('circle')
       .attr('r', (d) => radiusScale(d.data.historical_count))
       .attr('fill', (d) => colorScale(d.data.confidence))
-      .attr('fill-opacity', (d) => (d.data.is_active_path ? 1.0 : 0.6))
+      .attr('fill-opacity', (d) => (isActive(d.data) ? 1.0 : 0.6))
       .attr('stroke', (d) =>
-        d.data.is_active_path ? '#ffffff' : 'transparent'
+        isActive(d.data) ? '#ffffff' : 'transparent'
       )
-      .attr('stroke-width', (d) => (d.data.is_active_path ? 1.5 : 0))
+      .attr('stroke-width', (d) => (isActive(d.data) ? 1.5 : 0))
       .attr('filter', (d) =>
-        d.data.is_active_path ? 'url(#pulse-glow)' : null
+        isActive(d.data) ? 'url(#pulse-glow)' : null
       );
 
-    // ─── Active path pulse animation ───────────────────────
+    // Active path pulse animation
     nodes
-      .filter((d) => !!d.data.is_active_path)
+      .filter((d) => isActive(d.data))
       .select('circle')
       .style('animation', 'trie-pulse 2s ease-in-out infinite');
 
-    // ─── Labels (only for significant nodes) ───────────────
+    // ─── Labels ────────────────────────────────────────────
     nodes
       .filter(
-        (d) => d.data.historical_count >= 80 || !!d.data.is_active_path
+        (d) => d.data.historical_count >= 80 || isActive(d.data)
       )
       .append('text')
       .attr('dy', '0.31em')
@@ -198,12 +202,12 @@ export default function TrieLab() {
       )
       .text((d) => d.data.symbol ?? 'ROOT')
       .attr('fill', (d) =>
-        d.data.is_active_path ? '#ffffff' : '#9ca3af'
+        isActive(d.data) ? '#ffffff' : '#9ca3af'
       )
       .attr('font-size', '9px')
       .attr('font-family', 'JetBrains Mono, monospace')
       .attr('font-weight', (d) =>
-        d.data.is_active_path ? '600' : '400'
+        isActive(d.data) ? '600' : '400'
       );
 
     // ─── Hover interactions ────────────────────────────────
@@ -219,7 +223,6 @@ export default function TrieLab() {
           winRate: d.data.win_rate,
         });
 
-        // Highlight on hover
         d3.select(event.currentTarget as SVGGElement)
           .select('circle')
           .attr('stroke', '#ffffff')
@@ -230,11 +233,11 @@ export default function TrieLab() {
 
         d3.select(event.currentTarget as SVGGElement)
           .select('circle')
-          .attr('stroke', d.data.is_active_path ? '#ffffff' : 'transparent')
-          .attr('stroke-width', d.data.is_active_path ? 1.5 : 0);
+          .attr('stroke', isActive(d.data) ? '#ffffff' : 'transparent')
+          .attr('stroke-width', isActive(d.data) ? 1.5 : 0);
       });
 
-  }, [getPatternPath]);
+  }, [getPatternPath, activePathIds]);
 
   // ─── Initial render + ResizeObserver ──────────────────────
   useEffect(() => {
