@@ -168,10 +168,11 @@ class PPMTStorage:
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS tries (
                 symbol TEXT NOT NULL,
+                timeframe TEXT NOT NULL DEFAULT '',
                 level TEXT NOT NULL,
                 data TEXT NOT NULL,
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY(symbol, level)
+                PRIMARY KEY(symbol, timeframe, level)
             )
         """)
 
@@ -441,7 +442,7 @@ class PPMTStorage:
 
     # === Trie Persistence ===
 
-    def save_trie(self, symbol: str, level: str, trie: PPMTTrie) -> None:
+    def save_trie(self, symbol: str, level: str, trie: PPMTTrie, timeframe: str = "") -> None:
         """
         Save a serialized Trie to the database.
 
@@ -451,24 +452,31 @@ class PPMTStorage:
         Backwards-compatible: old tries with single-symbol keys ('a', 'b', ...)
         continue to load correctly.
 
+        v0.53.0: Added `timeframe` parameter. Tries are now keyed by
+        (symbol, timeframe, level) so that 1m, 5m, and 15m tries can
+        coexist in the same database without overwriting each other.
+        Default "" preserves backward compatibility for callers that
+        don't pass timeframe.
+
         Args:
             symbol: Trading pair
             level: Trie level ('n1', 'n2', 'n3', 'n4')
             trie: PPMTTrie instance to serialize
+            timeframe: Timeframe identifier ('1m', '5m', '15m'). Default "".
         """
         data = json.dumps(trie.to_dict())
         cursor = self._ensure_conn().cursor()
         cursor.execute(
-            """INSERT INTO tries (symbol, level, data, updated_at)
-               VALUES (?, ?, ?, datetime('now'))
-               ON CONFLICT(symbol, level) DO UPDATE SET
+            """INSERT INTO tries (symbol, timeframe, level, data, updated_at)
+               VALUES (?, ?, ?, ?, datetime('now'))
+               ON CONFLICT(symbol, timeframe, level) DO UPDATE SET
                    data=excluded.data,
                    updated_at=datetime('now')""",
-            (symbol, level, data),
+            (symbol, timeframe, level, data),
         )
         self._ensure_conn().commit()
 
-    def load_trie(self, symbol: str, level: str) -> Optional[PPMTTrie]:
+    def load_trie(self, symbol: str, level: str, timeframe: str = "") -> Optional[PPMTTrie]:
         """
         Load a serialized Trie from the database.
 
@@ -480,17 +488,22 @@ class PPMTStorage:
         an empty PPMTTrie on every restart — see
         docs/AUDIT_TRAZABILIDAD_CAPAS_1_2_3.md H2 (persistence bug).
 
+        v0.53.0: Added `timeframe` parameter for per-timeframe trie lookup.
+        Tries are now keyed by (symbol, timeframe, level). Default "" for
+        backward compatibility.
+
         Args:
             symbol: Trading pair (or special pool key: __UNIVERSAL__, __CLASS_*__)
             level: Trie level ('n1', 'n2', 'n3', 'n4')
+            timeframe: Timeframe identifier ('1m', '5m', '15m'). Default "".
 
         Returns:
             PPMTTrie / RegimePartitionedTrie instance or None if not found.
         """
         cursor = self._ensure_conn().cursor()
         cursor.execute(
-            "SELECT data FROM tries WHERE symbol = ? AND level = ?",
-            (symbol, level),
+            "SELECT data FROM tries WHERE symbol = ? AND timeframe = ? AND level = ?",
+            (symbol, timeframe, level),
         )
         row = cursor.fetchone()
         if row is None:
@@ -509,6 +522,7 @@ class PPMTStorage:
         self,
         symbol: str,
         asset_class: Optional[str] = None,
+        timeframe: str = "",
     ) -> dict[str, Optional[PPMTTrie]]:
         """
         Load all 4 trie levels for a symbol.
@@ -522,6 +536,9 @@ class PPMTStorage:
         §3.1-3.4) where N1 is the universal safety-net and N2 is the
         competitive-advantage class pool.
 
+        v0.53.0: Added `timeframe` parameter for per-timeframe trie lookup.
+        All levels (N1-N4) are loaded with the same timeframe key.
+
         When `asset_class` is None (backwards compatibility), N1/N2 are loaded
         from the symbol's own storage key — the v0.40.2 behavior. This is
         kept so existing callers don't break, but new callers should always
@@ -532,6 +549,7 @@ class PPMTStorage:
             asset_class: Optional asset class ('blue_chip', 'large_cap',
                 'mid_cap', 'defi', 'meme', 'new_launch'). When provided,
                 N1/N2 load from shared pools.
+            timeframe: Timeframe identifier ('1m', '5m', '15m'). Default "".
 
         Returns:
             Dict with keys 'n1', 'n2', 'n3', 'n4' mapping to PPMTTrie or None.
@@ -546,10 +564,10 @@ class PPMTStorage:
             n2_symbol = symbol
 
         return {
-            "n1": self.load_trie(n1_symbol, "n1"),
-            "n2": self.load_trie(n2_symbol, "n2"),
-            "n3": self.load_trie(symbol, "n3"),
-            "n4": self.load_trie(symbol, "n4"),
+            "n1": self.load_trie(n1_symbol, "n1", timeframe=timeframe),
+            "n2": self.load_trie(n2_symbol, "n2", timeframe=timeframe),
+            "n3": self.load_trie(symbol, "n3", timeframe=timeframe),
+            "n4": self.load_trie(symbol, "n4", timeframe=timeframe),
         }
 
     def add_observation_to_universal_n1(
@@ -563,6 +581,7 @@ class PPMTStorage:
         next_symbol: Optional[str] = None,
         regime: Optional[str] = None,
         regime_confidence: Optional[float] = None,
+        timeframe: str = "",
     ) -> None:
         """
         v0.40.3 FIX-1B: Add a single observation to the universal N1 pool.
@@ -572,10 +591,12 @@ class PPMTStorage:
         observation to the cross-asset safety net so that even brand-new
         symbols with no own history have N1 patterns to match against.
 
+        v0.53.0: Added `timeframe` parameter for per-timeframe pool support.
+
         Idempotent: if the pattern already exists, metadata is updated
         incrementally (same as PPMTTrie.insert_with_observations).
         """
-        trie = self.load_trie(UNIVERSAL_POOL_KEY, "n1") or PPMTTrie(name="universal")
+        trie = self.load_trie(UNIVERSAL_POOL_KEY, "n1", timeframe=timeframe) or PPMTTrie(name="universal")
         trie.insert_with_observations(
             symbols=symbols,
             move_pct=move_pct,
@@ -587,7 +608,7 @@ class PPMTStorage:
             regime=regime,
             regime_confidence=regime_confidence,
         )
-        self.save_trie(UNIVERSAL_POOL_KEY, "n1", trie)
+        self.save_trie(UNIVERSAL_POOL_KEY, "n1", trie, timeframe=timeframe)
 
     def add_observation_to_class_n2(
         self,
@@ -601,6 +622,7 @@ class PPMTStorage:
         next_symbol: Optional[str] = None,
         regime: Optional[str] = None,
         regime_confidence: Optional[float] = None,
+        timeframe: str = "",
     ) -> None:
         """
         v0.40.3 FIX-1B: Add a single observation to the class-shared N2 pool.
@@ -611,11 +633,13 @@ class PPMTStorage:
         the V3 design (patterns transfer between same-class assets —
         BTC ↔ ETH for blue_chip, PEPE ↔ WIF for meme) is finally realized.
 
+        v0.53.0: Added `timeframe` parameter for per-timeframe pool support.
+
         Idempotent: if the pattern already exists, metadata is updated
         incrementally.
         """
         pool_key = class_pool_key(asset_class)
-        trie = self.load_trie(pool_key, "n2") or PPMTTrie(name=f"class:{asset_class}")
+        trie = self.load_trie(pool_key, "n2", timeframe=timeframe) or PPMTTrie(name=f"class:{asset_class}")
         trie.insert_with_observations(
             symbols=symbols,
             move_pct=move_pct,
@@ -627,7 +651,7 @@ class PPMTStorage:
             regime=regime,
             regime_confidence=regime_confidence,
         )
-        self.save_trie(pool_key, "n2", trie)
+        self.save_trie(pool_key, "n2", trie, timeframe=timeframe)
 
     # === Engine State ===
 

@@ -1,7 +1,7 @@
 # TRAZABILIDAD PPMT — Estado del Proyecto
 
 > Última actualización: 2026-06-21
-> Versión actual: **v0.49.0** — FASE 3: BTC feed N5, Cold Start, v2_server fixes, pipeline build inicial. N1+N2 price-only, N3/N4/N5 SAX Dual.
+> Versión actual: **v0.53.0** — FASE 3: Nuclear rebuild con compute_outcome_won corregido. Storage con soporte timeframe. 10 tokens × 3 timeframes reconstruidos con data real.
 > ⚠️ **Si eres nuevo, lee primero la sección `# 📘 GUÍA DEL MOTOR PPMT — PARA CONTINUAR EL TRABAJO` al final de este archivo (línea 9914+).** Ahí está la arquitectura, dónde empezar a leer, dónde costó más, cómo se resolvieron largos y cortos, y el estado actual.
 > Repositorio: https://github.com/coverdraft/ppmt
 > Idioma: Español
@@ -10967,3 +10967,75 @@ ls -la scripts/build_initial_portfolio.py
 ### FASE 2A Corrección
 - `grep -n "detect_simple" src/ppmt/engine/ppmt.py` → línea 743: `self.regime_detector.detect_simple(window_df, timeframe=self.timeframe)` ✅ Ya pasa timeframe correctamente.
 - Commit FASE 2A: `6908750`
+
+---
+
+## v0.53.0 — TAREA 13: LIMPIEZA TOTAL Y RECONSTRUCCIÓN CON DATA REAL
+
+**Fecha**: 2026-06-21
+**Problema raíz**: El bug de `compute_outcome_won` (metadata.py) era GLOBAL — afectaba TODOS los timeframes, no solo 1m. Los tries de 5m y 15m también fueron construidos con datos corruptos (ganancias grabadas como pérdidas).
+
+### PASO 0: Soporte timeframe en storage (DESCUBRIMIENTO CRÍTICO)
+- **Problema encontrado**: La tabla `tries` tenía PK `(symbol, level)` — sin columna `timeframe`. Al construir 1m, 5m, y 15m, cada build SOBREESCRIBÍA el anterior. Solo sobrevivía el último timeframe construido.
+- **Solución**: Añadir columna `timeframe` a la tabla `tries`, cambiar PK a `(symbol, timeframe, level)`.
+- **Cambios en storage.py**:
+  - `_create_tables()`: Nuevo schema con timeframe
+  - `save_trie()`: Parámetro `timeframe=""` (backward compatible)
+  - `load_trie()`: Parámetro `timeframe=""` (backward compatible)
+  - `load_all_tries()`: Parámetro `timeframe=""` (backward compatible)
+  - `add_observation_to_universal_n1()`: Parámetro `timeframe=""`
+  - `add_observation_to_class_n2()`: Parámetro `timeframe=""`
+- **Cambios en ppmt.py**:
+  - Todas las llamadas `save_trie`/`load_trie` ahora pasan `timeframe=self.timeframe or ""`
+  - `ensure_shared_pools()` también pasa timeframe
+- **Build script**: Verificación final actualizada para iterar por timeframe
+
+### PASO 1: Limpieza nuclear
+- `DROP TABLE tries` + recreación con nuevo schema
+- Tabla `tries` completamente vacía
+
+### PASO 2: Reconstrucción total
+- 10 tokens × 3 timeframes = 30 builds
+- Tokens: BTC, ETH, SOL, XRP, AVAX, DOGE, PEPE, WIF, LINK, UNI
+- Timeframes: 1m (120d), 5m (180d), 15m (180d)
+- Parámetros SAX actuales: N3 P=3 (1m), P=4 (5m/15m), price-only α=3
+- Resultado: 75 tries en DB (25 por timeframe: 10×N3 + 10×N4 + 4 N2 class + 1 N1 universal)
+
+### PASO 3: Verificación de win_rates
+Post-rebuild win_rates (agregados por nivel):
+
+| Timeframe | N1 WR | N2 WR (meme) | N3 WR (DOGE) | N4 WR (DOGE) |
+|-----------|-------|-------------|-------------|-------------|
+| 1m        | 47.3% | 42.2%       | 46.0%       | 45.8%       |
+| 5m        | 43.5% | 35.4%       | 44.9%       | 44.5%       |
+| 15m       | 37.4% | 28.9%       | 40.1%       | 39.7%       |
+
+- **1m muestra WR más altos** — consistente con mayor densidad de observaciones.
+- **DOGE meme N2 en 15m = 28.9%** — confirma que N2 meme es débil en timeframes altos.
+- Los WR están en rango 35-48%, consistentes con trading de alta frecuencia en crypto.
+
+### PASO 4: OOS Final
+
+**DOGE/USDT 1m (500 velas OOS)**:
+- N1 confidence: 0.3702 (WR: 45.46%, 88 obs)
+- N2 confidence: 0.2609 (WR: 33.33%, 24 obs) → peso 0% en 1m
+- N3 confidence: **0.4367** (WR: 45.25%, 610 obs) → peso 55%
+- N4 confidence: 0.3566 (WR: 51.85%, 27 obs) → peso 10%
+- **Weighted confidence: 0.4054** ✅ MÍNIMO 0.40 CUMPLIDO
+
+**SOL/USDT 5m (500 velas OOS)**:
+- N1 confidence: 0.3174 (WR: 37.90%) → peso 10%
+- N2 confidence: 0.3941 (WR: 59.26%) → peso 30%
+- N3 confidence: 0.4066 (WR: 45.87%) → peso 30%
+- N4 confidence: 0.3877 (WR: 75.00%) → peso 30%
+- **Weighted confidence: 0.3883** ⚠️ Encima del filtro 0.30, pero debajo de 0.40
+
+### Archivos modificados
+- `src/ppmt/data/storage.py` — timeframe support en tries table
+- `src/ppmt/engine/ppmt.py` — timeframe propagation en save/load
+- `scripts/build_initial_portfolio.py` — verificación por timeframe
+
+### Commit
+```
+fix: nuclear rebuild of all timeframes using corrected compute_outcome_won formula
+```

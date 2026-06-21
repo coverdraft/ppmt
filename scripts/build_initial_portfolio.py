@@ -229,8 +229,13 @@ def main():
     print("BUILD COMPLETE — VERIFICATION")
     print(f"{'=' * 70}")
 
+    # v0.53.0: Verification now iterates per-timeframe since tries are keyed
+    # by (symbol, timeframe, level). We check the LAST timeframe's pools
+    # as a representative sample.
+    last_tf = TIMEFRAMES[-1]
+
     # Check shared pools
-    n1_universal = storage.load_trie(UNIVERSAL_POOL_KEY, "n1")
+    n1_universal = storage.load_trie(UNIVERSAL_POOL_KEY, "n1", timeframe=last_tf)
     n1_count = n1_universal.pattern_count if n1_universal else 0
 
     class_keys = set()
@@ -239,21 +244,22 @@ def main():
 
     class_counts = {}
     for cls in sorted(class_keys):
-        n2_trie = storage.load_trie(class_pool_key(cls), "n2")
+        n2_trie = storage.load_trie(class_pool_key(cls), "n2", timeframe=last_tf)
         class_counts[cls] = n2_trie.pattern_count if n2_trie else 0
 
-    print(f"\n  N1 Universal Pool (__UNIVERSAL__): {n1_count:,} patterns")
+    print(f"\n  N1 Universal Pool (__UNIVERSAL__, tf={last_tf}): {n1_count:,} patterns")
     for cls, count in class_counts.items():
         status = "✅" if count >= 1000 else "⚠️"
-        print(f"  N2 Class Pool ({cls}): {count:,} patterns {status}")
+        print(f"  N2 Class Pool ({cls}, tf={last_tf}): {count:,} patterns {status}")
 
-    # Per-symbol N3 counts
-    print(f"\n  Per-symbol N3:")
+    # Per-symbol N3 counts (show all timeframes)
+    print(f"\n  Per-symbol N3 (all timeframes):")
     for token in TOKENS:
         symbol = token["symbol"]
-        n3_trie = storage.load_trie(symbol, "n3")
-        n3c = n3_trie.pattern_count if n3_trie else 0
-        print(f"    {symbol:15s} N3: {n3c:,} patterns")
+        for tf in TIMEFRAMES:
+            n3_trie = storage.load_trie(symbol, "n3", timeframe=tf)
+            n3c = n3_trie.pattern_count if n3_trie else 0
+            print(f"    {symbol:15s} {tf:5s} N3: {n3c:,} patterns")
 
     # Summary
     print(f"\n  Total patterns inserted: {total_patterns:,}")

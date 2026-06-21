@@ -453,7 +453,7 @@ class PPMT:
             "n2_class": {"exists": False, "pattern_count": 0},
         }
         try:
-            n1 = storage.load_trie(UNIVERSAL_POOL_KEY, "n1")
+            n1 = storage.load_trie(UNIVERSAL_POOL_KEY, "n1", timeframe=self.timeframe or "")
             if n1 is not None:
                 status["n1_universal"] = {
                     "exists": True,
@@ -464,7 +464,7 @@ class PPMT:
 
         try:
             n2_key = class_pool_key(self.asset_class)
-            n2 = storage.load_trie(n2_key, "n2")
+            n2 = storage.load_trie(n2_key, "n2", timeframe=self.timeframe or "")
             if n2 is not None:
                 status["n2_class"] = {
                     "exists": True,
@@ -835,7 +835,7 @@ class PPMT:
                 return max(regime_dist.items(), key=lambda x: x[1])[0]
 
             # N1 universal pool
-            existing_n1 = self._storage.load_trie(UNIVERSAL_POOL_KEY, "n1")
+            existing_n1 = self._storage.load_trie(UNIVERSAL_POOL_KEY, "n1", timeframe=self.timeframe or "")
             if existing_n1 is None:
                 merged_n1 = self._n1_buffer
             else:
@@ -861,11 +861,11 @@ class PPMT:
                             next_symbol=None,
                             regime=_top_regime(meta.regime_distribution),
                         )
-            self._storage.save_trie(UNIVERSAL_POOL_KEY, "n1", merged_n1)
+            self._storage.save_trie(UNIVERSAL_POOL_KEY, "n1", merged_n1, timeframe=self.timeframe or "")
 
             # N2 class-shared pool
             pool_key = class_pool_key(self.asset_class)
-            existing_n2 = self._storage.load_trie(pool_key, "n2")
+            existing_n2 = self._storage.load_trie(pool_key, "n2", timeframe=self.timeframe or "")
             if existing_n2 is None:
                 merged_n2 = self._n2_buffer
             else:
@@ -886,12 +886,12 @@ class PPMT:
                             next_symbol=None,
                             regime=_top_regime(meta.regime_distribution),
                         )
-            self._storage.save_trie(pool_key, "n2", merged_n2)
+            self._storage.save_trie(pool_key, "n2", merged_n2, timeframe=self.timeframe or "")
 
             # N3 (per-symbol) — persist local trie
-            self._storage.save_trie(self.symbol, "n3", self.trie_n3)
+            self._storage.save_trie(self.symbol, "n3", self.trie_n3, timeframe=self.timeframe or "")
             # N4 (per-symbol + regime) — persist RegimePartitionedTrie
-            self._storage.save_trie(self.symbol, "n4", self.trie_n4)
+            self._storage.save_trie(self.symbol, "n4", self.trie_n4, timeframe=self.timeframe or "")
 
             # Reset buffers for next build() call
             self._n1_buffer = PPMTTrie(name="universal_buffer")
@@ -901,7 +901,7 @@ class PPMT:
             # This catches silent save failures that would otherwise go
             # undetected until N1/N2 load as None in paper_trader/realtime.
             try:
-                saved_n1 = self._storage.load_trie(UNIVERSAL_POOL_KEY, "n1")
+                saved_n1 = self._storage.load_trie(UNIVERSAL_POOL_KEY, "n1", timeframe=self.timeframe or "")
                 if saved_n1 is not None and saved_n1.pattern_count > 0:
                     logger.info(
                         f"N1 universal pool verified: {saved_n1.pattern_count} patterns"
@@ -913,7 +913,7 @@ class PPMT:
                     )
 
                 n2_key = class_pool_key(self.asset_class)
-                saved_n2 = self._storage.load_trie(n2_key, "n2")
+                saved_n2 = self._storage.load_trie(n2_key, "n2", timeframe=self.timeframe or "")
                 if saved_n2 is not None and saved_n2.pattern_count > 0:
                     logger.info(
                         f"N2 class pool ({self.asset_class}) verified: "
