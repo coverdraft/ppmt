@@ -1,0 +1,1455 @@
+     1→"""
+     2→Block Lifecycle Metadata - The V3 Innovation
+     3→
+     4→Each Trie node carries 12 metadata fields that encode:
+     5→- When to enter (trigger_candle)
+     6→- How long the pattern should last (remaining_candles)
+     7→- Expected move and risk parameters
+     8→- Forward continuation and backward context
+     9→- Historical statistics
+    10→
+    11→This metadata makes PPMT autonomous — all entry/exit/SL/TP decisions
+    12→emerge directly from the Trie without external indicators.
+    13→"""
+    14→
+    15→from __future__ import annotations
+    16→
+    17→import json
+    18→from dataclasses import dataclass, field
+    19→from typing import Optional
+    20→
+    21→import numpy as np
+    22→
+    23→
+    24→def _parse_es_key(k: str) -> tuple[str, ...]:
+    25→    """Parse an expected_sequences key from JSON storage back to a tuple.
+    26→
+    27→    Handles two formats:
+    28→    - v0.42.0+: JSON array string like '[["a","x"],["b","y"]]' → ('a', 'x', 'b', 'y')
+    29→    - Legacy: pipe-delimited string like 'a|b|c' → ('a', 'b', 'c')
+    30→    - Single symbols: 'a' → ('a',)
+    31→    """
+    32→    if k.startswith("["):
+    33→        # v0.42.0 format: JSON array of arrays or flat array
+    34→        try:
+    35→            parsed = json.loads(k)
+    36→            if isinstance(parsed, list):
+    37→                # Flatten nested lists: [["a","x"],["b","y"]] → ("a", "x", "b", "y")
+    38→                flat = []
+    39→                for item in parsed:
+    40→                    if isinstance(item, list):
+    41→                        flat.extend(str(x) for x in item)
+    42→                    else:
+    43→                        flat.append(str(item))
+    44→                return tuple(flat)
+    45→        except (json.JSONDecodeError, TypeError):
+    46→            pass
+    47→    if "|" in k:
+    48→        # Legacy format: "a|b|c" → ('a', 'b', 'c')
+    49→        return tuple(k.split("|"))
+    50→    # Single symbol
+    51→    return (k,)
+    52→
+    53→
+    54→# v0.40.23 (P7-FaseC): Bootstrap floors for outcome-SL/TP classification
+    55→# of young nodes. Until a node has accumulated HIST_COUNT_MATURE observations,
+    56→# `won` is computed using these conservative floors instead of the node's
+    57→# (still noisy) max_drawdown_pct / max_favorable_pct.
+    58→#
+    59→# Rationale (cross-AI review): the node's max_dd / max_fav only stabilizes
+    60→# after ~5 observations. Before that, the running max could be an outlier
+    61→# from a single noisy candle. Using a fixed 0.15% floor for both SL and TP
+    62→# (more conservative than the 0.10% paper_trader floor) means young nodes
+    63→# classify wins based on a small but consistent threshold rather than a
+    64→# potentially wide outlier.
+    65→#
+    66→# v0.51.0: Floors raised from 0.15% to 0.30% for 1m timeframe optimization.
+    67→# On 1m data, 0.15% thresholds produce win_rate ≈ 0.45 (slightly below
+    68→# random due to micro-structure mean reversion). At 0.30%, the first-touch
+    69→# simulation filters out noise and captures meaningful directional moves,
+    70→# pushing win_rate to 0.50-0.55 for patterns with genuine signal.
+    71→# This is NOT changing the confidence formula — it's calibrating the
+    72→# outcome simulation threshold to match 1m volatility characteristics.
+    73→#
+    74→# Threshold chosen from cross-AI review: historical_count >= 5 is where
+    75→# SL/TP starts to stabilize (max_dd converges within ±0.05% of final value
+    76→# for ~70% of nodes, per audit). Below 5: use floors. Above: use real.
+    77→#
+    78→# v0.54.0 (TAREA 15): DEPRECATED — these floors are NO LONGER used during
+    79→# build(). The build now uses compute_outcome_directional() which measures
+    80→# REAL directional movement, not artificial SL/TP simulation. These constants
+    81→# are kept for backward compatibility with compute_outcome_won() which is
+    82→# still used by signal generation (paper_trader) where SL/TP simulation is
+    83→# appropriate for risk management.
+    84→HIST_COUNT_MATURE = 5
+    85→OUTCOME_FLOOR_SL_PCT = 0.15
+    86→OUTCOME_FLOOR_TP_PCT = 0.15
+    87→
+    88→# v0.54.0 (TAREA 15): Micro-floor for directional outcome classification.
+    89→# A move of exactly 0.00% is treated as a loss (no signal). Moves with
+    90→# |real_move_pct| < DIRECTIONAL_MICRO_FLOOR are also treated as losses
+    91→# to avoid classifying micro-noise as directional signal. The 0.01%
+    92→# threshold is intentionally tiny — it only filters degenerate cases
+    93→# where price returns to entry within floating-point precision.
+    94→DIRECTIONAL_MICRO_FLOOR = 0.01
+    95→
+    96→
+    97→def simulate_first_touch(
+    98→    window_df,
+    99→    entry_price: float,
+   100→    sl_pct: float,
+   101→    tp_pct: float,
+   102→    direction: str,
+   103→) -> bool:
+   104→    """V4.4 (P7-FaseC, v0.40.23): Simulate LONG/SHORT trade on intraperiod OHLC.
+   105→
+   106→    Returns True if TP is touched before SL within the window. Conservative
+   107→    on ties (if both SL and TP touched in same candle, SL wins).
+   108→
+   109→    v0.40.24 CONTRACT: `window_df` MUST be the candles AFTER entry, not the
+   110→    candles that produced the pattern. The entry_price MUST be the close of
+   111→    the LAST pattern candle (≈ open of the first post-pattern candle). The
+   112→    v0.40.23 implementation in ppmt.py / profiles.py passed the pattern's
+   113→    own window_df, which made `won` a circular function of the pattern
+   114→    itself — see ppmt.py:337-422 for the fix rationale.
+   115→
+   116→    Args:
+   117→        window_df: pandas DataFrame with 'high' and 'low' columns — the
+   118→            POST-entry candles (typically PATTERN_LEN × WINDOW candles
+   119→            immediately after the pattern ends). Empty/short DataFrames
+   120→            are handled gracefully (timeout = loss).
+   121→        entry_price: entry price (close of the LAST pattern candle, i.e.
+   122→            the candle immediately before window_df.iloc[0]).
+   123→        sl_pct: stop loss distance in percent (positive number).
+   124→        tp_pct: take profit distance in percent (positive number).
+   125→        direction: 'LONG' or 'SHORT'.
+   126→
+   127→    Returns:
+   128→        True if TP hit first, False if SL hit first or neither hit (timeout).
+   129→        Timeout is treated as loss (no TP within window).
+   130→    """
+   131→    if direction == "LONG":
+   132→        sl_price = entry_price * (1.0 - sl_pct / 100.0)
+   133→        tp_price = entry_price * (1.0 + tp_pct / 100.0)
+   134→    else:
+   135→        sl_price = entry_price * (1.0 + sl_pct / 100.0)
+   136→        tp_price = entry_price * (1.0 - tp_pct / 100.0)
+   137→
+   138→    for i in range(len(window_df)):
+   139→        high = float(window_df["high"].iloc[i])
+   140→        low = float(window_df["low"].iloc[i])
+   141→        if direction == "LONG":
+   142→            sl_hit = low <= sl_price
+   143→            tp_hit = high >= tp_price
+   144→        else:
+   145→            sl_hit = high >= sl_price
+   146→            tp_hit = low <= tp_price
+   147→        if sl_hit and tp_hit:
+   148→            return False  # conservative: SL wins on tie
+   149→        if sl_hit:
+   150→            return False
+   151→        if tp_hit:
+   152→            return True
+   153→    return False  # timeout = loss
+   154→
+   155→
+   156→def compute_outcome_won(
+   157→    window_df,
+   158→    entry_price: float,
+   159→    move_pct: float,
+   160→    sl_pct: Optional[float] = None,
+   161→    tp_pct: Optional[float] = None,
+   162→    historical_count: int = 0,
+   163→) -> bool:
+   164→    """V4.4 (P7-FaseC, v0.40.23): Compute `won` flag using outcome SL/TP.
+   165→
+   166→    Convenience wrapper used by ppmt.py / profiles.py / validator.py callers
+   167→    that have `window_df` available but want to apply the maturity threshold
+   168→    automatically.
+   169→
+   170→    Logic:
+   171→      1. Direction is inferred from sign(move_pct):
+   172→         move_pct > 0 → LONG candidate, move_pct < 0 → SHORT candidate.
+   173→         move_pct == 0 → return False (degenerate, won't be classified).
+   174→      2. If historical_count < HIST_COUNT_MATURE: use OUTCOME_FLOOR_SL_PCT
+   175→         and OUTCOME_FLOOR_TP_PCT (bootstrap floors).
+   176→      3. If historical_count >= HIST_COUNT_MATURE: use the provided sl_pct /
+   177→         tp_pct (node's actual max_dd / max_fav from accumulated metadata).
+   178→      4. Simulate first-touch via simulate_first_touch().
+   179→
+   180→    Args:
+   181→        window_df: DataFrame with 'high' and 'low' columns for the POST-ENTRY
+   182→            window (typically PATTERN_LEN × WINDOW candles immediately AFTER
+   183→            the pattern ends). v0.40.24 CONTRACT: do NOT pass the pattern's
+   184→            own window_df here — that produces a circular, meaningless `won`.
+   185→        entry_price: entry price (close of the LAST pattern candle, i.e. the
+   186→            candle immediately before window_df.iloc[0]).
+   187→        move_pct: observed move_pct = (exit - entry) / entry × 100. Used only
+   188→            to infer direction via sign — the simulation itself runs on the
+   189→            POST-entry candles, not the pattern window that produced move_pct.
+   190→        sl_pct: node's |max_drawdown_pct| × 1.5 (None for new nodes).
+   191→        tp_pct: node's max(|expected_move_pct|, max_favorable_pct) × 1.0.
+   192→        historical_count: node's observation count BEFORE this observation
+   193→            (0 for the first observation in a new node).
+   194→
+   195→    Returns:
+   196→        True if outcome-SL/TP classifies this as a win, False otherwise.
+   197→    """
+   198→    if move_pct == 0:
+   199→        return False
+   200→    direction = "LONG" if move_pct > 0 else "SHORT"
+   201→
+   202→    if historical_count < HIST_COUNT_MATURE:
+   203→        # Young node: use bootstrap floors (more conservative than 0.10%
+   204→        # paper_trader floor — fewer false positives on noisy first obs).
+   205→        use_sl = OUTCOME_FLOOR_SL_PCT
+   206→        use_tp = OUTCOME_FLOOR_TP_PCT
+   207→    else:
+   208→        # Mature node: use real SL/TP from accumulated metadata.
+   209→        use_sl = sl_pct if sl_pct is not None and sl_pct > 0 else OUTCOME_FLOOR_SL_PCT
+   210→        use_tp = tp_pct if tp_pct is not None and tp_pct > 0 else OUTCOME_FLOOR_TP_PCT
+   211→
+   212→    return simulate_first_touch(window_df, entry_price, use_sl, use_tp, direction)
+   213→
+   214→
+   215→def compute_outcome_directional(
+   216→    post_pattern_df,
+   217→    entry_price: float,
+   218→    move_pct: float,
+   219→) -> bool:
+   220→    """V5.0 (TAREA 15, v0.54.0): Compute `won` flag from REAL directional movement.
+   221→
+   222→    This is the BUILD-TIME replacement for compute_outcome_won(). Instead of
+   223→    simulating first-touch SL/TP with artificial 0.15% thresholds (which
+   224→    measures micro-structure noise, not predictive power), this function
+   225→    asks a simple question:
+   226→
+   227→        "Did the price move in the direction predicted by the pattern?"
+   228→
+   229→    TAREA 14 AUDIT FINDING: With SL/TP=0.15%, the first-touch simulation
+   230→    produced WR=46% on DOGE 1m — below random. The root cause: 0.15% is
+   231→    18-22x smaller than real candle ranges (±1-5%), so micro-dips trigger
+   232→    SL before the real directional move materializes. Pattern "cbc" had
+   233→    expected_move_pct=+0.35% (REAL directional signal) but win_rate=41%
+   234→    (SL=0.15% triggered by noise first).
+   235→
+   236→    NEW LOGIC:
+   237→      1. Direction is inferred from sign(move_pct) of the PATTERN window.
+   238→      2. real_move_pct = (post_pattern close[-1] - entry_price) / entry_price × 100
+   239→         This is the ACTUAL price movement over the W candles after the pattern.
+   240→      3. For LONG: won = (real_move_pct > DIRECTIONAL_MICRO_FLOOR)
+   241→         For SHORT: won = (real_move_pct < -DIRECTIONAL_MICRO_FLOOR)
+   242→      4. Micro-floor of 0.01% filters degenerate zero-move cases only.
+   243→
+   244→    WHY THIS IS BETTER:
+   245→      - Measures PREDICTIVE POWER: "Did the pattern's direction call work?"
+   246→      - No artificial SL/TP thresholds that are timeframe-dependent
+   247→      - No first-touch noise contamination from micro-structure
+   248→      - WR naturally reflects genuine signal: random = 50%, skilled > 50%
+   249→      - Works identically across 1m/5m/15m — the move_pct scales with time
+   250→
+   251→    Args:
+   252→        post_pattern_df: DataFrame with 'close' column for the POST-PATTERN
+   253→            window (W candles immediately AFTER the pattern ends). MUST have
+   254→            at least 1 row, otherwise returns False (timeout = loss).
+   255→        entry_price: entry price (close of the LAST pattern candle, i.e. the
+   256→            candle immediately before post_pattern_df.iloc[0]).
+   257→        move_pct: observed move_pct from the PATTERN window. Used ONLY to
+   258→            infer direction via sign — the actual outcome is measured from
+   259→            post_pattern_df's close prices.
+   260→
+   261→    Returns:
+   262→        True if the post-pattern price moved in the predicted direction
+   263→        (beyond the micro-floor), False otherwise.
+   264→    """
+   265→    if move_pct == 0:
+   266→        return False
+   267→
+   268→    if len(post_pattern_df) == 0:
+   269→        return False  # timeout = loss
+   270→
+   271→    direction = "LONG" if move_pct > 0 else "SHORT"
+   272→
+   273→    # Real movement: last close of the post-pattern window vs entry
+   274→    actual_close = float(post_pattern_df["close"].iloc[-1])
+   275→    real_move_pct = (actual_close - entry_price) / entry_price * 100.0
+   276→
+   277→    if direction == "LONG":
+   278→        return real_move_pct > DIRECTIONAL_MICRO_FLOOR
+   279→    else:  # SHORT
+   280→        return real_move_pct < -DIRECTIONAL_MICRO_FLOOR
+   281→
+   282→
+   283→@dataclass
+   284→class DirectionStats:
+   285→    """
+   286→    V4.3 (FIX-A): Per-direction statistics for a node's observation history.
+   287→
+   288→    Tracks win_rate, expected_move, and count separately for LONG and SHORT
+   289→    observations, enabling the trading engine to make direction-aware decisions
+   290→    like: "This pattern wins 62% as LONG but only 33% as SHORT."
+   291→
+   292→    PROBLEM (v0.40.17-audit): The legacy `win_rate` field mixes LONG and SHORT
+   293→    observations. `won = move_pct > 0` (ppmt.py:336) is valid for LONG only —
+   294→    a SHORT trade "wins" when `move_pct < 0`. The mixed win_rate systematically
+   295→    overestimates LONG win_rate and underestimates SHORT win_rate, producing
+   296→    the LONG/SHORT asymmetry observed in the audit:
+   297→      - LONG PnL medio = -0.017% (negative in ALL confidence deciles >0.40)
+   298→      - SHORT PnL medio = +0.013% (positive in ALL confidence deciles)
+   299→      - Spearman confidence<->PnL LONG = -0.008 (no predictive power)
+   300→
+   301→    SOLUTION: Classify each observation by sign of move_pct at insert time.
+   302→    `long_stats` accumulates observations where move_pct > 0 (LONG wins).
+   303→    `short_stats` accumulates observations where move_pct < 0 (SHORT wins).
+   304→    At match time, the engine queries the stats for the direction it intends
+   305→    to trade, getting an unbiased win_rate.
+   306→    """
+   307→    count: int = 0
+   308→    """Number of observations in this direction (move_pct > 0 for LONG, < 0 for SHORT)."""
+   309→
+   310→    wins: int = 0
+   311→    """Number of winning observations in this direction.
+   312→    For LONG: move_pct > 0 (always wins by definition of classification).
+   313→    For SHORT: move_pct < 0 (always wins by definition of classification).
+   314→    So wins == count for DirectionStats — but kept for API symmetry with RegimeStats."""
+   315→
+   316→    total_move_pct: float = 0.0
+   317→    """Cumulative move_pct across all observations in this direction.
+   318→    For LONG: sum of positive move_pct values (LONG's expected profit).
+   319→    For SHORT: sum of negative move_pct values (SHORT's expected profit, negative)."""
+   320→
+   321→    total_drawdown_pct: float = 0.0
+   322→    """Cumulative drawdown observed in this direction's observations."""
+   323→
+   324→    @property
+   325→    def win_rate(self) -> float:
+   326→        """Win rate within this direction. By construction always 1.0 since
+   327→        classification IS by winning direction. Kept for API symmetry."""
+   328→        if self.count == 0:
+   329→            return 0.0
+   330→        return self.wins / self.count
+   331→
+   332→    @property
+   333→    def avg_move_pct(self) -> float:
+   334→        """Average move_pct within this direction.
+   335→        For LONG: average positive move (expected profit).
+   336→        For SHORT: average negative move (expected SHORT profit, returned as negative)."""
+   337→        if self.count == 0:
+   338→            return 0.0
+   339→        return self.total_move_pct / self.count
+   340→
+   341→    @property
+   342→    def avg_drawdown_pct(self) -> float:
+   343→        """Average max drawdown within this direction."""
+   344→        if self.count == 0:
+   345→            return 0.0
+   346→        return self.total_drawdown_pct / self.count
+   347→
+   348→    def to_dict(self) -> dict:
+   349→        """Serialize to dictionary."""
+   350→        return {
+   351→            "count": self.count,
+   352→            "wins": self.wins,
+   353→            "total_move_pct": round(self.total_move_pct, 4),
+   354→            "total_drawdown_pct": round(self.total_drawdown_pct, 4),
+   355→        }
+   356→
+   357→    @classmethod
+   358→    def from_dict(cls, data: dict) -> DirectionStats:
+   359→        """Deserialize from dictionary."""
+   360→        return cls(
+   361→            count=data.get("count", 0),
+   362→            wins=data.get("wins", 0),
+   363→            total_move_pct=data.get("total_move_pct", 0.0),
+   364→            total_drawdown_pct=data.get("total_drawdown_pct", 0.0),
+   365→        )
+   366→
+   367→
+   368→@dataclass
+   369→class RegimeStats:
+   370→    """
+   371→    Statistics for a single regime within a node's observation history.
+   372→
+   373→    Tracks win_rate, expected_move, and count separately for each regime,
+   374→    enabling the trading engine to make regime-aware decisions like:
+   375→      "This pattern wins 62% in trending_up but only 33% in volatile."
+   376→
+   377→    This is the key V4.1 enhancement that makes regime_distribution actionable.
+   378→    Without per-regime win_rate, we only know HOW MANY times a pattern was
+   379→    observed in each regime, but not WHETHER IT WON there.
+   380→    """
+   381→    count: int = 0
+   382→    """Number of observations in this regime."""
+   383→
+   384→    wins: int = 0
+   385→    """Number of winning observations in this regime."""
+   386→
+   387→    total_move_pct: float = 0.0
+   388→    """Cumulative expected_move across all observations in this regime.
+   389→    Used to compute average expected_move per regime."""
+   390→
+   391→    @property
+   392→    def win_rate(self) -> float:
+   393→        """Win rate within this regime."""
+   394→        if self.count == 0:
+   395→            return 0.0
+   396→        return self.wins / self.count
+   397→
+   398→    @property
+   399→    def avg_move_pct(self) -> float:
+   400→        """Average expected_move within this regime."""
+   401→        if self.count == 0:
+   402→            return 0.0
+   403→        return self.total_move_pct / self.count
+   404→
+   405→    def to_dict(self) -> dict:
+   406→        """Serialize to dictionary."""
+   407→        return {
+   408→            "count": self.count,
+   409→            "wins": self.wins,
+   410→            "total_move_pct": round(self.total_move_pct, 4),
+   411→        }
+   412→
+   413→    @classmethod
+   414→    def from_dict(cls, data: dict) -> RegimeStats:
+   415→        """Deserialize from dictionary."""
+   416→        return cls(
+   417→            count=data.get("count", 0),
+   418→            wins=data.get("wins", 0),
+   419→            total_move_pct=data.get("total_move_pct", 0.0),
+   420→        )
+   421→
+   422→
+   423→@dataclass
+   424→class BlockLifecycleMetadata:
+   425→    """
+   426→    Block Lifecycle Metadata attached to each Trie node.
+   427→
+   428→    This is the core innovation of PPMT V3/V4. Every node in the Trie
+   429→    carries these fields, enabling the Trie itself to make all
+   430→    trading decisions without external indicators.
+   431→
+   432→    Key insight: If a next SAX block does NOT exist as a child node,
+   433→    the pattern broke BEFORE price hit SL → earliest possible exit signal.
+   434→
+   435→    V4 Enhancement: Regime-Aware Node Metadata
+   436→    Each node now stores the market regime(s) under which its pattern
+   437→    was observed. This enables:
+   438→      - Regime-specific pattern matching (N4 Trie segmentation)
+   439→      - Regime-aware confidence scoring (patterns in favorable regimes
+   440→        get higher confidence, unfavorable regimes get lower)
+   441→      - Independent vs Dependent node classification:
+   442→          * Independent: has enough observations (>= min_independent_count)
+   443→            to be self-sufficient — its metadata is reliable on its own
+   444→          * Dependent: relies on parent/ancestor metadata (low count,
+   445→            inherited regime info) — confidence is scaled down
+   446→    """
+   447→
+   448→    # === Entry/Exit Timing ===
+   449→    trigger_candle: int = 0
+   450→    """Which candle within the pattern sequence activates this block.
+   451→    E.g., if trigger_candle=10 in a 50-candle pattern, the signal
+   452→    fires at candle 10 with 40 candles of predicted movement remaining."""
+   453→
+   454→    remaining_candles: int = 0
+   455→    """Predicted number of candles remaining in this pattern phase.
+   456→    Derived from historical average duration at this node."""
+   457→
+   458→    # === Price Prediction ===
+   459→    expected_move_pct: float = 0.0
+   460→    """Expected percentage price move from this point.
+   461→    Positive = bullish, Negative = bearish.
+   462→    Computed as median of historical moves from this node."""
+   463→
+   464→    max_drawdown_pct: float = 0.0
+   465→    """Maximum observed drawdown (negative) from entry at this node.
+   466→    Used to set stop loss levels dynamically."""
+   467→
+   468→    max_favorable_pct: float = 0.0
+   469→    """Maximum observed favorable excursion from entry.
+   470→    Used to set take profit and trailing stop levels."""
+   471→
+   472→    # === Historical Statistics ===
+   473→    win_rate: float = 0.0
+   474→    """Percentage of times this pattern completed successfully.
+   475→    Success = price reached expected_move before max_drawdown."""
+   476→
+   477→    avg_duration: int = 0
+   478→    """Average number of candles this pattern phase lasts.
+   479→    Used to predict remaining_candles for new observations."""
+   480→
+   481→    historical_count: int = 0
+   482→    """Number of times this exact SAX sequence has been observed.
+   483→    More observations = higher confidence in metadata accuracy."""
+   484→
+   485→    # === Risk Parameters (computed from history) ===
+   486→    sl_price: Optional[float] = None
+   487→    """Dynamic stop loss price level.
+   488→    Computed from max_drawdown_pct with safety margin."""
+   489→
+   490→    tp_price: Optional[float] = None
+   491→    """Dynamic take profit price level.
+   492→    Computed from max_favorable_pct with safety margin."""
+   493→
+   494→    # === Forward/Backward Navigation ===
+   495→    continuation_nodes: list[str] = field(default_factory=list)
+   496→    """SAX symbols that historically continued this pattern.
+   497→    If the next observed block is in this list → continue holding.
+   498→    These represent the 'forward' metadata — what comes after.
+   499→
+   500→    .. deprecated:: v0.41.0
+   501→        Use ``expected_sequences`` instead.  This field is kept for
+   502→        backwards compatibility but only records the *single* next
+   503→        symbol; ``expected_sequences`` records full 3-symbol
+   504→        continuations with frequency counts."""
+   505→
+   506→    expected_sequences: dict[tuple[str, ...], int] = field(default_factory=dict)
+   507→    """v0.41.0 (FASE 2, Tarea 2.1): Expected sequences of 3 future symbols.
+   508→
+   509→    Maps a 3-tuple of SAX symbols → frequency count.  Example:
+   510→    ``{('f','g','h'): 35, ('f','x','y'): 12}``.  When a pattern
+   511→    is matched, the most frequent sequence is the expected
+   512→    continuation, used by PatternDivergenceMonitor (Tarea 2.2)
+   513→    to detect pattern breaks early.
+   514→
+   515→    Only populated when there are ≥3 symbols after the pattern
+   516→    in the observation window.  Shorter suffixes fall back to
+   517→    ``continuation_nodes``."""
+   518→
+   519→    last_seen_timestamp: float = 0.0
+   520→    """v0.41.0 (FASE 2, Tarea 2.4): Unix timestamp of the most recent
+   521→    observation of this pattern.  Used by ``apply_time_decay()`` to
+   522→    reduce confidence for stale patterns.  Unlike
+   523→    ``last_observation_time`` (which tracks any observation), this
+   524→    is specifically the last time the *full pattern* was observed."""
+   525→
+   526→    break_nodes: list[str] = field(default_factory=list)
+   527→    """SAX symbols that historically broke this pattern.
+   528→    These represent transitions to a different regime.
+   529→    Not all missing blocks are breaks — some are just noise."""
+   530→
+   531→    # === V4: Regime-Aware Node Metadata ===
+   532→    regime: str = ""
+   533→    """The market regime under which this pattern was observed.
+   534→    One of: trending_up, trending_down, ranging, volatile.
+   535→    Empty string means not yet set (legacy nodes or before V4)."""
+   536→
+   537→    regime_confidence: float = 0.0
+   538→    """Confidence of the regime detection when this pattern was observed.
+   539→    Range [0, 1]. Higher = more certain about the regime classification."""
+   540→
+   541→    dominant_regime: str = ""
+   542→    """The most common regime across all observations of this pattern.
+   543→    For terminal nodes, this is the same as `regime`.
+   544→    For intermediate nodes (after propagation), this is the regime
+   545→    with the highest count in regime_distribution. This enables
+   546→    regime-aware routing at any Trie depth."""
+   547→
+   548→    regime_distribution: dict[str, int] = field(default_factory=dict)
+   549→    """Distribution of regimes across observations of this pattern.
+   550→    E.g., {'trending_up': 45, 'ranging': 30, 'volatile': 5}
+   551→    Used to compute regime-specific win rates and confidence.
+   552→    Enables the trading engine to say: 'This pattern works 60% of
+   553→    the time in trending_up but only 35% in volatile regimes.'"""
+   554→
+   555→    regime_stats: dict[str, RegimeStats] = field(default_factory=dict)
+   556→    """V4.1: Per-regime statistics including win_rate and expected_move.
+   557→    While regime_distribution only counts observations, regime_stats tracks
+   558→    the actual performance within each regime. This is critical because:
+   559→    - A pattern observed 50 times in trending_up with 60% WR is valuable
+   560→    - A pattern observed 50 times in volatile with 30% WR is dangerous
+   561→    Without this, the trading engine cannot make regime-aware decisions.
+   562→    Key: regime name (e.g., 'trending_up'), Value: RegimeStats."""
+   563→
+   564→    # === V4.3 (FIX-A): Per-direction statistics ===
+   565→    long_stats: DirectionStats = field(default_factory=DirectionStats)
+   566→    """Statistics for observations where move_pct > 0 (LONG instances).
+   567→    At match time, when the engine decides LONG, it should query
+   568→    long_stats.win_rate and long_stats.avg_move_pct instead of the
+   569→    mixed-aggregate `win_rate` field, which conflates LONG and SHORT outcomes."""
+   570→
+   571→    short_stats: DirectionStats = field(default_factory=DirectionStats)
+   572→    """Statistics for observations where move_pct < 0 (SHORT instances).
+   573→    At match time, when the engine decides SHORT, it should query
+   574→    short_stats.win_rate and short_stats.avg_move_pct (the latter is negative,
+   575→    representing SHORT's expected profit when expressed as a signed move)."""
+   576→
+   577→    # === V4.1: Move Variance Tracking ===
+   578→    move_variance: float = 0.0
+   579→    """Variance of observed moves (Welford's online algorithm).
+   580→    High variance = unreliable pattern (move_pct swings wildly).
+   581→    Low variance = reliable pattern (consistent outcomes).
+   582→    Used to compute move_std which adjusts confidence downward
+   583→    for patterns with inconsistent historical outcomes."""
+   584→
+   585→    move_mean_for_variance: float = 0.0
+   586→    """Running mean used by Welford's algorithm for move_variance.
+   587→    Not the same as expected_move_pct (which is the incremental mean).
+   588→    This is maintained separately for the Welford M2 computation."""
+   589→
+   590→    node_type: str = "dependent"
+   591→    """Whether this node is independent or dependent.
+   592→    - 'independent': Has enough observations (>= min_independent_count)
+   593→      to be self-sufficient. Its metadata is reliable on its own.
+   594→      Confidence is used at full strength.
+   595→    - 'dependent': Relies on parent/ancestor metadata. Low count,
+   596→      inherited regime info. Confidence is scaled down by a factor
+   597→      based on the ratio of actual vs minimum observations.
+   598→    Classification is performed during propagate_metadata() and
+   599→    updated during Living Trie observations."""
+   600→
+   601→    min_independent_count: int = 10
+   602→    """Minimum historical_count for a node to be classified as independent.
+   603→    Nodes with count >= this threshold are 'independent'. Below it,
+   604→    they are 'dependent' and their metadata inherits from parents.
+   605→    10 is a reasonable default: below 10 observations, the node's
+   606→    statistics are too noisy to be reliable on their own."""
+   607→
+   608→    # === V4.2: Observation Freshness ===
+   609→    last_observation_time: float = 0.0
+   610→    """Timestamp (epoch seconds) of the most recent observation.
+   611→    V4.2: Enables observation freshness tracking — patterns that
+   612→    haven't been observed recently can be deprioritized. This is
+   613→    critical for the Living Trie: as market conditions change,
+   614→    old patterns become less relevant. A pattern observed 5000
+   615→    candles ago should carry less weight than one observed 50 candles
+   616→    ago. The freshness_decay property computes a multiplier [0, 1]
+   617→    based on how long since the last observation."""
+   618→
+   619→    observation_timespan: float = 0.0
+   620→    """Time span (in seconds) between the first and last observation.
+   621→    V4.2: Measures how spread out observations are. A pattern observed
+   622→    100 times in one day is less reliable than one observed 100 times
+   623→    over 30 days. Longer timespan = more robust pattern that works
+   624→    across different conditions. Short timespan = potentially overfit
+   625→    to a specific market condition."""
+   626→
+   627→    # === Computed Properties ===
+   628→
+   629→    @property
+   630→    def risk_reward_ratio(self) -> float:
+   631→        """Compute risk:reward ratio from expected move vs max drawdown."""
+   632→        if self.max_drawdown_pct == 0:
+   633→            return 0.0
+   634→        return abs(self.expected_move_pct / self.max_drawdown_pct)
+   635→
+   636→    @property
+   637→    def confidence(self) -> float:
+   638→        """
+   639→        Confidence score based on historical observations and win rate.
+   640→        More observations and higher win rate → higher confidence.
+   641→        Uses Bayesian-inspired shrinking toward 0.5 for low counts.
+   642→
+   643→        V4: Dependent nodes have their confidence scaled down because
+   644→        their metadata is inherited/aggregated rather than directly
+   645→        observed. An independent node with 50 observations is more
+   646→        trustworthy than a dependent node with 3 observations whose
+   647→        statistics were propagated from children.
+   648→        """
+   649→        if self.historical_count == 0:
+   650→            return 0.0
+   651→        # Bayesian shrinkage: prior of 0.5 with strength of 10 observations
+   652→        prior_strength = 10.0
+   653→        adjusted_win_rate = (
+   654→            (self.win_rate * self.historical_count + 0.5 * prior_strength)
+   655→            / (self.historical_count + prior_strength)
+   656→        )
+   657→        # Scale by sqrt of log(count) for sample size bonus
+   658→        count_bonus = min(1.0, np.sqrt(np.log1p(self.historical_count) / np.log(1000)))
+   659→        base_confidence = adjusted_win_rate * count_bonus
+   660→
+   661→        # V4: Dependent node penalty
+   662→        # Dependent nodes have less reliable metadata, so we scale
+   663→        # their confidence down. The penalty is proportional to how
+   664→        # far they are from the minimum independent count.
+   665→        if self.node_type == "dependent" and self.historical_count > 0:
+   666→            dependency_ratio = min(
+   667→                1.0, self.historical_count / self.min_independent_count
+   668→            )
+   669→            # Scale between 0.5 (0 observations toward independent)
+   670→            # and 1.0 (at the threshold)
+   671→            dependency_penalty = 0.5 + 0.5 * dependency_ratio
+   672→            base_confidence *= dependency_penalty
+   673→
+   674→        return base_confidence
+   675→
+   676→    @property
+   677→    def expected_profit_ahead(self) -> float:
+   678→        """
+   679→        Expected profit percentage looking ahead from this block.
+   680→        Combines win_rate × expected_move to give a realistic expectation.
+   681→
+   682→        This is the key metric the Money Manager uses to decide allocation:
+   683→          - High expected_profit_ahead → allocate more capital
+   684→          - Low/negative → allocate less or skip
+   685→
+   686→        Formula: win_rate × expected_move_pct + (1 - win_rate) × max_drawdown_pct
+   687→        This gives the expected value including losses.
+   688→        """
+   689→        if self.historical_count == 0:
+   690→            return 0.0
+   691→        win_expectation = self.win_rate * self.expected_move_pct
+   692→        loss_expectation = (1.0 - self.win_rate) * self.max_drawdown_pct
+   693→        return win_expectation + loss_expectation
+   694→
+   695→    @property
+   696→    def probability_of_success(self) -> float:
+   697→        """
+   698→        Probability that this pattern succeeds (reaches expected move
+   699→        before hitting stop loss).
+   700→
+   701→        This is more nuanced than raw win_rate because it accounts
+   702→        for the Bayesian shrinkage and sample size. The Money Manager
+   703→        uses this as the primary signal for position sizing.
+   704→
+   705→        Returns the same Bayesian-adjusted win_rate used in confidence(),
+   706→        but without the count bonus — just the pure probability estimate.
+   707→        """
+   708→        if self.historical_count == 0:
+   709→            return 0.0
+   710→        prior_strength = 10.0
+   711→        return (
+   712→            (self.win_rate * self.historical_count + 0.5 * prior_strength)
+   713→            / (self.historical_count + prior_strength)
+   714→        )
+   715→
+   716→    @property
+   717→    def sizing_signal(self) -> float:
+   718→        """
+   719→        Composite sizing signal for the Money Manager (0.0 to 2.0+).
+   720→
+   721→        This is the single number the Risk Manager reads to decide
+   722→        position size. It combines:
+   723→          - probability_of_success: How likely is this pattern to win?
+   724→          - expected_profit_ahead: How much do we expect to make?
+   725→          - risk_reward_ratio: Is the payoff worth the risk?
+   726→
+   727→        Mapping (used by RiskManager):
+   728→          sizing_signal >= 1.5  → 2.0x base position (high conviction)
+   729→          sizing_signal 1.0-1.5 → 1.0x base position (normal)
+   730→          sizing_signal 0.5-1.0 → 0.5x base position (low conviction)
+   731→          sizing_signal < 0.5   → 0.25x or reject (very low)
+   732→
+   733→        This creates the tight PPMT → RiskManager integration where
+   734→        the Trie's metadata directly drives capital allocation.
+   735→        """
+   736→        if self.historical_count == 0:
+   737→            return 0.0
+   738→
+   739→        # Normalize components
+   740→        prob = self.probability_of_success  # 0-1
+   741→
+   742→        # Expected profit: normalize to 0-1 range
+   743→        # A 2% expected profit is already very good for crypto
+   744→        profit_score = min(abs(self.expected_profit_ahead) / 2.0, 1.0)
+   745→
+   746→        # Risk:reward: normalize (RR of 3+ is excellent)
+   747→        rr_score = min(self.risk_reward_ratio / 3.0, 1.0)
+   748→
+   749→        # Weighted composite: probability is most important
+   750→        signal = 0.4 * prob + 0.35 * profit_score + 0.25 * rr_score
+   751→
+   752→        # Scale to 0-2 range for the multiplier
+   753→        return signal * 2.0
+   754→
+   755→    @property
+   756→    def is_unknown_block_exit(self) -> bool:
+   757→        """
+   758→        Whether an unknown next block should trigger an exit.
+   759→        True when there are continuation_nodes defined but the observed
+   760→        block is NOT among them — meaning pattern broke.
+   761→        """
+   762→        return len(self.continuation_nodes) > 0
+   763→
+   764→    @property
+   765→    def move_std(self) -> float:
+   766→        """
+   767→        Standard deviation of observed moves.
+   768→        Computed from move_variance using Welford's online algorithm.
+   769→        High std = unpredictable pattern = lower effective confidence.
+   770→        Low std = consistent pattern = higher effective confidence.
+   771→        Returns 0.0 if fewer than 2 observations (can't compute variance).
+   772→        """
+   773→        if self.historical_count < 2:
+   774→            return 0.0
+   775→        return float(np.sqrt(self.move_variance / (self.historical_count - 1)))
+   776→
+   777→    @property
+   778→    def move_coefficient_of_variation(self) -> float:
+   779→        """
+   780→        Coefficient of variation (CV) of observed moves.
+   781→        CV = std / |mean|. Normalized measure of dispersion.
+   782→        CV < 0.5 = tight clustering around the mean (reliable)
+   783→        CV 0.5-1.0 = moderate dispersion (acceptable)
+   784→        CV > 1.0 = high dispersion (unreliable — move direction uncertain)
+   785→        Returns 0.0 if expected_move_pct is zero (can't normalize).
+   786→        """
+   787→        if abs(self.expected_move_pct) < 1e-10:
+   788→            return 0.0
+   789→        return self.move_std / abs(self.expected_move_pct)
+   790→
+   791→    @property
+   792→    def freshness_decay(self) -> float:
+   793→        """
+   794→        V4.2: Observation freshness multiplier based on time since last observation.
+   795→
+   796→        Returns a value in [0, 1] that decays as the last observation gets older.
+   797→        Uses exponential decay with a half-life of 7 days (604800 seconds).
+   798→
+   799→        - 0 days old → 1.0 (fresh, fully trusted)
+   800→        - 7 days old → 0.5 (half-weight)
+   801→        - 30 days old → ~0.06 (nearly expired)
+   802→
+   803→        This prevents stale patterns from having the same influence as
+   804→        recently-observed ones. In fast-moving markets, patterns that
+   805→        haven't been seen in weeks may no longer be valid.
+   806→
+   807→        Returns 1.0 if last_observation_time is 0 (not tracked).
+   808→        """
+   809→        if self.last_observation_time <= 0:
+   810→            return 1.0  # No tracking info, assume fresh
+   811→        import time as _time
+   812→        age_seconds = _time.time() - self.last_observation_time
+   813→        if age_seconds <= 0:
+   814→            return 1.0  # Future timestamp or same second
+   815→        # Half-life of 7 days = 604800 seconds
+   816→        half_life = 604800.0
+   817→        return float(np.exp(-0.693 * age_seconds / half_life))  # ln(2) ≈ 0.693
+   818→
+   819→    @property
+   820→    def observation_density(self) -> float:
+   821→        """
+   822→        V4.2: Observations per unit time (observations/day).
+   823→
+   824→        Measures how concentrated observations are. Low density = pattern
+   825→        observed occasionally over a long time (robust). High density =
+   826→        pattern observed many times in a short period (potentially overfit).
+   827→
+   828→        Returns 0.0 if no timespan data.
+   829→        """
+   830→        if self.observation_timespan <= 0 or self.historical_count <= 0:
+   831→            return 0.0
+   832→        days = self.observation_timespan / 86400.0
+   833→        if days < 0.01:  # Less than ~15 minutes
+   834→            return float(self.historical_count) / 0.01  # Cap at 100/day
+   835→        return self.historical_count / days
+   836→
+   837→    def regime_match_score(self, current_regime: str) -> float:
+   838→        """
+   839→        V4.1: Compute a confidence multiplier based on regime match.
+   840→
+   841→        If the current market regime matches the node's dominant regime,
+   842→        confidence is boosted (up to 1.2x). If the current regime is
+   843→        unfavorable for this pattern, confidence is penalized (down to 0.5x).
+   844→
+   845→        The scoring uses both regime_distribution (how often) AND
+   846→        regime_stats (how well it performed):
+   847→
+   848→        1. If current regime matches dominant_regime → boost (1.0 to 1.2)
+   849→           Boost is proportional to how dominant the regime is.
+   850→        2. If current regime exists but is not dominant → neutral (0.8 to 1.0)
+   851→           Scaled by the ratio of observations in that regime.
+   852→        3. If current regime has NO observations → penalty (0.5 to 0.7)
+   853→           Unknown territory, reduce confidence.
+   854→        4. If regime_stats available, further adjust by regime-specific win_rate
+   855→           vs overall win_rate. A regime where the pattern underperforms
+   856→           gets an additional penalty.
+   857→
+   858→        For independent nodes (sufficient observations), the regime match
+   859→        has MORE impact because we have reliable per-regime data.
+   860→        For dependent nodes (few observations), we apply less adjustment
+   861→        because the per-regime data is unreliable.
+   862→
+   863→        Args:
+   864→            current_regime: Current market regime string
+   865→
+   866→        Returns:
+   867→            Multiplier in range [0.5, 1.2] to apply to confidence
+   868→        """
+   869→        if not current_regime:
+   870→            return 1.0  # No regime info available, neutral
+   871→
+   872→        if not self.regime_distribution:
+   873→            return 1.0  # No regime data on this node, neutral
+   874→
+   875→        total_obs = sum(self.regime_distribution.values())
+   876→        if total_obs == 0:
+   877→            return 1.0
+   878→
+   879→        current_count = self.regime_distribution.get(current_regime, 0)
+   880→        current_ratio = current_count / total_obs
+   881→
+   882→        # Determine adjustment based on whether current regime is known
+   883→        if current_count == 0:
+   884→            # Regime never observed for this pattern — penalty
+   885→            # Less severe for independent nodes (more diverse data)
+   886→            base_mult = 0.7 if self.node_type == "independent" else 0.5
+   887→            return base_mult
+   888→
+   889→        # Regime has been observed — compute base multiplier
+   890→        if current_regime == self.dominant_regime:
+   891→            # Current regime is the dominant one — boost
+   892→            # Boost proportional to dominance (how concentrated)
+   893→            boost = 1.0 + 0.2 * current_ratio  # 1.0 to 1.2
+   894→        else:
+   895→            # Regime exists but not dominant — neutral to slight penalty
+   896→            # Scale by how rare this regime is for this pattern
+   897→            base_mult = 0.8 + 0.2 * current_ratio  # 0.8 to 1.0
+   898→            boost = base_mult
+   899→
+   900→        # V4.1: Further adjust using regime-specific win_rate if available
+   901→        if current_regime in self.regime_stats:
+   902→            rs = self.regime_stats[current_regime]
+   903→            if rs.count >= 3:  # Need at least 3 obs for reliable regime WR
+   904→                regime_wr = rs.win_rate
+   905→                overall_wr = self.win_rate
+   906→                if overall_wr > 0:
+   907→                    wr_ratio = regime_wr / overall_wr
+   908→                    # If regime WR is much worse than overall, penalize more
+   909→                    # If regime WR is better, slight extra boost
+   910→                    # Clamp wr_adjustment to [0.8, 1.1] to avoid extreme swings
+   911→                    wr_adjustment = max(0.8, min(1.1, wr_ratio ** 0.5))
+   912→                    boost *= wr_adjustment
+   913→
+   914→        # Clamp final result
+   915→        return max(0.5, min(1.2, boost))
+   916→
+   917→    def update_from_observation(
+   918→        self,
+   919→        move_pct: float,
+   920→        drawdown_pct: float,
+   921→        favorable_pct: float,
+   922→        duration: int,
+   923→        won: bool,
+   924→        next_symbol: Optional[str] = None,
+   925→        regime: Optional[str] = None,
+   926→        regime_confidence: Optional[float] = None,
+   927→        next_3_symbols: Optional[tuple[str, ...]] = None,
+   928→    ) -> None:
+   929→        """
+   930→        Update metadata with a new observation using incremental statistics.
+   931→
+   932→        This method updates all fields incrementally without storing raw data,
+   933→        making it memory-efficient for millions of patterns.
+   934→
+   935→        V4: Now also tracks regime information per observation.
+   936→        Each observation can carry the market regime under which it
+   937→        was observed, building the regime_distribution histogram.
+   938→
+   939→        v0.41.0 (FASE 2): Now also records ``expected_sequences`` and
+   940→        ``last_seen_timestamp`` for forward-sequence tracking and
+   941→        temporal decay.
+   942→
+   943→        Args:
+   944→            move_pct: Actual percentage move observed
+   945→            drawdown_pct: Maximum drawdown observed during pattern
+   946→            favorable_pct: Maximum favorable excursion observed
+   947→            duration: Actual duration in candles
+   948→            won: Whether the pattern completed successfully
+   949→            next_symbol: SAX symbol that followed this block (if any)
+   950→            regime: Market regime at time of observation
+   951→                    (trending_up, trending_down, ranging, volatile)
+   952→            regime_confidence: Confidence of the regime detection [0, 1]
+   953→            next_3_symbols: Tuple of 3 SAX symbols that followed this
+   954→                    pattern (if available).  Used to populate
+   955→                    ``expected_sequences`` (Tarea 2.1).
+   956→        """
+   957→        n = self.historical_count
+   958→        self.historical_count += 1
+   959→
+   960→        # Incremental mean update
+   961→        self.expected_move_pct = (
+   962→            (self.expected_move_pct * n + move_pct) / self.historical_count
+   963→        )
+   964→
+   965→        # Track worst drawdown and best favorable
+   966→        self.max_drawdown_pct = min(self.max_drawdown_pct, drawdown_pct)
+   967→        self.max_favorable_pct = max(self.max_favorable_pct, favorable_pct)
+   968→
+   969→        # Incremental win rate update
+   970→        wins = self.win_rate * n + (1.0 if won else 0.0)
+   971→        self.win_rate = wins / self.historical_count
+   972→
+   973→        # Incremental average duration
+   974→        self.avg_duration = int(
+   975→            (self.avg_duration * n + duration) / self.historical_count
+   976→        )
+   977→
+   978→        # Update remaining_candles from average duration
+   979→        self.remaining_candles = self.avg_duration
+   980→
+   981→        # Track continuation/break nodes
+   982→        if next_symbol is not None:
+   983→            if next_symbol not in self.continuation_nodes:
+   984→                self.continuation_nodes.append(next_symbol)
+   985→
+   986→        # v0.41.0 (FASE 2, Tarea 2.1): Track expected sequences of 3 future symbols.
+   987→        # When there are ≥3 symbols after the pattern, record the 3-tuple
+   988→        # as a key in expected_sequences and increment its frequency count.
+   989→        if next_3_symbols is not None and len(next_3_symbols) == 3:
+   990→            self.expected_sequences[next_3_symbols] = (
+   991→                self.expected_sequences.get(next_3_symbols, 0) + 1
+   992→            )
+   993→
+   994→        # v0.41.0 (FASE 2, Tarea 2.4): Set last_seen_timestamp for time decay.
+   995→        import time as _time_for_ts
+   996→        self.last_seen_timestamp = _time_for_ts.time()
+   997→
+   998→        # V4.4 (P7-FaseC, v0.40.23): Track per-direction statistics with
+   999→        # outcome-based `won` flag (SL/TP first-touch) instead of hardcoded
+  1000→        # `wins += 1` when move_pct > 0.
+  1001→        #
+  1002→        # BEFORE (v0.40.22): `self.long_stats.wins += 1` was always incremented
+  1003→        # when move_pct > 0, ignoring the `won` parameter passed in. This meant
+  1004→        # bayesian_wr_long ≡ 1.0 by construction, and the only signal the
+  1005→        # bayesian shrinkage captured was N-count.
+  1006→        #
+  1007→        # AFTER (v0.40.23): wins is incremented only when `won` is True. The
+  1008→        # `won` flag is now computed by callers using outcome SL/TP:
+  1009→        #   - paper_trader.py: won = (trade.exit_reason == "take_profit")
+  1010→        #   - ppmt.py: won = simulate_first_touch(window_df, sl_pct, tp_pct, dir)
+  1011→        #   - validator.py, profiles.py: same simulate_first_touch helper
+  1012→        #
+  1013→        # Validation (v0.40.23-audit, 8 tokens × 3 ventanas, 257k trades):
+  1014→        #   P7 (v0.40.22, wins ≡ count):  PnL -8090%, WR 0.421, PF 0.62
+  1015→        #   P7C (v0.40.23, wins = outcome): PnL -4353%, WR 0.446, PF 0.67
+  1016→        #   Δ P7C-P7: +3736pp PnL total, 8/8 tokens improve, 3/3 windows improve.
+  1017→        if move_pct > 0:
+  1018→            self.long_stats.count += 1
+  1019→            if won:
+  1020→                self.long_stats.wins += 1
+  1021→            self.long_stats.total_move_pct += move_pct
+  1022→            self.long_stats.total_drawdown_pct += drawdown_pct
+  1023→        elif move_pct < 0:
+  1024→            self.short_stats.count += 1
+  1025→            if won:
+  1026→                self.short_stats.wins += 1
+  1027→            self.short_stats.total_move_pct += move_pct  # negative
+  1028→            self.short_stats.total_drawdown_pct += drawdown_pct
+  1029→        # move_pct == 0: don't classify — degenerate case.
+  1030→
+  1031→        # V4.1: Track move variance using Welford's online algorithm
+  1032→        # This is numerically stable and doesn't require storing raw data.
+  1033→        # After n observations, move_variance holds the M2 statistic
+  1034→        # (sum of squared differences from the running mean).
+  1035→        if self.historical_count >= 2:
+  1036→            delta = move_pct - self.move_mean_for_variance
+  1037→            self.move_mean_for_variance = (
+  1038→                (self.move_mean_for_variance * (self.historical_count - 1) + move_pct)
+  1039→                / self.historical_count
+  1040→            )
+  1041→            delta2 = move_pct - self.move_mean_for_variance
+  1042→            self.move_variance += delta * delta2
+  1043→        elif self.historical_count == 1:
+  1044→            self.move_mean_for_variance = move_pct
+  1045→            self.move_variance = 0.0
+  1046→
+  1047→        # V4: Track regime distribution
+  1048→        if regime and regime in ("trending_up", "trending_down", "ranging", "volatile"):
+  1049→            self.regime_distribution[regime] = self.regime_distribution.get(regime, 0) + 1
+  1050→            # V4.1: Track per-regime statistics (win_rate, expected_move)
+  1051→            if regime not in self.regime_stats:
+  1052→                self.regime_stats[regime] = RegimeStats()
+  1053→            rs = self.regime_stats[regime]
+  1054→            rs.count += 1
+  1055→            rs.total_move_pct += move_pct
+  1056→            if won:
+  1057→                rs.wins += 1
+  1058→            # Update dominant_regime to the most common regime
+  1059→            if self.regime_distribution:
+  1060→                self.dominant_regime = max(
+  1061→                    self.regime_distribution, key=self.regime_distribution.get
+  1062→                )
+  1063→            # On first observation, set the regime directly
+  1064→            if n == 0:
+  1065→                self.regime = regime
+  1066→                self.regime_confidence = regime_confidence if regime_confidence is not None else 0.0
+  1067→            else:
+  1068→                # Blend regime_confidence incrementally
+  1069→                if regime_confidence is not None:
+  1070→                    self.regime_confidence = (
+  1071→                        (self.regime_confidence * n + regime_confidence)
+  1072→                        / self.historical_count
+  1073→                    )
+  1074→
+  1075→        # V4: Update node_type based on count
+  1076→        if self.historical_count >= self.min_independent_count:
+  1077→            self.node_type = "independent"
+  1078→        else:
+  1079→            self.node_type = "dependent"
+  1080→
+  1081→        # V4.2: Track observation freshness
+  1082→        import time as _time
+  1083→        now = _time.time()
+  1084→        if n == 0:
+  1085→            # First observation — set initial time, timespan is 0
+  1086→            self.last_observation_time = now
+  1087→            self.observation_timespan = 0.0
+  1088→        else:
+  1089→            # Update timespan: difference between first and latest observation
+  1090→            if self.last_observation_time > 0:
+  1091→                self.observation_timespan = max(
+  1092→                    self.observation_timespan, now - (self.last_observation_time - self.observation_timespan)
+  1093→                )
+  1094→            self.last_observation_time = now
+  1095→
+  1096→    @property
+  1097→    def win_rate_long(self) -> float:
+  1098→        """V4.3 (FIX-A): Win rate when this pattern is traded as LONG.
+  1099→
+  1100→        This is the count of LONG-favorable observations divided by total
+  1101→        observations. A pattern with `win_rate_long = 0.70` means: when this
+  1102→        pattern was observed historically, 70% of the time the price went UP
+  1103→        afterward. The engine should use this — NOT `win_rate` — when deciding
+  1104→        whether to enter a LONG position.
+  1105→
+  1106→        Returns 0.0 if no observations.
+  1107→        """
+  1108→        if self.historical_count == 0:
+  1109→            return 0.0
+  1110→        return self.long_stats.count / self.historical_count
+  1111→
+  1112→    @property
+  1113→    def win_rate_short(self) -> float:
+  1114→        """V4.3 (FIX-A): Win rate when this pattern is traded as SHORT.
+  1115→
+  1116→        This is the count of SHORT-favorable observations divided by total
+  1117→        observations. A pattern with `win_rate_short = 0.70` means: when this
+  1118→        pattern was observed historically, 70% of the time the price went DOWN
+  1119→        afterward. The engine should use this — NOT `win_rate` — when deciding
+  1120→        whether to enter a SHORT position.
+  1121→
+  1122→        Returns 0.0 if no observations.
+  1123→        """
+  1124→        if self.historical_count == 0:
+  1125→            return 0.0
+  1126→        return self.short_stats.count / self.historical_count
+  1127→
+  1128→    @property
+  1129→    def avg_move_long(self) -> float:
+  1130→        """V4.3 (FIX-A): Average move_pct when LONG was favorable.
+  1131→        Positive number = expected profit per LONG trade on this pattern.
+  1132→        Returns 0.0 if no LONG-favorable observations."""
+  1133→        return self.long_stats.avg_move_pct
+  1134→
+  1135→    @property
+  1136→    def avg_move_short(self) -> float:
+  1137→        """V4.3 (FIX-A): Average move_pct when SHORT was favorable.
+  1138→        Negative number — its absolute value is the expected profit per SHORT
+  1139→        trade on this pattern.
+  1140→        Returns 0.0 if no SHORT-favorable observations."""
+  1141→        return self.short_stats.avg_move_pct
+  1142→
+  1143→    def confidence_for_direction(self, direction: str) -> float:
+  1144→        """
+  1145→        V4.3 (FIX-A): Direction-aware confidence score.
+  1146→
+  1147→        This is the drop-in replacement for `confidence()` when the engine
+  1148→        knows which direction it intends to trade. Uses the per-direction
+  1149→        win_rate (unbiased) instead of the mixed-aggregate `win_rate` field.
+  1150→
+  1151→        Args:
+  1152→            direction: 'LONG' or 'SHORT' (case-insensitive).
+  1153→
+  1154→        Returns:
+  1155→            Confidence score in [0, 1]. Returns 0.0 if no observations.
+  1156→
+  1157→        Formula mirrors `confidence()` but with direction-specific win_rate:
+  1158→            adjusted_wr = (wr_dir * count + 0.5 * 10) / (count + 10)
+  1159→            count_bonus = min(1.0, sqrt(log1p(count) / log(1000)))
+  1160→            base_confidence = adjusted_wr * count_bonus
+  1161→        Plus the dependent-node penalty from `confidence()`.
+  1162→        """
+  1163→        if self.historical_count == 0:
+  1164→            return 0.0
+  1165→
+  1166→        direction = direction.upper()
+  1167→        if direction == "LONG":
+  1168→            wr = self.win_rate_long
+  1169→        elif direction == "SHORT":
+  1170→            wr = self.win_rate_short
+  1171→        else:
+  1172→            # Unknown direction: fall back to mixed-aggregate (legacy behavior)
+  1173→            wr = self.win_rate
+  1174→
+  1175→        prior_strength = 10.0
+  1176→        adjusted_wr = (
+  1177→            (wr * self.historical_count + 0.5 * prior_strength)
+  1178→            / (self.historical_count + prior_strength)
+  1179→        )
+  1180→        count_bonus = min(1.0, np.sqrt(np.log1p(self.historical_count) / np.log(1000)))
+  1181→        base_confidence = adjusted_wr * count_bonus
+  1182→
+  1183→        if self.node_type == "dependent" and self.historical_count > 0:
+  1184→            dependency_ratio = min(
+  1185→                1.0, self.historical_count / self.min_independent_count
+  1186→            )
+  1187→            dependency_penalty = 0.5 + 0.5 * dependency_ratio
+  1188→            base_confidence *= dependency_penalty
+  1189→
+  1190→        return base_confidence
+  1191→
+  1192→    def expected_move_for_direction(self, direction: str) -> float:
+  1193→        """
+  1194→        V4.3 (FIX-A): Direction-aware expected move.
+  1195→
+  1196→        For LONG: returns avg_move_long (positive number = expected % profit).
+  1197→        For SHORT: returns abs(avg_move_short) (positive number = expected % profit).
+  1198→
+  1199→        This is the drop-in replacement for `expected_move_pct` when the engine
+  1200→        knows the direction. The legacy `expected_move_pct` mixes LONG and SHORT
+  1201→        moves and can be near-zero even when both directions have strong edges.
+  1202→        """
+  1203→        direction = direction.upper()
+  1204→        if direction == "LONG":
+  1205→            return self.avg_move_long
+  1206→        if direction == "SHORT":
+  1207→            # SHORT profit = abs(move_pct) when move_pct < 0
+  1208→            return abs(self.avg_move_short)
+  1209→        return self.expected_move_pct  # fallback
+  1210→
+  1211→    # ---------------------------------------------------------------- #
+  1212→    # V4.4 (P7): directional_edge policy
+  1213→    # ---------------------------------------------------------------- #
+  1214→    #
+  1215→    # v0.40.22-audit: P7 replaces the legacy `dir = sign(expected_move_pct)`
+  1216→    # policy in signal.py. It computes a per-direction edge using bayesian-
+  1217→    # shrunk win_rate × avg_move, then picks the direction with the higher
+  1218→    # edge. The motor applies a quality gate (min_edge_pct) to skip trades
+  1219→    # where neither direction has enough expected edge.
+  1220→    #
+  1221→    # Validation (v0.40.22-audit): 8 tokens × 3 windows, 304,685 trades.
+  1222→    #   P1 (legacy):  PnL -8650%, WR 0.421, PF 0.612
+  1223→    #   P7 (this):    PnL -8090%, WR 0.421, PF 0.625  (+560pp, 7/8 tokens)
+  1224→    #
+  1225→    # Note on long_wins ≡ long_count: the current definition classifies
+  1226→    # observations by sign(move_pct), so wins == count by construction.
+  1227→    # The bayesian shrinkage (lc+1)/(lc+2) still adds value because it
+  1228→    # penalizes low-N observations. Fase C (redefine long_wins with SL/TP
+  1229→    # outcome) would break this equivalence and unlock further gains.
+  1230→
+  1231→    def bayesian_wr_long(self, alpha: float = 1.0, beta: float = 1.0) -> float:
+  1232→        """Bayesian-shrunk win_rate for LONG direction.
+  1233→        bayesian_wr = (long_wins + α) / (long_count + α + β).
+  1234→        With current definition (long_wins ≡ long_count), this simplifies
+  1235→        to (lc + 1) / (lc + 2) for Laplace prior α=β=1.
+  1236→        """
+  1237→        lc = self.long_stats.count
+  1238→        lw = self.long_stats.wins
+  1239→        if lc == 0:
+  1240→            return 0.0
+  1241→        return (lw + alpha) / (lc + alpha + beta)
+  1242→
+  1243→    def bayesian_wr_short(self, alpha: float = 1.0, beta: float = 1.0) -> float:
+  1244→        """Bayesian-shrunk win_rate for SHORT direction.
+  1245→        See bayesian_wr_long for details.
+  1246→        """
+  1247→        sc = self.short_stats.count
+  1248→        sw = self.short_stats.wins
+  1249→        if sc == 0:
+  1250→            return 0.0
+  1251→        return (sw + alpha) / (sc + alpha + beta)
+  1252→
+  1253→    def long_edge(self, alpha: float = 1.0, beta: float = 1.0) -> float:
+  1254→        """V4.4 (P7): Expected edge for LONG = bayesian_wr_long × avg_move_long.
+  1255→        Positive number representing expected % profit per LONG trade."""
+  1256→        return self.bayesian_wr_long(alpha, beta) * self.avg_move_long
+  1257→
+  1258→    def short_edge(self, alpha: float = 1.0, beta: float = 1.0) -> float:
+  1259→        """V4.4 (P7): Expected edge for SHORT = bayesian_wr_short × |avg_move_short|.
+  1260→        Positive number representing expected % profit per SHORT trade."""
+  1261→        return self.bayesian_wr_short(alpha, beta) * abs(self.avg_move_short)
+  1262→
+  1263→    def directional_edge(self, alpha: float = 1.0, beta: float = 1.0) -> float:
+  1264→        """V4.4 (P7): Signed directional edge = long_edge − short_edge.
+  1265→        Positive → LONG is favoured. Negative → SHORT is favoured.
+  1266→        Zero → no directional preference (gate will likely reject)."""
+  1267→        return self.long_edge(alpha, beta) - self.short_edge(alpha, beta)
+  1268→
+  1269→    def best_direction_p7(
+  1270→        self,
+  1271→        min_edge_pct: float = 0.10,
+  1272→        alpha: float = 1.0,
+  1273→        beta: float = 1.0,
+  1274→    ) -> Optional[str]:
+  1275→        """V4.4 (P7): Pick the best direction using bayesian-shrunk edge.
+  1276→
+  1277→        Returns 'LONG', 'SHORT', or None (if no direction clears the gate).
+  1278→        This is the canonical P7 policy — signal.py calls this instead of
+  1279→        the legacy `sign(expected_move_pct)` logic.
+  1280→
+  1281→        Args:
+  1282→            min_edge_pct: Hard floor on max(long_edge, short_edge).
+  1283→                Below this → no trade (return None).
+  1284→            alpha, beta: Laplace prior for bayesian shrinkage.
+  1285→
+  1286→        Decision logic:
+  1287→            1. If both long_count and short_count are 0 → no data → None.
+  1288→            2. Compute long_edge and short_edge with bayesian shrinkage.
+  1289→            3. Gate: if max(long_edge, short_edge) < min_edge_pct → None.
+  1290→            4. If only one direction has observations → return that direction
+  1291→               (after gate check).
+  1292→            5. Otherwise → return direction with higher edge.
+  1293→        """
+  1294→        lc = self.long_stats.count
+  1295→        sc = self.short_stats.count
+  1296→        if lc == 0 and sc == 0:
+  1297→            return None
+  1298→
+  1299→        long_e = self.long_edge(alpha, beta)
+  1300→        short_e = self.short_edge(alpha, beta)
+  1301→
+  1302→        # Gate: best edge must clear min_edge_pct
+  1303→        if max(long_e, short_e) < min_edge_pct:
+  1304→            return None
+  1305→
+  1306→        if lc == 0:
+  1307→            return "SHORT" if sc > 0 else None
+  1308→        if sc == 0:
+  1309→            return "LONG"
+  1310→        return "LONG" if long_e >= short_e else "SHORT"
+  1311→
+  1312→    def compute_sl_tp(self, entry_price: float, safety_margin: float = 0.2) -> None:
+  1313→        """
+  1314→        Compute stop loss and take profit prices from metadata.
+  1315→
+  1316→        Args:
+  1317→            entry_price: Current entry price
+  1318→            safety_margin: Margin added to SL/TP for safety (0.2 = 20% extra)
+  1319→
+  1320→        v0.40.1 FIX-4: Rebalanced SL/TP to preserve the directional edge
+  1321→          identified in CAPA 3 audit (EM→PnL corr = +0.11).
+  1322→          BEFORE: SL = max_drawdown × 1.2, TP = min(|EM|, max_fav) × 0.9
+  1323→            → SL/TP hit ratio = 2.14 (SL hits 64.8% of trades, TP 30.3%)
+  1324→            → Break-even requires 28.6% TP rate, motor delivered 30.3%
+  1325→              but END trades (4.9%) destroyed the margin → net losing.
+  1326→          AFTER: SL = max_drawdown × 1.5 (more slack), TP = max(|EM|, max_fav) × 1.0 (full)
+  1327→            → Logic: if motor has directional edge (+0.11 EM→PnL), we want:
+  1328→              - SL holgado so noisy drawdowns don't kick us out
+  1329→              - TP completo so we capture the full predicted move
+  1330→            → Target RR ≈ 0.67 (TP_dist / SL_dist), break-even at 60% TP rate
+  1331→              but the bet is that with looser SL we go from 30% → 50%+ TP rate
+  1332→              because the noisy drawdowns that hit SL before now resolve.
+  1333→          The old safety_margin param is preserved for API compat but no
+  1334→          longer used in the calculation (we use explicit 1.5 and 1.0 factors).
+  1335→        """
+  1336→        # Stop loss: max_drawdown × 1.5 (was × 1.2)
+  1337→        # More slack to absorb noisy drawdowns from sparse-trie metadata
+  1338→        sl_distance = abs(self.max_drawdown_pct) * 1.5
+  1339→        self.sl_price = entry_price * (1.0 - sl_distance / 100.0)
+  1340→
+  1341→        # Take profit: max(|expected_move|, max_favorable) × 1.0 (was min(...) × 0.9)
+  1342→        # - Use MAX instead of MIN: if the motor predicts +0.5% but history
+  1343→        #   shows max_favorable of +0.8%, target the higher (more optimistic)
+  1344→        #   since we believe the directional signal.
+  1345→        # - No haircut (× 1.0 instead of × 0.9): capture the full predicted
+  1346→        #   move. The old 0.9 haircut was leaving profit on the table.
+  1347→        tp_distance = max(
+  1348→            abs(self.expected_move_pct),
+  1349→            self.max_favorable_pct,
+  1350→        ) * 1.0
+  1351→        self.tp_price = entry_price * (1.0 + tp_distance / 100.0)
+  1352→
+  1353→    def to_dict(self) -> dict:
+  1354→        """Serialize metadata to dictionary for storage."""
+  1355→        return {
+  1356→            "trigger_candle": self.trigger_candle,
+  1357→            "remaining_candles": self.remaining_candles,
+  1358→            "expected_move_pct": round(self.expected_move_pct, 4),
+  1359→            "max_drawdown_pct": round(self.max_drawdown_pct, 4),
+  1360→            "max_favorable_pct": round(self.max_favorable_pct, 4),
+  1361→            "win_rate": round(self.win_rate, 4),
+  1362→            "avg_duration": self.avg_duration,
+  1363→            "historical_count": self.historical_count,
+  1364→            "sl_price": self.sl_price,
+  1365→            "tp_price": self.tp_price,
+  1366→            "continuation_nodes": self.continuation_nodes,
+  1367→            # v0.42.0: Expected sequences of 3 future symbols.
+  1368→            # JSON keys must be strings. For tuple keys like ('a','x','b','y'),
+  1369→            # we serialize as a JSON array string: '[["a","x"],["b","y"]]'.
+  1370→            # Single-symbol keys are kept as strings.
+  1371→            "expected_sequences": {
+  1372→                (
+  1373→                    str(list(k)) if isinstance(k, tuple) else k
+  1374→                ): v
+  1375→                for k, v in self.expected_sequences.items()
+  1376→            },
+  1377→            "break_nodes": self.break_nodes,
+  1378→            # V3: Computed sizing signals for Risk Manager
+  1379→            "confidence": round(self.confidence, 4),
+  1380→            "probability_of_success": round(self.probability_of_success, 4),
+  1381→            "expected_profit_ahead": round(self.expected_profit_ahead, 4),
+  1382→            "sizing_signal": round(self.sizing_signal, 4),
+  1383→            "risk_reward_ratio": round(self.risk_reward_ratio, 4),
+  1384→            # V4: Regime-aware node metadata
+  1385→            "regime": self.regime,
+  1386→            "regime_confidence": round(self.regime_confidence, 4),
+  1387→            "dominant_regime": self.dominant_regime,
+  1388→            "regime_distribution": self.regime_distribution,
+  1389→            # V4.1: Per-regime statistics
+  1390→            "regime_stats": {k: v.to_dict() for k, v in self.regime_stats.items()},
+  1391→            # V4.3 (FIX-A): Per-direction statistics
+  1392→            "long_stats": self.long_stats.to_dict(),
+  1393→            "short_stats": self.short_stats.to_dict(),
+  1394→            # V4.1: Move variance tracking
+  1395→            "move_variance": round(self.move_variance, 6),
+  1396→            "move_mean_for_variance": round(self.move_mean_for_variance, 6),
+  1397→            "node_type": self.node_type,
+  1398→            "min_independent_count": self.min_independent_count,
+  1399→            # V4.2: Observation freshness
+  1400→            "last_observation_time": self.last_observation_time,
+  1401→            "observation_timespan": self.observation_timespan,
+  1402→            # v0.41.0 (FASE 2, Tarea 2.4): Last seen timestamp for time decay
+  1403→            "last_seen_timestamp": self.last_seen_timestamp,
+  1404→        }
+  1405→
+  1406→    @classmethod
+  1407→    def from_dict(cls, data: dict) -> BlockLifecycleMetadata:
+  1408→        """Deserialize metadata from dictionary."""
+  1409→        return cls(
+  1410→            trigger_candle=data.get("trigger_candle", 0),
+  1411→            remaining_candles=data.get("remaining_candles", 0),
+  1412→            expected_move_pct=data.get("expected_move_pct", 0.0),
+  1413→            max_drawdown_pct=data.get("max_drawdown_pct", 0.0),
+  1414→            max_favorable_pct=data.get("max_favorable_pct", 0.0),
+  1415→            win_rate=data.get("win_rate", 0.0),
+  1416→            avg_duration=data.get("avg_duration", 0),
+  1417→            historical_count=data.get("historical_count", 0),
+  1418→            sl_price=data.get("sl_price"),
+  1419→            tp_price=data.get("tp_price"),
+  1420→            continuation_nodes=data.get("continuation_nodes", []),
+  1421→            # v0.42.0: Deserialize expected_sequences.
+  1422→            # Keys are stored as JSON array strings like '[["a","x"],["b","y"]]'
+  1423→            # or legacy "a|b|c" pipe-delimited strings. Convert both to tuples.
+  1424→            expected_sequences={
+  1425→                _parse_es_key(k): v
+  1426→                for k, v in data.get("expected_sequences", {}).items()
+  1427→            },
+  1428→            break_nodes=data.get("break_nodes", []),
+  1429→            # V4: Regime-aware node metadata
+  1430→            regime=data.get("regime", ""),
+  1431→            regime_confidence=data.get("regime_confidence", 0.0),
+  1432→            dominant_regime=data.get("dominant_regime", ""),
+  1433→            regime_distribution=data.get("regime_distribution", {}),
+  1434→            # V4.1: Per-regime statistics
+  1435→            regime_stats={
+  1436→                k: RegimeStats.from_dict(v) if isinstance(v, dict) else RegimeStats()
+  1437→                for k, v in data.get("regime_stats", {}).items()
+  1438→            },
+  1439→            # V4.3 (FIX-A): Per-direction statistics
+  1440→            long_stats=DirectionStats.from_dict(data.get("long_stats", {}))
+  1441→                if isinstance(data.get("long_stats", {}), dict) else DirectionStats(),
+  1442→            short_stats=DirectionStats.from_dict(data.get("short_stats", {}))
+  1443→                if isinstance(data.get("short_stats", {}), dict) else DirectionStats(),
+  1444→            # V4.1: Move variance tracking
+  1445→            move_variance=data.get("move_variance", 0.0),
+  1446→            move_mean_for_variance=data.get("move_mean_for_variance", 0.0),
+  1447→            node_type=data.get("node_type", "dependent"),
+  1448→            min_independent_count=data.get("min_independent_count", 10),
+  1449→            # V4.2: Observation freshness
+  1450→            last_observation_time=data.get("last_observation_time", 0.0),
+  1451→            observation_timespan=data.get("observation_timespan", 0.0),
+  1452→            # v0.41.0 (FASE 2, Tarea 2.4): Last seen timestamp for time decay
+  1453→            last_seen_timestamp=data.get("last_seen_timestamp", 0.0),
+  1454→        )
+  1455→
