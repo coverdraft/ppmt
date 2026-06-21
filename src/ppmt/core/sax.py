@@ -102,8 +102,12 @@ LEVEL_DUAL_ALPHA_CONFIG: dict[str, dict[str, int]] = {
     "n2_meme": {"price": 3, "volume": 0},   # v0.43.1: price-only for memes too (3^5=243, not 5^5=3125)
     "n2_new_launch": {"price": 3, "volume": 0},  # v0.43.1: same reasoning as memes
     "n2_default": {"price": 3, "volume": 0},     # v0.43.1: ALL N2 price-only (volume is noise at class level)
-    "n3": {"price": 4, "volume": 3},
-    "n4": {"price": 4, "volume": 3},
+    # v0.51.0: N3/N4 price-only (volume=0) for 1m density optimization.
+    # With dual encoding (price=4, vol=3), effective α=12, 12^4=20736 patterns
+    # → ~1 obs/node → confidence ≤ 0.10. Price-only α=3, P=3 → 27 patterns
+    # → ~100+ obs/node → confidence ≥ 0.35. Volume is noise at per-token 1m level.
+    "n3": {"price": 3, "volume": 0},
+    "n4": {"price": 3, "volume": 0},
 }
 
 # v0.48.0 (FASE 2A): Per-level window size by timeframe.
@@ -119,7 +123,9 @@ LEVEL_DUAL_ALPHA_CONFIG: dict[str, dict[str, int]] = {
 #   5m N1: 24*5=120 candles (10h), N3: 10*4=40 candles (200min)
 #   1h N1: 8*5=40 candles (40h), N3: 8*4=32 candles (32h) — same W
 LEVEL_WINDOW_CONFIG: dict[str, dict[str, int]] = {
-    "1m":  {"n1": 60, "n2": 60, "n3": 20, "n4": 20, "n5": 20},  # v0.48.0 (FASE 2B): N5=BTC context, 1m only
+    # v0.51.0: 1m N3/N4/N5 window reduced from 20→10 for more symbols & higher
+    # pattern density. W=10, P=3 → 30-min patterns, ~3000 symbols from 30d data.
+    "1m":  {"n1": 60, "n2": 60, "n3": 10, "n4": 10, "n5": 10},
     "5m":  {"n1": 24, "n2": 24, "n3": 10, "n4": 10},
     "15m": {"n1": 12, "n2": 12, "n3": 6,  "n4": 6},
     "30m": {"n1": 10, "n2": 10, "n3": 8,  "n4": 8},
@@ -137,9 +143,11 @@ LEVEL_WINDOW_CONFIG: dict[str, dict[str, int]] = {
 LEVEL_PATTERN_CONFIG: dict[str, int] = {
     "n1": 5,
     "n2": 5,
-    "n3": 4,
-    "n4": 4,
-    "n5": 4,  # v0.48.0 (FASE 2B): N5 BTC context, same as N3/N4
+    # v0.51.0: N3/N4/N5 P=3 for 1m density. Shorter patterns = denser tries.
+    # α=3, P=3 → 27 patterns (vs 12^4=20736 with dual P=4). Each gets ~100+ obs.
+    "n3": 3,
+    "n4": 3,
+    "n5": 3,  # v0.51.0: same as N3/N4 for consistency
 }
 
 

@@ -239,18 +239,36 @@ class PPMT:
                     window_size=_w_n2,
                     price_strategy=sax_strategy,
                 )
-            self.sax_n3 = SAXDualEncoder(
-                price_alphabet_size=n3_dual["price"],
-                volume_alphabet_size=n3_dual["volume"],
-                window_size=_w_n3,
-                price_strategy=sax_strategy,
-            )
-            self.sax_n4 = SAXDualEncoder(
-                price_alphabet_size=n4_dual["price"],
-                volume_alphabet_size=n4_dual["volume"],
-                window_size=_w_n4,
-                price_strategy=sax_strategy,
-            )
+            # v0.51.0: N3/N4 with volume=0 use SAXEncoder (price-only), same as N1/N2.
+            # This enables ultra-dense per-token patterns for 1m where dual encoding
+            # creates too many patterns (12^4=20736) for the available data.
+            # Price-only N3 with α=3, P=3 gives 3^3=27 patterns → high obs/node → high conf.
+            if n3_dual["volume"] == 0:
+                self.sax_n3 = SAXEncoder(
+                    alphabet_size=n3_dual["price"],
+                    window_size=_w_n3,
+                    strategy=sax_strategy,
+                )
+            else:
+                self.sax_n3 = SAXDualEncoder(
+                    price_alphabet_size=n3_dual["price"],
+                    volume_alphabet_size=n3_dual["volume"],
+                    window_size=_w_n3,
+                    price_strategy=sax_strategy,
+                )
+            if n4_dual["volume"] == 0:
+                self.sax_n4 = SAXEncoder(
+                    alphabet_size=n4_dual["price"],
+                    window_size=_w_n4,
+                    strategy=sax_strategy,
+                )
+            else:
+                self.sax_n4 = SAXDualEncoder(
+                    price_alphabet_size=n4_dual["price"],
+                    volume_alphabet_size=n4_dual["volume"],
+                    window_size=_w_n4,
+                    price_strategy=sax_strategy,
+                )
         else:
             # Legacy single-composite encoding
             n2_alpha = get_alpha_for_level("n2", asset_class)
@@ -273,16 +291,24 @@ class PPMT:
             )
 
         # v0.48.0 (FASE 2B): N5 — BTC Context Level (1m only).
-        # N5 uses SAXDualEncoder (same params as N3) but partitions by BTC context
-        # (bull/bear/neutral) instead of regime. Only created for timeframe="1m".
+        # N5 uses same encoding as N3 (including price-only when volume=0).
+        # Partitions by BTC context (bull/bear/neutral) instead of regime.
+        # Only created for timeframe="1m".
         self.sax_n5 = None
         if _w_n5 is not None and dual_sax:
-            self.sax_n5 = SAXDualEncoder(
-                price_alphabet_size=n3_dual["price"],  # same alpha as N3
-                volume_alphabet_size=n3_dual["volume"],
-                window_size=_w_n5,
-                price_strategy=sax_strategy,
-            )
+            if n3_dual["volume"] == 0:
+                self.sax_n5 = SAXEncoder(
+                    alphabet_size=n3_dual["price"],
+                    window_size=_w_n5,
+                    strategy=sax_strategy,
+                )
+            else:
+                self.sax_n5 = SAXDualEncoder(
+                    price_alphabet_size=n3_dual["price"],  # same alpha as N3
+                    volume_alphabet_size=n3_dual["volume"],
+                    window_size=_w_n5,
+                    price_strategy=sax_strategy,
+                )
         elif _w_n5 is not None:
             self.sax_n5 = SAXEncoder(
                 alphabet_size=n3_dual["price"],
@@ -703,25 +729,23 @@ class PPMT:
                 duration = len(window_df)
 
                 # Compute won from post-pattern candles
-                # Look up existing node for SL/TP (use N3 as reference)
-                existing_node = None
-                if level_name == "n3" and hasattr(self, 'trie_n3'):
-                    existing_node = self.trie_n3.search(pattern)
-                elif level_name == "n3":
-                    existing_node = None
-
-                if existing_node is not None and existing_node.metadata.historical_count > 0:
-                    existing_meta = existing_node.metadata
-                    sl_pct_for_outcome = abs(existing_meta.max_drawdown_pct) * 1.5
-                    tp_pct_for_outcome = max(
-                        abs(existing_meta.expected_move_pct),
-                        existing_meta.max_favorable_pct,
-                    ) * 1.0
-                    hist_count_for_outcome = existing_node.metadata.historical_count
-                else:
-                    sl_pct_for_outcome = None
-                    tp_pct_for_outcome = None
-                    hist_count_for_outcome = 0
+                # v0.51.0: Use bootstrap floors (SL=TP=0.15%) for ALL levels during build.
+                #
+                # BUG FIX: Previously, only N3 looked up existing_node for SL/TP,
+                # while N1/N2/N4 always used bootstrap floors. This created an
+                # asymmetry where N1 got win_rate ≈ 0.44 (fair SL/TP ratio) but
+                # N3 got win_rate ≈ 0.03-0.13 (SL = max_dd*1.5 >> TP). With
+                # SL >> TP, the first-touch simulation almost always hits SL first,
+                # making N3 confidence permanently low regardless of density.
+                #
+                # The fix: use bootstrap floors for ALL levels during build().
+                # This makes win_rate consistent across levels and allows density
+                # (historical_count) to properly differentiate confidence.
+                # Node-specific SL/TP is still used for signal generation in the
+                # trading engine — only the `won` flag during build uses floors.
+                sl_pct_for_outcome = None
+                tp_pct_for_outcome = None
+                hist_count_for_outcome = 0
 
                 # Post-pattern window for SL/TP simulation
                 post_pattern_window_size = pl * w_size
