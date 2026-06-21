@@ -1,8 +1,8 @@
 # HANDOFF — PPMT Project Status
 
 > **Read this file FIRST when joining the project.**
-> Última actualización: 2026-06-19
-> Versión actual: **v0.40.8** — FIX-13: SAX α=5→α=4 en TF 1m (audit empírico sobre 50k velas reales × 8 tokens)
+> Última actualización: 2026-06-21
+> Versión actual: **v0.50.0** — Architecture Overhaul: 5-level trie, BTC context, cold start, learning loop, build pipeline
 > Repositorio: https://github.com/coverdraft/ppmt
 
 ---
@@ -251,3 +251,80 @@ sqlite3 ~/.ppmt/ppmt.db "SELECT symbol, timeframe, COUNT(*) FROM trades GROUP BY
 ---
 
 **Fin del handoff.** El próximo asistente debería poder continuar el trabajo con este archivo + `TRAZABILIDAD.md` (sección v0.38.x) como única lectura inicial.
+
+---
+
+## v0.50.0 — Architecture Overhaul (21 jun 2026)
+
+> Cuatro fases de reestructuración profunda del motor PPMT. Cada fase resolvió un bloqueo arquitectónico que impedía que el sistema funcionara correctamente en producción multi-token.
+
+### Fase 1: Living Trie Learning Loop + String/Tuple Match Fix
+
+**Problema**: El motor nunca aprendía de trades reales. Las observaciones se insertaban en el trie durante `build()` pero en live trading no había mecanismo de retroalimentación. Además, `match_raw()` recibía strings del `pattern_buffer` pero N3/N4 usaban `SAXDualEncoder` que produce tuplas `('a','x')` → nunca matcheaban.
+
+**Solución**:
+- `_active_learning` dict que registra `pattern_n1`, `pattern_n2`, `pattern_n3`, `entry_price`, `direction`, `entry_ts` al abrir posición.
+- Al cerrar posición (SL/TP/catastrophic/pattern_broken), `_learning_insert_outcome()` llama `insert_with_observations()` en N3 (per-token) y hace flush de N1/N2 buffers al storage compartido.
+- `match_raw()` ahora acepta `recent_candles: pd.DataFrame` y re-encodea con cada nivel's SAX encoder → N3/N4 reciben tuplas, N1/N2 reciben strings.
+- Buffer `recent_prices` dinámico: `max(200, W*P+20, 500)` en vez del hard-coded 50 que truncaba datos para TF bajos.
+
+**Archivos**: `src/ppmt/engine/realtime.py`, `src/ppmt/engine/ppmt.py`
+**Commit**: `98d44ba` (v0.47.0 + v0.47.1)
+
+### Fase 2A: Per-Level Window/Pattern Configs + Timeframe Regime Thresholds
+
+**Problema**: Todos los niveles usaban el mismo `window_size` y `pattern_length`. N3 en 1m necesitaba 300 velas por patrón (W=60, P=5) → imposible de llenar con datos limitados. Además, `detect_simple()` no recibía `timeframe`, así que N4 se particionaba con umbrales genéricos.
+
+**Solución**:
+- `LEVEL_WINDOW_CONFIG` en `sax.py`: per-tf, per-level. Ej: 1m → N1=60, N3=20, N4=20. 5m → N1=24, N3=10.
+- `LEVEL_PATTERN_CONFIG`: N1/N2=5, N3/N4=4 (patrones más cortos para tries locales con menos obs).
+- `TIMEFRAME_REGIME_CUTOFFS` en `thresholds.py`: umbrales de régimen calibrados por timeframe.
+- `build()` itera por nivel independientemente, cada uno con su propia codificación SAX.
+- `detect_simple(window_df, timeframe=self.timeframe)` → N4 se particiona correctamente.
+
+**Archivos**: `src/ppmt/core/sax.py`, `src/ppmt/core/thresholds.py`, `src/ppmt/core/regime.py`, `src/ppmt/engine/ppmt.py`
+**Commit**: `6908750` (Phase 2A)
+
+### Fase 2B: N5 BTC Context Level (1m only) + Pattern Divergence Fix
+
+**Problema**: El contexto BTC era un filtro binario (btc_filter) que rechazaba señales, no un nivel de matching. Además, el Pattern Divergence Monitor comparaba strings con tuplas → nunca detectaba divergencias reales.
+
+**Solución**:
+- N5: `RegimePartitionedTrie` con particiones `btc_bull`, `btc_bear`, `btc_neutral`. Solo existe en timeframe 1m. Se codifica con `SAXDualEncoder` (mismos params que N3). Blend al 7.5% del weighted_confidence (low weight = contexto, no señal primaria).
+- `_get_btc_context(btc_recent_candles)`: calcula pendiente de últimos 20 closes de BTC. slope > 0.0005 → bull, < -0.0005 → bear, else neutral.
+- Pattern Divergence: `set_expected()` ahora busca en trie_n3 con `_active_learning["pattern_n3"]` (tuplas), obtiene `expected_sequences`. `check_divergence()` usa `encode_all_levels(recent_df)["n3"][-3:]` (tuplas) → comparación correcta.
+
+**Archivos**: `src/ppmt/core/sax.py`, `src/ppmt/engine/ppmt.py`, `src/ppmt/engine/realtime.py`
+**Commit**: `f3759fa` (Phase 2B)
+
+### Fase 3: BTC Price Cache, Cold Start, v2 Fixes, Build Script
+
+**Problema**: N5 era inútil sin datos de BTC en realtime. Tokens nuevos sin trie N3 crasheaban el sistema. v2_server tenía bugs de formato y fallbacks incorrectos. Y lo más crítico: NO HABÍA DATA — ningún trie estaba poblado con datos reales.
+
+**Solución**:
+- `_BTC_PRICE_CACHE`: caché global que se alimenta cuando `cfg.symbol == "BTC/USDT"`. Altcoins en 1m construyen mini DataFrame y lo pasan como `btc_recent_candles` a `match_raw()`.
+- Cold Start: si `trie_n3 is None` en live, cargar N1/N2 compartidos + crear N3 vacío. El motor opera con confianza baja pero no crashea. Log: `[COLD START] {symbol} operating with shared N1/N2`.
+- v2_server BUG 1: `f"conf={value:.3f if cond else 0.0}"` → f-string precedence. BUG 2: `executor._position = None` al iniciar sesión WS. BUG 3: `n1 or engine.trie_n1` → trie vacío + WARNING.
+- `scripts/build_initial_portfolio.py`: 10 tokens × 3 timeframes, descarga paginada de Binance, build secuencial con storage compartido. BTC primero para poblar N1 universal + N2 blue_chip.
+
+**Archivos**: `src/ppmt/engine/realtime.py`, `src/ppmt/terminal/v2_server.py`, `scripts/build_initial_portfolio.py`
+**Commit**: `88215ea` (Phase 3)
+
+### Arquitectura post-v0.50.0
+
+```
+N1 (Universal) ─── SAXEncoder(price-only, α=3) ─── Shared across ALL tokens
+N2 (Class) ──────── SAXDualEncoder(α=3/2) ─────── Shared across asset class
+N3 (Per-Token) ──── SAXDualEncoder(α=4/2) ─────── Token-specific patterns
+N4 (Per-Token+Regime) ─ RegimePartitionedTrie ──── Partitioned by regime
+N5 (BTC Context) ── RegimePartitionedTrie ──────── 1m only, partitioned by BTC context
+```
+
+Per-level configs (1m example):
+- N1: W=60, P=5, 300 candles/pattern, strings
+- N2: W=60, P=5, 300 candles/pattern, tuples
+- N3: W=20, P=4, 80 candles/pattern, tuples
+- N4: W=20, P=4, 80 candles/pattern, tuples, regime-partitioned
+- N5: W=20, P=4, 80 candles/pattern, tuples, BTC-context-partitioned
+
+**Próximo paso**: Ejecutar `python scripts/build_initial_portfolio.py` para poblar todos los tries con data real y validar que el weighted_confidence supere 0.13 en tokens OOS.
