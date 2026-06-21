@@ -1,7 +1,7 @@
 # TRAZABILIDAD PPMT — Estado del Proyecto
 
 > Última actualización: 2026-06-22
-> Versión actual: **v0.56.0** — TAREA 17: Filtro de Expectativa (EV Gate). Veredicto científico: 1m tiene edge asimétrico (EV=+1.0R) con R:R=3.26 tras filtro EV≥0.80. 312 de 1940 señales pasan. WR=46.79% pero wins pagan 3.26x.
+> Versión actual: **v0.57.0** — TAREA 18: Portfolio Velocity OOS 5m/15m. 5m: 212 señales EV en 3.5 días (3 tokens), WR=45.3%, R:R=3.03, EV=+0.82R. Proyección 10 tokens: ~6100 ops/mes. 15m: 43 señales EV (solo SOL), WR=60.5%, EV=+0.97R.
 > ⚠️ **Si eres nuevo, lee primero la sección `# 📘 GUÍA DEL MOTOR PPMT — PARA CONTINUAR EL TRABAJO` al final de este archivo (línea 9914+).** Ahí está la arquitectura, dónde empezar a leer, dónde costó más, cómo se resolvieron largos y cortos, y el estado actual.
 > Repositorio: https://github.com/coverdraft/ppmt
 > Idioma: Español
@@ -11324,4 +11324,70 @@ cada una con alta expectativa. Esto es consistente con trading institucional:
 ### Commit
 ```
 test: apply institutional EV gate to 1m — final scientific verdict on 1m execution edge
+```
+
+## v0.57.0 — TAREA 18: Portfolio Velocity OOS — 5m & 15m (22 jun 2026)
+
+### Contexto
+TAREA 17 demostró que 1m tiene edge asimétrico (EV=+1.0R) con el EV Gate.
+Pero un sistema profesional no opera 1 token: opera 10-15 en paralelo.
+Esta tarea mide CUÁNTAS operaciones reales genera un portafolio multi-token
+en 5m y 15m, y si el volumen es suficiente para ser rentable como executor principal.
+
+### Metodología
+- 3 tokens: SOL/USDT (large_cap), DOGE/USDT (meme), LINK/USDT (large_cap/alt)
+- 1000 velas reales por token por timeframe
+- EV Gate ≥ 0.80 aplicado a cada señal
+- Forward window = W_n3 × P_n3 por timeframe
+- Outcome: dirección correcta con umbral > 0.01%
+
+### TABLA 5m — 1000 velas (~3.5 días)
+
+| Token | Señales EV | WR | R:R | EV |
+|-------|-----------|-----|-----|-----|
+| SOL/USDT | 53 | 58.5% | 2.93 | +1.2991R |
+| DOGE/USDT | 114 | 41.2% | 2.13 | +0.2922R |
+| LINK/USDT | 45 | 40.0% | 5.40 | +1.5606R |
+| **PORTAFOLIO** | **212** | **45.3%** | **3.03** | **+0.8235R** |
+
+### TABLA 15m — 1000 velas (~10.4 días)
+
+| Token | Señales EV | WR | R:R | EV |
+|-------|-----------|-----|-----|-----|
+| SOL/USDT | 43 | 60.5% | 2.26 | +0.9716R |
+| DOGE/USDT | 0 | N/A | N/A | N/A |
+| LINK/USDT | 0 | N/A | N/A | N/A |
+| **PORTAFOLIO** | **43** | **60.5%** | **2.26** | **+0.9716R** |
+
+### Proyección de Volumen Mensual
+
+| Timeframe | Ops (3 tok, periodo) | Ops/mes (3 tok) | Ops/mes (10 tok) |
+|-----------|---------------------|-----------------|------------------|
+| 5m | 212 en 3.5 días | ~1,832 | **~6,106** |
+| 15m | 43 en 10.4 días | ~124 | ~413 |
+
+### VEREDICTO: 5m es el executor principal; 15m complementario
+
+**5m** (EV=+0.82R, ~6100 ops/mes con 10 tokens):
+- Edge asimétrico confirmado en 3 de 3 tokens
+- Volumen masivo: 212 señales en solo 3.5 días con 3 tokens
+- LINK sorprendentemente tiene el mejor EV (+1.56R) con R:R=5.40
+- DOGE tiene el peor WR (41.2%) pero EV positivo por R:R>2
+- Supera la expectativa de 15-20 ops en 3.4 días por un factor de 10x
+
+**15m** (EV=+0.97R, ~413 ops/mes con 10 tokens):
+- Edge fuerte en SOL (60.5% WR, +0.97R EV)
+- DOGE y LINK: 0 señales pasan el EV Gate → el motor no tiene edge en 15m para esos tokens
+- Volumen mucho menor pero calidad superior donde funciona
+- Rol: complemento para SOL y tokens blue_chip/large_cap con datos densos
+
+**Decisión operativa**: 5m como executor principal para todos los tokens,
+15m como filtro complementario en tokens donde pase señales.
+
+### Archivos creados
+- `scripts/oos_portfolio_t18.py` — OOS multi-token portfolio velocity script
+
+### Commit
+```
+test: portfolio velocity OOS on 5m and 15m — proving multi-asset execution volume
 ```
