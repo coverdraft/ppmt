@@ -69,9 +69,9 @@ from ppmt.core.metadata import compute_outcome_won
 # gives the metadata real statistical grounding. SL/TP from compute_sl_tp()
 # becomes reliable because it's based on 7+ observations instead of 2.
 TIMEFRAME_ALPHA_DEFAULTS = {
-    "1m":  {"sax_alphabet_size": 3, "sax_window_size": 45},  # v0.42.0: W=45 (1h per symbol)
-    "5m":  {"sax_alphabet_size": 3, "sax_window_size": 18},  # v0.42.0: W=18 (1.5h per symbol)
-    "15m": {"sax_alphabet_size": 4, "sax_window_size": 5},
+    "1m":  {"sax_alphabet_size": 3, "sax_window_size": 60},  # v0.59.0 (TAREA 22): W=60 = N1 window (LEVEL_WINDOW_CONFIG)
+    "5m":  {"sax_alphabet_size": 3, "sax_window_size": 24},  # v0.59.0: W=24 = N1 window (LEVEL_WINDOW_CONFIG)
+    "15m": {"sax_alphabet_size": 4, "sax_window_size": 12},  # v0.59.0: W=12 = N1 window (LEVEL_WINDOW_CONFIG)
     "30m": {"sax_alphabet_size": 4, "sax_window_size": 5},
     "1h":  {"sax_alphabet_size": 3, "sax_window_size": 7},
     "4h":  {"sax_alphabet_size": 3, "sax_window_size": 10},

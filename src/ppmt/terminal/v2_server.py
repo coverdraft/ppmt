@@ -24,6 +24,8 @@ from typing import Optional
 import pandas as pd
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from ppmt.data.storage import PPMTStorage
@@ -1541,6 +1543,27 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
         _live_session_key = f"{symbol}:{timeframe}"
         _LIVE_SESSIONS.pop(_live_session_key, None)
         logger.info(f"[WS-LIVE] Session closed: {symbol}/{timeframe}")
+
+
+# ─── Static files: serve new terminal UI ─────────────────────
+# v0.59.0 (TAREA 22): Mount static/ so index.html is served at /,
+# and assets (if any) at /static/. This replaces the old React
+# terminal that required npm + Vite on port 5173.
+
+_STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+
+
+@app.get("/")
+async def serve_terminal():
+    """Serve the PPMT terminal HTML at the root URL."""
+    index_path = os.path.join(_STATIC_DIR, "index.html")
+    if os.path.exists(index_path):
+        return FileResponse(index_path)
+    return {"error": "Terminal not found — index.html missing"}
+
+
+# Mount static dir AFTER all API routes so /api/* takes precedence
+app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 
 
 # ─── Run directly ─────────────────────────────────────────────

@@ -1,7 +1,7 @@
 #!/bin/bash
 # ══════════════════════════════════════════════════════════════════════
 #  PPMT — One-Command Startup for macOS
-#  v0.58.0 · TAREA 20
+#  v0.59.0 · TAREA 22
 #
 #  Uso:
 #    bash start.sh
@@ -12,7 +12,10 @@
 #    3. Activa venv
 #    4. Instala dependencias si es necesario
 #    5. Levanta uvicorn en puerto 8000
-#    6. Imprime URL de acceso
+#    6. Sirve terminal en http://localhost:8000 (static/index.html)
+#
+#  NOTA: No se necesita npm/React. El terminal HTML se sirve
+#  directamente desde src/ppmt/terminal/static/index.html vía FastAPI.
 # ══════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
@@ -121,8 +124,10 @@ done
 
 echo ""
 echo -e "${GRN}═══════════════════════════════════════════════════${RST}"
-echo -e "${GRN}  PPMT v0.58 Running -> http://localhost:$PORT${RST}"
+echo -e "${GRN}  PPMT v0.59 Running -> http://localhost:$PORT${RST}"
 echo -e "${GRN}═══════════════════════════════════════════════════${RST}"
+echo ""
+echo -e "  ${WHT}Abre tu navegador en: http://localhost:$PORT${RST}"
 echo ""
 echo -e "${DIM}  API Health:     http://localhost:$PORT/api/health${RST}"
 echo -e "${DIM}  Risk Status:    http://localhost:$PORT/api/risk/status${RST}"
