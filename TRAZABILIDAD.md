@@ -1,7 +1,7 @@
 # TRAZABILIDAD PPMT — Estado del Proyecto
 
 > Última actualización: 2026-06-22
-> Versión actual: **v0.54.0** — TAREA 15: Fix definitivo de compute_outcome_won. Reemplazo de SL/TP=0.15% artificial por outcome direccional real durante build. Storage con soporte timeframe completo. 10 tokens × 3 timeframes reconstruidos.
+> Versión actual: **v0.55.0** — TAREA 16: Mejora de inputs SAX para 1m — volumen + anatomía de vela (body_score). N3/N4/N5 de 1m ahora usan SAXDualEncoder con α_p=3, α_v=2 y estrategia body_anatomy. 6^3=216 patrones. 10 tokens reconstruidos.
 > ⚠️ **Si eres nuevo, lee primero la sección `# 📘 GUÍA DEL MOTOR PPMT — PARA CONTINUAR EL TRABAJO` al final de este archivo (línea 9914+).** Ahí está la arquitectura, dónde empezar a leer, dónde costó más, cómo se resolvieron largos y cortos, y el estado actual.
 > Repositorio: https://github.com/coverdraft/ppmt
 > Idioma: Español
@@ -11134,4 +11134,107 @@ para capturar señal direccional real.
 ### Commit
 ```
 fix: replace artificial 0.15% SL/TP with real directional outcome during build — true predictive power unlocked
+```
+
+## v0.55.0 — TAREA 16: Mejora de inputs SAX para 1m — volumen + body_anatomy (22 jun 2026)
+
+### Contexto
+TAREA 15 reveló que el WR < 50% es genuino — los patrones SAX α=3 P=3 price-only no discriminan
+dirección. El diagnóstico adicional identificó dos features faltantes para 1m:
+1. **VOLUMEN**: Eliminado en v0.51.0 por densidad. Pero volumen detecta convicción.
+2. **ANATOMÍA DE VELA**: Una vela verde con mecha superior 2x el cuerpo es rechazo, no señal
+   alcista. SAX price-only (close-to-close) ve "subió" y no detecta la trampa.
+
+### Cambios realizados
+
+#### 1. `src/ppmt/core/sax.py` — Volumen por timeframe + estrategia body_anatomy
+
+**LEVEL_DUAL_ALPHA_TF_OVERRIDES**: Nuevo diccionario que sobreescribe la config dual-alpha
+por timeframe. Para 1m: N3/N4/N5 obtienen `{"price": 3, "volume": 2}` en vez de `volume=0`.
+Otros timeframes permanecen price-only (volume=0) para preservar densidad.
+
+- Alfabeto compuesto: α_p=3 × α_v=2 = 6 símbolos
+- Patrones: 6^3 = 216 combinaciones (vs 27 con price-only)
+- Densidad: 17,277 obs / 216 ≈ 80 obs/nodo — aceptable
+
+**Estrategia "body_anatomy"**: Nuevo strategy en SAXEncoder._extract_series():
+```python
+body_score = (close - open) / (high - low + 1e-8)
+```
+- Rango: [-1.0, +1.0] (-1=bearish puro, 0=doji/rechazo, +1=bullish puro)
+- Vela verde con mecha superior grande → score ≈ 0 (rechazo), no positivo (alcista)
+- Distribución simétrica alrededor de 0 → buena para z-score normalization
+
+**get_dual_alpha_for_level()**: Nuevo parámetro `timeframe`. Chequea overrides antes del base config.
+Soporte para nivel "n5" (antes no existía en LEVEL_DUAL_ALPHA_CONFIG).
+
+#### 2. `src/ppmt/engine/ppmt.py` — body_anatomy para 1m N3/N4/N5
+
+- `get_dual_alpha_for_level()` ahora recibe `timeframe=timeframe`
+- N3/N4/N5 usan `price_strategy="body_anatomy"` cuando `timeframe=="1m"`
+- N5 usa su propia config `_n5_dual` en vez de reusar `n3_dual`
+- Log añadido: `Per-level dual-alpha: N1=..., N2=..., N3=..., N4=... | TF=...`
+
+### PASO 3: Verificación de combinaciones
+- α_p=3, α_v=2, P=3 → 6^3 = 216 combinaciones
+- 17,277 observaciones / 216 = ~80 obs/patrón
+- Símbolos compuestos: `('a','a'), ('a','b'), ('b','a'), ('b','b'), ('c','a'), ('c','b')`
+
+### PASO 4: Limpieza + reconstrucción 1m
+- `DELETE FROM tries WHERE level IN ('n3','n4','n5') AND timeframe='1m'` — 20 tries borrados
+- 10 tokens reconstruidos en 1m (120 días × 172,800 velas)
+
+### Build stats — N3 aggregate por token (1m)
+
+| Token | N3 patterns | N3 obs | N3 WR | avg_conf |
+|-------|-------------|--------|-------|----------|
+| BTC/USDT | 216 | 17,277 | 45.7% | 0.363 |
+| ETH/USDT | 216 | 17,277 | 45.5% | 0.365 |
+| SOL/USDT | 216 | 17,277 | 46.4% | 0.368 |
+| XRP/USDT | 216 | 17,277 | 45.6% | 0.362 |
+| AVAX/USDT | 216 | 17,277 | 38.0% | 0.314 |
+| DOGE/USDT | 216 | 17,277 | 45.0% | 0.360 |
+| PEPE/USDT | 216 | 17,277 | 24.8% | 0.226 |
+| WIF/USDT | 216 | 17,277 | 21.0% | 0.203 |
+| LINK/USDT | 216 | 17,277 | 37.6% | 0.312 |
+| UNI/USDT | 216 | 17,277 | 44.6% | 0.357 |
+
+### PASO 5: OOS DOGE/USDT 1m (500 velas)
+
+| Nivel | Confidence | WR | Obs |
+|-------|-----------|-----|-----|
+| N1 | 0.4122 | 45.18% | 301 |
+| N2 | 0.2897 | 35.71% | 56 |
+| N3 | **0.3878** | **45.27%** | 148 |
+| N4 | 0.0950 | 100.00% | 1 |
+| N5 | 0.0000 | — | — |
+| **Weighted** | **0.3671** | — | — |
+
+### HALLAZGO: body_anatomy + volumen no mejoran WR agregado
+
+**WR N3 = 45.27%** (vs 46.0% con price-only v0.54.0). La anatomía de vela y el volumen
+cambian CÓMO se agrupan los patrones (mejor discriminación), pero no cambian CUÁNTO
+gana cada patrón (el outcome direccional es el mismo).
+
+Razones:
+1. body_anatomy mejora la agrupación de señales (separar rechazos de verdaderos alcistas),
+   pero el WR agregado se mantiene porque los 216 patrones más específicos tienen ~80 obs
+   cada uno vs ~640 obs con 27 patrones price-only.
+2. Volumen añade información de convicción pero el alph_size=2 es muy grueso.
+3. El WR < 50% fundamental refleja que patrones 1m de 3 símbolos no capturan suficiente
+   señal direccional independientemente de la codificación.
+
+**PEPE (24.8%) y WIF (21.0%)** tienen WR extremadamente bajo — probablemente en tendencia
+bajista fuerte durante el período de datos, donde la mayoría de patrones predicen alcista
+pero el precio sigue bajando.
+
+### Archivos modificados
+- `src/ppmt/core/sax.py` — LEVEL_DUAL_ALPHA_TF_OVERRIDES, body_anatomy strategy, get_dual_alpha_for_level(timeframe), n5 config
+- `src/ppmt/engine/ppmt.py` — timeframe en get_dual_alpha_for_level(), body_anatomy para 1m N3/N4/N5, n5 config separada
+- `scripts/oos_tarea16.py` — OOS validation script
+- `scripts/rebuild_1m_t16.py` — Rebuild 1m script
+
+### Commit
+```
+feat: enhance 1m SAX inputs with volume dimension and candle anatomy (body/wick ratio)
 ```
