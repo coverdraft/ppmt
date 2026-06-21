@@ -1459,6 +1459,30 @@ class RealtimeTrader:
 
                             risk_reward = tp_distance_pct / sl_distance_pct if sl_distance_pct > 0 else 0
 
+                            # v0.56.0 (TAREA 17): EV Gate — Expected Value filter.
+                            # The institutional test: does this signal have positive EV?
+                            # EV_Score = confidence × min(R:R, 3.0)
+                            # If EV_Score < 0.80, the signal lacks sufficient edge.
+                            # This catches high-confidence/low-R:R and low-confidence/high-R:R
+                            # signals that look promising but have negative expectancy.
+                            _ev_rr = min(risk_reward, 3.0) if risk_reward > 0 else 0.0
+                            _ev_score = boosted_confidence * _ev_rr
+                            _ev_gate_threshold = 0.80
+                            if _ev_score < _ev_gate_threshold:
+                                if result.candles_processed % 20 == 0:
+                                    console.print(
+                                        f"[dim][{cfg.symbol}] [EV GATE] REJECTED: "
+                                        f"conf={boosted_confidence:.3f}, R:R={risk_reward:.2f}, "
+                                        f"EV={_ev_score:.3f} (min {_ev_gate_threshold})[/dim]"
+                                    )
+                                continue
+                            if result.candles_processed % 50 == 0:
+                                console.print(
+                                    f"[dim][{cfg.symbol}] [EV GATE] PASSED: "
+                                    f"conf={boosted_confidence:.3f}, R:R={risk_reward:.2f}, "
+                                    f"EV={_ev_score:.3f}[/dim]"
+                                )
+
                             # v0.11.0: Get actual historical_count from matched node
                             actual_historical_count = 10
                             matched_node_for_sizing = None
