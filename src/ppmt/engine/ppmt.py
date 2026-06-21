@@ -48,7 +48,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from ppmt.core.sax import SAXEncoder, SAXDualEncoder, get_alpha_for_level, get_dual_alpha_for_level
+from ppmt.core.sax import SAXEncoder, SAXDualEncoder, get_alpha_for_level, get_dual_alpha_for_level, LEVEL_WINDOW_CONFIG, LEVEL_PATTERN_CONFIG
 from ppmt.core.trie import PPMTTrie, TrieNode, RegimePartitionedTrie
 from ppmt.core.matcher import FuzzyMatcher, MatchResult
 from ppmt.core.metadata import BlockLifecycleMetadata, compute_outcome_won
@@ -145,6 +145,30 @@ class PPMT:
                     f"Timeframe {timeframe}: α={sax_alphabet_size}, W={sax_window_size}"
                 )
 
+        # v0.48.0 (FASE 2A): Per-level window size and pattern length.
+        #
+        # Each level gets its own window_size from LEVEL_WINDOW_CONFIG (by timeframe)
+        # and its own pattern_length from LEVEL_PATTERN_CONFIG.
+        # This fixes the "N3 impossible to fill" bug on low timeframes:
+        #   1m N1 W=60 P=5 → 300 candles per pattern, N3 W=20 P=4 → 80 candles
+        #   5m N1 W=24 P=5 → 120 candles, N3 W=10 P=4 → 40 candles
+        # Fallback: if timeframe is None or not in config, use sax_window_size for all.
+        _tf_window_config = LEVEL_WINDOW_CONFIG.get(timeframe) if timeframe else None
+        if _tf_window_config is None:
+            _tf_window_config = {
+                "n1": sax_window_size,
+                "n2": sax_window_size,
+                "n3": sax_window_size,
+                "n4": sax_window_size,
+            }
+        self.pl_n1 = LEVEL_PATTERN_CONFIG["n1"]
+        self.pl_n2 = LEVEL_PATTERN_CONFIG["n2"]
+        self.pl_n3 = LEVEL_PATTERN_CONFIG["n3"]
+        self.pl_n4 = LEVEL_PATTERN_CONFIG["n4"]
+        # Backwards compat: self._pattern_length = max(pl) for callers that
+        # use a single value (e.g. buffer sizing in match_raw).
+        self._pattern_length = max(self.pl_n1, self.pl_n2, self.pl_n3, self.pl_n4)
+
         # v0.43.0: STRATIFIED SAX Dual — N1 is PRICE-ONLY.
         #
         # The key mathematical insight: volume is noise at the universal level.
@@ -178,11 +202,21 @@ class PPMT:
         n3_dual = get_dual_alpha_for_level("n3", asset_class)
         n4_dual = get_dual_alpha_for_level("n4", asset_class)
 
+        # v0.48.0 (FASE 2A): Each encoder uses its own window_size.
+        _w_n1 = _tf_window_config["n1"]
+        _w_n2 = _tf_window_config["n2"]
+        _w_n3 = _tf_window_config["n3"]
+        _w_n4 = _tf_window_config["n4"]
+        logger.info(
+            f"Per-level windows: N1={_w_n1}, N2={_w_n2}, N3={_w_n3}, N4={_w_n4} | "
+            f"Pattern lengths: N1={self.pl_n1}, N2={self.pl_n2}, N3={self.pl_n3}, N4={self.pl_n4}"
+        )
+
         # N1: PRICE-ONLY — uses SAXEncoder (no volume dimension).
         # This is the critical fix: N1 max 243 patterns → ~45 obs/node → conf > 0.6.
         self.sax_n1 = SAXEncoder(
             alphabet_size=n1_dual["price"],
-            window_size=sax_window_size,
+            window_size=_w_n1,
             strategy=sax_strategy,
         )
 
@@ -193,26 +227,26 @@ class PPMT:
             if n2_dual["volume"] == 0:
                 self.sax_n2 = SAXEncoder(
                     alphabet_size=n2_dual["price"],
-                    window_size=sax_window_size,
+                    window_size=_w_n2,
                     strategy=sax_strategy,
                 )
             else:
                 self.sax_n2 = SAXDualEncoder(
                     price_alphabet_size=n2_dual["price"],
                     volume_alphabet_size=n2_dual["volume"],
-                    window_size=sax_window_size,
+                    window_size=_w_n2,
                     price_strategy=sax_strategy,
                 )
             self.sax_n3 = SAXDualEncoder(
                 price_alphabet_size=n3_dual["price"],
                 volume_alphabet_size=n3_dual["volume"],
-                window_size=sax_window_size,
+                window_size=_w_n3,
                 price_strategy=sax_strategy,
             )
             self.sax_n4 = SAXDualEncoder(
                 price_alphabet_size=n4_dual["price"],
                 volume_alphabet_size=n4_dual["volume"],
-                window_size=sax_window_size,
+                window_size=_w_n4,
                 price_strategy=sax_strategy,
             )
         else:
@@ -222,17 +256,17 @@ class PPMT:
             n4_alpha = get_alpha_for_level("n4", asset_class, calibrated_alpha=sax_alphabet_size)
             self.sax_n2 = SAXEncoder(
                 alphabet_size=n2_alpha,
-                window_size=sax_window_size,
+                window_size=_w_n2,
                 strategy=sax_strategy,
             )
             self.sax_n3 = SAXEncoder(
                 alphabet_size=n3_alpha,
-                window_size=sax_window_size,
+                window_size=_w_n3,
                 strategy=sax_strategy,
             )
             self.sax_n4 = SAXEncoder(
                 alphabet_size=n4_alpha,
-                window_size=sax_window_size,
+                window_size=_w_n4,
                 strategy=sax_strategy,
             )
 
@@ -476,6 +510,10 @@ class PPMT:
         the per-level symbol sequences. N1 is list[str], N2/N3/N4 are
         list[tuple[str, str]] when dual_sax=True.
 
+        v0.48.0 (FASE 2A): Each level uses its own window_size, so the
+        returned lists may have DIFFERENT lengths. N1 with W=60 produces
+        fewer symbols than N3 with W=20 for the same data.
+
         This is the public API for OOS replay and real-time encoding.
         """
         return {
@@ -485,7 +523,7 @@ class PPMT:
             "n4": self._encode(self.sax_n4, df),
         }
 
-    def encode_pattern_per_level(self, df: pd.DataFrame, pattern_length: int = 5) -> dict[str, list]:
+    def encode_pattern_per_level(self, df: pd.DataFrame, pattern_length: int = None) -> dict[str, list]:
         """Encode OHLCV data and return the LAST pattern_length symbols per level.
 
         v0.47.0: Used by the learning loop to capture the exact per-level
@@ -493,18 +531,25 @@ class PPMT:
         symbol types (strings for N1/N2, tuples for N3/N4), so we return
         the last `pattern_length` symbols from each level's full encoding.
 
+        v0.48.0 (FASE 2A): Uses per-level pattern_length (self.pl_n1 etc.)
+        instead of a single global pattern_length. This means N1/N2 return
+        the last 5 symbols, while N3/N4 return the last 4.
+
         Args:
-            df: DataFrame with OHLCV columns (at least window_size * pattern_length rows)
-            pattern_length: Number of trailing symbols to return per level
+            df: DataFrame with OHLCV columns (at least max(window_size * pattern_length) rows)
+            pattern_length: DEPRECATED — ignored, per-level lengths are used instead.
+                Kept for API backwards compatibility.
 
         Returns:
             Dict with keys 'n1', 'n2', 'n3', 'n4' containing the last
-            pattern_length symbols from each level's encoding.
+            pl_* symbols from each level's encoding.
         """
         full = self.encode_all_levels(df)
         return {
-            level: syms[-pattern_length:] if len(syms) >= pattern_length else syms
-            for level, syms in full.items()
+            "n1": full["n1"][-self.pl_n1:] if len(full["n1"]) >= self.pl_n1 else full["n1"],
+            "n2": full["n2"][-self.pl_n2:] if len(full["n2"]) >= self.pl_n2 else full["n2"],
+            "n3": full["n3"][-self.pl_n3:] if len(full["n3"]) >= self.pl_n3 else full["n3"],
+            "n4": full["n4"][-self.pl_n4:] if len(full["n4"]) >= self.pl_n4 else full["n4"],
         }
 
     def build(self, df: pd.DataFrame, pattern_length: int = 5) -> int:
@@ -515,285 +560,161 @@ class PPMT:
         overlapping pattern sequences and inserts them into all
         4 Trie levels with Block Lifecycle Metadata.
 
+        v0.48.0 (FASE 2A): Each level uses its own window_size and
+        pattern_length (self.pl_n1 etc.), so levels are built independently.
+        Metadata (move_pct, won, drawdown, regime) is computed per-level
+        based on each level's own candle-to-symbol mapping.
+
         Args:
             df: OHLCV DataFrame with columns: open, high, low, close, volume
-            pattern_length: Number of SAX blocks per pattern sequence
+            pattern_length: DEPRECATED — per-level lengths from LEVEL_PATTERN_CONFIG
+                are used instead. Kept for API backwards compatibility.
 
         Returns:
-            Number of patterns inserted
+            Number of patterns inserted (sum across all levels)
         """
-        # FASE 1 Tarea 1.1: Encode with EACH level's SAX encoder.
-        #
-        # Each level has a different alphabet_size, so the same price data
-        # produces DIFFERENT symbol sequences at each level. For example:
-        #   N3 (α=5): "abcde"  (5 distinct symbols)
-        #   N1 (α=3): "abcae"  (only 3 possible symbols, so different mapping)
-        #
-        # These are DIFFERENT patterns stored in DIFFERENT tries. During match(),
-        # the current price data is re-encoded with each level's encoder.
-        #
-        # v0.43.0: N1 is now PRICE-ONLY (SAXEncoder), so symbols_n1 is a list
-        # of strings like ['a', 'b', 'c', 'a', 'b']. N2/N3/N4 use SAXDualEncoder,
-        # so they return lists of tuples like [('a','x'), ('b','y'), ...].
-        # The Trie handles both key types (str and tuple) natively.
+        # Encode with each level's SAX encoder.
+        # v0.48.0 (FASE 2A): Each level has its own window_size, so symbol
+        # lists may have DIFFERENT lengths. We build each level independently.
         symbols_n1 = self._encode(self.sax_n1, df)
         symbols_n2 = self._encode(self.sax_n2, df)
         symbols_n3 = self._encode(self.sax_n3, df)
         symbols_n4 = self._encode(self.sax_n4, df)
 
-        # Use N3's symbol count as the reference (same window_size for all levels)
-        if len(symbols_n3) < pattern_length:
-            return 0
-
-        # Create overlapping sequences
+        # Build each level independently with its own pattern_length
         count = 0
-        for i in range(len(symbols_n3) - pattern_length):
-            # Per-level patterns (each level has its own symbol sequence)
-            pattern_n1 = symbols_n1[i:i + pattern_length]
-            pattern_n2 = symbols_n2[i:i + pattern_length]
-            pattern_n3 = symbols_n3[i:i + pattern_length]
-            pattern_n4 = symbols_n4[i:i + pattern_length]
+        level_configs = [
+            ("n1", symbols_n1, self.pl_n1, self.sax_n1.window_size),
+            ("n2", symbols_n2, self.pl_n2, self.sax_n2.window_size),
+            ("n3", symbols_n3, self.pl_n3, self.sax_n3.window_size),
+            ("n4", symbols_n4, self.pl_n4, self.sax_n4.window_size),
+        ]
 
-            # Next symbol for continuation (per-level)
-            next_sym_n1 = symbols_n1[i + pattern_length] if i + pattern_length < len(symbols_n1) else None
-            next_sym_n2 = symbols_n2[i + pattern_length] if i + pattern_length < len(symbols_n2) else None
-            next_sym_n3 = symbols_n3[i + pattern_length] if i + pattern_length < len(symbols_n3) else None
-            next_sym_n4 = symbols_n4[i + pattern_length] if i + pattern_length < len(symbols_n4) else None
-
-            # v0.41.0 (FASE 2, Tarea 2.1): Next 3 symbols for forward sequences.
-            # Only populated when there are ≥3 symbols after the pattern.
-            next_3_n1 = tuple(symbols_n1[i + pattern_length : i + pattern_length + 3]) if i + pattern_length + 3 <= len(symbols_n1) else None
-            next_3_n2 = tuple(symbols_n2[i + pattern_length : i + pattern_length + 3]) if i + pattern_length + 3 <= len(symbols_n2) else None
-            next_3_n3 = tuple(symbols_n3[i + pattern_length : i + pattern_length + 3]) if i + pattern_length + 3 <= len(symbols_n3) else None
-            next_3_n4 = tuple(symbols_n4[i + pattern_length : i + pattern_length + 3]) if i + pattern_length + 3 <= len(symbols_n4) else None
-
-            # Compute metadata from the actual price data
-            # Map SAX window indices to candle indices (all levels share window_size)
-            start_candle = i * self.sax.window_size
-            end_candle = (i + pattern_length) * self.sax.window_size
-
-            if end_candle > len(df):
-                break
-
-            window_df = df.iloc[start_candle:end_candle]
-
-            # Compute move, drawdown, favorable from actual prices
-            entry_price = window_df["close"].iloc[0]
-            exit_price = window_df["close"].iloc[-1]
-            move_pct = ((exit_price - entry_price) / entry_price) * 100.0
-
-            high = window_df["high"].max()
-            low = window_df["low"].min()
-            drawdown_pct = ((low - entry_price) / entry_price) * 100.0
-            favorable_pct = ((high - entry_price) / entry_price) * 100.0
-
-            duration = len(window_df)
-
-            # v0.40.24 (P7-FaseC FIX): compute `won` using POST-pattern candles.
-            #
-            # v0.40.23 BUG: passed `window_df` (the pattern's own candles) to
-            # `compute_outcome_won`, but `simulate_first_touch` expects the
-            # candles AFTER entry, not the candles that produced the pattern.
-            # This made `won` a function of the pattern window itself —
-            # circular and meaningless. The smoke test ratios (0.58/0.62)
-            # were consistent with random classification under 0.15% floors
-            # applied to pattern-noise OHLC.
-            #
-            # v0.40.24 FIX: simulate the trade on the POST-pattern window
-            # (the next PATTERN_LEN × WINDOW candles after `end_candle`),
-            # with entry_price = close of the LAST pattern candle (≈ open
-            # of first post-pattern candle). This matches paper_trader.py
-            # live semantics (entry at next symbol after pattern detection).
-            #
-            # Note: `move_pct` (across-pattern) is UNCHANGED — it still
-            # measures close[0]→close[-1] of the pattern window. The two
-            # quantities measure different things, and that's the point:
-            #   - move_pct > 0 = "pattern looks bullish" → classified LONG
-            #   - won = "post-pattern outcome touched TP before SL"
-            # A pattern that looks bullish but loses post-pattern is exactly
-            # what P7-FaseC is designed to penalize. The mismatch is the
-            # feature, not a bug.
-            #
-            # Bootstrap floors (0.15%) still apply for young nodes
-            # (historical_count < 5); mature nodes use real SL/TP from
-            # accumulated metadata. SL/TP values themselves are derived
-            # from the pattern window (max_dd, max_fav), which is correct:
-            # "based on what this pattern USUALLY does, would the post-
-            # pattern outcome touch TP before SL?"
-            #
-            # Validation: v0.40.23-audit (re-labeled post-pattern) showed
-            # +3736pp PnL total vs P7-actual (v0.40.22) and +4297pp vs P1.
-            # v0.40.24 is the in-engine implementation of that audit.
-            #
-            # Look up existing node (if any) to read historical_count and
-            # mature SL/TP. For new patterns this returns None and the helper
-            # uses bootstrap floors.
-            #
-            # Note: we look up in trie_n3 (per-symbol) rather than N1/N2/N4.
-            # The `won` flag is a property of the OBSERVATION (this specific
-            # window of OHLC data), not of the trie it lives in — so it's
-            # correct to compute it once and pass to all 4 tries. The SL/TP
-            # used for the first-touch simulation is N3's, which is the most
-            # conservative choice (N3 has the smallest count, so it's most
-            # likely to use bootstrap floors rather than overly-wide outliers
-            # from a young universal pool). N1/N2 universal pools will have
-            # many more observations and could provide tighter SL/TP, but
-            # that's a v0.40.25+ optimization — for now we keep it simple.
-            existing_node = self.trie_n3.search(pattern_n3) if hasattr(self, 'trie_n3') else None
-            if existing_node is not None and existing_node.metadata.historical_count > 0:
-                existing_meta = existing_node.metadata
-                sl_pct_for_outcome = abs(existing_meta.max_drawdown_pct) * 1.5
-                tp_pct_for_outcome = max(
-                    abs(existing_meta.expected_move_pct),
-                    existing_meta.max_favorable_pct,
-                ) * 1.0
-                hist_count_for_outcome = existing_meta.historical_count
-            else:
-                sl_pct_for_outcome = None
-                tp_pct_for_outcome = None
-                hist_count_for_outcome = 0
-
-            # v0.40.24: post-pattern window for SL/TP simulation.
-            # Same horizon as the pattern itself (PATTERN_LEN × WINDOW candles).
-            # If we're at the end of df, post_pattern_df may be short or empty —
-            # simulate_first_touch treats timeout (no TP hit) as loss, which is
-            # the correct conservative behavior for incomplete observations.
-            post_pattern_window_size = pattern_length * self.sax.window_size
-            post_pattern_start = end_candle
-            post_pattern_end = min(end_candle + post_pattern_window_size, len(df))
-            post_pattern_df = df.iloc[post_pattern_start:post_pattern_end]
-            # Entry for the post-pattern "trade": close of the LAST pattern candle.
-            # This matches paper_trader.py:entry_price semantics (entry at next
-            # symbol open ≈ previous symbol close for low-spread candles).
-            entry_price_for_outcome = window_df["close"].iloc[-1]
-
-            won = compute_outcome_won(
-                window_df=post_pattern_df,
-                entry_price=entry_price_for_outcome,
-                move_pct=move_pct,
-                sl_pct=sl_pct_for_outcome,
-                tp_pct=tp_pct_for_outcome,
-                historical_count=hist_count_for_outcome,
-            )
-
-            # V4 FIX: Detect simple regime from price action for this window
-            # This pipes regime into insert_with_observations (was dead code before)
-            # v0.38.8: Now uses self.regime_detector.detect_simple() (delegates
-            # to RegimeDetector with RegimeThresholds.simple_*_cutoff).
-            # v0.41.0 (FASE 3, Tarea 3.2): Pass timeframe to detect_simple
-            # for calibrated regime thresholds.
-            regime = self.regime_detector.detect_simple(window_df, timeframe=self.timeframe)
-
-            # v0.40.2 FIX-1: Differentiate the 4 tries structurally.
-            #
-            # BEFORE: `for trie in [N1, N2, N3, N4]: trie.insert_with_observations(...)`
-            # inserted the SAME observation into all 4 tries → N1=N2=N3=N4
-            # structurally (CAPA 1 audit #3).
-            #
-            # v0.40.3 FIX-1B: When a storage is attached, N1/N2 are NO LONGER
-            # inserted locally. Instead, the observation is accumulated in
-            # in-memory buffers (self._n1_buffer / self._n2_buffer) which are
-            # flushed to storage's cross-asset shared pools ONCE at the end of
-            # build(). The engine's trie_n1 / trie_n2 stay empty in this mode —
-            # they get populated at match-time via set_tries() from storage.
-            #
-            # When no storage is attached (single-symbol backwards-compat mode),
-            # N1/N2 receive the observation locally — same as v0.40.2 — and
-            # remain structurally identical to N3.
-            # FASE 1 Tarea 1.1: Insert per-level patterns into per-level tries.
-            #
-            # Each level's trie gets its own symbol sequence (encoded with
-            # that level's SAX alphabet_size). The metadata (move_pct, drawdown,
-            # etc.) is derived from the SAME raw price data for all levels.
-            if self._storage is not None:
-                # FIX-1B: accumulate in in-memory buffers (fast)
-                self._n1_buffer.insert_with_observations(
-                    symbols=pattern_n1,
-                    move_pct=move_pct,
-                    drawdown_pct=drawdown_pct,
-                    favorable_pct=favorable_pct,
-                    duration=duration,
-                    won=won,
-                    next_symbol=next_sym_n1,
-                    regime=regime,
-                    next_3_symbols=next_3_n1,
+        for level_name, symbols, pl, w_size in level_configs:
+            if len(symbols) < pl:
+                logger.warning(
+                    f"build(): {level_name} has {len(symbols)} symbols, "
+                    f"need >= {pl} (pattern_length). Skipping."
                 )
-                self._n2_buffer.insert_with_observations(
-                    symbols=pattern_n2,
+                continue
+
+            for i in range(len(symbols) - pl):
+                pattern = symbols[i:i + pl]
+
+                # Next symbol for continuation
+                next_sym = symbols[i + pl] if i + pl < len(symbols) else None
+
+                # Next 3 symbols for forward sequences
+                next_3 = tuple(symbols[i + pl : i + pl + 3]) if i + pl + 3 <= len(symbols) else None
+
+                # Map symbol index to candle range
+                start_candle = i * w_size
+                end_candle = (i + pl) * w_size
+
+                if end_candle > len(df):
+                    break
+
+                window_df = df.iloc[start_candle:end_candle]
+
+                # Compute metadata from actual prices
+                entry_price = window_df["close"].iloc[0]
+                exit_price = window_df["close"].iloc[-1]
+                move_pct = ((exit_price - entry_price) / entry_price) * 100.0
+
+                high = window_df["high"].max()
+                low = window_df["low"].min()
+                drawdown_pct = ((low - entry_price) / entry_price) * 100.0
+                favorable_pct = ((high - entry_price) / entry_price) * 100.0
+
+                duration = len(window_df)
+
+                # Compute won from post-pattern candles
+                # Look up existing node for SL/TP (use N3 as reference)
+                existing_node = None
+                if level_name == "n3" and hasattr(self, 'trie_n3'):
+                    existing_node = self.trie_n3.search(pattern)
+                elif level_name == "n3":
+                    existing_node = None
+
+                if existing_node is not None and existing_node.metadata.historical_count > 0:
+                    existing_meta = existing_node.metadata
+                    sl_pct_for_outcome = abs(existing_meta.max_drawdown_pct) * 1.5
+                    tp_pct_for_outcome = max(
+                        abs(existing_meta.expected_move_pct),
+                        existing_meta.max_favorable_pct,
+                    ) * 1.0
+                    hist_count_for_outcome = existing_node.metadata.historical_count
+                else:
+                    sl_pct_for_outcome = None
+                    tp_pct_for_outcome = None
+                    hist_count_for_outcome = 0
+
+                # Post-pattern window for SL/TP simulation
+                post_pattern_window_size = pl * w_size
+                post_pattern_start = end_candle
+                post_pattern_end = min(end_candle + post_pattern_window_size, len(df))
+                post_pattern_df = df.iloc[post_pattern_start:post_pattern_end]
+                entry_price_for_outcome = window_df["close"].iloc[-1]
+
+                won = compute_outcome_won(
+                    window_df=post_pattern_df,
+                    entry_price=entry_price_for_outcome,
                     move_pct=move_pct,
-                    drawdown_pct=drawdown_pct,
-                    favorable_pct=favorable_pct,
-                    duration=duration,
-                    won=won,
-                    next_symbol=next_sym_n2,
-                    regime=regime,
-                    next_3_symbols=next_3_n2,
-                )
-                # N3 (per-symbol) — local insert only
-                self.trie_n3.insert_with_observations(
-                    symbols=pattern_n3,
-                    move_pct=move_pct,
-                    drawdown_pct=drawdown_pct,
-                    favorable_pct=favorable_pct,
-                    duration=duration,
-                    won=won,
-                    next_symbol=next_sym_n3,
-                    regime=regime,
-                    next_3_symbols=next_3_n3,
-                )
-            else:
-                # Backwards-compat (no storage): N1/N2/N3 receive locally,
-                # each with its own per-level pattern.
-                self.trie_n1.insert_with_observations(
-                    symbols=pattern_n1,
-                    move_pct=move_pct,
-                    drawdown_pct=drawdown_pct,
-                    favorable_pct=favorable_pct,
-                    duration=duration,
-                    won=won,
-                    next_symbol=next_sym_n1,
-                    regime=regime,
-                    next_3_symbols=next_3_n1,
-                )
-                self.trie_n2.insert_with_observations(
-                    symbols=pattern_n2,
-                    move_pct=move_pct,
-                    drawdown_pct=drawdown_pct,
-                    favorable_pct=favorable_pct,
-                    duration=duration,
-                    won=won,
-                    next_symbol=next_sym_n2,
-                    regime=regime,
-                    next_3_symbols=next_3_n2,
-                )
-                self.trie_n3.insert_with_observations(
-                    symbols=pattern_n3,
-                    move_pct=move_pct,
-                    drawdown_pct=drawdown_pct,
-                    favorable_pct=favorable_pct,
-                    duration=duration,
-                    won=won,
-                    next_symbol=next_sym_n3,
-                    regime=regime,
-                    next_3_symbols=next_3_n3,
+                    sl_pct=sl_pct_for_outcome,
+                    tp_pct=tp_pct_for_outcome,
+                    historical_count=hist_count_for_outcome,
                 )
 
-            # N4: insert into the regime-matched sub-trie only.
-            # RegimePartitionedTrie.insert_with_observations routes via
-            # the `regime` kwarg internally.
-            self.trie_n4.insert_with_observations(
-                symbols=pattern_n4,
-                move_pct=move_pct,
-                drawdown_pct=drawdown_pct,
-                favorable_pct=favorable_pct,
-                duration=duration,
-                won=won,
-                next_symbol=next_sym_n4,
-                regime=regime,
-                next_3_symbols=next_3_n4,
-            )
+                # Detect regime
+                regime = self.regime_detector.detect_simple(window_df, timeframe=self.timeframe)
 
-            count += 1
+                # Insert into appropriate trie
+                if level_name == "n1":
+                    if self._storage is not None:
+                        self._n1_buffer.insert_with_observations(
+                            symbols=pattern, move_pct=move_pct,
+                            drawdown_pct=drawdown_pct, favorable_pct=favorable_pct,
+                            duration=duration, won=won, next_symbol=next_sym,
+                            regime=regime, next_3_symbols=next_3,
+                        )
+                    else:
+                        self.trie_n1.insert_with_observations(
+                            symbols=pattern, move_pct=move_pct,
+                            drawdown_pct=drawdown_pct, favorable_pct=favorable_pct,
+                            duration=duration, won=won, next_symbol=next_sym,
+                            regime=regime, next_3_symbols=next_3,
+                        )
+                elif level_name == "n2":
+                    if self._storage is not None:
+                        self._n2_buffer.insert_with_observations(
+                            symbols=pattern, move_pct=move_pct,
+                            drawdown_pct=drawdown_pct, favorable_pct=favorable_pct,
+                            duration=duration, won=won, next_symbol=next_sym,
+                            regime=regime, next_3_symbols=next_3,
+                        )
+                    else:
+                        self.trie_n2.insert_with_observations(
+                            symbols=pattern, move_pct=move_pct,
+                            drawdown_pct=drawdown_pct, favorable_pct=favorable_pct,
+                            duration=duration, won=won, next_symbol=next_sym,
+                            regime=regime, next_3_symbols=next_3,
+                        )
+                elif level_name == "n3":
+                    self.trie_n3.insert_with_observations(
+                        symbols=pattern, move_pct=move_pct,
+                        drawdown_pct=drawdown_pct, favorable_pct=favorable_pct,
+                        duration=duration, won=won, next_symbol=next_sym,
+                        regime=regime, next_3_symbols=next_3,
+                    )
+                elif level_name == "n4":
+                    self.trie_n4.insert_with_observations(
+                        symbols=pattern, move_pct=move_pct,
+                        drawdown_pct=drawdown_pct, favorable_pct=favorable_pct,
+                        duration=duration, won=won, next_symbol=next_sym,
+                        regime=regime, next_3_symbols=next_3,
+                    )
+
+                count += 1
 
         self._total_patterns_built += count
 
@@ -957,16 +878,25 @@ class PPMT:
         # encoder to get the correct symbol types. This fixes the bug where
         # N3/N4 (SAXDualEncoder) expect tuples but received strings.
         # v0.47.1: Check against window_size * pattern_length (not just window_size)
-        # so we get enough symbols for a meaningful match. With only window_size rows,
-        # we'd produce just 1 symbol → no pattern match possible.
-        _min_rows = self.sax_n1.window_size * getattr(self, '_pattern_length', 5)
+        # so we get enough symbols for a meaningful match.
+        # v0.48.0 (FASE 2A): Use per-level min_rows since each level has its
+        # own window_size and pattern_length.
+        _min_rows = min(
+            self.sax_n1.window_size * self.pl_n1,
+            self.sax_n2.window_size * self.pl_n2,
+            self.sax_n3.window_size * self.pl_n3,
+            self.sax_n4.window_size * self.pl_n4,
+        )
         if recent_candles is not None and len(recent_candles) >= _min_rows:
             try:
                 encoded = self.encode_all_levels(recent_candles)
-                syms_n1 = encoded["n1"]
-                syms_n2 = encoded["n2"]
-                syms_n3 = encoded["n3"]
-                syms_n4 = encoded["n4"]
+                # v0.48.0 (FASE 2A): Truncate each level to its own pattern_length.
+                # N1/N2 use pl=5, N3/N4 use pl=4. The trie stores patterns of
+                # length pl_*, so we must match that exact length for search.
+                syms_n1 = encoded["n1"][-self.pl_n1:] if len(encoded["n1"]) >= self.pl_n1 else encoded["n1"]
+                syms_n2 = encoded["n2"][-self.pl_n2:] if len(encoded["n2"]) >= self.pl_n2 else encoded["n2"]
+                syms_n3 = encoded["n3"][-self.pl_n3:] if len(encoded["n3"]) >= self.pl_n3 else encoded["n3"]
+                syms_n4 = encoded["n4"][-self.pl_n4:] if len(encoded["n4"]) >= self.pl_n4 else encoded["n4"]
             except Exception:
                 # Fallback to current_symbols if encoding fails
                 syms_n1 = current_symbols_n1 if current_symbols_n1 is not None else current_symbols
@@ -1110,13 +1040,21 @@ class PPMT:
 
         # v0.47.0: When recent_candles is provided, encode with each level's
         # encoder to get the correct symbol types.
-        if recent_candles is not None and len(recent_candles) >= self.sax_n1.window_size:
+        # v0.48.0 (FASE 2A): Per-level min_rows and per-level truncation.
+        _min_rows = min(
+            self.sax_n1.window_size * self.pl_n1,
+            self.sax_n2.window_size * self.pl_n2,
+            self.sax_n3.window_size * self.pl_n3,
+            self.sax_n4.window_size * self.pl_n4,
+        )
+        if recent_candles is not None and len(recent_candles) >= _min_rows:
             try:
                 encoded = self.encode_all_levels(recent_candles)
-                syms_n1 = encoded["n1"]
-                syms_n2 = encoded["n2"]
-                syms_n3 = encoded["n3"]
-                syms_n4 = encoded["n4"]
+                # v0.48.0 (FASE 2A): Truncate each level to its own pattern_length.
+                syms_n1 = encoded["n1"][-self.pl_n1:] if len(encoded["n1"]) >= self.pl_n1 else encoded["n1"]
+                syms_n2 = encoded["n2"][-self.pl_n2:] if len(encoded["n2"]) >= self.pl_n2 else encoded["n2"]
+                syms_n3 = encoded["n3"][-self.pl_n3:] if len(encoded["n3"]) >= self.pl_n3 else encoded["n3"]
+                syms_n4 = encoded["n4"][-self.pl_n4:] if len(encoded["n4"]) >= self.pl_n4 else encoded["n4"]
             except Exception:
                 syms_n1 = current_symbols_n1 if current_symbols_n1 is not None else current_symbols
                 syms_n2 = current_symbols_n2 if current_symbols_n2 is not None else current_symbols

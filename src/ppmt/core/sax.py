@@ -106,6 +106,41 @@ LEVEL_DUAL_ALPHA_CONFIG: dict[str, dict[str, int]] = {
     "n4": {"price": 4, "volume": 3},
 }
 
+# v0.48.0 (FASE 2A): Per-level window size by timeframe.
+#
+# Lower timeframes produce too many symbols with large windows, making N3
+# impossible to fill (e.g. 1m W=45 → 225 candles for P=5 → few patterns
+# per symbol → sparse trie). With smaller windows for N3/N4, the local
+# tries fill faster while N1/N2 keep large windows for stable patterns.
+#
+# Window semantics: W=number of candles per SAX symbol.
+# Total candles needed for P symbols = W * P.
+#   1m N1: 60*5=300 candles (5h), N3: 20*4=80 candles (80min)
+#   5m N1: 24*5=120 candles (10h), N3: 10*4=40 candles (200min)
+#   1h N1: 8*5=40 candles (40h), N3: 8*4=32 candles (32h) — same W
+LEVEL_WINDOW_CONFIG: dict[str, dict[str, int]] = {
+    "1m":  {"n1": 60, "n2": 60, "n3": 20, "n4": 20},
+    "5m":  {"n1": 24, "n2": 24, "n3": 10, "n4": 10},
+    "15m": {"n1": 12, "n2": 12, "n3": 6,  "n4": 6},
+    "30m": {"n1": 10, "n2": 10, "n3": 8,  "n4": 8},
+    "1h":  {"n1": 8,  "n2": 8,  "n3": 8,  "n4": 8},
+    "4h":  {"n1": 10, "n2": 10, "n3": 10, "n4": 10},
+    "1d":  {"n1": 10, "n2": 10, "n3": 10, "n4": 10},
+}
+
+# v0.48.0 (FASE 2A): Per-level pattern length.
+#
+# N3/N4 use shorter patterns (4 vs 5) because:
+# 1. Local tries have fewer observations → shorter patterns = more matches
+# 2. Dual encoders (SAXDualEncoder) produce tuples → 4^4=256 vs 4^5=1024 combos
+# 3. N1/N2 keep P=5 for stability (universal pools have enough obs for 5-length)
+LEVEL_PATTERN_CONFIG: dict[str, int] = {
+    "n1": 5,
+    "n2": 5,
+    "n3": 4,
+    "n4": 4,
+}
+
 
 def get_alpha_for_level(
     level: str,
