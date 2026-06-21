@@ -1,7 +1,7 @@
 # TRAZABILIDAD PPMT — Estado del Proyecto
 
 > Última actualización: 2026-06-22
-> Versión actual: **v0.58.0** — TAREA 19: Net EV Gate (friction-aware) + Multi-TF execution con anti-overlap. Portfolio 7 streams: 244/6628 señales pasan Net EV (3.7%), WR=51.2%, R:R=3.79, Real EV=+1.46R. 0 rechazos por spread (favorable >> spread en blue_chip/large_cap).
+> Versión actual: **v0.59.0** — TAREA 22: Emergency cleanup — terminal servido vía FastAPI static files, TIMEFRAME_ALPHA_DEFAULTS sincronizado con LEVEL_WINDOW_CONFIG. DB verificada: datos correctos (N1=83K obs, N3=17K obs).
 > ⚠️ **Si eres nuevo, lee primero la sección `# 📘 GUÍA DEL MOTOR PPMT — PARA CONTINUAR EL TRABAJO` al final de este archivo (línea 9914+).** Ahí está la arquitectura, dónde empezar a leer, dónde costó más, cómo se resolvieron largos y cortos, y el estado actual.
 > Repositorio: https://github.com/coverdraft/ppmt
 > Idioma: Español
@@ -11492,4 +11492,48 @@ R:R. La diferencia es: "¿cuánto puede ganar este patrón en el mejor caso?" vs
 ### Commit
 ```
 feat: implement net EV gate (friction-aware) and multi-timeframe execution with anti-overlap
+```
+
+## v0.59.0 — TAREA 22: Emergency Cleanup — Terminal + Config Fix (22 jun 2026)
+
+### Contexto
+Al ejecutar start.sh y conectar BTC/USDT 1m, los logs mostraban W=45 (debería ser W=60),
+y el terminal no se servía — v2_server.py no tenía StaticFiles mount, por lo que
+navegar a http://localhost:8000 mostraba error en vez del index.html (945 líneas).
+
+### Diagnóstico DB
+- 75 tries en la DB, todos con timeframe correcto (1m/5m/15m)
+- N1: 243 patrones, 83,386 observaciones ✅
+- N2: 243 patrones, 28,750 observaciones ✅
+- N3 1m: 216 patrones (6^3 dual), 17,277 observaciones ✅
+- N3 5m/15m: 27 patrones (3^3 price-only) ✅
+- N4: 400 patrones, 266 observaciones ⚠️ (esperado sparse)
+- **No se necesitó nuclear rebuild** — datos correctos y poblados
+
+### Root cause del W=45 en logs
+`TIMEFRAME_ALPHA_DEFAULTS["1m"]["sax_window_size"] = 45` era el fallback legacy
+de v0.42.0. El motor siempre usó `LEVEL_WINDOW_CONFIG` (W=60 para N1), pero el
+log en `PPMT.__init__` imprimía el valor de TIMEFRAME_ALPHA_DEFAULTS, causando confusión.
+
+### Cambios realizados
+
+#### 1. `src/ppmt/terminal/v2_server.py` — Static file serving
+- Import: `FileResponse`, `StaticFiles` de FastAPI
+- Route `GET /`: sirve `static/index.html` via FileResponse
+- Mount `/static`: sirve directorio static/ para assets
+- Montado DESPUÉS de las rutas API para que `/api/*` tenga precedencia
+
+#### 2. `src/ppmt/core/profiles.py` — TIMEFRAME_ALPHA_DEFAULTS sync
+- 1m: W=45 → 60 (= N1 window en LEVEL_WINDOW_CONFIG)
+- 5m: W=18 → 24 (= N1 window en LEVEL_WINDOW_CONFIG)
+- 15m: W=5 → 12 (= N1 window en LEVEL_WINDOW_CONFIG)
+
+#### 3. `start.sh` — v0.59.0
+- Versión actualizada a v0.59.0
+- Añadido mensaje "Abre tu navegador en: http://localhost:8000"
+- Documentación: "No se necesita npm/React"
+
+### Commit
+```
+fix: emergency cleanup — point start.sh to new terminal, verify DB has post-fix data
 ```
