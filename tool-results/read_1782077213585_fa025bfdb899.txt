@@ -1,0 +1,865 @@
+     1→     1→"""
+     2→     2→PPMT MEXC Futures Executor — Real-money executor for MEXC Futures API v2.
+     3→     3→
+     4→     4→v0.44.0: ENTREGABLE 4 — Cero ccxt. Código nuevo, limpio y aislado.
+     5→     5→v0.47.0: ENTREGABLE 8 — Position heartbeat (check_position_alive).
+     6→     6→v0.48.0: ENTREGABLE 9 — Parametrized base_url for testnet support.
+     7→     7→v0.49.0: ENTREGABLE 10 — LATAM WAF bypass via api.mexc.com gateway.
+     8→     8→All HTTP requests are made directly with ``aiohttp`` (or ``requests``
+     9→     9→via ``asyncio.to_thread``). HMAC-SHA256 signatures are computed
+    10→    10→manually. No exchange abstraction library is used.
+    11→    11→
+    12→    12→MEXC Futures API v2 endpoints used:
+    13→    13→  - GET  /api/v1/contract/detail          — symbol precision info
+    14→    14→  - GET  /api/v1/position/openPositions   — check if position still alive (heartbeat)
+    15→    15→  - POST /api/v1/leverage                  — set leverage
+    16→    16→  - POST /api/v1/order/place-order        — open market order
+    17→    17→  - POST /api/v1/order/stop-order         — place SL/TP conditional orders
+    18→    18→  - DELETE /api/v1/order                   — cancel order
+    19→    19→  - POST /api/v1/order/close-position     — close position
+    20→    20→  - POST /api/v1/order/close-all-positions — kill switch
+    21→    21→
+    22→    22→Architecture:
+    23→    23→  - Symbol precision is fetched ONCE per symbol on first use (lazy init).
+    24→    24→  - Leverage is set ONCE per symbol before the first position open.
+    25→    25→  - After a market fill, two conditional orders (SL + TP) are placed
+    26→    26→    immediately. Their order IDs are stored in PositionState.exchange_meta.
+    27→    27→  - update_position cancels + replaces SL/TP orders individually.
+    28→    28→  - All API calls are wrapped in try/except with rate-limit retry (429).
+    29→    29→"""
+    30→    30→
+    31→    31→from __future__ import annotations
+    32→    32→
+    33→    33→import asyncio
+    34→    34→import hashlib
+    35→    35→import hmac
+    36→    36→import json
+    37→    37→import logging
+    38→    38→import time
+    39→    39→from datetime import datetime, timezone
+    40→    40→from typing import Any, Optional
+    41→    41→from urllib.parse import urlencode
+    42→    42→
+    43→    43→import aiohttp
+    44→    44→
+    45→    45→from ppmt.execution.interfaces import IExecutor
+    46→    46→from ppmt.execution.models import PositionState, Direction, PositionStatus
+    47→    47→
+    48→    48→logger = logging.getLogger("ppmt.execution.mexc")
+    49→    49→
+    50→    50→
+    51→    51→# ─── Helpers ──────────────────────────────────────────────────
+    52→    52→
+    53→    53→def _symbol_to_mexc(symbol: str) -> str:
+    54→    54→    """Convert PPMT symbol format to MEXC contract symbol.
+    55→    55→
+    56→    56→    "DOGE/USDT" → "DOGE_USDT"
+    57→    57→    """
+    58→    58→    return symbol.replace("/", "_")
+    59→    59→
+    60→    60→
+    61→    61→def _direction_to_side(direction: str) -> int:
+    62→    62→    """Convert PPMT direction to MEXC side integer.
+    63→    63→
+    64→    64→    MEXC API: 1 = OPEN_LONG, 2 = CLOSE_LONG,
+    65→    65→              3 = OPEN_SHORT, 4 = CLOSE_SHORT
+    66→    66→    """
+    67→    67→    if direction == "LONG":
+    68→    68→        return 1
+    69→    69→    elif direction == "SHORT":
+    70→    70→        return 3
+    71→    71→    raise ValueError(f"Invalid direction: {direction!r}")
+    72→    72→
+    73→    73→
+    74→    74→def _direction_to_close_side(direction: str) -> int:
+    75→    75→    """MEXC close-side integer matching the position direction."""
+    76→    76→    if direction == "LONG":
+    77→    77→        return 2
+    78→    78→    elif direction == "SHORT":
+    79→    79→        return 4
+    80→    80→    raise ValueError(f"Invalid direction: {direction!r}")
+    81→    81→
+    82→    82→
+    83→    83→# ─── Rate Limit Exception ────────────────────────────────────
+    84→    84→
+    85→    85→class MexcRateLimitError(Exception):
+    86→    86→    """Raised when MEXC returns HTTP 429."""
+    87→    87→    pass
+    88→    88→
+    89→    89→
+    90→    90→class MexcApiError(Exception):
+    91→    91→    """Raised when MEXC returns a non-success response body."""
+    92→    92→
+    93→    93→    def __init__(self, code: int, message: str, data: Any = None):
+    94→    94→        self.code = code
+    95→    95→        self.message = message
+    96→    96→        self.data = data
+    97→    97→        super().__init__(f"MEXC API error {code}: {message}")
+    98→    98→
+    99→    99→
+   100→   100→# ─── MexcFuturesExecutor ─────────────────────────────────────
+   101→   101→
+   102→   102→class MexcFuturesExecutor(IExecutor):
+   103→   103→    """
+   104→   104→    Real-money executor for MEXC Futures (USDT-M perpetual contracts).
+   105→   105→
+   106→   106→    Usage:
+   107→   107→        executor = MexcFuturesExecutor(api_key="...", secret="...")
+   108→   108→        # Default base_url bypasses LATAM WAF via api.mexc.com gateway:
+   109→   109→        #   https://api.mexc.com/api/v1/contract
+   110→   110→        # Direct (may be geo-blocked):
+   111→   111→        #   base_url="https://contract.mexc.com"
+   112→   112→        pos = await executor.open_position(
+   113→   113→            symbol="DOGE/USDT",
+   114→   114→            direction="LONG",
+   115→   115→            size_usdt=100.0,
+   116→   116→            metadata={"entry_price": 0.080, "expected_move_pct": 2.0},
+   117→   117→        )
+   118→   118→    """
+   119→   119→
+   120→   120→    DEFAULT_BASE_URL = "https://contract.mexc.com/"
+   121→   121→    # v0.49.0: ENTREGABLE 10 — Configurable base_url for WAF bypass.
+   122→   122→    # Default is contract.mexc.com (MEXC Futures API).
+   123→   123→    # For regions where contract.mexc.com is WAF-blocked, set:
+   124→   124→    #   base_url="https://api.mexc.com/"
+   125→   125→    # Note: api.mexc.com only mirrors read endpoints (contract/detail, ticker,
+   126→   126→    # funding_rate). Trading endpoints (order, position, leverage) are only
+   127→   127→    # served by contract.mexc.com. HMAC-SHA256 signing is validated via
+   128→   128→    # Spot API v3 on api.mexc.com (same algorithm).
+   129→   129→
+   130→   130→    def __init__(
+   131→   131→        self,
+   132→   132→        api_key: str,
+   133→   133→        secret: str,
+   134→   134→        default_leverage: int = 20,
+   135→   135→        base_url: str = "",
+   136→   136→    ):
+   137→   137→        self._api_key = api_key
+   138→   138→        self._secret = secret
+   139→   139→        self._default_leverage = default_leverage
+   140→   140→        self._base_url = base_url or self.DEFAULT_BASE_URL
+   141→   141→
+   142→   142→        # Lazy-loaded precision cache: symbol → {price_precision, quantity_precision, ...}
+   143→   143→        self._symbol_info: dict[str, dict] = {}
+   144→   144→
+   145→   145→        # Track which symbols have had leverage set
+   146→   146→        self._leverage_set: set[str] = set()
+   147→   147→
+   148→   148→        # Open positions indexed by PPMT symbol
+   149→   149→        self._positions: dict[str, PositionState] = {}
+   150→   150→
+   151→   151→        # aiohttp session (created on first use)
+   152→   152→        self._session: Optional[aiohttp.ClientSession] = None
+   153→   153→
+   154→   154→    # ─── Session management ──────────────────────────────────
+   155→   155→
+   156→   156→    async def _get_session(self) -> aiohttp.ClientSession:
+   157→   157→        if self._session is None or self._session.closed:
+   158→   158→            self._session = aiohttp.ClientSession(
+   159→   159→                base_url=self._base_url,
+   160→   160→                headers={"X-MEXC-APIKEY": self._api_key},
+   161→   161→            )
+   162→   162→        return self._session
+   163→   163→
+   164→   164→    async def close(self) -> None:
+   165→   165→        """Close the HTTP session. Call this when shutting down."""
+   166→   166→        if self._session and not self._session.closed:
+   167→   167→            await self._session.close()
+   168→   168→            self._session = None
+   169→   169→
+   170→   170→    # ─── HMAC-SHA256 signing ─────────────────────────────────
+   171→   171→
+   172→   172→    def _sign(self, params: dict[str, Any]) -> dict[str, Any]:
+   173→   173→        """
+   174→   174→        Sign request parameters with HMAC-SHA256.
+   175→   175→
+   176→   176→        MEXC Futures API v2 signature algorithm:
+   177→   177→          1. Sort all parameters by key.
+   178→   178→          2. URL-encode them into a query string.
+   179→   179→          3. Compute HMAC-SHA256 of the query string using the API secret.
+   180→   180→          4. Append the hex digest as the ``signature`` parameter.
+   181→   181→
+   182→   182→        The ``api_key`` and ``timestamp`` (in milliseconds) are added
+   183→   183→        automatically if not already present.
+   184→   184→
+   185→   185→        Args:
+   186→   186→            params: Request parameters (without signature).
+   187→   187→
+   188→   188→        Returns:
+   189→   189→            New dict with api_key, timestamp, and signature added.
+   190→   190→        """
+   191→   191→        signed = dict(params)
+   192→   192→
+   193→   193→        # Add API key if not present
+   194→   194→        if "api_key" not in signed:
+   195→   195→            signed["api_key"] = self._api_key
+   196→   196→
+   197→   197→        # Add timestamp if not present (millisecond epoch)
+   198→   198→        if "timestamp" not in signed:
+   199→   199→            signed["timestamp"] = int(time.time() * 1000)
+   200→   200→
+   201→   201→        # Sort by key and build query string
+   202→   202→        sorted_params = sorted(signed.items())
+   203→   203→        query_string = urlencode(sorted_params)
+   204→   204→
+   205→   205→        # HMAC-SHA256
+   206→   206→        signature = hmac.new(
+   207→   207→            self._secret.encode("utf-8"),
+   208→   208→            query_string.encode("utf-8"),
+   209→   209→            hashlib.sha256,
+   210→   210→        ).hexdigest()
+   211→   211→
+   212→   212→        signed["signature"] = signature
+   213→   213→        return signed
+   214→   214→
+   215→   215→    def _build_sign_string(self, params: dict[str, Any]) -> str:
+   216→   216→        """
+   217→   217→        Build the exact string that gets signed (for testing/debugging).
+   218→   218→
+   219→   219→        Returns the query string BEFORE the signature is appended.
+   220→   220→        """
+   221→   221→        tmp = dict(params)
+   222→   222→        if "api_key" not in tmp:
+   223→   223→            tmp["api_key"] = self._api_key
+   224→   224→        if "timestamp" not in tmp:
+   225→   225→            tmp["timestamp"] = int(time.time() * 1000)
+   226→   226→        sorted_params = sorted(tmp.items())
+   227→   227→        return urlencode(sorted_params)
+   228→   228→
+   229→   229→    # ─── HTTP request with rate-limit handling ───────────────
+   230→   230→
+   231→   231→    async def _request(
+   232→   232→        self,
+   233→   233→        method: str,
+   234→   234→        path: str,
+   235→   235→        params: Optional[dict] = None,
+   236→   236→        signed: bool = True,
+   237→   237→    ) -> dict:
+   238→   238→        """
+   239→   239→        Make an HTTP request to MEXC with automatic rate-limit retry.
+   240→   240→
+   241→   241→        Args:
+   242→   242→            method: HTTP method ("GET", "POST", "DELETE").
+   243→   243→            path: API path (e.g. "/api/v1/contract/detail").
+   244→   244→            params: Request parameters.
+   245→   245→            signed: Whether to sign the request.
+   246→   246→
+   247→   247→        Returns:
+   248→   248→            Parsed JSON response body.
+   249→   249→
+   250→   250→        Raises:
+   251→   251→            MexcRateLimitError: If 429 persists after one retry.
+   252→   252→            MexcApiError: If MEXC returns a non-zero code.
+   253→   253→        """
+   254→   254→        session = await self._get_session()
+   255→   255→
+   256→   256→        if params is None:
+   257→   257→            params = {}
+   258→   258→
+   259→   259→        if signed:
+   260→   260→            params = self._sign(params)
+   261→   261→
+   262→   262→        for attempt in range(2):
+   263→   263→            try:
+   264→   264→                if method == "GET":
+   265→   265→                    async with session.get(path, params=params) as resp:
+   266→   266→                        return await self._handle_response(resp)
+   267→   267→                elif method == "POST":
+   268→   268→                    async with session.post(path, params=params) as resp:
+   269→   269→                        return await self._handle_response(resp)
+   270→   270→                elif method == "DELETE":
+   271→   271→                    async with session.delete(path, params=params) as resp:
+   272→   272→                        return await self._handle_response(resp)
+   273→   273→                else:
+   274→   274→                    raise ValueError(f"Unsupported HTTP method: {method}")
+   275→   275→            except MexcRateLimitError:
+   276→   276→                if attempt == 0:
+   277→   277→                    logger.warning("[MEXC] Rate limit hit (429), retrying in 1s...")
+   278→   278→                    await asyncio.sleep(1)
+   279→   279→                    continue
+   280→   280→                raise
+   281→   281→            except aiohttp.ClientError as e:
+   282→   282→                logger.error(f"[MEXC] Connection error: {e}")
+   283→   283→                raise ConnectionError(f"MEXC unreachable: {e}") from e
+   284→   284→
+   285→   285→    async def _handle_response(self, resp: aiohttp.ClientResponse) -> dict:
+   286→   286→        """Parse response and handle errors."""
+   287→   287→        if resp.status == 429:
+   288→   288→            raise MexcRateLimitError("MEXC rate limit (429)")
+   289→   289→
+   290→   290→        # Handle non-JSON responses (WAF blocks, CDN errors, etc.)
+   291→   291→        content_type = resp.headers.get("Content-Type", "")
+   292→   292→        if "application/json" not in content_type and "text/json" not in content_type:
+   293→   293→            text = await resp.text()
+   294→   294→            if resp.status == 403:
+   295→   295→                raise ConnectionError(
+   296→   296→                    f"MEXC returned 403 Forbidden (WAF/geo-block). "
+   297→   297→                    f"The API domain may be blocked from this server. "
+   298→   298→                    f"Response: {text[:200]}"
+   299→   299→                )
+   300→   300→            raise MexcApiError(
+   301→   301→                code=resp.status,
+   302→   302→                message=f"Non-JSON response (Content-Type: {content_type}): {text[:200]}",
+   303→   303→            )
+   304→   304→
+   305→   305→        body = await resp.json(content_type=None)
+   306→   306→
+   307→   307→        # MEXC Futures API returns {"code": 0, "data": ...} on success
+   308→   308→        # and {"code": non-zero, "message": "..."} on error
+   309→   309→        code = body.get("code", -1)
+   310→   310→        if code != 0:
+   311→   311→            msg = body.get("message", body.get("msg", "Unknown error"))
+   312→   312→            raise MexcApiError(code=code, message=msg, data=body.get("data"))
+   313→   313→
+   314→   314→        return body
+   315→   315→
+   316→   316→    # ─── Symbol info (lazy) ──────────────────────────────────
+   317→   317→
+   318→   318→    async def _fetch_symbol_info(self, symbol: str) -> dict:
+   319→   319→        """
+   320→   320→        Fetch contract detail for a single symbol.
+   321→   321→
+   322→   322→        GET /api/v1/contract/detail?symbol=DOGE_USDT
+   323→   323→
+   324→   324→        Returns and caches:
+   325→   325→          - price_precision (int): Decimal places for price (e.g. 5)
+   326→   326→          - quantity_precision (int): Decimal places for quantity (e.g. 0)
+   327→   327→          - min_qty (float): Minimum order quantity
+   328→   328→          - contract_size (float): Multiplier per contract
+   329→   329→        """
+   330→   330→        mexc_sym = _symbol_to_mexc(symbol)
+   331→   331→
+   332→   332→        if mexc_sym in self._symbol_info:
+   333→   333→            return self._symbol_info[mexc_sym]
+   334→   334→
+   335→   335→        resp = await self._request(
+   336→   336→            "GET",
+   337→   337→            "/api/v1/contract/detail",
+   338→   338→            params={"symbol": mexc_sym},
+   339→   339→            signed=False,
+   340→   340→        )
+   341→   341→
+   342→   342→        data = resp.get("data", {})
+   343→   343→        info = {
+   344→   344→            "symbol": mexc_sym,
+   345→   345→            "price_precision": int(data.get("pricePrecision", 8)),
+   346→   346→            "quantity_precision": int(data.get("quantityPrecision", 0)),
+   347→   347→            "min_qty": float(data.get("minQty", 1)),
+   348→   348→            "contract_size": float(data.get("contractSize", 1)),
+   349→   349→        }
+   350→   350→
+   351→   351→        self._symbol_info[mexc_sym] = info
+   352→   352→        logger.info(
+   353→   353→            f"[MEXC] Symbol info cached: {mexc_sym} "
+   354→   354→            f"price_prec={info['price_precision']} qty_prec={info['quantity_precision']}"
+   355→   355→        )
+   356→   356→        return info
+   357→   357→
+   358→   358→    # ─── Leverage (lazy) ─────────────────────────────────────
+   359→   359→
+   360→   360→    async def _ensure_leverage(self, symbol: str, leverage: int) -> None:
+   361→   361→        """
+   362→   362→        Set leverage for a symbol if not already set.
+   363→   363→
+   364→   364→        POST /api/v1/leverage
+   365→   365→          symbol=DOGE_USDT&leverage=20&openType=2
+   366→   366→
+   367→   367→        Called once per symbol before the first position open.
+   368→   368→        """
+   369→   369→        mexc_sym = _symbol_to_mexc(symbol)
+   370→   370→        if mexc_sym in self._leverage_set:
+   371→   371→            return
+   372→   372→
+   373→   373→        await self._request(
+   374→   374→            "POST",
+   375→   375→            "/api/v1/leverage",
+   376→   376→            params={
+   377→   377→                "symbol": mexc_sym,
+   378→   378→                "leverage": leverage,
+   379→   379→                "openType": 2,  # Cross margin
+   380→   380→            },
+   381→   381→        )
+   382→   382→
+   383→   383→        self._leverage_set.add(mexc_sym)
+   384→   384→        logger.info(f"[MEXC] Leverage set: {mexc_sym} = {leverage}x (cross)")
+   385→   385→
+   386→   386→    # ─── Quantity calculation ────────────────────────────────
+   387→   387→
+   388→   388→    @staticmethod
+   389→   389→    def _calc_quantity(
+   390→   390→        size_usdt: float,
+   391→   391→        price: float,
+   392→   392→        leverage: int,
+   393→   393→        quantity_precision: int,
+   394→   394→        contract_size: float = 1.0,
+   395→   395→    ) -> float:
+   396→   396→        """
+   397→   397→        Calculate order quantity from USDT size.
+   398→   398→
+   399→   399→        quantity = (size_usdt * leverage) / (price * contract_size)
+   400→   400→
+   401→   401→        Then round down to quantity_precision decimal places.
+   402→   402→        """
+   403→   403→        raw_qty = (size_usdt * leverage) / (price * contract_size)
+   404→   404→        # Round down to precision (floor)
+   405→   405→        factor = 10 ** quantity_precision
+   406→   406→        rounded = int(raw_qty * factor) / factor
+   407→   407→        return rounded
+   408→   408→
+   409→   409→    # ─── IExecutor implementation ────────────────────────────
+   410→   410→
+   411→   411→    async def open_position(
+   412→   412→        self,
+   413→   413→        symbol: str,
+   414→   414→        direction: str,
+   415→   415→        size_usdt: float,
+   416→   416→        metadata: dict,
+   417→   417→    ) -> PositionState:
+   418→   418→        """
+   419→   419→        Open a real futures position on MEXC.
+   420→   420→
+   421→   421→        Flow:
+   422→   422→          1. Fetch symbol precision (lazy, once per symbol).
+   423→   423→          2. Set leverage (lazy, once per symbol).
+   424→   424→          3. Calculate quantity from size_usdt.
+   425→   425→          4. POST /api/v1/order/place-order (market order).
+   426→   426→          5. Immediately place SL and TP conditional orders.
+   427→   427→          6. Return PositionState with exchange_meta containing order IDs.
+   428→   428→        """
+   429→   429→        if symbol in self._positions and self._positions[symbol].status in (
+   430→   430→            "ACTIVE", "BREAK_EVEN_SECURED", "TP_EXTENDED"
+   431→   431→        ):
+   432→   432→            raise RuntimeError(f"Already in position: {symbol}")
+   433→   433→
+   434→   434→        entry_price = metadata.get("entry_price", 0.0)
+   435→   435→        expected_move_pct = metadata.get("expected_move_pct", 1.0)
+   436→   436→        leverage = metadata.get("leverage", self._default_leverage)
+   437→   437→
+   438→   438→        # 1. Fetch symbol info
+   439→   439→        info = await self._fetch_symbol_info(symbol)
+   440→   440→        mexc_sym = info["symbol"]
+   441→   441→        qty_prec = info["quantity_precision"]
+   442→   442→        price_prec = info["price_precision"]
+   443→   443→        contract_size = info["contract_size"]
+   444→   444→
+   445→   445→        # 2. Set leverage
+   446→   446→        await self._ensure_leverage(symbol, leverage)
+   447→   447→
+   448→   448→        # 3. Calculate quantity
+   449→   449→        quantity = self._calc_quantity(
+   450→   450→            size_usdt=size_usdt,
+   451→   451→            price=entry_price,
+   452→   452→            leverage=leverage,
+   453→   453→            quantity_precision=qty_prec,
+   454→   454→            contract_size=contract_size,
+   455→   455→        )
+   456→   456→
+   457→   457→        if quantity <= 0:
+   458→   458→            raise ValueError(
+   459→   459→                f"Calculated quantity is 0 for {symbol}: "
+   460→   460→                f"size={size_usdt}, price={entry_price}, leverage={leverage}"
+   461→   461→            )
+   462→   462→
+   463→   463→        # 4. Place market order
+   464→   464→        side = _direction_to_side(direction)
+   465→   465→        order_params = {
+   466→   466→            "symbol": mexc_sym,
+   467→   467→            "price": round(entry_price, price_prec),
+   468→   468→            "vol": quantity,
+   469→   469→            "side": side,
+   470→   470→            "type": 5,          # 5 = MARKET order
+   471→   471→            "openType": 2,      # 2 = CROSS margin
+   472→   472→            "positionType": 1,  # 1 = FIXED position (perpetual)
+   473→   473→        }
+   474→   474→
+   475→   475→        resp = await self._request(
+   476→   476→            "POST",
+   477→   477→            "/api/v1/order/place-order",
+   478→   478→            params=order_params,
+   479→   479→        )
+   480→   480→
+   481→   481→        order_data = resp.get("data", {})
+   482→   482→        order_id = order_data.get("orderId") or order_data.get("id")
+   483→   483→
+   484→   484→        logger.info(
+   485→   485→            f"[MEXC] Market order placed: {direction} {mexc_sym} "
+   486→   486→            f"qty={quantity} @ ~{entry_price} order_id={order_id}"
+   487→   487→        )
+   488→   488→
+   489→   489→        # 5. Calculate SL/TP prices
+   490→   490→        expected_move = entry_price * (expected_move_pct / 100.0)
+   491→   491→        if direction == "LONG":
+   492→   492→            sl_price = metadata.get("sl_price", entry_price - (expected_move * 1.2))
+   493→   493→            tp_price = metadata.get("tp_price", entry_price + (expected_move * 2.5))
+   494→   494→            cat_sl = entry_price - (expected_move * 3.0)
+   495→   495→        else:
+   496→   496→            sl_price = metadata.get("sl_price", entry_price + (expected_move * 1.2))
+   497→   497→            tp_price = metadata.get("tp_price", entry_price - (expected_move * 2.5))
+   498→   498→            cat_sl = entry_price + (expected_move * 3.0)
+   499→   499→
+   500→   500→        # Round SL/TP to price precision
+   501→   501→        sl_price = round(sl_price, price_prec)
+   502→   502→        tp_price = round(tp_price, price_prec)
+   503→   503→
+   504→   504→        # Place SL order (stop market)
+   505→   505→        sl_order_id = None
+   506→   506→        try:
+   507→   507→            sl_resp = await self._request(
+   508→   508→                "POST",
+   509→   509→                "/api/v1/order/stop-order",
+   510→   510→                params={
+   511→   511→                    "symbol": mexc_sym,
+   512→   512→                    "price": round(sl_price, price_prec),
+   513→   513→                    "vol": quantity,
+   514→   514→                    "side": _direction_to_close_side(direction),
+   515→   515→                    "type": 1,          # 1 = STOP (loss)
+   516→   516→                    "triggerPrice": round(sl_price, price_prec),
+   517→   517→                    "triggerType": 1,   # 1 = deal price
+   518→   518→                    "openType": 2,
+   519→   519→                },
+   520→   520→            )
+   521→   521→            sl_data = sl_resp.get("data", {})
+   522→   522→            sl_order_id = sl_data.get("orderId") or sl_data.get("id")
+   523→   523→            logger.info(f"[MEXC] SL order placed: {sl_price} id={sl_order_id}")
+   524→   524→        except (MexcApiError, Exception) as e:
+   525→   525→            logger.warning(f"[MEXC] SL order failed (non-fatal): {e}")
+   526→   526→
+   527→   527→        # Place TP order (take profit market)
+   528→   528→        tp_order_id = None
+   529→   529→        try:
+   530→   530→            tp_resp = await self._request(
+   531→   531→                "POST",
+   532→   532→                "/api/v1/order/stop-order",
+   533→   533→                params={
+   534→   534→                    "symbol": mexc_sym,
+   535→   535→                    "price": round(tp_price, price_prec),
+   536→   536→                    "vol": quantity,
+   537→   537→                    "side": _direction_to_close_side(direction),
+   538→   538→                    "type": 2,          # 2 = TAKE_PROFIT
+   539→   539→                    "triggerPrice": round(tp_price, price_prec),
+   540→   540→                    "triggerType": 1,
+   541→   541→                    "openType": 2,
+   542→   542→                },
+   543→   543→            )
+   544→   544→            tp_data = tp_resp.get("data", {})
+   545→   545→            tp_order_id = tp_data.get("orderId") or tp_data.get("id")
+   546→   546→            logger.info(f"[MEXC] TP order placed: {tp_price} id={tp_order_id}")
+   547→   547→        except (MexcApiError, Exception) as e:
+   548→   548→            logger.warning(f"[MEXC] TP order failed (non-fatal): {e}")
+   549→   549→
+   550→   550→        # 6. Build PositionState
+   551→   551→        predicted_path = metadata.get("predicted_path_symbols")
+   552→   552→        expected_sequence = [[s] for s in predicted_path] if predicted_path else []
+   553→   553→
+   554→   554→        position = PositionState(
+   555→   555→            symbol=symbol,
+   556→   556→            direction=direction,
+   557→   557→            status="ACTIVE",
+   558→   558→            entry_price=entry_price,
+   559→   559→            entry_time=datetime.now(timezone.utc).isoformat(),
+   560→   560→            size_usdt=size_usdt,
+   561→   561→            current_sl=sl_price,
+   562→   562→            current_tp=tp_price,
+   563→   563→            catastrophic_sl=round(cat_sl, price_prec),
+   564→   564→            expected_sequence=expected_sequence,
+   565→   565→            sequence_index=0,
+   566→   566→            exchange_meta={
+   567→   567→                "mexc_symbol": mexc_sym,
+   568→   568→                "order_id": order_id,
+   569→   569→                "sl_order_id": sl_order_id,
+   570→   570→                "tp_order_id": tp_order_id,
+   571→   571→                "quantity": quantity,
+   572→   572→                "leverage": leverage,
+   573→   573→                "price_precision": price_prec,
+   574→   574→                "quantity_precision": qty_prec,
+   575→   575→            },
+   576→   576→        )
+   577→   577→
+   578→   578→        self._positions[symbol] = position
+   579→   579→        return position
+   580→   580→
+   581→   581→    async def update_position(
+   582→   582→        self,
+   583→   583→        position: PositionState,
+   584→   584→        new_sl: Optional[float] = None,
+   585→   585→        new_tp: Optional[float] = None,
+   586→   586→    ) -> bool:
+   587→   587→        """
+   588→   588→        Update SL/TP by cancelling old conditional orders and placing new ones.
+   589→   589→
+   590→   590→        Golden rule: If cancellation fails (order already filled or triggered),
+   591→   591→        we log the error and return False — we do NOT crash.
+   592→   592→        """
+   593→   593→        if not position.exchange_meta:
+   594→   594→            logger.warning("[MEXC] update_position: no exchange_meta, cannot update")
+   595→   595→            return False
+   596→   596→
+   597→   597→        mexc_sym = position.exchange_meta.get("mexc_symbol", "")
+   598→   598→        quantity = position.exchange_meta.get("quantity", 0)
+   599→   599→        price_prec = position.exchange_meta.get("price_precision", 8)
+   600→   600→        direction = position.direction
+   601→   601→        success = True
+   602→   602→
+   603→   603→        # Update SL
+   604→   604→        if new_sl is not None and new_sl != position.current_sl:
+   605→   605→            old_sl_id = position.exchange_meta.get("sl_order_id")
+   606→   606→            if old_sl_id:
+   607→   607→                try:
+   608→   608→                    await self._request(
+   609→   609→                        "DELETE",
+   610→   610→                        "/api/v1/order",
+   611→   611→                        params={"symbol": mexc_sym, "orderId": old_sl_id},
+   612→   612→                    )
+   613→   613→                    logger.info(f"[MEXC] Old SL order cancelled: {old_sl_id}")
+   614→   614→                except MexcApiError as e:
+   615→   615→                    logger.warning(f"[MEXC] SL cancel failed (may be filled): {e}")
+   616→   616→                    success = False
+   617→   617→
+   618→   618→            if success:
+   619→   619→                try:
+   620→   620→                    sl_resp = await self._request(
+   621→   621→                        "POST",
+   622→   622→                        "/api/v1/order/stop-order",
+   623→   623→                        params={
+   624→   624→                            "symbol": mexc_sym,
+   625→   625→                            "price": round(new_sl, price_prec),
+   626→   626→                            "vol": quantity,
+   627→   627→                            "side": _direction_to_close_side(direction),
+   628→   628→                            "type": 1,
+   629→   629→                            "triggerPrice": round(new_sl, price_prec),
+   630→   630→                            "triggerType": 1,
+   631→   631→                            "openType": 2,
+   632→   632→                        },
+   633→   633→                    )
+   634→   634→                    sl_data = sl_resp.get("data", {})
+   635→   635→                    new_sl_id = sl_data.get("orderId") or sl_data.get("id")
+   636→   636→                    position.exchange_meta["sl_order_id"] = new_sl_id
+   637→   637→                    position.current_sl = round(new_sl, price_prec)
+   638→   638→                    logger.info(f"[MEXC] New SL placed: {new_sl} id={new_sl_id}")
+   639→   639→                except MexcApiError as e:
+   640→   640→                    logger.warning(f"[MEXC] New SL placement failed: {e}")
+   641→   641→                    success = False
+   642→   642→
+   643→   643→        # Update TP
+   644→   644→        if new_tp is not None and new_tp != position.current_tp:
+   645→   645→            old_tp_id = position.exchange_meta.get("tp_order_id")
+   646→   646→            if old_tp_id:
+   647→   647→                try:
+   648→   648→                    await self._request(
+   649→   649→                        "DELETE",
+   650→   650→                        "/api/v1/order",
+   651→   651→                        params={"symbol": mexc_sym, "orderId": old_tp_id},
+   652→   652→                    )
+   653→   653→                    logger.info(f"[MEXC] Old TP order cancelled: {old_tp_id}")
+   654→   654→                except MexcApiError as e:
+   655→   655→                    logger.warning(f"[MEXC] TP cancel failed (may be filled): {e}")
+   656→   656→                    success = False
+   657→   657→
+   658→   658→            if success:
+   659→   659→                try:
+   660→   660→                    tp_resp = await self._request(
+   661→   661→                        "POST",
+   662→   662→                        "/api/v1/order/stop-order",
+   663→   663→                        params={
+   664→   664→                            "symbol": mexc_sym,
+   665→   665→                            "price": round(new_tp, price_prec),
+   666→   666→                            "vol": quantity,
+   667→   667→                            "side": _direction_to_close_side(direction),
+   668→   668→                            "type": 2,
+   669→   669→                            "triggerPrice": round(new_tp, price_prec),
+   670→   670→                            "triggerType": 1,
+   671→   671→                            "openType": 2,
+   672→   672→                        },
+   673→   673→                    )
+   674→   674→                    tp_data = tp_resp.get("data", {})
+   675→   675→                    new_tp_id = tp_data.get("orderId") or tp_data.get("id")
+   676→   676→                    position.exchange_meta["tp_order_id"] = new_tp_id
+   677→   677→                    position.current_tp = round(new_tp, price_prec)
+   678→   678→                    logger.info(f"[MEXC] New TP placed: {new_tp} id={new_tp_id}")
+   679→   679→                except MexcApiError as e:
+   680→   680→                    logger.warning(f"[MEXC] New TP placement failed: {e}")
+   681→   681→                    success = False
+   682→   682→
+   683→   683→        return success
+   684→   684→
+   685→   685→    async def close_position(
+   686→   686→        self,
+   687→   687→        position: PositionState,
+   688→   688→        reason: str,
+   689→   689→    ) -> PositionState:
+   690→   690→        """
+   691→   691→        Close a specific position on MEXC.
+   692→   692→
+   693→   693→        1. Cancel pending SL/TP orders.
+   694→   694→        2. POST /api/v1/order/close-position with the symbol.
+   695→   695→        """
+   696→   696→        if not position.exchange_meta:
+   697→   697→            raise RuntimeError("No exchange_meta — cannot close position")
+   698→   698→
+   699→   699→        mexc_sym = position.exchange_meta.get("mexc_symbol", "")
+   700→   700→
+   701→   701→        # Cancel SL
+   702→   702→        old_sl_id = position.exchange_meta.get("sl_order_id")
+   703→   703→        if old_sl_id:
+   704→   704→            try:
+   705→   705→                await self._request(
+   706→   706→                    "DELETE",
+   707→   707→                    "/api/v1/order",
+   708→   708→                    params={"symbol": mexc_sym, "orderId": old_sl_id},
+   709→   709→                )
+   710→   710→            except MexcApiError as e:
+   711→   711→                logger.warning(f"[MEXC] SL cancel on close (may be filled): {e}")
+   712→   712→
+   713→   713→        # Cancel TP
+   714→   714→        old_tp_id = position.exchange_meta.get("tp_order_id")
+   715→   715→        if old_tp_id:
+   716→   716→            try:
+   717→   717→                await self._request(
+   718→   718→                    "DELETE",
+   719→   719→                    "/api/v1/order",
+   720→   720→                    params={"symbol": mexc_sym, "orderId": old_tp_id},
+   721→   721→                )
+   722→   722→            except MexcApiError as e:
+   723→   723→                logger.warning(f"[MEXC] TP cancel on close (may be filled): {e}")
+   724→   724→
+   725→   725→        # Close position
+   726→   726→        resp = await self._request(
+   727→   727→            "POST",
+   728→   728→            "/api/v1/order/close-position",
+   729→   729→            params={
+   730→   730→                "symbol": mexc_sym,
+   731→   731→                "side": _direction_to_close_side(position.direction),
+   732→   732→            },
+   733→   733→        )
+   734→   734→
+   735→   735→        close_data = resp.get("data", {})
+   736→   736→        close_price = float(close_data.get("price", position.entry_price))
+   737→   737→
+   738→   738→        # Update position
+   739→   739→        position.close_price = close_price
+   740→   740→        position.close_reason = reason
+   741→   741→        position.status = reason
+   742→   742→
+   743→   743→        if position.direction == "LONG":
+   744→   744→            position.pnl_pct = ((close_price - position.entry_price) / position.entry_price) * 100.0
+   745→   745→        else:
+   746→   746→            position.pnl_pct = ((position.entry_price - close_price) / position.entry_price) * 100.0
+   747→   747→
+   748→   748→        position.pnl_usdt = position.size_usdt * (position.pnl_pct / 100.0)
+   749→   749→
+   750→   750→        logger.info(
+   751→   751→            f"[MEXC] Position closed: {mexc_sym} {reason} @ {close_price} "
+   752→   752→            f"PnL={position.pnl_pct:+.2f}%"
+   753→   753→        )
+   754→   754→
+   755→   755→        # Remove from active positions
+   756→   756→        self._positions.pop(position.symbol, None)
+   757→   757→        return position
+   758→   758→
+   759→   759→    async def close_all_positions(self) -> bool:
+   760→   760→        """
+   761→   761→        Kill switch — close ALL open positions via MEXC bulk endpoint.
+   762→   762→
+   763→   763→        POST /api/v1/order/close-all-positions
+   764→   764→        """
+   765→   765→        all_success = True
+   766→   766→        for symbol, pos in list(self._positions.items()):
+   767→   767→            if pos.status in ("ACTIVE", "BREAK_EVEN_SECURED", "TP_EXTENDED"):
+   768→   768→                try:
+   769→   769→                    await self.close_position(pos, "CLOSED_KILL_SWITCH")
+   770→   770→                except Exception as e:
+   771→   771→                    logger.error(f"[MEXC] Kill switch failed for {symbol}: {e}")
+   772→   772→                    all_success = False
+   773→   773→        return all_success
+   774→   774→
+   775→   775→    # ─── Position heartbeat (exchange sync) ────────────────
+   776→   776→
+   777→   777→    async def check_position_alive(self, symbol: str) -> Optional[dict]:
+   778→   778→        """
+   779→   779→        Check whether a position for *symbol* is still open on MEXC.
+   780→   780→
+   781→   781→        Calls GET /api/v1/position/openPositions (signed) and filters
+   782→   782→        by the MEXC contract symbol. Returns None if no position exists
+   783→   783→        on the exchange, or a dict with 'symbol', 'unrealisedPnl',
+   784→   784→        'markPrice', etc. if it does.
+   785→   785→
+   786→   786→        This is the heartbeat that keeps local PositionState in sync
+   787→   787→        with the real MEXC position. If the exchange closed the
+   788→   788→        position (SL/TP triggered physically), this method lets us
+   789→   789→        detect it before the Walk-Forward logic operates on stale state.
+   790→   790→        """
+   791→   791→        mexc_sym = _symbol_to_mexc(symbol)
+   792→   792→
+   793→   793→        try:
+   794→   794→            resp = await self._request(
+   795→   795→                "GET",
+   796→   796→                "/api/v1/position/openPositions",
+   797→   797→                params={},  # no extra params — returns all open positions
+   798→   798→                signed=True,
+   799→   799→            )
+   800→   800→            positions = resp.get("data", [])
+   801→   801→            if not isinstance(positions, list):
+   802→   802→                return None
+   803→   803→
+   804→   804→            for p in positions:
+   805→   805→                if p.get("symbol") == mexc_sym:
+   806→   806→                    return p  # Position IS alive on MEXC
+   807→   807→
+   808→   808→            return None  # Symbol not found → MEXC closed it
+   809→   809→
+   810→   810→        except Exception as e:
+   811→   811→            logger.warning(f"[MEXC] check_position_alive failed: {e}")
+   812→   812→            # Return a sentinel to indicate "unknown" — don't close
+   813→   813→            # the local position based on a failed API call.
+   814→   814→            return {"_error": True, "message": str(e)}
+   815→   815→
+   816→   816→    # ─── Test helpers (expose internals for unit testing) ─────
+   817→   817→
+   818→   818→    def build_open_order_payload(
+   819→   819→        self,
+   820→   820→        symbol: str,
+   821→   821→        direction: str,
+   822→   822→        size_usdt: float,
+   823→   823→        entry_price: float,
+   824→   824→        leverage: int,
+   825→   825→        quantity_precision: int,
+   826→   826→        price_precision: int,
+   827→   827→        contract_size: float = 1.0,
+   828→   828→    ) -> dict[str, Any]:
+   829→   829→        """
+   830→   830→        Build the place-order payload WITHOUT sending it.
+   831→   831→
+   832→   832→        Used for testing to verify correct quantity rounding,
+   833→   833→        field naming, and signature generation.
+   834→   834→        """
+   835→   835→        mexc_sym = _symbol_to_mexc(symbol)
+   836→   836→        quantity = self._calc_quantity(
+   837→   837→            size_usdt=size_usdt,
+   838→   838→            price=entry_price,
+   839→   839→            leverage=leverage,
+   840→   840→            quantity_precision=quantity_precision,
+   841→   841→            contract_size=contract_size,
+   842→   842→        )
+   843→   843→        side = _direction_to_side(direction)
+   844→   844→
+   845→   845→        payload = {
+   846→   846→            "symbol": mexc_sym,
+   847→   847→            "price": round(entry_price, price_precision),
+   848→   848→            "vol": quantity,
+   849→   849→            "side": side,
+   850→   850→            "type": 5,          # MARKET
+   851→   851→            "openType": 2,      # CROSS margin
+   852→   852→            "positionType": 1,  # FIXED (perpetual)
+   853→   853→        }
+   854→   854→
+   855→   855→        # Sign it
+   856→   856→        signed = self._sign(payload)
+   857→   857→
+   858→   858→        return {
+   859→   859→            "payload": payload,
+   860→   860→            "signed_params": signed,
+   861→   861→            "sign_string": self._build_sign_string(payload),
+   862→   862→            "quantity": quantity,
+   863→   863→            "mexc_symbol": mexc_sym,
+   864→   864→        }
+   865→   865→
