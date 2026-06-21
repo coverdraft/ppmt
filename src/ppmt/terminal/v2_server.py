@@ -193,10 +193,21 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
         if n1 or n2 or n3:
             # N4 may be None — keep the default RegimePartitionedTrie instead
             from ppmt.core.trie import PPMTTrie, RegimePartitionedTrie
+            # v0.49.0 (FASE 3 BUG 3): DO NOT fall back to engine.trie_n1/n2 —
+            # those are empty in storage mode and would mask a missing shared pool.
+            # Use empty tries + WARNING instead (same as realtime.py FIX-1B).
+            _n1 = n1 if n1 is not None else None
+            _n2 = n2 if n2 is not None else None
+            if _n1 is None:
+                _n1 = PPMTTrie(name="universal_empty")
+                logger.warning(f"[WS] N1 universal pool not found for {symbol}. Using empty trie — confidence will be 0.")
+            if _n2 is None:
+                _n2 = PPMTTrie(name=f"class_empty:{asset_class}")
+                logger.warning(f"[WS] N2 class pool not found for {asset_class}. Using empty trie — confidence will be 0.")
             engine.set_tries(
-                trie_n1=n1 or engine.trie_n1,
-                trie_n2=n2 or engine.trie_n2,
-                trie_n3=n3 or engine.trie_n3,
+                trie_n1=_n1,
+                trie_n2=_n2,
+                trie_n3=n3 or PPMTTrie(name="n3_empty"),
                 trie_n4=n4 if n4 is not None else engine.trie_n4,
             )
             logger.info(f"[WS] Tries injected into engine — Transfer Learning ACTIVE")
@@ -212,7 +223,11 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
         return
 
     # ─── 2. Initialize PaperExecutor (via IExecutor interface) ──
+    # v0.49.0 (FASE 3 BUG 2): Ensure clean state on new WS session.
+    # Previously, if a session restarted, stale position data from
+    # a prior session could leak through. Now we explicitly reset.
     executor: IExecutor = PaperExecutor(capital_usdt=100.0)
+    executor._position = None  # Force FLAT state
 
     # ─── 3. Initialize Exchange Poller ────────────────────────
     from ppmt.engine.realtime import _DirectPollExchange
@@ -385,7 +400,7 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                         _last_best_level = best_level
                         logger.info(
                             f"[WS] Active path ({best_level}): {active_path_ids} "
-                            f"conf={best_match.node.metadata.confidence:.3f if best_match.node.metadata else 0.0}"
+                            f"conf={f'{best_match.node.metadata.confidence:.3f}' if best_match.node.metadata else '0.000'}"
                         )
 
                     n1_conf = result.n1_confidence
@@ -609,6 +624,7 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
         # ── MOCK MODE: Skip auth entirely, use PaperExecutor ──
         logger.info("[WS-LIVE-MOCK] Using PaperExecutor (Mock Live Test mode)")
         executor: IExecutor = PaperExecutor(capital_usdt=allocated_usdt)
+        executor._position = None  # v0.49.0 (FASE 3 BUG 2): Force clean state
 
         # Still send auth_ok so the frontend proceeds to config
         await websocket.send_json({"type": "auth_ok"})
@@ -717,11 +733,20 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
         logger.info(f"[WS-LIVE] Loaded N1: {n1c} N2: {n2c} N3: {n3c} N4: {n4c}")
 
         if n1 or n2 or n3:
-            from ppmt.core.trie import RegimePartitionedTrie
+            from ppmt.core.trie import PPMTTrie, RegimePartitionedTrie
+            # v0.49.0 (FASE 3 BUG 3): Same fix as paper_live_websocket.
+            _n1 = n1 if n1 is not None else None
+            _n2 = n2 if n2 is not None else None
+            if _n1 is None:
+                _n1 = PPMTTrie(name="universal_empty")
+                logger.warning(f"[WS-LIVE] N1 universal pool not found for {symbol}. Using empty trie.")
+            if _n2 is None:
+                _n2 = PPMTTrie(name=f"class_empty:{asset_class}")
+                logger.warning(f"[WS-LIVE] N2 class pool not found for {asset_class}. Using empty trie.")
             engine.set_tries(
-                trie_n1=n1 or engine.trie_n1,
-                trie_n2=n2 or engine.trie_n2,
-                trie_n3=n3 or engine.trie_n3,
+                trie_n1=_n1,
+                trie_n2=_n2,
+                trie_n3=n3 or PPMTTrie(name="n3_empty"),
                 trie_n4=n4 if n4 is not None else engine.trie_n4,
             )
     except Exception as e:

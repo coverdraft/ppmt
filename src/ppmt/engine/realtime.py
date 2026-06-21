@@ -80,6 +80,11 @@ except ImportError:
 
 console = Console()
 
+# v0.49.0 (FASE 3): Shared BTC Price Cache for N5 context.
+# Populated when BTC/USDT candles arrive, consumed by altcoins
+# to feed match_raw(btc_recent_candles=...) for N5 trie matching.
+_BTC_PRICE_CACHE: dict = {"closes": [], "last_update_ts": 0}
+
 
 # ============================================================
 # v0.34.0: TF-aware recalibration interval
@@ -1890,6 +1895,17 @@ class RealtimeTrader:
         current_low = candle.low
         current_time = str(candle.timestamp)
 
+        # v0.49.0 (FASE 3 TAREA 7B): Feed global BTC price cache.
+        # When this candle belongs to BTC/USDT, we append the close
+        # to the shared cache so that altcoins running on the same
+        # timeframe can read BTC context for N5 matching.
+        if getattr(cfg, 'symbol', '') == "BTC/USDT":
+            _BTC_PRICE_CACHE["closes"].append(current_price)
+            _BTC_PRICE_CACHE["last_update_ts"] = time.time()
+            # Keep only the last 100 elements (N5 needs 20, 100 gives margin)
+            if len(_BTC_PRICE_CACHE["closes"]) > 100:
+                _BTC_PRICE_CACHE["closes"] = _BTC_PRICE_CACHE["closes"][-100:]
+
         # Update ATR tracking
         recent_prices.append(current_price)
         recent_highs.append(current_high)
@@ -2137,10 +2153,32 @@ class RealtimeTrader:
                             })
                     except Exception:
                         _recent_df = None
+
+                    # v0.49.0 (FASE 3 TAREA 7C): Build BTC mini-DataFrame
+                    # from the global cache for N5 matching. Only done for
+                    # 1m timeframe on non-BTC symbols when the cache has
+                    # enough data (≥20 closes for _get_btc_context).
+                    _btc_recent_df = None
+                    _tf = getattr(cfg, 'timeframe', '')
+                    _sym = getattr(cfg, 'symbol', '')
+                    if _tf == "1m" and _sym != "BTC/USDT" and len(_BTC_PRICE_CACHE["closes"]) >= 20:
+                        try:
+                            _btc_closes = _BTC_PRICE_CACHE["closes"][-20:]
+                            _btc_recent_df = pd.DataFrame({
+                                'close': _btc_closes,
+                                'open': _btc_closes,
+                                'high': _btc_closes,
+                                'low': _btc_closes,
+                                'volume': [0] * len(_btc_closes),
+                            })
+                        except Exception:
+                            _btc_recent_df = None
+
                     ppmt_result = ppmt_engine.match_raw(
                         current_symbols=current_symbols,
                         current_price=current_price,
                         recent_candles=_recent_df,
+                        btc_recent_candles=_btc_recent_df,
                     )
                     weighted_confidence = ppmt_result.weighted_confidence
 
@@ -2545,23 +2583,42 @@ class RealtimeTrader:
         trie_n4 = all_tries["n4"]
 
         if trie_n3 is None:
-            # v0.39.3: Surface clear error to state_callback so the dashboard
-            # can show WHY this session is dead instead of silently returning.
-            # Previously the session would just become STOPPED with no reason,
-            # leaving the user to guess why "bot not operating".
-            _msg = (f"No Trie for {cfg.symbol} — run Validate or Build first. "
-                    f"Auto-build may have failed (check data ingestion).")
-            console.print(f"[red]{_msg}[/red]")
+            # v0.49.0 (FASE 3 TAREA 8): Cold Start for new tokens.
+            # Instead of crashing, operate with shared N1/N2 and an
+            # empty N3 that will learn from live trades. The engine
+            # runs with lower confidence but doesn't die.
+            console.print(f"[yellow][COLD START] {cfg.symbol} has no N3 trie. Loading shared N1/N2...[/yellow]")
+
+            # Reload shared pools explicitly
+            all_tries_cold = storage.load_all_tries(cfg.symbol, asset_class=info.asset_class)
+            trie_n1 = all_tries_cold.get("n1")
+            trie_n2 = all_tries_cold.get("n2")
+
+            if trie_n1 is None:
+                trie_n1 = PPMTTrie(name="universal_empty")
+                console.print("[yellow]  N1 universal pool empty — using empty trie[/yellow]")
+            else:
+                console.print(f"[green]  N1 loaded: {trie_n1.pattern_count} patterns[/green]")
+
+            if trie_n2 is None:
+                trie_n2 = PPMTTrie(name=f"class_empty:{info.asset_class}")
+                console.print(f"[yellow]  N2 class pool ({info.asset_class}) empty — using empty trie[/yellow]")
+            else:
+                console.print(f"[green]  N2 loaded: {trie_n2.pattern_count} patterns[/green]")
+
+            trie_n3 = PPMTTrie(name="n3_cold_start")
+            trie_n4 = RegimePartitionedTrie(name=f"per_asset_regime:{cfg.symbol}")
+            console.print(f"[cyan][COLD START] {cfg.symbol} operating with shared N1/N2. N3 will learn from live trades.[/cyan]")
+
+            # Notify dashboard (non-fatal — session continues)
             try:
                 self._update_terminal_state(
-                    is_running=False,
-                    websocket_status="error",
-                    error=_msg,
+                    is_running=True,
+                    websocket_status="cold_start",
+                    error=f"COLD START: {cfg.symbol} has no N3, using shared N1/N2",
                 )
             except Exception:
                 pass
-            storage.close()
-            return RealtimeResult(mode="live", symbol=cfg.symbol, timeframe=cfg.timeframe)
 
         trie = trie_n3
         trie.propagate_metadata()

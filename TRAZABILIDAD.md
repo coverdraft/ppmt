@@ -1,7 +1,7 @@
 # TRAZABILIDAD PPMT — Estado del Proyecto
 
-> Última actualización: 2026-06-20
-> Versión actual: **v0.43.1** — N1+N2 PRICE ONLY (α=3, 243 max patterns), N3/N4 SAX Dual. PEPE OOS weighted confidence 0.463 > 0.40 ✅ Motor CERRADO
+> Última actualización: 2026-06-21
+> Versión actual: **v0.49.0** — FASE 3: BTC feed N5, Cold Start, v2_server fixes, pipeline build inicial. N1+N2 price-only, N3/N4/N5 SAX Dual.
 > ⚠️ **Si eres nuevo, lee primero la sección `# 📘 GUÍA DEL MOTOR PPMT — PARA CONTINUAR EL TRABAJO` al final de este archivo (línea 9914+).** Ahí está la arquitectura, dónde empezar a leer, dónde costó más, cómo se resolvieron largos y cortos, y el estado actual.
 > Repositorio: https://github.com/coverdraft/ppmt
 > Idioma: Español
@@ -10907,3 +10907,63 @@ persistidos en SQLite para DOGEUSDT. Para señales reales se necesita:
 1. Ejecutar `bulk_ingest.py` o `download_90d.py` para poblar OHLCV
 2. Ejecutar `PaperTrader` para construir tries N1-N4
 3. Los tries se persisten en `~/.ppmt/ppmt.db` y se cargan automáticamente
+
+---
+
+## v0.49.0 — FASE 3: BTC Feed, Cold Start, Data Pipeline (21 jun 2026)
+
+> Versión actual: **v0.49.0** — N5 con BTC feed real, Cold Start para tokens nuevos, v2_server fixes, pipeline de build inicial.
+
+### Cambios principales
+
+#### TAREA 7: Shared BTC Price Cache para N5
+- **Problema**: N5 fue implementado en FASE 2B pero era INÚTIL porque realtime.py no le pasaba precios de BTC a los altcoins.
+- **Solución**: Caché global `_BTC_PRICE_CACHE` que se alimenta cuando `cfg.symbol == "BTC/USDT"` en `process_new_candle()`.
+- Archivo: `src/ppmt/engine/realtime.py`
+  - `_BTC_PRICE_CACHE = {"closes": [], "last_update_ts": 0}` — módulo-level, compartido entre sesiones.
+  - PASO 7B: Si `cfg.symbol == "BTC/USDT"`, append close y mantener últimos 100 elementos.
+  - PASO 7C: Si `timeframe == "1m"` y `symbol != "BTC/USDT"` y `len(closes) >= 20`, construir mini DataFrame y pasar como `btc_recent_candles` a `match_raw()`.
+
+#### TAREA 8: Cold Start para Tokens Nuevos en Live
+- **Problema**: Si un token nuevo entraba en live sin trie N3, el sistema crasheaba y retornaba `RealtimeResult` vacío.
+- **Solución**: En vez de crashear, operar con N1/N2 compartidos + N3 vacío. Confianza baja pero el motor no muere.
+- Archivo: `src/ppmt/engine/realtime.py`
+  - Cargar N1/N2 con `storage.load_all_tries()` → si None, crear tries vacíos.
+  - N3 = `PPMTTrie(name="n3_cold_start")`, N4 = `RegimePartitionedTrie`.
+  - Log: `[COLD START] {symbol} operating with shared N1/N2. N3 will learn from live trades.`
+  - Dashboard: `websocket_status="cold_start"` (no-fatal).
+
+#### TAREA 9: Fix v2_server.py Bugs
+- **BUG 1** (Format string): `f"conf={value:.3f if condition else 0.0}"` → f-string precedence error. Corregido a `f"conf={f'{value:.3f}' if condition else '0.000'}"`.
+- **BUG 2** (Fake operation): Al iniciar nueva sesión WS, `executor._position = None` para forzar FLAT y limpiar datos de sesiones anteriores.
+- **BUG 3** (Fallback): `n1 or engine.trie_n1` → reemplazado con trie vacío + WARNING (igual que realtime.py FIX-1B). Aplicado en ambas funciones: `paper_live_websocket` y `live_trading_websocket`.
+
+#### TAREA 10: Data Pipeline y Build Secuencial
+- **Problema**: NO HAY DATA. Todos los arreglos del motor no sirven sin datos reales.
+- **Solución**: Script `scripts/build_initial_portfolio.py` que:
+  - 10 tokens (BTC, ETH, SOL, XRP, AVAX, DOGE, PEPE, WIF, LINK, UNI)
+  - 3 timeframes (1m=120d, 5m=180d, 15m=180d)
+  - Descarga paginada desde Binance API con rate limiting
+  - Build secuencial con `PPMT(symbol, timeframe).attach_storage(storage).build(df)`
+  - BTC primero → pobla N1 universal + N2 blue_chip
+  - Verificación final: N1 > 5000, N2 por clase > 1000
+- **Uso**: `python scripts/build_initial_portfolio.py`
+
+### Verificaciones
+```bash
+# Confirmar _BTC_PRICE_CACHE se alimenta con BTC
+grep -n "_BTC_PRICE_CACHE" src/ppmt/engine/realtime.py
+
+# Confirmar Cold Start reemplaza crash
+grep -n "COLD START" src/ppmt/engine/realtime.py
+
+# Confirmar v2_server BUG 3 fix
+grep -n "universal_empty" src/ppmt/terminal/v2_server.py
+
+# Confirmar build script existe y es ejecutable
+ls -la scripts/build_initial_portfolio.py
+```
+
+### FASE 2A Corrección
+- `grep -n "detect_simple" src/ppmt/engine/ppmt.py` → línea 743: `self.regime_detector.detect_simple(window_df, timeframe=self.timeframe)` ✅ Ya pasa timeframe correctamente.
+- Commit FASE 2A: `6908750`
