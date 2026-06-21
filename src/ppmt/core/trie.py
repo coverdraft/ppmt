@@ -1050,12 +1050,16 @@ class RegimePartitionedTrie:
     # Canonical regime order (used for iteration / serialization)
     REGIMES = ("trending_up", "trending_down", "ranging", "volatile")
 
-    def __init__(self, name: str = "regime_partitioned"):
+    # v0.48.0 (FASE 2B): BTC context partitions for N5
+    BTC_CONTEXTS = ("btc_bull", "btc_bear", "btc_neutral")
+
+    def __init__(self, name: str = "regime_partitioned", regimes: Optional[tuple] = None):
         self.name = name
+        _regimes = regimes if regimes is not None else self.REGIMES
         self.sub_tries: dict[str, "PPMTTrie"] = {
-            r: PPMTTrie(name=f"{name}:{r}") for r in self.REGIMES
+            r: PPMTTrie(name=f"{name}:{r}") for r in _regimes
         }
-        self._current_regime: str = "ranging"  # safe default
+        self._current_regime: str = _regimes[0] if _regimes else "ranging"  # safe default
         self.trading_observations: int = 0
         # `pattern_count` and `max_depth` are computed properties below.
 

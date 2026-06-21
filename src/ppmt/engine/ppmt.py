@@ -165,9 +165,10 @@ class PPMT:
         self.pl_n2 = LEVEL_PATTERN_CONFIG["n2"]
         self.pl_n3 = LEVEL_PATTERN_CONFIG["n3"]
         self.pl_n4 = LEVEL_PATTERN_CONFIG["n4"]
+        self.pl_n5 = LEVEL_PATTERN_CONFIG["n5"]  # v0.48.0 (FASE 2B): N5 BTC context
         # Backwards compat: self._pattern_length = max(pl) for callers that
         # use a single value (e.g. buffer sizing in match_raw).
-        self._pattern_length = max(self.pl_n1, self.pl_n2, self.pl_n3, self.pl_n4)
+        self._pattern_length = max(self.pl_n1, self.pl_n2, self.pl_n3, self.pl_n4, self.pl_n5)
 
         # v0.43.0: STRATIFIED SAX Dual — N1 is PRICE-ONLY.
         #
@@ -207,9 +208,10 @@ class PPMT:
         _w_n2 = _tf_window_config["n2"]
         _w_n3 = _tf_window_config["n3"]
         _w_n4 = _tf_window_config["n4"]
+        _w_n5 = _tf_window_config.get("n5")  # v0.48.0 (FASE 2B): N5 only for 1m
         logger.info(
-            f"Per-level windows: N1={_w_n1}, N2={_w_n2}, N3={_w_n3}, N4={_w_n4} | "
-            f"Pattern lengths: N1={self.pl_n1}, N2={self.pl_n2}, N3={self.pl_n3}, N4={self.pl_n4}"
+            f"Per-level windows: N1={_w_n1}, N2={_w_n2}, N3={_w_n3}, N4={_w_n4}, N5={_w_n5} | "
+            f"Pattern lengths: N1={self.pl_n1}, N2={self.pl_n2}, N3={self.pl_n3}, N4={self.pl_n4}, N5={self.pl_n5}"
         )
 
         # N1: PRICE-ONLY — uses SAXEncoder (no volume dimension).
@@ -270,6 +272,24 @@ class PPMT:
                 strategy=sax_strategy,
             )
 
+        # v0.48.0 (FASE 2B): N5 — BTC Context Level (1m only).
+        # N5 uses SAXDualEncoder (same params as N3) but partitions by BTC context
+        # (bull/bear/neutral) instead of regime. Only created for timeframe="1m".
+        self.sax_n5 = None
+        if _w_n5 is not None and dual_sax:
+            self.sax_n5 = SAXDualEncoder(
+                price_alphabet_size=n3_dual["price"],  # same alpha as N3
+                volume_alphabet_size=n3_dual["volume"],
+                window_size=_w_n5,
+                price_strategy=sax_strategy,
+            )
+        elif _w_n5 is not None:
+            self.sax_n5 = SAXEncoder(
+                alphabet_size=n3_dual["price"],
+                window_size=_w_n5,
+                strategy=sax_strategy,
+            )
+
         # Backwards compatibility: self.sax = N3's encoder
         self.sax = self.sax_n3
 
@@ -291,6 +311,13 @@ class PPMT:
             sax_encoder=self.sax_n4,
             threshold=fuzzy_threshold,
         )
+        # v0.48.0 (FASE 2B): N5 matcher (1m only)
+        self.matcher_n5 = None
+        if self.sax_n5 is not None:
+            self.matcher_n5 = FuzzyMatcher(
+                sax_encoder=self.sax_n5,
+                threshold=fuzzy_threshold,
+            )
 
         # Backwards compatibility: self.matcher = N3's matcher
         self.matcher = self.matcher_n3
@@ -316,6 +343,15 @@ class PPMT:
         self.trie_n2 = PPMTTrie(name=f"asset_class:{asset_class}")
         self.trie_n3 = PPMTTrie(name=f"per_asset:{symbol}")
         self.trie_n4 = RegimePartitionedTrie(name=f"per_asset_regime:{symbol}")
+        # v0.48.0 (FASE 2B): N5 — BTC Context Partitioned Trie (1m only).
+        # Partitions by BTC context (btc_bull, btc_bear, btc_neutral).
+        # Only created when timeframe is "1m".
+        self.trie_n5 = None
+        if timeframe == "1m":
+            self.trie_n5 = RegimePartitionedTrie(
+                name=f"per_asset_btc_ctx:{symbol}",
+                regimes=["btc_bull", "btc_bear", "btc_neutral"],
+            )
 
         # Adaptive weights
         if weight_profile:
@@ -493,6 +529,44 @@ class PPMT:
         # Propagate to N4's wrapper so search/match go to the right sub-trie
         if isinstance(self.trie_n4, RegimePartitionedTrie):
             self.trie_n4.set_current_regime(regime)
+
+    def _get_btc_context(self, btc_recent_candles: Optional[pd.DataFrame] = None) -> str:
+        """v0.48.0 (FASE 2B): Classify recent BTC price action into 3 states.
+
+        Computes the simple slope of the last 20 BTC close prices and
+        classifies as:
+          - "btc_bull": slope > 0.0005 (BTC is trending up)
+          - "btc_bear": slope < -0.0005 (BTC is trending down)
+          - "btc_neutral": otherwise (BTC is ranging)
+
+        The 0.0005 threshold is calibrated for 1m candles: BTC typically
+        moves ~0.05% per minute, so 5x that in slope indicates a clear
+        directional move over 20 candles.
+
+        Args:
+            btc_recent_candles: DataFrame with 'close' column (at least 20 rows).
+                If None or too short, returns "btc_neutral".
+
+        Returns:
+            One of: "btc_bull", "btc_bear", "btc_neutral"
+        """
+        if btc_recent_candles is None or len(btc_recent_candles) < 20:
+            return "btc_neutral"
+
+        closes = btc_recent_candles["close"].values[-20:]
+        if len(closes) < 20 or closes[0] == 0:
+            return "btc_neutral"
+
+        # Simple linear slope: (last - first) / (first * N)
+        # Normalized by entry price so it's comparable across price levels
+        slope = (closes[-1] - closes[0]) / (closes[0] * len(closes))
+
+        if slope > 0.0005:
+            return "btc_bull"
+        elif slope < -0.0005:
+            return "btc_bear"
+        else:
+            return "btc_neutral"
 
     def _encode(self, encoder, df: pd.DataFrame) -> list[str | tuple[str, str]]:
         """Encode OHLCV data and return symbols directly.
@@ -839,6 +913,7 @@ class PPMT:
         current_symbols_n3: Optional[list[str]] = None,
         current_symbols_n4: Optional[list[str]] = None,
         recent_candles: Optional[pd.DataFrame] = None,
+        btc_recent_candles: Optional[pd.DataFrame] = None,
     ) -> PPMTResult:
         """
         Raw 4-level match without signal generation.
@@ -979,6 +1054,40 @@ class PPMT:
             n3_confidence=n3_conf,
             n4_confidence=n4_conf,
         )
+
+        # v0.48.0 (FASE 2B): N5 — BTC Context Level (1m only).
+        # N5 blends BTC-context-aware confidence at 5-10% weight into the
+        # final confidence. Only active when self.trie_n5 exists (1m TF).
+        n5_conf = 0.0
+        n5_match = None
+        if self.trie_n5 is not None and self.sax_n5 is not None and recent_candles is not None:
+            # Encode with N5's SAX encoder
+            try:
+                n5_syms = self._encode(self.sax_n5, recent_candles)
+                n5_syms = n5_syms[-self.pl_n5:] if len(n5_syms) >= self.pl_n5 else n5_syms
+
+                # Get BTC context and route to the right sub-trie
+                btc_context = self._get_btc_context(btc_recent_candles)
+                self.trie_n5.set_current_regime(btc_context)
+
+                # Match
+                n5_match = self.matcher_n5.best_match(self.trie_n5, n5_syms)
+                n5_conf = n5_match.node.metadata.confidence if n5_match.node else 0.0
+
+                # Apply time decay
+                n5_conf = apply_time_decay(
+                    n5_conf, n5_match.node.metadata.last_seen_timestamp
+                ) if n5_match.node and n5_conf > 0 else n5_conf
+
+                # Blend: N5 gets 7.5% weight (low — it's a context signal, not primary)
+                n5_weight = 0.075
+                n5_count = self.trie_n5.pattern_count if hasattr(self.trie_n5, 'pattern_count') else 0
+                if n5_count < 10:
+                    # Too sparse to trust — reduce weight
+                    n5_weight = n5_weight * (n5_count / 10.0)
+                weighted_conf = weighted_conf * (1.0 - n5_weight) + n5_conf * n5_weight
+            except Exception:
+                pass  # N5 failure is non-fatal
 
         search_time = (time.perf_counter() - start_time) * 1000.0
 

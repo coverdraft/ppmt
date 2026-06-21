@@ -119,7 +119,7 @@ LEVEL_DUAL_ALPHA_CONFIG: dict[str, dict[str, int]] = {
 #   5m N1: 24*5=120 candles (10h), N3: 10*4=40 candles (200min)
 #   1h N1: 8*5=40 candles (40h), N3: 8*4=32 candles (32h) — same W
 LEVEL_WINDOW_CONFIG: dict[str, dict[str, int]] = {
-    "1m":  {"n1": 60, "n2": 60, "n3": 20, "n4": 20},
+    "1m":  {"n1": 60, "n2": 60, "n3": 20, "n4": 20, "n5": 20},  # v0.48.0 (FASE 2B): N5=BTC context, 1m only
     "5m":  {"n1": 24, "n2": 24, "n3": 10, "n4": 10},
     "15m": {"n1": 12, "n2": 12, "n3": 6,  "n4": 6},
     "30m": {"n1": 10, "n2": 10, "n3": 8,  "n4": 8},
@@ -139,6 +139,7 @@ LEVEL_PATTERN_CONFIG: dict[str, int] = {
     "n2": 5,
     "n3": 4,
     "n4": 4,
+    "n5": 4,  # v0.48.0 (FASE 2B): N5 BTC context, same as N3/N4
 }
 
 

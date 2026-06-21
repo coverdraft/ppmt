@@ -1089,10 +1089,26 @@ class RealtimeTrader:
                         # v0.46.0: Pattern Divergence Exit
                         # Compare real SAX stream with expected_sequences from
                         # the node that generated the entry signal.
-                        if (divergence_monitor.expected_sequence is not None
-                                and len(pattern_buffer) >= 3):
-                            recent_symbols = pattern_buffer[-3:]
-                            div_result = divergence_monitor.check_divergence(recent_symbols)
+                        # v0.48.0 (FASE 2B FIX): Use N3-encoded tuples instead of
+                        # pattern_buffer strings. expected_sequences stores tuples,
+                        # so comparing strings vs tuples always showed "no divergence".
+                        if divergence_monitor.expected_sequence is not None:
+                            recent_symbols = None
+                            if ppmt_engine is not None:
+                                try:
+                                    _n3_needed = ppmt_engine.sax_n3.window_size * 3
+                                    if candle_idx >= _n3_needed:
+                                        _div_df = df.iloc[candle_idx - _n3_needed + 1:candle_idx + 1]
+                                        _n3_all = ppmt_engine._encode(ppmt_engine.sax_n3, _div_df)
+                                        recent_symbols = _n3_all[-3:] if len(_n3_all) >= 3 else None
+                                except Exception:
+                                    pass
+                            if recent_symbols is None and len(pattern_buffer) >= 3:
+                                recent_symbols = pattern_buffer[-3:]  # fallback: strings (old behavior)
+                            if recent_symbols is not None:
+                                div_result = divergence_monitor.check_divergence(recent_symbols)
+                            else:
+                                div_result = {'diverged': False}
                             if div_result['diverged']:
                                 # v0.47.0: Insert trade outcome into tries (learning loop)
                                 _learning_insert_outcome(
@@ -1527,8 +1543,14 @@ class RealtimeTrader:
                                 trade_counter += 1
 
                                 # v0.46.0: Set expected sequence for divergence monitoring
+                                # v0.48.0 (FASE 2B FIX): Use _active_learning patterns (tuples)
+                                # instead of current_symbols (strings). N3 trie has tuple keys,
+                                # so trie.search(current_strings) never found nodes.
                                 try:
-                                    matched_node = trie.search(current_symbols)
+                                    if _active_learning is not None and _active_learning.get("pattern_n3"):
+                                        matched_node = trie.search(_active_learning["pattern_n3"])
+                                    else:
+                                        matched_node = trie.search(current_symbols)
                                     if matched_node and matched_node.metadata.expected_sequences:
                                         divergence_monitor.set_expected(matched_node.metadata)
                                 except Exception:
@@ -1935,11 +1957,33 @@ class RealtimeTrader:
                                     trade_counter, current_regime, peak_capital, last_losing_trade_idx)
 
                     # v0.46.0: Pattern Divergence Exit (live mode)
+                    # v0.48.0 (FASE 2B FIX): Use N3-encoded tuples instead of
+                    # pattern_buffer strings for tuple-vs-tuple comparison.
                     if (divergence_monitor is not None
-                            and divergence_monitor.expected_sequence is not None
-                            and len(pattern_buffer) >= 3):
-                        recent_symbols = pattern_buffer[-3:]
-                        div_result = divergence_monitor.check_divergence(recent_symbols)
+                            and divergence_monitor.expected_sequence is not None):
+                        recent_symbols = None
+                        if ppmt_engine is not None:
+                            try:
+                                _n3_needed = ppmt_engine.sax_n3.window_size * 3
+                                if len(recent_prices) >= _n3_needed:
+                                    _s = len(recent_prices) - _n3_needed
+                                    _div_df = pd.DataFrame({
+                                        'close': recent_prices[_s:],
+                                        'high': recent_highs[_s:],
+                                        'low': recent_lows[_s:],
+                                        'open': recent_prices[_s:],
+                                        'volume': [0] * _n3_needed,
+                                    })
+                                    _n3_all = ppmt_engine._encode(ppmt_engine.sax_n3, _div_df)
+                                    recent_symbols = _n3_all[-3:] if len(_n3_all) >= 3 else None
+                            except Exception:
+                                pass
+                        if recent_symbols is None and len(pattern_buffer) >= 3:
+                            recent_symbols = pattern_buffer[-3:]  # fallback: strings
+                        if recent_symbols is not None:
+                            div_result = divergence_monitor.check_divergence(recent_symbols)
+                        else:
+                            div_result = {'diverged': False}
                         if div_result['diverged']:
                             # v0.47.0: Insert trade outcome into tries (learning loop)
                             _learning_insert_outcome(
@@ -2362,9 +2406,14 @@ class RealtimeTrader:
                         trade_counter += 1
 
                         # v0.46.0: Set expected sequence for divergence monitoring (live mode)
+                        # v0.48.0 (FASE 2B FIX): Use _active_learning patterns (tuples)
+                        # instead of current_symbols (strings). N3 trie has tuple keys.
                         if divergence_monitor is not None:
                             try:
-                                matched_node = trie.search(current_symbols)
+                                if _active_learning is not None and _active_learning.get("pattern_n3"):
+                                    matched_node = trie.search(_active_learning["pattern_n3"])
+                                else:
+                                    matched_node = trie.search(current_symbols)
                                 if matched_node and matched_node.metadata.expected_sequences:
                                     divergence_monitor.set_expected(matched_node.metadata)
                             except Exception:
