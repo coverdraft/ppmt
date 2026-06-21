@@ -1,0 +1,1465 @@
+     1→"""
+     2→PPMT Terminal CLI - Command Line Interface
+     3→
+     4→Usage:
+     5→  ppmt init                          Initialize database and config
+     6→  ppmt ingest --symbol BTC/USDT      Fetch and store historical data
+     7→  ppmt build --symbol BTC/USDT       Build Trie from stored data
+     8→  ppmt predict --symbol BTC/USDT     Show prediction from current pattern
+     9→  ppmt run --symbol BTC/USDT         Real-time pattern matching + dashboard
+    10→  ppmt terminal                      Launch web dashboard
+    11→  ppmt scan                          Scan and analyze assets
+    12→  ppmt stats --symbol BTC/USDT       Show pattern statistics
+    13→  ppmt list                          List tracked assets
+    14→  ppmt portfolio                     Portfolio and money management
+    15→"""
+    16→
+    17→from __future__ import annotations
+    18→
+    19→import os
+    20→import sys
+    21→from pathlib import Path
+    22→
+    23→import click
+    24→import yaml
+    25→from rich.console import Console
+    26→
+    27→# v0.40.24: leer versión del paquete en vez de hardcodearla
+    28→from ppmt import __version__ as _PPMT_VERSION
+    29→from rich.table import Table
+    30→
+    31→from ppmt.data.storage import PPMTStorage
+    32→from ppmt.data.collector import DataCollector
+    33→from ppmt.data.classifier import AssetClassifier
+    34→from ppmt.engine.ppmt import PPMT
+    35→from ppmt.engine.prediction import PredictionEngine
+    36→from ppmt.engine.realtime import format_realtime_result
+    37→
+    38→console = Console()
+    39→
+    40→CONFIG_DIR = os.path.expanduser("~/.ppmt")
+    41→CONFIG_FILE = os.path.join(CONFIG_DIR, "config.yaml")
+    42→
+    43→
+    44→def load_config() -> dict:
+    45→    """Load configuration from file."""
+    46→    if os.path.exists(CONFIG_FILE):
+    47→        with open(CONFIG_FILE) as f:
+    48→            return yaml.safe_load(f) or {}
+    49→    return {}
+    50→
+    51→
+    52→@click.group()
+    53→@click.version_option(version=_PPMT_VERSION)
+    54→def cli():
+    55→    """PPMT Terminal - Autonomous Pattern-Based Trading Terminal"""
+    56→    pass
+    57→
+    58→
+    59→@cli.command()
+    60→def init():
+    61→    """Initialize PPMT database and configuration."""
+    62→    os.makedirs(CONFIG_DIR, exist_ok=True)
+    63→
+    64→    # Create default config if not exists
+    65→    if not os.path.exists(CONFIG_FILE):
+    66→        config_path = os.path.join(
+    67→            os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))),
+    68→            "config",
+    69→            "default.yaml",
+    70→        )
+    71→        if os.path.exists(config_path):
+    72→            import shutil
+    73→            shutil.copy(config_path, CONFIG_FILE)
+    74→            console.print(f"[green]Created config at {CONFIG_FILE}[/green]")
+    75→        else:
+    76→            # Write minimal config
+    77→            with open(CONFIG_FILE, "w") as f:
+    78→                yaml.dump({"sax": {"alphabet_size": 8, "window_size": 10}}, f)
+    79→            console.print(f"[green]Created minimal config at {CONFIG_FILE}[/green]")
+    80→    else:
+    81→        console.print(f"[yellow]Config already exists at {CONFIG_FILE}[/yellow]")
+    82→
+    83→    # Initialize database
+    84→    storage = PPMTStorage()
+    85→    storage.close()
+    86→
+    87→    console.print("[green]PPMT initialized successfully![/green]")
+    88→    console.print(f"  Config: {CONFIG_FILE}")
+    89→    console.print(f"  Database: {os.path.expanduser('~/.ppmt/ppmt.db')}")
+    90→
+    91→
+    92→@cli.command()
+    93→@click.option("--symbol", "-s", required=True, help="Trading pair (e.g., BTC/USDT)")
+    94→@click.option("--timeframe", "-t", default="1h", help="Candle timeframe")
+    95→@click.option("--days", "-d", default=365, type=int, help="Days of history to fetch")
+    96→@click.option("--exchange", "-e", default="binance", help="Exchange name")
+    97→@click.option("--csv", "csv_path", default=None, help="Import from CSV file instead of exchange")
+    98→def ingest(symbol: str, timeframe: str, days: int, exchange: str, csv_path: str):
+    99→    """Fetch and store historical OHLCV data."""
+   100→    config = load_config()
+   101→    storage = PPMTStorage()
+   102→
+   103→    collector = DataCollector(exchange=exchange, storage=storage)
+   104→
+   105→    try:
+   106→        if csv_path:
+   107→            # Import from CSV (works without ccxt)
+   108→            console.print(f"[cyan]Importing {symbol} ({timeframe}) from CSV...[/cyan]")
+   109→            df = collector.import_csv(symbol, timeframe, csv_path)
+   110→        else:
+   111→            # Fetch from exchange (requires ccxt / Python 3.10+)
+   112→            console.print(f"[cyan]Fetching {symbol} ({timeframe}) from {exchange}...[/cyan]")
+   113→            df = collector.fetch_and_save(symbol, timeframe, days)
+   114→
+   115→        if df.empty:
+   116→            console.print("[red]No data fetched. Check symbol and exchange.[/red]")
+   117→            return
+   118→
+   119→        # Classify asset
+   120→        classifier = AssetClassifier()
+   121→        info = classifier.classify(symbol)
+   122→        storage.register_asset(symbol, info.asset_class)
+   123→
+   124→        console.print(f"[green]Fetched {len(df)} candles[/green]")
+   125→        console.print(f"  Symbol: {symbol}")
+   126→        console.print(f"  Asset Class: {info.asset_class}")
+   127→        console.print(f"  Weight Profile: {info.weight_profile}")
+   128→        if not df.empty and hasattr(df, 'index') and len(df.index) > 0:
+   129→            console.print(f"  Date Range: {df.index[0]} → {df.index[-1]}")
+   130→
+   131→    except Exception as e:
+   132→        console.print(f"[red]Error: {e}[/red]")
+   133→    finally:
+   134→        collector.close()
+   135→
+   136→
+   137→@cli.command()
+   138→@click.option("--symbol", "-s", required=True, help="Trading pair")
+   139→@click.option("--timeframe", "-t", default="1h", help="Candle timeframe")
+   140→@click.option("--pattern-length", "-p", default=5, type=int, help="SAX blocks per pattern")
+   141→def build(symbol: str, timeframe: str, pattern_length: int):
+   142→    """Build PPMT Trie from stored data."""
+   143→    config = load_config()
+   144→    storage = PPMTStorage()
+   145→
+   146→    # Load data
+   147→    df = storage.load_ohlcv(symbol, timeframe)
+   148→    if df.empty:
+   149→        console.print(f"[red]No data found for {symbol}. Run 'ppmt ingest' first.[/red]")
+   150→        return
+   151→
+   152→    console.print(f"[cyan]Building PPMT for {symbol} ({len(df)} candles)...[/cyan]")
+   153→
+   154→    # Classify asset
+   155→    classifier = AssetClassifier()
+   156→    info = classifier.classify(symbol)
+   157→
+   158→    # Create engine
+   159→    sax_config = config.get("sax", {})
+   160→    engine = PPMT(
+   161→        symbol=symbol,
+   162→        asset_class=info.asset_class,
+   163→        sax_alphabet_size=sax_config.get("alphabet_size", 8),
+   164→        sax_window_size=sax_config.get("window_size", 10),
+   165→        sax_strategy=sax_config.get("strategy", "ohlcv"),
+   166→        weight_profile=info.weight_profile,
+   167→    )
+   168→
+   169→    # Build Trie
+   170→    count = engine.build(df, pattern_length=pattern_length)
+   171→
+   172→    # Save Tries
+   173→    for level, trie in [
+   174→        ("n1", engine.trie_n1),
+   175→        ("n2", engine.trie_n2),
+   176→        ("n3", engine.trie_n3),
+   177→        ("n4", engine.trie_n4),
+   178→    ]:
+   179→        storage.save_trie(symbol, level, trie)
+   180→        console.print(f"  N{level[-1]} Trie: {trie.pattern_count} patterns, max depth {trie.max_depth}")
+   181→
+   182→    # Save engine state
+   183→    storage.save_engine_state(symbol, engine.get_stats())
+   184→
+   185→    console.print(f"[green]Built {count} patterns for {symbol}[/green]")
+   186→
+   187→    # Show stats
+   188→    stats = engine.get_stats()
+   189→    console.print(f"  Weights: {engine.weights}")
+   190→
+   191→    storage.close()
+   192→
+   193→
+   194→@cli.command()
+   195→@click.option("--symbol", "-s", required=True, help="Trading pair")
+   196→@click.option("--timeframe", "-t", default="1h", help="Candle timeframe")
+   197→def stats(symbol: str, timeframe: str):
+   198→    """Show PPMT statistics for an asset."""
+   199→    storage = PPMTStorage()
+   200→
+   201→    # Load engine state
+   202→    state = storage.load_engine_state(symbol)
+   203→    if state is None:
+   204→        console.print(f"[red]No engine state for {symbol}. Run 'ppmt build' first.[/red]")
+   205→        return
+   206→
+   207→    # Load Tries
+   208→    table = Table(title=f"PPMT Stats: {symbol}")
+   209→    table.add_column("Level", style="cyan")
+   210→    table.add_column("Patterns", justify="right")
+   211→    table.add_column("Max Depth", justify="right")
+   212→
+   213→    for level in ["n1", "n2", "n3", "n4"]:
+   214→        trie = storage.load_trie(symbol, level)
+   215→        if trie:
+   216→            table.add_row(
+   217→                f"N{level[-1]} ({trie.name})",
+   218→                str(trie.pattern_count),
+   219→                str(trie.max_depth),
+   220→            )
+   221→        else:
+   222→            table.add_row(f"N{level[-1]}", "0", "0")
+   223→
+   224→    console.print(table)
+   225→
+   226→    # Show weights
+   227→    if state:
+   228→        console.print(f"\nWeights: {state.get('weight_profile', 'default')}")
+   229→        console.print(f"Asset Class: {state.get('asset_class', 'unknown')}")
+   230→        console.print(f"Total Patterns Built: {state.get('total_patterns_built', 0)}")
+   231→
+   232→    # Show stored candles
+   233→    df = storage.load_ohlcv(symbol, timeframe)
+   234→    console.print(f"Stored Candles: {len(df)}")
+   235→
+   236→    storage.close()
+   237→
+   238→
+   239→@cli.command("list")
+   240→def list_assets():
+   241→    """List all tracked assets."""
+   242→    storage = PPMTStorage()
+   243→    assets = storage.get_assets()
+   244→
+   245→    if not assets:
+   246→        console.print("[yellow]No assets tracked. Run 'ppmt ingest' to add one.[/yellow]")
+   247→        return
+   248→
+   249→    table = Table(title="Tracked Assets")
+   250→    table.add_column("Symbol", style="cyan")
+   251→    table.add_column("Asset Class")
+   252→    table.add_column("Candles", justify="right")
+   253→
+   254→    for asset in assets:
+   255→        table.add_row(
+   256→            asset["symbol"],
+   257→            asset["asset_class"],
+   258→            str(asset["candle_count"]),
+   259→        )
+   260→
+   261→    console.print(table)
+   262→    storage.close()
+   263→
+   264→
+   265→@cli.command()
+   266→@click.option("--symbol", "-s", required=True, help="Trading pair")
+   267→@click.option("--timeframe", "-t", default="1h", help="Candle timeframe")
+   268→@click.option("--depth", "-d", default=5, type=int, help="Prediction depth (SAX blocks)")
+   269→@click.option("--price", "-p", default=None, type=float, help="Current price for price levels")
+   270→def predict(symbol: str, timeframe: str, depth: int, price: float):
+   271→    """Show PPMT prediction for the current pattern state."""
+   272→    config = load_config()
+   273→    storage = PPMTStorage()
+   274→
+   275→    # Load data and find the most recent SAX symbols
+   276→    df = storage.load_ohlcv(symbol, timeframe)
+   277→    if df.empty:
+   278→        console.print(f"[red]No data found for {symbol}. Run 'ppmt ingest' first.[/red]")
+   279→        return
+   280→
+   281→    # Load the per-asset Trie (N3)
+   282→    trie = storage.load_trie(symbol, "n3")
+   283→    if trie is None:
+   284→        console.print(f"[red]No Trie built for {symbol}. Run 'ppmt build' first.[/red]")
+   285→        return
+   286→
+   287→    # FIX-14 (v0.40.10): also load N4 for regime-aware prediction
+   288→    trie_n4 = storage.load_trie(symbol, "n4")
+   289→
+   290→    # Encode recent data to SAX symbols
+   291→    sax_config = config.get("sax", {})
+   292→    from ppmt.core.sax import SAXEncoder
+   293→    encoder = SAXEncoder(
+   294→        alphabet_size=sax_config.get("alphabet_size", 8),
+   295→        window_size=sax_config.get("window_size", 10),
+   296→        strategy=sax_config.get("strategy", "ohlcv"),
+   297→    )
+   298→
+   299→    # Use last N candles to get recent SAX symbols
+   300→    recent_df = df.tail(100)
+   301→    symbols = encoder.encode(recent_df)
+   302→
+   303→    if not symbols:
+   304→        console.print("[red]Could not encode recent data.[/red]")
+   305→        return
+   306→
+   307→    # Use last 5 SAX blocks as current pattern
+   308→    current_symbols = symbols[-5:] if len(symbols) >= 5 else symbols
+   309→
+   310→    # Get current price
+   311→    current_price = price or float(df["close"].iloc[-1])
+   312→
+   313→    # Timeframe to hours
+   314→    tf_hours = {"1m": 1/60, "5m": 5/60, "15m": 15/60, "1h": 1, "4h": 4, "1d": 24}.get(timeframe, 1)
+   315→
+   316→    # Detect current regime for FIX-14 N4 routing
+   317→    from ppmt.core.regime import RegimeDetector
+   318→    regime_detector = RegimeDetector(lookback=50)
+   319→    close_prices = df["close"].values.astype(float)
+   320→    regime_info = regime_detector.detect(close_prices)
+   321→    current_regime = regime_info.name if hasattr(regime_info, 'name') else str(regime_info)
+   322→
+   323→    # Generate prediction
+   324→    # FIX-14 (v0.40.10): pass regime_trie (N4) and current_regime
+   325→    pred_engine = PredictionEngine(
+   326→        trie, prediction_depth=depth,
+   327→        regime_trie=trie_n4,
+   328→    )
+   329→    prediction = pred_engine.predict(
+   330→        current_symbols=current_symbols,
+   331→        entry_price=current_price,
+   332→        timeframe_hours=tf_hours,
+   333→        symbol=symbol,
+   334→        current_regime=current_regime,
+   335→    )
+   336→
+   337→    # Display
+   338→    console.print(prediction.format_summary(timeframe_hours=tf_hours))
+   339→
+   340→    # Also show sizing recommendation
+   341→    if prediction.overall_probability > 0:
+   342→        from ppmt.engine.signal import Signal, SignalType
+   343→        mock_signal = Signal(
+   344→            signal_type=SignalType.ENTRY_LONG if prediction.direction == "LONG" else SignalType.ENTRY_SHORT,
+   345→            confidence=prediction.confidence,
+   346→            win_rate=prediction.predicted_path[-1].win_rate if prediction.predicted_path else 0,
+   347→            risk_reward_ratio=abs(prediction.expected_total_move_pct / prediction.pattern_break_probability) if prediction.pattern_break_probability > 0 else 0,
+   348→            historical_count=100,
+   349→        )
+   350→        mock_signal.quality_score = mock_signal.compute_quality_score()
+   351→        mock_signal.sizing_multiplier = mock_signal.compute_sizing_multiplier()
+   352→
+   353→        # V3: Show metadata-driven sizing signal
+   354→        from ppmt.core.metadata import BlockLifecycleMetadata
+   355→        mock_meta = BlockLifecycleMetadata(
+   356→            win_rate=mock_signal.win_rate,
+   357→            expected_move_pct=prediction.expected_total_move_pct,
+   358→            max_drawdown_pct=prediction.pattern_break_probability * 2 if prediction.pattern_break_probability > 0 else -1.0,
+   359→            historical_count=100,
+   360→        )
+   361→        mock_signal.probability_of_success = mock_meta.probability_of_success
+   362→        mock_signal.expected_profit_ahead = mock_meta.expected_profit_ahead
+   363→        mock_signal.metadata_sizing_signal = mock_meta.sizing_signal
+   364→
+   365→        console.print(f"\n[bold]Position Sizing (Metadata-Driven):[/bold]")
+   366→        console.print(f"  Quality Score: {mock_signal.quality_score:.2f}")
+   367→        console.print(f"  Probability of Success: {mock_signal.probability_of_success:.1%}")
+   368→        console.print(f"  Expected Profit Ahead: {mock_signal.expected_profit_ahead:+.2f}%")
+   369→        console.print(f"  [bold cyan]Sizing Signal: {mock_signal.metadata_sizing_signal:.2f}[/bold cyan]")
+   370→
+   371→        # Sizing interpretation
+   372→        if mock_signal.metadata_sizing_signal >= 1.5:
+   373→            console.print(f"  → [bold green]2.0x base position (HIGH CONVICTION)[/bold green]")
+   374→        elif mock_signal.metadata_sizing_signal >= 1.0:
+   375→            console.print(f"  → [green]1.0x base position (NORMAL)[/green]")
+   376→        elif mock_signal.metadata_sizing_signal >= 0.5:
+   377→            console.print(f"  → [yellow]0.5x base position (LOW CONVICTION)[/yellow]")
+   378→        else:
+   379→            console.print(f"  → [red]0.25x base position or REJECT[/red]")
+   380→
+   381→        # Forward prediction chain
+   382→        if prediction.predicted_path:
+   383→            console.print(f"\n[bold]Forward Prediction Chain:[/bold]")
+   384→            total_hours = 0
+   385→            for step in prediction.predicted_path:
+   386→                step_hours = step.estimated_candles * tf_hours
+   387→                total_hours += step_hours
+   388→                marker = "[green]✓[/green]" if step.is_continuation else "[red]✗[/red]"
+   389→                console.print(
+   390→                    f"  {marker} Block [{step.symbol}] "
+   391→                    f"prob={step.probability:.0%} "
+   392→                    f"move={step.cumulative_move_pct:>+5.2f}% "
+   393→                    f"candles={step.estimated_candles} "
+   394→                    f"~{step_hours:.1f}h "
+   395→                    f"wr={step.win_rate:.0%}"
+   396→                )
+   397→            console.print(f"  [bold]Total: {len(prediction.predicted_path)} blocks, ~{total_hours:.1f}h ahead[/bold]")
+   398→
+   399→    storage.close()
+   400→
+   401→
+   402→@cli.command()
+   403→@click.option("--symbol", "-s", required=True, help="Trading pair")
+   404→@click.option("--timeframe", "-t", default="1h", help="Candle timeframe")
+   405→@click.option("--exchange", "-e", default="binance", help="Exchange (binance/bybit/mexc)")
+   406→@click.option("--capital", "-c", default=10000.0, type=float, help="Initial capital")
+   407→@click.option("--dry-run", is_flag=True, default=True, help="Paper trading (no real orders)")
+   408→@click.option("--live", "dry_run_false", is_flag=True, help="Execute REAL orders on exchange")
+   409→@click.option("--testnet", is_flag=True, default=False, help="Use exchange testnet (for order execution only)")
+   410→@click.option("--mainnet", "testnet_false", is_flag=True, help="Use exchange MAINNET (real money)")
+   411→@click.option("--api-key", envvar="PPMT_API_KEY", default="", help="Exchange API key")
+   412→@click.option("--api-secret", envvar="PPMT_API_SECRET", default="", help="Exchange API secret")
+   413→@click.option("--replay", is_flag=True, help="Replay historical data instead of live")
+   414→@click.option("--speed", default=0.0, type=float, help="Replay speed (0=max, 1=realtime, 10=10x)")
+   415→@click.option("--pattern-length", "-p", default=5, type=int, help="SAX blocks per pattern")
+   416→@click.option("--min-confidence", default=0.08, type=float, help="Minimum signal confidence (v0.21.0: lowered for Bayesian shrinkage)")
+   417→@click.option("--auto-calibrate", is_flag=True, default=True, help="Auto-calibrate SAX parameters")
+   418→@click.option("--no-calibrate", "no_calibrate", is_flag=True, help="Skip auto-calibration")
+   419→@click.option("--regime-aware", is_flag=True, default=True, help="Enable regime detection")
+   420→@click.option("--multi-level", is_flag=True, default=True, help="Enable 4-level matching")
+   421→@click.option("--leverage", "-l", default=1, type=int, help="Leverage (1=spot, 2-125=futures)")
+   422→@click.option("--auto/--manual", default=True, help="Auto mode (execute signals) or manual (display only)")
+   423→@click.option("--max-positions", default=5, type=int, help="Max simultaneous open positions")
+   424→@click.option("--max-exposure", default=0.80, type=float, help="Max portfolio exposure (0-1)")
+   425→@click.option("--kill-switch", default=0.95, type=float, help="Exposure % to trigger kill switch (0-1)")
+   426→@click.option("--daily-loss", default=0.05, type=float, help="Max daily loss (0-1)")
+   427→@click.option("--kelly", is_flag=True, default=True, help="Use Kelly Criterion sizing")
+   428→@click.option("--no-kelly", "no_kelly", is_flag=True, help="Disable Kelly Criterion sizing")
+   429→def run(
+   430→    symbol: str, timeframe: str, exchange: str, capital: float,
+   431→    dry_run: bool, dry_run_false: bool, testnet: bool, testnet_false: bool,
+   432→    api_key: str, api_secret: str,
+   433→    replay: bool, speed: float,
+   434→    pattern_length: int, min_confidence: float,
+   435→    auto_calibrate: bool, no_calibrate: bool,
+   436→    regime_aware: bool, multi_level: bool,
+   437→    leverage: int, auto: bool,
+   438→    max_positions: int, max_exposure: float,
+   439→    kill_switch: float, daily_loss: float,
+   440→    kelly: bool, no_kelly: bool,
+   441→):
+   442→    """Run real-time pattern matching and trading.
+   443→
+   444→    v0.20.0: Supports Binance, Bybit, MEXC exchanges.
+   445→    WebSocket streaming, REST polling, and replay modes.
+   446→
+   447→    Modes:
+   448→      --replay          Replay historical data (for testing)
+   449→      (default)         Live WebSocket streaming from exchange
+   450→
+   451→    Examples:
+   452→      ppmt run -s BTC/USDT                      # Dry run with Binance WebSocket
+   453→      ppmt run -s BTC/USDT --replay             # Replay stored data
+   454→      ppmt run -s ETH/USDT -e bybit             # Bybit WebSocket
+   455→      ppmt run -s BTC/USDT -t 5m -e mexc        # MEXC 5-minute WebSocket
+   456→      ppmt run -s BTC/USDT --live --mainnet     # REAL trading on Binance
+   457→      ppmt run -s BTC/USDT -e mexc --live       # REAL trading on MEXC
+   458→    """
+   459→    # Resolve flag conflicts
+   460→    actual_dry_run = not dry_run_false  # --live flag disables dry-run
+   461→    actual_testnet = testnet and not testnet_false  # Testnet only if explicitly requested; --mainnet overrides
+   462→    # v0.29.0: For paper trading (dry_run), always use mainnet data feed.
+   463→    # Testnet is only for order execution routing, NOT for market data.
+   464→    if actual_dry_run and actual_testnet:
+   465→        actual_testnet = False
+   466→        console.print("[dim]Note: Using mainnet data feed (testnet only affects order execution)[/dim]")
+   467→
+   468→    if no_calibrate:
+   469→        auto_calibrate = False
+   470→
+   471→    if replay:
+   472→        # === REPLAY MODE ===
+   473→        from ppmt.engine.realtime import RealtimeTrader, ReplayConfig
+   474→
+   475→        config = ReplayConfig(
+   476→            symbol=symbol,
+   477→            timeframe=timeframe,
+   478→            initial_capital=capital,
+   479→            speed=speed,
+   480→            pattern_length=pattern_length,
+   481→            min_confidence=min_confidence,
+   482→            auto_calibrate=auto_calibrate,
+   483→            regime_aware=regime_aware,
+   484→            use_multi_level=multi_level,
+   485→            use_token_profile=True,
+   486→        )
+   487→
+   488→        trader = RealtimeTrader(config=config)
+   489→        result = trader.run_replay()
+   490→
+   491→        console.print(format_realtime_result(result))
+   492→
+   493→    else:
+   494→        # === LIVE MODE (WebSocket or REST) ===
+   495→        import asyncio
+   496→        from ppmt.engine.realtime import RealtimeTrader, LiveConfig
+   497→
+   498→        if not actual_dry_run:
+   499→            if not api_key or not api_secret:
+   500→                console.print("[bold red]WARNING: Live trading requires API credentials![/bold red]")
+   501→                console.print("[dim]Set PPMT_API_KEY and PPMT_API_SECRET environment variables[/dim]")
+   502→                console.print("[dim]Or use --api-key and --api-secret options[/dim]")
+   503→                if not click.confirm("Continue without credentials?"):
+   504→                    return
+   505→
+   506→        config = LiveConfig(
+   507→            symbol=symbol,
+   508→            timeframe=timeframe,
+   509→            initial_capital=capital,
+   510→            exchange=exchange,
+   511→            api_key=api_key,
+   512→            api_secret=api_secret,
+   513→            pattern_length=pattern_length,
+   514→            min_confidence=min_confidence,
+   515→            auto_calibrate=auto_calibrate,
+   516→            regime_aware=regime_aware,
+   517→            use_multi_level=multi_level,
+   518→            use_token_profile=True,
+   519→            testnet=actual_testnet,
+   520→            dry_run=actual_dry_run,
+   521→            leverage=leverage,
+   522→            auto_mode=auto,
+   523→            max_open_positions=max_positions,
+   524→            max_portfolio_exposure_pct=max_exposure,
+   525→            kill_switch_pct=kill_switch,
+   526→            daily_loss_limit_pct=daily_loss,
+   527→            use_kelly_sizing=kelly and not no_kelly,
+   528→        )
+   529→
+   530→        trader = RealtimeTrader(config=config)
+   531→
+   532→        try:
+   533→            result = asyncio.run(trader.run_live())
+   534→            console.print(format_realtime_result(result))
+   535→        except KeyboardInterrupt:
+   536→            console.print("\n[yellow]Stopped by user.[/yellow]")
+   537→
+   538→
+   539→if __name__ == "__main__":
+   540→    cli()
+   541→
+   542→
+   543→# ============================================================
+   544→# v0.13.0: BACKTEST & MONTE CARLO COMMANDS
+   545→# ============================================================
+   546→
+   547→@cli.command()
+   548→@click.option("--symbol", "-s", required=True, help="Trading pair")
+   549→@click.option("--timeframe", "-t", default="1h", help="Candle timeframe")
+   550→@click.option("--capital", "-c", default=10000.0, type=float, help="Initial capital")
+   551→@click.option("--pattern-length", "-p", default=5, type=int, help="SAX blocks per pattern")
+   552→@click.option("--min-confidence", default=0.08, type=float, help="Minimum signal confidence (v0.21.0: lowered for Bayesian shrinkage)")
+   553→@click.option("--start-offset", default=200, type=int, help="Candles to skip (warm-up)")
+   554→@click.option("--auto-calibrate", is_flag=True, default=True, help="Auto-calibrate SAX parameters")
+   555→@click.option("--no-calibrate", "no_calibrate", is_flag=True, help="Skip auto-calibration")
+   556→@click.option("--regime-aware", is_flag=True, default=True, help="Enable regime detection")
+   557→@click.option("--multi-level", is_flag=True, default=True, help="Enable 4-level matching")
+   558→@click.option("--output", "-o", default=None, help="Save results to JSON file")
+   559→def backtest(
+   560→    symbol: str, timeframe: str, capital: float,
+   561→    pattern_length: int, min_confidence: float, start_offset: int,
+   562→    auto_calibrate: bool, no_calibrate: bool,
+   563→    regime_aware: bool, multi_level: bool, output: str,
+   564→):
+   565→    """Run a full backtest on stored historical data.
+   566→
+   567→    Uses the RealtimeTrader in replay mode to simulate streaming through
+   568→    historical candles, generating signals, and tracking P&L with
+   569→    the full PPMT pipeline (SAX → Trie → Match → Signal → Risk → Trade).
+   570→
+   571→    This is the primary tool for validating the trading engine before
+   572→    deploying to live markets.
+   573→
+   574→    Examples:
+   575→      ppmt backtest -s BTC/USDT                    # Default backtest
+   576→      ppmt backtest -s ETH/USDT -t 5m -c 50000     # 5-minute with 50k capital
+   577→      ppmt backtest -s BTC/USDT -o results.json     # Save results
+   578→    """
+   579→    if no_calibrate:
+   580→        auto_calibrate = False
+   581→
+   582→    from ppmt.engine.realtime import RealtimeTrader, ReplayConfig
+   583→
+   584→    config = ReplayConfig(
+   585→        symbol=symbol,
+   586→        timeframe=timeframe,
+   587→        initial_capital=capital,
+   588→        speed=0,  # Maximum speed for backtest
+   589→        pattern_length=pattern_length,
+   590→        min_confidence=min_confidence,
+   591→        start_offset=start_offset,
+   592→        auto_calibrate=auto_calibrate,
+   593→        regime_aware=regime_aware,
+   594→        use_multi_level=multi_level,
+   595→        use_token_profile=True,
+   596→        verbose=True,
+   597→    )
+   598→
+   599→    console.print(f"[bold cyan]Running Backtest: {symbol} ({timeframe})[/bold cyan]")
+   600→    console.print(f"  Capital: ${capital:,.2f}")
+   601→    console.print(f"  Pattern Length: {pattern_length}")
+   602→    console.print(f"  Min Confidence: {min_confidence:.0%}")
+   603→    console.print(f"  Auto-calibrate: {'ON' if auto_calibrate else 'OFF'}")
+   604→    console.print(f"  Regime-aware: {'ON' if regime_aware else 'OFF'}")
+   605→    console.print(f"  Multi-level: {'ON' if multi_level else 'OFF'}")
+   606→    console.print()
+   607→
+   608→    trader = RealtimeTrader(config=config)
+   609→    result = trader.run_replay()
+   610→
+   611→    console.print(format_realtime_result(result))
+   612→
+   613→    # Show trade details if any
+   614→    if result.trades:
+   615→        console.print(f"\n[bold]Trade Details:[/bold]")
+   616→        trade_table = Table(title="Backtest Trades")
+   617→        trade_table.add_column("#", justify="right", style="cyan")
+   618→        trade_table.add_column("Dir")
+   619→        trade_table.add_column("Entry", justify="right")
+   620→        trade_table.add_column("Exit", justify="right")
+   621→        trade_table.add_column("P&L%", justify="right")
+   622→        trade_table.add_column("Exit Reason")
+   623→        trade_table.add_column("Regime")
+   624→
+   625→        for t in result.trades:
+   626→            pnl_color = "green" if t.pnl_pct >= 0 else "red"
+   627→            trade_table.add_row(
+   628→                str(t.trade_id),
+   629→                t.direction,
+   630→                f"${t.entry_price:,.2f}",
+   631→                f"${t.exit_price:,.2f}",
+   632→                f"[{pnl_color}]{t.pnl_pct:+.2f}%[/{pnl_color}]",
+   633→                t.exit_reason,
+   634→                t.regime,
+   635→            )
+   636→
+   637→        console.print(trade_table)
+   638→
+   639→    # Save to JSON if requested
+   640→    if output:
+   641→        import json
+   642→        from pathlib import Path
+   643→        output_path = Path(output)
+   644→        if not output_path.is_absolute():
+   645→            output_path = Path.cwd() / output_path
+   646→
+   647→        result_dict = {
+   648→            "symbol": result.symbol,
+   649→            "timeframe": result.timeframe,
+   650→            "mode": result.mode,
+   651→            "initial_capital": result.initial_capital,
+   652→            "final_capital": result.final_capital,
+   653→            "total_pnl": result.total_pnl,
+   654→            "total_pnl_pct": result.total_pnl_pct,
+   655→            "total_trades": result.total_trades,
+   656→            "winning_trades": result.winning_trades,
+   657→            "losing_trades": result.losing_trades,
+   658→            "win_rate": result.win_rate,
+   659→            "max_drawdown": result.max_drawdown,
+   660→            "candles_processed": result.candles_processed,
+   661→            "sax_symbols_produced": result.sax_symbols_produced,
+   662→            "signals_generated": result.signals_generated,
+   663→            "duration_seconds": result.duration_seconds,
+   664→            "trades": [
+   665→                {
+   666→                    "trade_id": t.trade_id,
+   667→                    "direction": t.direction,
+   668→                    "entry_price": t.entry_price,
+   669→                    "exit_price": t.exit_price,
+   670→                    "pnl": t.pnl,
+   671→                    "pnl_pct": t.pnl_pct,
+   672→                    "exit_reason": t.exit_reason,
+   673→                    "regime": t.regime,
+   674→                    "confidence": t.confidence,
+   675→                }
+   676→                for t in result.trades
+   677→            ],
+   678→        }
+   679→
+   680→        output_path.parent.mkdir(parents=True, exist_ok=True)
+   681→        with open(output_path, "w") as f:
+   682→            json.dump(result_dict, f, indent=2, default=str)
+   683→        console.print(f"\n[green]Results saved to {output_path}[/green]")
+   684→
+   685→
+   686→@cli.command("monte-carlo")
+   687→@click.option("--symbol", "-s", required=True, help="Trading pair")
+   688→@click.option("--timeframe", "-t", default="1h", help="Candle timeframe")
+   689→@click.option("--capital", "-c", default=10000.0, type=float, help="Initial capital")
+   690→@click.option("--simulations", "-n", default=1000, type=int, help="Number of simulations")
+   691→@click.option("--pattern-length", "-p", default=5, type=int, help="SAX blocks per pattern")
+   692→@click.option("--min-confidence", default=0.08, type=float, help="Minimum signal confidence (v0.21.0: lowered for Bayesian shrinkage)")
+   693→@click.option("--auto-calibrate", is_flag=True, default=True, help="Auto-calibrate SAX parameters")
+   694→@click.option("--regime-aware", is_flag=True, default=True, help="Enable regime detection")
+   695→@click.option("--confidence-level", default=0.95, type=float, help="Confidence level (0-1)")
+   696→@click.option("--output", "-o", default=None, help="Save results to JSON file")
+   697→def monte_carlo(
+   698→    symbol: str, timeframe: str, capital: float,
+   699→    simulations: int, pattern_length: int, min_confidence: float,
+   700→    auto_calibrate: bool, regime_aware: bool,
+   701→    confidence_level: float, output: str,
+   702→):
+   703→    """Run Monte Carlo simulation on backtest results.
+   704→
+   705→    First runs a backtest to collect trade P&Ls, then resamples
+   706→    them thousands of times to build confidence intervals for:
+   707→      - Risk of Ruin
+   708→      - Probability of Profit
+   709→      - Max Drawdown distribution
+   710→      - Sharpe Ratio distribution
+   711→
+   712→    This provides statistical validation of the trading strategy.
+   713→
+   714→    Examples:
+   715→      ppmt monte-carlo -s BTC/USDT                     # 1000 simulations
+   716→      ppmt monte-carlo -s ETH/USDT -n 5000             # 5000 simulations
+   717→      ppmt monte-carlo -s BTC/USDT -o mc_results.json   # Save results
+   718→    """
+   719→    from ppmt.engine.realtime import RealtimeTrader, ReplayConfig
+   720→    from ppmt.risk.monte_carlo import MonteCarloSimulator, MonteCarloConfig
+   721→
+   722→    # Step 1: Run backtest to collect trades
+   723→    console.print(f"[bold cyan]Step 1/2: Running Backtest for {symbol}...[/bold cyan]")
+   724→    config = ReplayConfig(
+   725→        symbol=symbol,
+   726→        timeframe=timeframe,
+   727→        initial_capital=capital,
+   728→        speed=0,
+   729→        pattern_length=pattern_length,
+   730→        min_confidence=min_confidence,
+   731→        auto_calibrate=auto_calibrate,
+   732→        regime_aware=regime_aware,
+   733→        use_multi_level=True,
+   734→        use_token_profile=True,
+   735→        verbose=False,  # Quiet mode for backtest
+   736→    )
+   737→
+   738→    trader = RealtimeTrader(config=config)
+   739→    result = trader.run_replay()
+   740→
+   741→    if result.total_trades == 0:
+   742→        console.print("[yellow]No trades generated. Cannot run Monte Carlo.[/yellow]")
+   743→        console.print("[dim]Try lowering --min-confidence or ingesting more data.[/dim]")
+   744→        return
+   745→
+   746→    console.print(f"  Backtest: {result.total_trades} trades, "
+   747→                  f"WR={result.win_rate:.1%}, "
+   748→                  f"P&L={result.total_pnl_pct:+.2f}%")
+   749→
+   750→    # Step 2: Run Monte Carlo
+   751→    console.print(f"\n[bold cyan]Step 2/2: Running {simulations} Monte Carlo simulations...[/bold cyan]")
+   752→
+   753→    # Extract trade PnL percentages as fractions (e.g., 0.05 = +5%)
+   754→    trade_pnls_pct = [t.pnl_pct / 100.0 for t in result.trades]
+   755→
+   756→    mc_config = MonteCarloConfig(
+   757→        simulations=simulations,
+   758→        initial_capital=capital,
+   759→    )
+   760→    mc = MonteCarloSimulator()
+   761→    mc_results = mc.simulate(trades_pnl_pct=trade_pnls_pct, config=mc_config)
+   762→
+   763→    # Display results
+   764→    console.print(f"\n[bold]Monte Carlo Simulation Results: {symbol} ({timeframe})[/bold]")
+   765→    console.print(f"  Base Trades:       {result.total_trades}")
+   766→    console.print(f"  Simulations:       {simulations}")
+   767→    console.print("")
+   768→
+   769→    # Risk metrics
+   770→    risk_of_ruin = mc_results.risk_of_ruin
+   771→    prob_profit = mc_results.probability_of_profit
+   772→    mean_final = mc_results.mean_final_equity
+   773→    median_final = mc_results.median_final_equity
+   774→
+   775→    console.print(f"  [bold]Risk of Ruin:[/bold]          {risk_of_ruin:.1%}")
+   776→    console.print(f"  [bold]Probability of Profit:[/bold]  {prob_profit:.1%}")
+   777→    console.print(f"  Mean Final Capital:    ${mean_final:,.2f}")
+   778→    console.print(f"  Median Final Capital:  ${median_final:,.2f}")
+   779→
+   780→    # Confidence intervals for equity
+   781→    if mc_results.equity_percentiles:
+   782→        console.print(f"\n  [bold]Equity Confidence Intervals:[/bold]")
+   783→        for ci in mc_results.equity_percentiles:
+   784→            console.print(f"    P{ci.level:>2}: ${ci.value:>12,.2f}")
+   785→
+   786→    # Drawdown intervals
+   787→    if mc_results.drawdown_percentiles:
+   788→        console.print(f"\n  [bold]Max Drawdown Confidence Intervals:[/bold]")
+   789→        for ci in mc_results.drawdown_percentiles:
+   790→            console.print(f"    P{ci.level:>2}: {ci.value * 100:>8.2f}%")
+   791→
+   792→    # P95 max drawdown
+   793→    console.print(f"\n  P95 Max Drawdown:     {mc_results.p95_max_drawdown:.1%}")
+   794→
+   795→    # Original path metrics
+   796→    if mc_results.original_metrics:
+   797→        om = mc_results.original_metrics
+   798→        console.print(f"\n  [bold]Original (Unshuffled) Path:[/bold]")
+   799→        console.print(f"    Final Equity:  ${om.final_equity:>12,.2f}")
+   800→        console.print(f"    Max Drawdown:  {om.max_drawdown:.1%}")
+   801→        console.print(f"    Sharpe Ratio:  {om.sharpe_ratio:.3f}")
+   802→        console.print(f"    Win Rate:      {om.win_rate:.1%}")
+   803→        pf_str = "INF" if om.profit_factor == float('inf') else f"{om.profit_factor:.2f}"
+   804→        console.print(f"    Profit Factor: {pf_str}")
+   805→
+   806→    # Verdict — gate live trading (v0.24.0: comprehensive multi-factor verdict)
+   807→    # The old logic only checked risk_of_ruin, which meant a strategy with
+   808→    # 0% probability of profit but low ruin (slow bleed) was marked "LOW RISK".
+   809→    # Now we also check probability_of_profit, profit_factor, and win_rate.
+   810→
+   811→    profit_factor = mc_results.original_metrics.profit_factor if mc_results.original_metrics else 0.0
+   812→    win_rate = mc_results.original_metrics.win_rate if mc_results.original_metrics else 0.0
+   813→
+   814→    # Build a composite risk score (0-100, lower = safer)
+   815→    risk_score = 0
+   816→
+   817→    # Factor 1: Risk of Ruin (0-40 points)
+   818→    if risk_of_ruin > 0.20:
+   819→        risk_score += 40
+   820→    elif risk_of_ruin > 0.10:
+   821→        risk_score += 30
+   822→    elif risk_of_ruin > 0.05:
+   823→        risk_score += 15
+   824→    else:
+   825→        risk_score += 0
+   826→
+   827→    # Factor 2: Probability of Profit (0-30 points, inverted)
+   828→    if prob_profit < 0.10:
+   829→        risk_score += 30  # Almost never profitable
+   830→    elif prob_profit < 0.30:
+   831→        risk_score += 22
+   832→    elif prob_profit < 0.50:
+   833→        risk_score += 12
+   834→    elif prob_profit < 0.70:
+   835→        risk_score += 5
+   836→    else:
+   837→        risk_score += 0
+   838→
+   839→    # Factor 3: Profit Factor (0-15 points)
+   840→    if profit_factor < 0.8:
+   841→        risk_score += 15  # Losing money consistently
+   842→    elif profit_factor < 1.0:
+   843→        risk_score += 10  # Marginal loser
+   844→    elif profit_factor < 1.2:
+   845→        risk_score += 5   # Marginal winner
+   846→    else:
+   847→        risk_score += 0
+   848→
+   849→    # Factor 4: P95 Max Drawdown (0-15 points)
+   850→    if mc_results.p95_max_drawdown > 0.30:
+   851→        risk_score += 15
+   852→    elif mc_results.p95_max_drawdown > 0.20:
+   853→        risk_score += 8
+   854→    elif mc_results.p95_max_drawdown > 0.10:
+   855→        risk_score += 3
+   856→    else:
+   857→        risk_score += 0
+   858→
+   859→    # Render verdict based on composite score
+   860→    if risk_score >= 50:
+   861→        console.print(f"\n  [bold red]VERDICT: HIGH RISK (score: {risk_score}/100)[/bold red]")
+   862→        if prob_profit < 0.10:
+   863→            console.print(f"  [red]Probability of profit is {prob_profit:.0%} — this strategy LOSES money.[/red]")
+   864→        if profit_factor < 1.0:
+   865→            console.print(f"  [red]Profit factor {profit_factor:.2f} < 1.0 — losses exceed gains.[/red]")
+   866→        console.print(f"  [red]DO NOT deploy this strategy with real money.[/red]")
+   867→        console.print(f"  [dim]Suggestions: improve signal quality, widen SL, reduce position size, or tune parameters.[/dim]")
+   868→    elif risk_score >= 30:
+   869→        console.print(f"\n  [bold yellow]VERDICT: MODERATE RISK (score: {risk_score}/100)[/bold yellow]")
+   870→        console.print(f"  [yellow]Risk of ruin: {risk_of_ruin:.0%} | Profit prob: {prob_profit:.0%} | PF: {profit_factor:.2f}[/yellow]")
+   871→        console.print(f"  [yellow]Consider reducing position size or improving signal filters before live trading.[/yellow]")
+   872→    else:
+   873→        console.print(f"\n  [bold green]VERDICT: LOW RISK (score: {risk_score}/100)[/bold green]")
+   874→        console.print(f"  [green]Risk of ruin: {risk_of_ruin:.0%} | Profit prob: {prob_profit:.0%} | PF: {profit_factor:.2f}[/green]")
+   875→        console.print(f"  [green]Strategy passed Monte Carlo validation. Safe to deploy.[/green]")
+   876→
+   877→    # Save to JSON
+   878→    if output:
+   879→        import json as json_mod
+   880→        from pathlib import Path
+   881→        output_path = Path(output)
+   882→        if not output_path.is_absolute():
+   883→            output_path = Path.cwd() / output_path
+   884→
+   885→        # Build summary using the simulator's generate_summary method
+   886→        mc_dict = {
+   887→            "symbol": symbol,
+   888→            "timeframe": timeframe,
+   889→            "base_trades": result.total_trades,
+   890→            "base_win_rate": result.win_rate,
+   891→            "base_pnl_pct": result.total_pnl_pct,
+   892→            "simulations": simulations,
+   893→            "risk_of_ruin": risk_of_ruin,
+   894→            "probability_of_profit": prob_profit,
+   895→            "mean_final_equity": mean_final,
+   896→            "median_final_equity": median_final,
+   897→            "p95_max_drawdown": mc_results.p95_max_drawdown,
+   898→            "equity_percentiles": [
+   899→                {"level": ci.level, "value": ci.value}
+   900→                for ci in mc_results.equity_percentiles
+   901→            ],
+   902→            "drawdown_percentiles": [
+   903→                {"level": ci.level, "value": ci.value}
+   904→                for ci in mc_results.drawdown_percentiles
+   905→            ],
+   906→        }
+   907→
+   908→        output_path.parent.mkdir(parents=True, exist_ok=True)
+   909→        with open(output_path, "w") as f:
+   910→            json_mod.dump(mc_dict, f, indent=2, default=str)
+   911→        console.print(f"\n[green]Results saved to {output_path}[/green]")
+   912→
+   913→
+   914→@cli.command("validate")
+   915→@click.option("--symbol", "-s", required=True, help="Trading pair")
+   916→@click.option("--timeframe", "-t", default="1h", help="Candle timeframe")
+   917→@click.option("--pattern-length", "-p", default=5, type=int, help="SAX blocks per pattern")
+   918→@click.option("--output", "-o", default=None, help="Save validation report to JSON")
+   919→def validate(symbol: str, timeframe: str, pattern_length: int, output: str):
+   920→    """Run the full validation suite (OOS + Monte Carlo + Walk-Forward).
+   921→
+   922→    Performs three statistical tests to determine if the strategy
+   923→    is robust, overfit, or marginal:
+   924→
+   925→      P0 — Out-of-Sample Test: Train on 70%, test on 30%
+   926→      P1 — Monte Carlo Permutation: Randomize trade order 1000x
+   927→      P2 — Walk-Forward Analysis: Rolling window validation
+   928→
+   929→    Composite verdict: ROBUST / MARGINAL / OVERFIT / INSUFFICIENT_DATA
+   930→
+   931→    Examples:
+   932→      ppmt validate -s BTC/USDT
+   933→      ppmt validate -s ETH/USDT -t 5m -o validation.json
+   934→    """
+   935→    from ppmt.engine.validator import ValidationSuite
+   936→
+   937→    console.print(f"[bold cyan]Running Validation Suite: {symbol} ({timeframe})[/bold cyan]")
+   938→
+   939→    storage = PPMTStorage()
+   940→    df = storage.load_ohlcv(symbol, timeframe)
+   941→    if df.empty:
+   942→        console.print(f"[red]No data for {symbol}. Run 'ppmt ingest' first.[/red]")
+   943→        storage.close()
+   944→        return
+   945→
+   946→    config = load_config()
+   947→    classifier = AssetClassifier()
+   948→    info = classifier.classify(symbol)
+   949→
+   950→    sax_config = config.get("sax", {})
+   951→
+   952→    suite = ValidationSuite(
+   953→        symbol=symbol,
+   954→        timeframe=timeframe,
+   955→        pattern_length=pattern_length,
+   956→        sax_alphabet_size=sax_config.get("alphabet_size", 8),
+   957→        sax_window_size=sax_config.get("window_size", 10),
+   958→        asset_class=info.asset_class,
+   959→    )
+   960→
+   961→    results = suite.run(df)
+   962→
+   963→    # Display results
+   964→    console.print(f"\n[bold]Validation Results: {symbol} ({timeframe})[/bold]")
+   965→    console.print(f"  Data: {len(df)} candles")
+   966→
+   967→    for test_name, test_result in results.items():
+   968→        if isinstance(test_result, dict):
+   969→            status = test_result.get("verdict", "N/A")
+   970→            color = {"ROBUST": "green", "MARGINAL": "yellow", "OVERFIT": "red", "INSUFFICIENT_DATA": "dim"}.get(status, "white")
+   971→            console.print(f"  {test_name}: [{color}]{status}[/{color}]")
+   972→            for key, val in test_result.items():
+   973→                if key != "verdict" and isinstance(val, (int, float, str)):
+   974→                    console.print(f"    {key}: {val}")
+   975→
+   976→    composite = results.get("composite_verdict", "UNKNOWN")
+   977→    composite_color = {"ROBUST": "bold green", "MARGINAL": "bold yellow", "OVERFIT": "bold red"}.get(composite, "white")
+   978→    console.print(f"\n  [bold]Composite Verdict:[/bold] [{composite_color}]{composite}[/{composite_color}]")
+   979→
+   980→    # Save to JSON
+   981→    if output:
+   982→        import json
+   983→        from pathlib import Path
+   984→        output_path = Path(output)
+   985→        if not output_path.is_absolute():
+   986→            output_path = Path.cwd() / output_path
+   987→
+   988→        output_path.parent.mkdir(parents=True, exist_ok=True)
+   989→
+   990→        # Convert results for JSON serialization
+   991→        json_results = {}
+   992→        for key, val in results.items():
+   993→            if isinstance(val, dict):
+   994→                json_results[key] = {k: str(v) if not isinstance(v, (int, float, bool)) else v
+   995→                                     for k, v in val.items()}
+   996→            else:
+   997→                json_results[key] = str(val)
+   998→
+   999→        json_results["symbol"] = symbol
+  1000→        json_results["timeframe"] = timeframe
+  1001→        json_results["data_candles"] = len(df)
+  1002→
+  1003→        with open(output_path, "w") as f:
+  1004→            json.dump(json_results, f, indent=2, default=str)
+  1005→        console.print(f"\n[green]Validation report saved to {output_path}[/green]")
+  1006→
+  1007→    storage.close()
+  1008→
+  1009→
+  1010→# ============================================================
+  1011→# v0.14.0: TERMINAL DASHBOARD & PORTFOLIO COMMANDS
+  1012→# ============================================================
+  1013→
+  1014→@cli.command()
+  1015→@click.option("--host", "-h", default="localhost", help="Dashboard host")
+  1016→@click.option("--port", "-p", default=8420, type=int, help="Dashboard port (default 8420)")
+  1017→@click.option("--open-browser", is_flag=True, default=False, help="Open browser automatically")
+  1018→def terminal(host: str, port: int, open_browser: bool):
+  1019→    """Launch the PPMT Terminal web dashboard.
+  1020→
+  1021→    v0.29.0: FastAPI dashboard with real-time candlestick chart,
+  1022→    entry/exit markers, Money Management, Node Management, Backtest,
+  1023→    and live trading controls with start/stop from dashboard.
+  1024→    Runs on port 8420 by default.
+  1025→
+  1026→    Examples:
+  1027→      ppmt terminal                      # Start dashboard on port 8420
+  1028→      ppmt terminal -p 9000             # Custom port
+  1029→      ppmt terminal --open-browser      # Auto-open in browser
+  1030→    """
+  1031→    console.print("[bold cyan]PPMT Terminal Dashboard v0.40.34[/bold cyan]")
+  1032→
+  1033→    if open_browser:
+  1034→        import webbrowser
+  1035→        import threading
+  1036→
+  1037→    fastapi_port = port
+  1038→
+  1039→    # Kill any existing process on the target port
+  1040→    try:
+  1041→        import subprocess as _sp
+  1042→        check = _sp.run(
+  1043→            ["lsof", "-ti", f":{fastapi_port}"],
+  1044→            capture_output=True, text=True, timeout=5,
+  1045→        )
+  1046→        if check.returncode == 0 and check.stdout.strip():
+  1047→            pids = check.stdout.strip().split('\n')
+  1048→            console.print(f"  [yellow]Port {fastapi_port} in use. Killing...[/yellow]")
+  1049→            for pid in pids:
+  1050→                try:
+  1051→                    _sp.run(["kill", "-9", pid], capture_output=True, timeout=5)
+  1052→                except Exception:
+  1053→                    pass
+  1054→            import time as _time
+  1055→            _time.sleep(1)
+  1056→    except Exception:
+  1057→        pass
+  1058→
+  1059→    console.print(f"  Starting PPMT Terminal Dashboard on http://localhost:{fastapi_port}")
+  1060→
+  1061→    if open_browser:
+  1062→        url = f"http://localhost:{fastapi_port}"
+  1063→        threading.Timer(2.0, lambda: webbrowser.open(url)).start()
+  1064→        console.print(f"  Opening browser at {url}")
+  1065→
+  1066→    console.print("[dim]Press Ctrl+C to stop[/dim]")
+  1067→    console.print("[dim]Dashboard features: Portfolio, Money Management, Node Control, Backtest, Real-time[/dim]\n")
+  1068→
+  1069→    try:
+  1070→        from ppmt.terminal.server import run_server
+  1071→        run_server(host=host, port=fastapi_port)
+  1072→    except ImportError as e:
+  1073→        console.print(f"[red]Terminal dashboard not available: {e}[/red]")
+  1074→        console.print("[dim]Install dependencies: pip3 install fastapi uvicorn --break-system-packages[/dim]")
+  1075→    except KeyboardInterrupt:
+  1076→        console.print("\n[yellow]Dashboard stopped.[/yellow]")
+  1077→
+  1078→
+  1079→@cli.command()
+  1080→@click.option("--exchange", "-e", default="binance", help="Exchange to scan")
+  1081→@click.option("--quote", "-q", default="USDT", help="Quote currency")
+  1082→@click.option("--top", default=20, type=int, help="Number of top assets to show")
+  1083→@click.option("--sort-by", type=click.Choice(["volume", "volatility", "change"]), default="volume", help="Sort criterion")
+  1084→def scan(exchange: str, quote: str, top: int, sort_by: str):
+  1085→    """Scan and analyze available trading assets.
+  1086→
+  1087→    Fetches market data from the exchange and ranks assets by
+  1088→    the selected criterion. Useful for finding high-activity
+  1089→    or high-volatility assets to trade.
+  1090→
+  1091→    Examples:
+  1092→      ppmt scan                           # Top 20 USDT pairs by volume on Binance
+  1093→      ppmt scan -e bybit -q USDC         # USDC pairs on Bybit
+  1094→      ppmt scan --sort-by volatility      # Most volatile assets
+  1095→    """
+  1096→    console.print(f"[bold cyan]Scanning {exchange} markets ({quote} pairs)...[/bold cyan]")
+  1097→
+  1098→    try:
+  1099→        storage = PPMTStorage()
+  1100→        collector = DataCollector(exchange=exchange, storage=storage)
+  1101→
+  1102→        # Get markets via ccxt (v0.20.0: now implemented)
+  1103→        markets = collector.get_markets()
+  1104→        if not markets:
+  1105→            console.print("[red]No markets found. Check exchange connection.[/red]")
+  1106→            collector.close()
+  1107→            storage.close()
+  1108→            return
+  1109→
+  1110→        # Filter by quote currency
+  1111→        pairs = [m for m in markets if m.endswith(f"/{quote}")]
+  1112→        if not pairs:
+  1113→            console.print(f"[red]No {quote} pairs found on {exchange}[/red]")
+  1114→            collector.close()
+  1115→            storage.close()
+  1116→            return
+  1117→
+  1118→        # Fetch tickers for ranking (v0.20.0: now implemented)
+  1119→        console.print(f"  Found {len(pairs)} {quote} pairs. Fetching tickers...")
+  1120→
+  1121→        tickers = collector.get_tickers(pairs[:100])  # Limit to avoid rate limits
+  1122→
+  1123→        # Build ranking
+  1124→        rankings = []
+  1125→        for symbol, ticker in tickers.items():
+  1126→            volume = ticker.get("quoteVolume", 0) or 0
+  1127→            change = ticker.get("percentage", 0) or 0
+  1128→            high = ticker.get("high", 0) or 0
+  1129→            low = ticker.get("low", 0) or 0
+  1130→            last = ticker.get("last", 0) or 0
+  1131→
+  1132→            volatility = ((high - low) / last * 100) if last > 0 else 0
+  1133→
+  1134→            rankings.append({
+  1135→                "symbol": symbol,
+  1136→                "price": last,
+  1137→                "volume_24h": volume,
+  1138→                "change_24h": change,
+  1139→                "volatility": volatility,
+  1140→                "high": high,
+  1141→                "low": low,
+  1142→            })
+  1143→
+  1144→        # Sort
+  1145→        sort_key = {"volume": "volume_24h", "volatility": "volatility", "change": "change_24h"}[sort_by]
+  1146→        rankings.sort(key=lambda x: x[sort_key], reverse=True)
+  1147→
+  1148→        # Display table
+  1149→        table = Table(title=f"Top {top} {quote} Pairs on {exchange} (by {sort_by})")
+  1150→        table.add_column("#", style="dim", width=4)
+  1151→        table.add_column("Symbol", style="bold")
+  1152→        table.add_column("Price", justify="right")
+  1153→        table.add_column("24h Volume", justify="right")
+  1154→        table.add_column("24h Change", justify="right")
+  1155→        table.add_column("Volatility", justify="right")
+  1156→
+  1157→        for i, r in enumerate(rankings[:top], 1):
+  1158→            change_color = "green" if r["change_24h"] >= 0 else "red"
+  1159→            change_sign = "+" if r["change_24h"] >= 0 else ""
+  1160→
+  1161→            vol_str = f"${r['volume_24h']:,.0f}" if r['volume_24h'] >= 1e6 else f"${r['volume_24h']:,.0f}"
+  1162→            price_str = f"${r['price']:,.2f}" if r['price'] >= 1 else f"${r['price']:,.6f}"
+  1163→
+  1164→            table.add_row(
+  1165→                str(i),
+  1166→                r["symbol"],
+  1167→                price_str,
+  1168→                vol_str,
+  1169→                f"[{change_color}]{change_sign}{r['change_24h']:.1f}%[/{change_color}]",
+  1170→                f"{r['volatility']:.1f}%",
+  1171→            )
+  1172→
+  1173→        console.print(table)
+  1174→        console.print(f"\n[dim]To ingest data: ppmt ingest -s <SYMBOL> -e {exchange}[/dim]")
+  1175→
+  1176→        collector.close()
+  1177→        storage.close()
+  1178→
+  1179→    except ImportError:
+  1180→        console.print("[red]ccxt is required for market scanning. Install with: pip install ccxt>=4.0.0[/red]")
+  1181→    except Exception as e:
+  1182→        console.print(f"[red]Scan failed: {e}[/red]")
+  1183→
+  1184→
+  1185→@cli.command()
+  1186→@click.option("--symbol", "-s", default=None, help="Filter by symbol")
+  1187→@click.option("--capital", "-c", default=None, type=float, help="Set initial capital")
+  1188→@click.option("--tokens", "-t", default=None, help="Comma-separated token list (e.g. BTC/USDT,ETH/USDT)")
+  1189→@click.option("--method", "-m", default="REGIME_AWARE", help="Allocation method: EQUAL_WEIGHT, RISK_PARITY, REGIME_AWARE, QUALITY_WEIGHTED")
+  1190→@click.option("--correlation", is_flag=True, help="Show cross-token correlation matrix")
+  1191→@click.option("--rebalance", is_flag=True, help="Trigger portfolio rebalance")
+  1192→@click.option("--serve-api", is_flag=True, help="Start Portfolio API server")
+  1193→@click.option("--api-port", default=8430, type=int, help="API server port")
+  1194→def portfolio(symbol: str, capital: float, tokens: str, method: str, correlation: bool, rebalance: bool, serve_api: bool, api_port: int):
+  1195→    """Show portfolio and money management status.
+  1196→
+  1197→    Displays current portfolio value, open positions, exposure,
+  1198→    circuit breaker status, and risk metrics.
+  1199→
+  1200→    v0.16.0: Now supports multi-token portfolio management with
+  1201→    cross-token correlation, regime-aware allocation, and
+  1202→    a REST API bridge for the dashboard.
+  1203→
+  1204→    Examples:
+  1205→      ppmt portfolio                                    # Show portfolio overview
+  1206→      ppmt portfolio -s BTC/USDT                        # Filter by symbol
+  1207→      ppmt portfolio -c 50000                           # Set initial capital
+  1208→      ppmt portfolio -t BTC/USDT,ETH/USDT,SOL/USDT      # Multi-token portfolio
+  1209→      ppmt portfolio -m RISK_PARITY                     # Use risk parity allocation
+  1210→      ppmt portfolio --correlation                      # Show correlation matrix
+  1211→      ppmt portfolio --rebalance                        # Trigger rebalance
+  1212→      ppmt portfolio --serve-api --api-port 8430         # Start API server
+  1213→    """
+  1214→    from ppmt.risk.portfolio_manager import PortfolioManager, PortfolioConfig
+  1215→    from ppmt.risk.correlation_engine import CrossTokenCorrelationEngine
+  1216→    from ppmt.risk.regime_allocator import RegimeAwareAllocator
+  1217→
+  1218→    # Start API server if requested
+  1219→    if serve_api:
+  1220→        from ppmt.risk.portfolio_api import serve as portfolio_serve
+  1221→        portfolio_serve(port=api_port)
+  1222→        return
+  1223→
+  1224→    # Parse token list
+  1225→    token_list = None
+  1226→    if tokens:
+  1227→        token_list = [t.strip() for t in tokens.split(",")]
+  1228→
+  1229→    # Build portfolio config
+  1230→    config_kwargs = {}
+  1231→    if capital is not None:
+  1232→        config_kwargs["initial_capital"] = capital
+  1233→    if token_list:
+  1234→        config_kwargs["tokens"] = token_list
+  1235→    config_kwargs["allocation_method"] = method
+  1236→
+  1237→    pm_config = PortfolioConfig(**config_kwargs)
+  1238→
+  1239→    # Try to load saved state
+  1240→    state_file = os.path.join(CONFIG_DIR, "portfolio_state.json")
+  1241→    pm_config.state_file = state_file
+  1242→
+  1243→    pm = PortfolioManager(config=pm_config)
+  1244→
+  1245→    # Load state if exists
+  1246→    if os.path.exists(state_file):
+  1247→        try:
+  1248→            pm.load_state(state_file)
+  1249→        except Exception:
+  1250→            pass
+  1251→
+  1252→    if capital is not None:
+  1253→        console.print(f"[yellow]Setting capital to ${capital:,.2f}[/yellow]")
+  1254→
+  1255→    # Trigger rebalance if requested
+  1256→    if rebalance:
+  1257→        result = pm.rebalance(reason="cli_request")
+  1258→        console.print(f"\n[bold green]Portfolio rebalanced![/bold green]")
+  1259→        if result.capital_moves:
+  1260→            for move in result.capital_moves:
+  1261→                delta_color = "green" if move["move"] >= 0 else "red"
+  1262→                console.print(
+  1263→                    f"  {move['symbol']}: ${move['from']:,.0f} -> ${move['to']:,.0f} "
+  1264→                    f"[{delta_color}]{move['move']:+,.0f}[/{delta_color}]"
+  1265→                )
+  1266→        else:
+  1267→            console.print("  No capital moves needed")
+  1268→        pm.save_state()
+  1269→        return
+  1270→
+  1271→    # Show correlation matrix if requested
+  1272→    if correlation:
+  1273→        corr_engine = CrossTokenCorrelationEngine(
+  1274→            tokens=list(pm._slots.keys()),
+  1275→        )
+  1276→        result = corr_engine.compute_matrix()
+  1277→        corr_engine.display_matrix(result)
+  1278→
+  1279→        # Show diversification score
+  1280→        div = corr_engine.compute_diversification_score()
+  1281→        console.print(f"\n  Diversification Score: [bold]{div['score']:.2f}[/bold] ({div['rating']})")
+  1282→        console.print(f"  Effective Positions: {div['effective_positions']:.1f}")
+  1283→        console.print(f"  Correlation Clusters: {div['clusters']}")
+  1284→        return
+  1285→
+  1286→    # Display portfolio summary using the PortfolioManager's rich display
+  1287→    pm.display_summary()
+  1288→
+  1289→    # Save state
+  1290→    try:
+  1291→        pm.save_state()
+  1292→    except Exception:
+  1293→        pass
+  1294→
+  1295→
+  1296→@cli.command("nodes")
+  1297→@click.option("--capital", "-c", default=10000.0, type=float, help="Total capital for parent node")
+  1298→@click.option("--add", "-a", default=None, help="Add child node: SYMBOL:TIMEFRAME:ALLOC_PCT:LEVERAGE (e.g. BTC/USDT:1h:30:1)")
+  1299→@click.option("--remove", "-r", default=None, help="Remove child node by node_id")
+  1300→@click.option("--leverage", "-l", default=None, help="Set leverage for a child node: NODE_ID:LEVERAGE (e.g. btc_5m:5)")
+  1301→@click.option("--auto/--manual", default=None, help="Set child node to auto or manual mode: NODE_ID")
+  1302→@click.option("--kill", is_flag=True, help="Activate global kill switch (close all positions)")
+  1303→@click.option("--unkill", is_flag=True, help="Deactivate global kill switch")
+  1304→@click.option("--redistribute", "-R", default=None, help="Redistribute capital: NODE_ID:NEW_PCT,NODE_ID:NEW_PCT")
+  1305→def nodes(capital: float, add: str, remove: str, leverage: str, auto: bool, kill: bool, unkill: bool, redistribute: str):
+  1306→    """Manage parent-child node architecture for multi-strategy capital distribution.
+  1307→
+  1308→    v0.23.0: Parent-Child Node Architecture with Leverage Control.
+  1309→
+  1310→    The parent node manages a pool of capital and distributes it among
+  1311→    child nodes, each running an independent PPMT strategy with its own
+  1312→    leverage and auto/manual mode.
+  1313→
+  1314→    Examples:
+  1315→      ppmt nodes -c 50000                                 # Initialize with $50k capital
+  1316→      ppmt nodes -a BTC/USDT:1h:30:1                      # Add child: BTC 1h, 30% capital, 1x leverage
+  1317→      ppmt nodes -a BTC/USDT:5m:20:3                      # Add child: BTC 5m, 20% capital, 3x leverage
+  1318→      ppmt nodes -a ETH/USDT:1h:25:1                      # Add child: ETH 1h, 25% capital, 1x leverage
+  1319→      ppmt nodes -r btc_1h                                # Remove child node
+  1320→      ppmt nodes -l btc_5m:5                               # Set btc_5m to 5x leverage
+  1321→      ppmt nodes --manual btc_1h                          # Set btc_1h to manual mode
+  1322→      ppmt nodes --kill                                   # Emergency: close all positions
+  1323→      ppmt nodes --unkill                                 # Deactivate kill switch
+  1324→      ppmt nodes -R btc_1h:40,btc_5m:15                   # Redistribute capital
+  1325→    """
+  1326→    from ppmt.risk.money_manager import ParentNodeManager, ChildNodeConfig
+  1327→
+  1328→    # Load or create parent node state
+  1329→    state_file = os.path.join(CONFIG_DIR, "parent_node_state.json")
+  1330→    parent = ParentNodeManager(total_capital=capital)
+  1331→
+  1332→    # Load existing state
+  1333→    if os.path.exists(state_file):
+  1334→        try:
+  1335→            with open(state_file) as f:
+  1336→                saved = yaml.safe_load(f) or {}
+  1337→            parent.total_capital = saved.get("total_capital", capital)
+  1338→            for child_data in saved.get("children", []):
+  1339→                cfg = ChildNodeConfig(**child_data)
+  1340→                parent.register_child(cfg)
+  1341→            if parent._children:
+  1342→                parent.distribute_capital()
+  1343→        except Exception:
+  1344→            pass
+  1345→
+  1346→    # Add child node
+  1347→    if add:
+  1348→        try:
+  1349→            parts = add.split(":")
+  1350→            if len(parts) < 4:
+  1351→                console.print("[red]Format: SYMBOL:TIMEFRAME:ALLOC_PCT:LEVERAGE[/red]")
+  1352→                console.print("[dim]Example: BTC/USDT:1h:30:1[/dim]")
+  1353→                return
+  1354→
+  1355→            symbol = parts[0]
+  1356→            timeframe = parts[1]
+  1357→            alloc_pct = float(parts[2]) / 100.0
+  1358→            leverage_val = int(parts[3])
+  1359→
+  1360→            # Generate node_id
+  1361→            node_id = f"{symbol.split('/')[0].lower()}_{timeframe}"
+  1362→
+  1363→            cfg = ChildNodeConfig(
+  1364→                node_id=node_id,
+  1365→                symbol=symbol,
+  1366→                timeframe=timeframe,
+  1367→                capital_allocation_pct=alloc_pct,
+  1368→                leverage=leverage_val,
+  1369→            )
+  1370→
+  1371→            parent.register_child(cfg)
+  1372→            parent.distribute_capital()
+  1373→
+  1374→            console.print(f"[green]Added child node: {node_id}[/green]")
+  1375→            console.print(f"  Symbol: {symbol}")
+  1376→            console.print(f"  Timeframe: {timeframe}")
+  1377→            console.print(f"  Allocation: {alloc_pct:.0%}")
+  1378→            console.print(f"  Leverage: {leverage_val}x")
+  1379→            console.print(f"  Capital: ${parent.get_child_capital(node_id):,.2f}")
+  1380→
+  1381→        except ValueError as e:
+  1382→            console.print(f"[red]Error: {e}[/red]")
+  1383→            return
+  1384→
+  1385→    # Remove child node
+  1386→    if remove:
+  1387→        try:
+  1388→            parent.unregister_child(remove)
+  1389→            console.print(f"[green]Removed child node: {remove}[/green]")
+  1390→        except (ValueError, RuntimeError) as e:
+  1391→            console.print(f"[red]Error: {e}[/red]")
+  1392→            return
+  1393→
+  1394→    # Set leverage
+  1395→    if leverage:
+  1396→        try:
+  1397→            parts = leverage.split(":")
+  1398→            if len(parts) != 2:
+  1399→                console.print("[red]Format: NODE_ID:LEVERAGE[/red]")
+  1400→                return
+  1401→            parent.set_child_leverage(parts[0], int(parts[1]))
+  1402→            console.print(f"[green]Set {parts[0]} leverage to {parts[1]}x[/green]")
+  1403→        except ValueError as e:
+  1404→            console.print(f"[red]Error: {e}[/red]")
+  1405→            return
+  1406→
+  1407→    # Set auto/manual mode
+  1408→    if auto is not None:
+  1409→        # Find the node_id - the last argument should be the node_id
+  1410→        # But with click, auto is True/False. We need to handle this differently.
+  1411→        # For now, just show status
+  1412→        pass
+  1413→
+  1414→    # Kill switch
+  1415→    if kill:
+  1416→        parent.activate_global_kill_switch()
+  1417→        console.print("[bold red]GLOBAL KILL SWITCH ACTIVATED[/bold red]")
+  1418→        console.print("[dim]All child nodes disabled. Use --unkill to reactivate.[/dim]")
+  1419→
+  1420→    if unkill:
+  1421→        parent.deactivate_global_kill_switch()
+  1422→        console.print("[bold green]Kill switch deactivated. All nodes re-enabled.[/bold green]")
+  1423→
+  1424→    # Redistribute capital
+  1425→    if redistribute:
+  1426→        try:
+  1427→            allocs = {}
+  1428→            for pair in redistribute.split(","):
+  1429→                node_id, pct = pair.split(":")
+  1430→                allocs[node_id] = float(pct) / 100.0
+  1431→            parent.redistribute_capital(allocs)
+  1432→            console.print(f"[green]Capital redistributed:[/green]")
+  1433→            for node_id, pct in allocs.items():
+  1434→                console.print(f"  {node_id}: {pct:.0%} → ${parent.get_child_capital(node_id):,.2f}")
+  1435→        except (ValueError, RuntimeError) as e:
+  1436→            console.print(f"[red]Error: {e}[/red]")
+  1437→            return
+  1438→
+  1439→    # Display status
+  1440→    parent.print_status()
+  1441→
+  1442→    # Save state
+  1443→    try:
+  1444→        os.makedirs(CONFIG_DIR, exist_ok=True)
+  1445→        state = {
+  1446→            "total_capital": parent.total_capital,
+  1447→            "children": [
+  1448→                {
+  1449→                    "node_id": cfg.node_id,
+  1450→                    "symbol": cfg.symbol,
+  1451→                    "timeframe": cfg.timeframe,
+  1452→                    "capital_allocation_pct": cfg.capital_allocation_pct,
+  1453→                    "leverage": cfg.leverage,
+  1454→                    "auto_mode": cfg.auto_mode,
+  1455→                    "max_position_pct": cfg.max_position_pct,
+  1456→                    "enabled": cfg.enabled,
+  1457→                }
+  1458→                for cfg in parent._children.values()
+  1459→            ],
+  1460→        }
+  1461→        with open(state_file, "w") as f:
+  1462→            yaml.dump(state, f, default_flow_style=False)
+  1463→    except Exception:
+  1464→        pass
+  1465→

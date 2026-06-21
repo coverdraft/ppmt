@@ -1,0 +1,1076 @@
+     1→#!/usr/bin/env python3
+     2→"""
+     3→PPMT v0.6.2 — Comprehensive Out-of-Sample Validation
+     4→
+     5→This is the DEFINITIVE test suite that the external AI critique demanded:
+     6→  1. Cross-token OOS validation (BTC, ETH, SOL) with real Binance data
+     7→  2. Walk-forward testing (5 folds) to detect lookahead bias
+     8→  3. Monte Carlo simulation on OOS trades for statistical robustness
+     9→  4. Weight sensitivity analysis (are 0.40/0.35/0.25 optimal?)
+    10→  5. Composite vs Close head-to-head comparison
+    11→
+    12→CRITICAL: Uses ONLY real Binance data. Never synthetic.
+    13→
+    14→Architecture:
+    15→  - Train on 70% of data, test on 30% (OOS)
+    16→  - Walk-forward: 5 expanding windows, each adding 6 months
+    17→  - SAX encoding uses training normalization for test data
+    18→  - PaperTrader runs with alpha=3 (proven optimal from previous tests)
+    19→"""
+    20→
+    21→import sys
+    22→import os
+    23→import json
+    24→import time
+    25→import math
+    26→import random
+    27→from datetime import datetime
+    28→from dataclasses import dataclass, field, asdict
+    29→from typing import Optional
+    30→
+    31→# Add project to path (src/ contains the actual ppmt package)
+    32→project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+    33→src_path = os.path.join(project_root, 'src')
+    34→sys.path.insert(0, src_path)
+    35→# Ensure src/ takes precedence over any duplicate ppmt/ppmt/ namespace
+    36→os.environ['PYTHONPATH'] = src_path
+    37→
+    38→import numpy as np
+    39→import pandas as pd
+    40→
+    41→from ppmt.data.collector import DataCollector
+    42→from ppmt.data.classifier import AssetClassifier
+    43→from ppmt.core.sax import SAXEncoder
+    44→from ppmt.core.regime import RegimeDetector
+    45→from ppmt.core.trie import PPMTTrie
+    46→from ppmt.engine.ppmt import PPMT
+    47→from ppmt.engine.prediction import PredictionEngine
+    48→from ppmt.engine.signal import Signal, SignalType
+    49→from ppmt.risk.manager import RiskManager, RiskConfig
+    50→from ppmt.risk.monte_carlo import MonteCarloSimulator, MonteCarloConfig
+    51→
+    52→
+    53→# ============================================================================
+    54→# Configuration
+    55→# ============================================================================
+    56→
+    57→TOKENS = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+    58→TIMEFRAME = "1h"
+    59→TRAIN_PCT = 0.70
+    60→SAX_ALPHABET = 3        # alpha=3 proven optimal
+    61→SAX_WINDOW = 10
+    62→PATTERN_LENGTH = 5
+    63→INITIAL_CAPITAL = 10_000.0
+    64→DAYS_OF_DATA = 730       # 2 years
+    65→
+    66→# Weight configurations to test
+    67→WEIGHT_CONFIGS = {
+    68→    "current_40_35_25": {"bp": 0.40, "dir": 0.35, "vol": 0.25},
+    69→    "equal_33_33_33":   {"bp": 0.333, "dir": 0.333, "vol": 0.334},
+    70→    "direction_heavy":  {"bp": 0.25, "dir": 0.50, "vol": 0.25},
+    71→    "body_heavy":       {"bp": 0.50, "dir": 0.25, "vol": 0.25},
+    72→    "volume_heavy":     {"bp": 0.25, "dir": 0.25, "vol": 0.50},
+    73→}
+    74→
+    75→# Walk-forward configuration
+    76→WF_NUM_FOLDS = 5
+    77→WF_INITIAL_TRAIN_PCT = 0.40  # Start with 40% train
+    78→WF_STEP_PCT = 0.12           # Add ~12% each fold
+    79→
+    80→
+    81→# ============================================================================
+    82→# Data Fetching
+    83→# ============================================================================
+    84→
+    85→def fetch_real_data(symbol: str, timeframe: str = "1h", days: int = 730) -> pd.DataFrame:
+    86→    """Fetch real OHLCV data from Binance."""
+    87→    print(f"\n{'='*60}")
+    88→    print(f"  Fetching {symbol} {timeframe} data ({days} days) from Binance...")
+    89→    print(f"{'='*60}")
+    90→    
+    91→    collector = DataCollector(exchange="binance")
+    92→    df = collector.fetch_and_save(symbol, timeframe, days=days)
+    93→    
+    94→    if df.empty:
+    95→        raise RuntimeError(f"Failed to fetch data for {symbol}")
+    96→    
+    97→    print(f"  ✓ Got {len(df)} candles from {df.index[0]} to {df.index[-1]}")
+    98→    return df
+    99→
+   100→
+   101→# ============================================================================
+   102→# Custom SAX Encoder with Configurable Weights
+   103→# ============================================================================
+   104→
+   105→class WeightedSAXEncoder(SAXEncoder):
+   106→    """SAX encoder with configurable OHLCV composite weights."""
+   107→    
+   108→    def __init__(self, weight_bp: float = 0.40, weight_dir: float = 0.35,
+   109→                 weight_vol: float = 0.25, **kwargs):
+   110→        super().__init__(**kwargs)
+   111→        self.weight_bp = weight_bp
+   112→        self.weight_dir = weight_dir
+   113→        self.weight_vol = weight_vol
+   114→    
+   115→    def _extract_series(self, df: pd.DataFrame) -> np.ndarray:
+   116→        """Extract OHLCV composite with configurable weights."""
+   117→        if len(df) == 0:
+   118→            return np.array([])
+   119→        
+   120→        if self.strategy == "close":
+   121→            return df["close"].values.astype(float)
+   122→        elif self.strategy == "typical_price":
+   123→            return ((df["high"] + df["low"] + df["close"]) / 3.0).values.astype(float)
+   124→        elif self.strategy == "ohlcv":
+   125→            o = df["open"].values.astype(float)
+   126→            h = df["high"].values.astype(float)
+   127→            l = df["low"].values.astype(float)
+   128→            c = df["close"].values.astype(float)
+   129→            v = df["volume"].values.astype(float) if "volume" in df.columns else np.ones_like(c)
+   130→            
+   131→            rng = h - l
+   132→            rng = np.where(rng == 0, 1e-10, rng)
+   133→            
+   134→            body_position = ((c + o) / 2.0 - l) / rng
+   135→            direction = (c - o) / rng
+   136→            
+   137→            vol_window = min(20, len(v))
+   138→            if vol_window > 0 and len(v) > 0:
+   139→                vol_mean = np.convolve(v, np.ones(vol_window) / vol_window, mode="same")
+   140→                vol_mean = np.where(vol_mean == 0, 1.0, vol_mean)
+   141→                vol_ratio = np.clip(v / vol_mean, 0.5, 2.0)
+   142→                vol_signal = (vol_ratio - 0.5) / 1.5
+   143→            else:
+   144→                vol_signal = np.full_like(v, 0.33)
+   145→            
+   146→            composite = (
+   147→                body_position * self.weight_bp
+   148→                + direction * self.weight_dir
+   149→                + vol_signal * self.weight_vol
+   150→            )
+   151→            return composite
+   152→        else:
+   153→            raise ValueError(f"Unknown strategy: {self.strategy}")
+   154→
+   155→
+   156→# ============================================================================
+   157→# OOS Validation Engine
+   158→# ============================================================================
+   159→
+   160→def compute_atr_pct(df, period: int = 14) -> np.ndarray:
+   161→    """Compute ATR as percentage of close price."""
+   162→    high = df['high'].values.astype(float)
+   163→    low = df['low'].values.astype(float)
+   164→    close = df['close'].values.astype(float)
+   165→    
+   166→    prev_close = np.roll(close, 1)
+   167→    prev_close[0] = close[0]
+   168→    tr = np.maximum(
+   169→        high - low,
+   170→        np.maximum(np.abs(high - prev_close), np.abs(low - prev_close))
+   171→    )
+   172→    
+   173→    atr = np.zeros_like(tr)
+   174→    if len(tr) >= period:
+   175→        atr[period - 1] = np.mean(tr[:period])
+   176→        for i in range(period, len(tr)):
+   177→            atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
+   178→    
+   179→    atr_pct = np.where(close > 0, atr / close * 100, 0)
+   180→    return atr_pct
+   181→
+   182→
+   183→@dataclass
+   184→class OOSTradeResult:
+   185→    """Single OOS trade result."""
+   186→    trade_id: int = 0
+   187→    symbol: str = ""
+   188→    direction: str = ""
+   189→    entry_price: float = 0.0
+   190→    exit_price: float = 0.0
+   191→    pnl_pct: float = 0.0
+   192→    exit_reason: str = ""
+   193→    confidence: float = 0.0
+   194→    regime: str = ""
+   195→
+   196→
+   197→@dataclass
+   198→class OOSRunResult:
+   199→    """Complete OOS run result for one token/config combination."""
+   200→    token: str = ""
+   201→    config_name: str = ""
+   202→    train_candles: int = 0
+   203→    test_candles: int = 0
+   204→    total_trades: int = 0
+   205→    winning_trades: int = 0
+   206→    win_rate: float = 0.0
+   207→    total_pnl_pct: float = 0.0
+   208→    profit_factor: float = 0.0
+   209→    max_drawdown: float = 0.0
+   210→    sharpe_ratio: float = 0.0
+   211→    avg_trade_pnl_pct: float = 0.0
+   212→    best_trade_pct: float = 0.0
+   213→    worst_trade_pct: float = 0.0
+   214→    long_trades: int = 0
+   215→    short_trades: int = 0
+   216→    long_win_rate: float = 0.0
+   217→    short_win_rate: float = 0.0
+   218→    trades_pnl: list = field(default_factory=list)
+   219→    equity_curve: list = field(default_factory=list)
+   220→
+   221→
+   222→def run_oos_backtest(
+   223→    df: pd.DataFrame,
+   224→    symbol: str,
+   225→    config_name: str = "current_40_35_25",
+   226→    weights: Optional[dict] = None,
+   227→    train_pct: float = 0.70,
+   228→    sax_alphabet: int = 3,
+   229→    sax_window: int = 10,
+   230→    pattern_length: int = 5,
+   231→    sax_strategy: str = "ohlcv",
+   232→    verbose: bool = True,
+   233→) -> OOSRunResult:
+   234→    """
+   235→    Run a single OOS backtest with the PaperTrader engine.
+   236→    
+   237→    This is a DIRECT engine test (not using PaperTrader class to avoid
+   238→    SQLite dependencies). Uses the same logic but runs in-memory.
+   239→    """
+   240→    if weights is None:
+   241→        weights = WEIGHT_CONFIGS["current_40_35_25"]
+   242→    
+   243→    # Split data
+   244→    split_idx = int(len(df) * train_pct)
+   245→    train_df = df.iloc[:split_idx]
+   246→    test_df = df.iloc[split_idx:]
+   247→    
+   248→    if verbose:
+   249→        print(f"\n  [{config_name}] Train: {len(train_df)} candles, Test: {len(test_df)} candles")
+   250→    
+   251→    # Create SAX encoder with custom weights
+   252→    if sax_strategy == "close":
+   253→        # Use standard SAX encoder for close strategy (weights don't apply)
+   254→        sax = SAXEncoder(
+   255→            alphabet_size=sax_alphabet,
+   256→            window_size=sax_window,
+   257→            strategy="close",
+   258→        )
+   259→    else:
+   260→        sax = WeightedSAXEncoder(
+   261→            weight_bp=weights["bp"],
+   262→            weight_dir=weights["dir"],
+   263→            weight_vol=weights["vol"],
+   264→            alphabet_size=sax_alphabet,
+   265→            window_size=sax_window,
+   266→            strategy=sax_strategy,
+   267→        )
+   268→    
+   269→    # Encode training data and get normalization stats
+   270→    train_symbols, train_paa_mean, train_paa_std = sax.encode_with_normalization(train_df)
+   271→    
+   272→    if not train_symbols:
+   273→        return OOSRunResult(token=symbol, config_name=config_name)
+   274→    
+   275→    # Build trie on training data
+   276→    classifier = AssetClassifier()
+   277→    info = classifier.classify(symbol)
+   278→    
+   279→    engine = PPMT(
+   280→        symbol=symbol,
+   281→        asset_class=info.asset_class,
+   282→        sax_alphabet_size=sax_alphabet,
+   283→        sax_window_size=sax_window,
+   284→        sax_strategy=sax_strategy,
+   285→    )
+   286→    # Replace SAX encoder with our weighted version
+   287→    engine.sax = sax
+   288→    
+   289→    engine.build(train_df, pattern_length=pattern_length)
+   290→    trie = engine.trie_n3
+   291→    trie.propagate_metadata()
+   292→    
+   293→    if verbose:
+   294→        print(f"  [{config_name}] Trie: {trie.pattern_count} patterns, "
+   295→              f"SAX symbols: {len(train_symbols)}")
+   296→    
+   297→    # Encode test data using TRAINING normalization (critical for OOS validity)
+   298→    test_symbols, _, _ = sax.encode_with_normalization(
+   299→        test_df, paa_mean=train_paa_mean, paa_std=train_paa_std
+   300→    )
+   301→    
+   302→    if not test_symbols:
+   303→        return OOSRunResult(token=symbol, config_name=config_name,
+   304→                           train_candles=len(train_df), test_candles=len(test_df))
+   305→    
+   306→    # Create prediction engine
+   307→    pred_engine = PredictionEngine(trie, prediction_depth=pattern_length)
+   308→    
+   309→    # Compute ATR
+   310→    full_atr = compute_atr_pct(df, period=14)
+   311→    
+   312→    # Regime detector
+   313→    regime_detector = RegimeDetector(lookback=50, vol_threshold=0.6, trend_threshold=0.005)
+   314→    
+   315→    # Risk manager
+   316→    risk_config = RiskConfig(
+   317→        base_position_size_pct=0.01,
+   318→        max_position_size_pct=0.04,
+   319→        min_position_size_pct=0.005,
+   320→        min_risk_reward=1.0,
+   321→        max_daily_loss_pct=0.10,
+   322→        max_drawdown_pct=0.80,
+   323→        min_quality_score=0.0,
+   324→    )
+   325→    
+   326→    # Simulation state
+   327→    capital = INITIAL_CAPITAL
+   328→    peak_capital = capital
+   329→    trades = []
+   330→    equity_curve = [capital]
+   331→    
+   332→    current_position = None
+   333→    consecutive_breaks = 0
+   334→    last_losing_sym_idx = -999
+   335→    
+   336→    df_close = df['close'].values.astype(float)
+   337→    df_high = df['high'].values.astype(float)
+   338→    df_low = df['low'].values.astype(float)
+   339→    
+   340→    start_sym_idx = pattern_length
+   341→    end_sym_idx = len(test_symbols)
+   342→    
+   343→    # We need to map test symbols back to candle indices
+   344→    # Test starts at split_idx, each SAX window = sax_window candles
+   345→    test_start_candle = split_idx
+   346→    
+   347→    for sym_idx in range(start_sym_idx, end_sym_idx):
+   348→        current_symbols = test_symbols[sym_idx - pattern_length:sym_idx]
+   349→        
+   350→        # Candle indices
+   351→        candle_start = test_start_candle + sym_idx * sax_window
+   352→        candle_end = min(candle_start + sax_window, len(df))
+   353→        if candle_start >= len(df):
+   354→            break
+   355→        last_candle_idx = candle_end - 1
+   356→        
+   357→        current_price = df_close[last_candle_idx]
+   358→        current_atr = full_atr[last_candle_idx] if last_candle_idx < len(full_atr) else 2.0
+   359→        
+   360→        # Detect regime
+   361→        regime_candle_start = max(0, last_candle_idx - 200)
+   362→        regime_prices = df_close[regime_candle_start:last_candle_idx + 1]
+   363→        current_regime = "ranging"
+   364→        if len(regime_prices) >= 50:
+   365→            regime_info = regime_detector.detect_detailed(regime_prices)
+   366→            current_regime = regime_info.regime
+   367→        
+   368→        # === PHASE 1: SL/TP checking ===
+   369→        if current_position is not None:
+   370→            # Catastrophic protection
+   371→            catastrophic_close = False
+   372→            if current_position.get("catastrophic_pct", 8.0) > 0:
+   373→                for ci in range(candle_start, candle_end):
+   374→                    if ci >= len(df_close):
+   375→                        break
+   376→                    candle_c = df_close[ci]
+   377→                    if current_position["direction"] == "LONG":
+   378→                        unrealized_loss = (current_position["entry_price"] - candle_c) / current_position["entry_price"] * 100
+   379→                    else:
+   380→                        unrealized_loss = (candle_c - current_position["entry_price"]) / current_position["entry_price"] * 100
+   381→                    if unrealized_loss >= 8.0:
+   382→                        exit_price = candle_c
+   383→                        if current_position["direction"] == "LONG":
+   384→                            pnl_pct = (exit_price - current_position["entry_price"]) / current_position["entry_price"] * 100
+   385→                        else:
+   386→                            pnl_pct = (current_position["entry_price"] - exit_price) / current_position["entry_price"] * 100
+   387→                        capital *= (1 + pnl_pct / 100)
+   388→                        trades.append(OOSTradeResult(
+   389→                            trade_id=len(trades) + 1,
+   390→                            symbol=symbol,
+   391→                            direction=current_position["direction"],
+   392→                            entry_price=current_position["entry_price"],
+   393→                            exit_price=exit_price,
+   394→                            pnl_pct=pnl_pct,
+   395→                            exit_reason="catastrophic_stop",
+   396→                            confidence=current_position["confidence"],
+   397→                            regime=current_position["regime"],
+   398→                        ))
+   399→                        current_position = None
+   400→                        catastrophic_close = True
+   401→                        equity_curve.append(capital)
+   402→                        if capital > peak_capital:
+   403→                            peak_capital = capital
+   404→                        break
+   405→            
+   406→            if catastrophic_close:
+   407→                continue
+   408→            
+   409→            # Trailing stop update
+   410→            if current_position.get("tp_price") and current_position.get("trailing_activated"):
+   411→                current_atr_val = full_atr[last_candle_idx] if last_candle_idx < len(full_atr) else 2.0
+   412→                trailing_distance = current_atr_val * 1.5
+   413→                if current_position["direction"] == "LONG":
+   414→                    new_sl = max(current_position["sl_price"], current_price * (1 - trailing_distance / 100))
+   415→                else:
+   416→                    new_sl = min(current_position["sl_price"], current_price * (1 + trailing_distance / 100))
+   417→                current_position["sl_price"] = new_sl
+   418→            
+   419→            # Check SL
+   420→            if current_position["direction"] == "LONG":
+   421→                sl_hit = current_price <= current_position["sl_price"]
+   422→                tp_hit = current_price >= current_position["tp_price"] if current_position.get("tp_price") else False
+   423→            else:
+   424→                sl_hit = current_price >= current_position["sl_price"]
+   425→                tp_hit = current_price <= current_position["tp_price"] if current_position.get("tp_price") else False
+   426→            
+   427→            if sl_hit:
+   428→                exit_price = current_price
+   429→                if current_position["direction"] == "LONG":
+   430→                    pnl_pct = (exit_price - current_position["entry_price"]) / current_position["entry_price"] * 100
+   431→                else:
+   432→                    pnl_pct = (current_position["entry_price"] - exit_price) / current_position["entry_price"] * 100
+   433→                capital *= (1 + pnl_pct / 100)
+   434→                exit_reason = "trailing_stop" if current_position.get("trailing_activated") else "stop_loss"
+   435→                trades.append(OOSTradeResult(
+   436→                    trade_id=len(trades) + 1, symbol=symbol,
+   437→                    direction=current_position["direction"],
+   438→                    entry_price=current_position["entry_price"],
+   439→                    exit_price=exit_price, pnl_pct=pnl_pct,
+   440→                    exit_reason=exit_reason,
+   441→                    confidence=current_position["confidence"],
+   442→                    regime=current_position["regime"],
+   443→                ))
+   444→                current_position = None
+   445→                if pnl_pct <= 0:
+   446→                    last_losing_sym_idx = sym_idx
+   447→                equity_curve.append(capital)
+   448→                if capital > peak_capital:
+   449→                    peak_capital = capital
+   450→                continue
+   451→            
+   452→            if tp_hit:
+   453→                exit_price = current_price
+   454→                if current_position["direction"] == "LONG":
+   455→                    pnl_pct = (exit_price - current_position["entry_price"]) / current_position["entry_price"] * 100
+   456→                else:
+   457→                    pnl_pct = (current_position["entry_price"] - exit_price) / current_position["entry_price"] * 100
+   458→                capital *= (1 + pnl_pct / 100)
+   459→                trades.append(OOSTradeResult(
+   460→                    trade_id=len(trades) + 1, symbol=symbol,
+   461→                    direction=current_position["direction"],
+   462→                    entry_price=current_position["entry_price"],
+   463→                    exit_price=exit_price, pnl_pct=pnl_pct,
+   464→                    exit_reason="take_profit",
+   465→                    confidence=current_position["confidence"],
+   466→                    regime=current_position["regime"],
+   467→                ))
+   468→                current_position = None
+   469→                equity_curve.append(capital)
+   470→                if capital > peak_capital:
+   471→                    peak_capital = capital
+   472→                continue
+   473→            
+   474→            # Pattern break check
+   475→            if len(current_symbols) >= 2:
+   476→                pattern_to_check = current_symbols[:-1]
+   477→                latest_symbol = current_symbols[-1]
+   478→                continues, _ = trie.check_continuation(pattern_to_check, latest_symbol)
+   479→                if not continues and current_position["confidence"] > 0:
+   480→                    consecutive_breaks += 1
+   481→                    if consecutive_breaks >= 2:
+   482→                        exit_price = current_price
+   483→                        if current_position["direction"] == "LONG":
+   484→                            pnl_pct = (exit_price - current_position["entry_price"]) / current_position["entry_price"] * 100
+   485→                        else:
+   486→                            pnl_pct = (current_position["entry_price"] - exit_price) / current_position["entry_price"] * 100
+   487→                        capital *= (1 + pnl_pct / 100)
+   488→                        trades.append(OOSTradeResult(
+   489→                            trade_id=len(trades) + 1, symbol=symbol,
+   490→                            direction=current_position["direction"],
+   491→                            entry_price=current_position["entry_price"],
+   492→                            exit_price=exit_price, pnl_pct=pnl_pct,
+   493→                            exit_reason="pattern_break",
+   494→                            confidence=current_position["confidence"],
+   495→                            regime=current_position["regime"],
+   496→                        ))
+   497→                        current_position = None
+   498→                        consecutive_breaks = 0
+   499→                        if pnl_pct <= 0:
+   500→                            last_losing_sym_idx = sym_idx
+   501→                        equity_curve.append(capital)
+   502→                        if capital > peak_capital:
+   503→                            peak_capital = capital
+   504→                        continue
+   505→                else:
+   506→                    consecutive_breaks = 0
+   507→        
+   508→        # === PHASE 2: Entry signal ===
+   509→        if current_position is None:
+   510→            # Cooldown
+   511→            if sym_idx - last_losing_sym_idx < 1:
+   512→                continue
+   513→            
+   514→            # V0.6.2 Regime filter: Skip entries in volatile regime
+   515→            # Walk-forward showed system is regime-dependent with 16.7% WR
+   516→            # in adverse periods. Volatile regime = high uncertainty = skip.
+   517→            # NOTE: Disabling for now — results are mixed. BTC got worse with filter.
+   518→            # Re-enable after more sophisticated regime-aware logic is developed.
+   519→            # if current_regime == "volatile":
+   520→            #     continue
+   521→            
+   522→            try:
+   523→                prediction = pred_engine.predict(
+   524→                    current_symbols=current_symbols,
+   525→                    entry_price=current_price,
+   526→                    timeframe_hours=1.0,
+   527→                    symbol=symbol,
+   528→                    current_regime=current_regime,
+   529→                )
+   530→            except Exception:
+   531→                continue
+   532→            
+   533→            if prediction.direction == "FLAT" or prediction.confidence <= 0:
+   534→                continue
+   535→            
+   536→            # Get 4-level weighted confidence
+   537→            weighted_confidence = prediction.confidence
+   538→            try:
+   539→                ppmt_result = engine.match_raw(current_symbols, current_price)
+   540→                weighted_confidence = ppmt_result.weighted_confidence
+   541→                if weighted_confidence <= 0 and prediction.confidence > 0:
+   542→                    weighted_confidence = prediction.confidence
+   543→            except Exception:
+   544→                pass
+   545→            
+   546→            # Confidence threshold
+   547→            effective_min_conf = 0.20
+   548→            if prediction.direction == "SHORT":
+   549→                short_mult = {
+   550→                    "trending_down": 0.85,
+   551→                    "ranging": 1.1,
+   552→                    "trending_up": 1.5,
+   553→                    "volatile": 1.8,
+   554→                }.get(current_regime, 1.2)
+   555→                effective_min_conf = max(effective_min_conf * short_mult, 0.20)
+   556→            
+   557→            if (prediction.direction != "FLAT"
+   558→                and weighted_confidence >= effective_min_conf
+   559→                and abs(prediction.expected_total_move_pct) > 0.3
+   560→                and prediction.overall_probability > 0.20):
+   561→                
+   562→                # SL/TP — Prediction-Aware Sizing (V0.6.2 FIX)
+   563→                #
+   564→                # CRITICAL FIX: Previous SL/TP was ATR-based with fixed floors
+   565→                # (1.5% SL, 3% TP for LONG). But with alpha=3, the average
+   566→                # expected move is only ~0.3-0.5%. TP at 3% = 11x expected move!
+   567→                # Almost no trade ever reaches TP, so they all hit SL or pattern
+   568→                # break → guaranteed losing system despite 54% directional accuracy.
+   569→                #
+   570→                # New approach: Scale SL/TP to the PREDICTED move, not ATR.
+   571→                #   SL = 1.5x expected move (give room for noise)
+   572→                #   TP = 2.5x expected move (R:R = 1.67)
+   573→                #   Floor: 0.5% SL (minimum viable), Cap: 5% SL (maximum risk)
+   574→                # This ensures TP is REACHABLE when the prediction is correct.
+   575→                expected_move_abs = abs(prediction.expected_total_move_pct)
+   576→                
+   577→                if prediction.direction == "LONG":
+   578→                    sl_dist = max(min(expected_move_abs * 1.5, 5.0), 0.5)
+   579→                    tp_dist = expected_move_abs * 2.5  # R:R = 1.67
+   580→                    # Ensure TP > SL (minimum R:R of 1.5)
+   581→                    if tp_dist < sl_dist * 1.5:
+   582→                        tp_dist = sl_dist * 1.5
+   583→                    sl_price = current_price * (1 - sl_dist / 100)
+   584→                    tp_price = current_price * (1 + tp_dist / 100)
+   585→                else:
+   586→                    sl_dist = max(min(expected_move_abs * 1.5, 5.0), 0.5)
+   587→                    tp_dist = expected_move_abs * 2.5
+   588→                    if tp_dist < sl_dist * 1.5:
+   589→                        tp_dist = sl_dist * 1.5
+   590→                    sl_price = current_price * (1 + sl_dist / 100)
+   591→                    tp_price = current_price * (1 - tp_dist / 100)
+   592→                
+   593→                current_position = {
+   594→                    "direction": prediction.direction,
+   595→                    "entry_price": current_price,
+   596→                    "sl_price": sl_price,
+   597→                    "tp_price": tp_price,
+   598→                    "confidence": weighted_confidence,
+   599→                    "regime": current_regime,
+   600→                    "trailing_activated": False,
+   601→                    "catastrophic_pct": 8.0,
+   602→                }
+   603→        
+   604→        # Record equity
+   605→        if sym_idx % 10 == 0:
+   606→            equity_curve.append(capital)
+   607→    
+   608→    # Close any remaining position
+   609→    if current_position is not None:
+   610→        last_price = df_close[-1]
+   611→        if current_position["direction"] == "LONG":
+   612→            pnl_pct = (last_price - current_position["entry_price"]) / current_position["entry_price"] * 100
+   613→        else:
+   614→            pnl_pct = (current_position["entry_price"] - last_price) / current_position["entry_price"] * 100
+   615→        capital *= (1 + pnl_pct / 100)
+   616→        trades.append(OOSTradeResult(
+   617→            trade_id=len(trades) + 1, symbol=symbol,
+   618→            direction=current_position["direction"],
+   619→            entry_price=current_position["entry_price"],
+   620→            exit_price=last_price, pnl_pct=pnl_pct,
+   621→            exit_reason="end_of_data",
+   622→            confidence=current_position["confidence"],
+   623→            regime=current_position["regime"],
+   624→        ))
+   625→        equity_curve.append(capital)
+   626→    
+   627→    # Compute statistics
+   628→    result = OOSRunResult(
+   629→        token=symbol,
+   630→        config_name=config_name,
+   631→        train_candles=len(train_df),
+   632→        test_candles=len(test_df),
+   633→    )
+   634→    
+   635→    if trades:
+   636→        result.total_trades = len(trades)
+   637→        result.winning_trades = sum(1 for t in trades if t.pnl_pct > 0)
+   638→        result.win_rate = result.winning_trades / result.total_trades
+   639→        result.total_pnl_pct = (capital - INITIAL_CAPITAL) / INITIAL_CAPITAL * 100
+   640→        
+   641→        pnls = [t.pnl_pct for t in trades]
+   642→        result.trades_pnl = pnls
+   643→        result.equity_curve = equity_curve
+   644→        result.avg_trade_pnl_pct = sum(pnls) / len(pnls)
+   645→        result.best_trade_pct = max(pnls)
+   646→        result.worst_trade_pct = min(pnls)
+   647→        
+   648→        gross_profit = sum(p for p in pnls if p > 0)
+   649→        gross_loss = sum(abs(p) for p in pnls if p < 0)
+   650→        result.profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
+   651→        
+   652→        # Max drawdown
+   653→        if equity_curve:
+   654→            peak = equity_curve[0]
+   655→            max_dd = 0.0
+   656→            for eq in equity_curve:
+   657→                if eq > peak:
+   658→                    peak = eq
+   659→                dd = (peak - eq) / peak if peak > 0 else 0
+   660→                if dd > max_dd:
+   661→                    max_dd = dd
+   662→            result.max_drawdown = max_dd
+   663→        
+   664→        # Sharpe
+   665→        returns = [p / 100 for p in pnls]
+   666→        if len(returns) >= 2:
+   667→            mean_ret = np.mean(returns)
+   668→            std_ret = np.std(returns, ddof=1)
+   669→            if std_ret > 0:
+   670→                result.sharpe_ratio = (mean_ret / std_ret) * (252 ** 0.5)
+   671→        
+   672→        # Direction breakdown
+   673→        longs = [t for t in trades if t.direction == "LONG"]
+   674→        shorts = [t for t in trades if t.direction == "SHORT"]
+   675→        result.long_trades = len(longs)
+   676→        result.short_trades = len(shorts)
+   677→        result.long_win_rate = sum(1 for t in longs if t.pnl_pct > 0) / len(longs) if longs else 0
+   678→        result.short_win_rate = sum(1 for t in shorts if t.pnl_pct > 0) / len(shorts) if shorts else 0
+   679→    
+   680→    if verbose:
+   681→        wr_str = f"{result.win_rate:.1%}" if result.total_trades > 0 else "N/A"
+   682→        pf_str = f"{result.profit_factor:.2f}" if result.profit_factor != float('inf') else "INF"
+   683→        print(f"  [{config_name}] PnL: {result.total_pnl_pct:+.2f}% | "
+   684→              f"Trades: {result.total_trades} | WR: {wr_str} | "
+   685→              f"PF: {pf_str} | Sharpe: {result.sharpe_ratio:.2f} | "
+   686→              f"MaxDD: {result.max_drawdown:.1%}")
+   687→    
+   688→    return result
+   689→
+   690→
+   691→# ============================================================================
+   692→# Walk-Forward Testing
+   693→# ============================================================================
+   694→
+   695→@dataclass
+   696→class WalkForwardResult:
+   697→    """Walk-forward test result for one fold."""
+   698→    fold: int = 0
+   699→    train_start: int = 0
+   700→    train_end: int = 0
+   701→    test_start: int = 0
+   702→    test_end: int = 0
+   703→    train_trades: int = 0
+   704→    test_pnl_pct: float = 0.0
+   705→    test_trades: int = 0
+   706→    test_win_rate: float = 0.0
+   707→    test_profit_factor: float = 0.0
+   708→    test_sharpe: float = 0.0
+   709→    test_max_dd: float = 0.0
+   710→    degradation_pct: float = 0.0  # How much worse than full-sample
+   711→
+   712→
+   713→def run_walk_forward(
+   714→    df: pd.DataFrame,
+   715→    symbol: str,
+   716→    num_folds: int = 5,
+   717→    initial_train_pct: float = 0.40,
+   718→    step_pct: float = 0.12,
+   719→) -> list[WalkForwardResult]:
+   720→    """
+   721→    Walk-forward testing with expanding windows.
+   722→    
+   723→    For each fold:
+   724→      - Train on data from 0 to train_end
+   725→      - Test on data from train_end to train_end + step
+   726→      - Compare test performance to full-sample performance
+   727→    
+   728→    If test performance degrades significantly vs train, there's lookahead bias.
+   729→    """
+   730→    print(f"\n{'='*60}")
+   731→    print(f"  WALK-FORWARD TEST: {symbol}")
+   732→    print(f"{'='*60}")
+   733→    
+   734→    results = []
+   735→    
+   736→    for fold in range(num_folds):
+   737→        train_end_pct = initial_train_pct + fold * step_pct
+   738→        test_end_pct = train_end_pct + step_pct
+   739→        
+   740→        if test_end_pct > 0.95:
+   741→            break
+   742→        
+   743→        train_end_idx = int(len(df) * train_end_pct)
+   744→        test_end_idx = int(len(df) * test_end_pct)
+   745→        
+   746→        # Run OOS backtest on this fold
+   747→        fold_result = run_oos_backtest(
+   748→            df.iloc[:test_end_idx],
+   749→            symbol=symbol,
+   750→            config_name=f"wf_fold{fold}",
+   751→            train_pct=train_end_pct / test_end_pct,  # Relative split
+   752→            verbose=False,
+   753→        )
+   754→        
+   755→        wf = WalkForwardResult(
+   756→            fold=fold,
+   757→            train_start=0,
+   758→            train_end=train_end_idx,
+   759→            test_start=train_end_idx,
+   760→            test_end=test_end_idx,
+   761→            test_pnl_pct=fold_result.total_pnl_pct,
+   762→            test_trades=fold_result.total_trades,
+   763→            test_win_rate=fold_result.win_rate,
+   764→            test_profit_factor=fold_result.profit_factor,
+   765→            test_sharpe=fold_result.sharpe_ratio,
+   766→            test_max_dd=fold_result.max_drawdown,
+   767→        )
+   768→        results.append(wf)
+   769→        
+   770→        pf_str = f"{wf.test_profit_factor:.2f}" if wf.test_profit_factor != float('inf') else "INF"
+   771→        print(f"  Fold {fold}: Train 0-{train_end_idx} ({train_end_pct:.0%}), "
+   772→              f"Test {train_end_idx}-{test_end_idx} | "
+   773→              f"PnL: {wf.test_pnl_pct:+.2f}% | Trades: {wf.test_trades} | "
+   774→              f"WR: {wf.test_win_rate:.1%} | PF: {pf_str}")
+   775→    
+   776→    return results
+   777→
+   778→
+   779→# ============================================================================
+   780→# Monte Carlo Simulation
+   781→# ============================================================================
+   782→
+   783→def run_monte_carlo(trades_pnl: list[float], token: str, num_sims: int = 2000) -> dict:
+   784→    """Run Monte Carlo simulation on OOS trades."""
+   785→    if len(trades_pnl) < 5:
+   786→        return {"error": "Not enough trades for Monte Carlo"}
+   787→    
+   788→    sim = MonteCarloSimulator()
+   789→    config = MonteCarloConfig(
+   790→        simulations=num_sims,
+   791→        seed=42,
+   792→        initial_capital=INITIAL_CAPITAL,
+   793→        ruin_threshold=0.5,
+   794→    )
+   795→    
+   796→    # Convert from percentage to fraction
+   797→    trades_frac = [p / 100 for p in trades_pnl]
+   798→    
+   799→    result = sim.simulate(trades_frac, config=config)
+   800→    
+   801→    return {
+   802→        "token": token,
+   803→        "trade_count": result.trade_count,
+   804→        "simulations": num_sims,
+   805→        "probability_of_profit": result.probability_of_profit,
+   806→        "risk_of_ruin": result.risk_of_ruin,
+   807→        "p95_max_drawdown": result.p95_max_drawdown,
+   808→        "mean_final_equity": result.mean_final_equity,
+   809→        "median_final_equity": result.median_final_equity,
+   810→        "sharpe_p50": _get_percentile(result.sharpe_percentiles, 50),
+   811→        "sharpe_p05": _get_percentile(result.sharpe_percentiles, 5),
+   812→        "sharpe_p95": _get_percentile(result.sharpe_percentiles, 95),
+   813→        "dd_p50": _get_percentile(result.drawdown_percentiles, 50),
+   814→        "dd_p95": _get_percentile(result.drawdown_percentiles, 95),
+   815→        "original_sharpe": result.original_metrics.sharpe_ratio if result.original_metrics else 0,
+   816→        "original_pf": result.original_metrics.profit_factor if result.original_metrics else 0,
+   817→    }
+   818→
+   819→
+   820→def _get_percentile(intervals, level: int) -> float:
+   821→    """Get a specific percentile from confidence intervals."""
+   822→    for ci in intervals:
+   823→        if ci.level == level:
+   824→            return ci.value
+   825→    return 0.0
+   826→
+   827→
+   828→# ============================================================================
+   829→# Main Validation Pipeline
+   830→# ============================================================================
+   831→
+   832→def main():
+   833→    """Run the complete OOS validation pipeline."""
+   834→    
+   835→    print("\n" + "=" * 70)
+   836→    print("  PPMT v0.6.2 — COMPREHENSIVE OOS VALIDATION")
+   837→    print("  Cross-Token + Walk-Forward + Monte Carlo + Weight Sensitivity")
+   838→    print("=" * 70)
+   839→    
+   840→    all_results = {}
+   841→    
+   842→    # ========================================================================
+   843→    # PHASE 1: Fetch real data
+   844→    # ========================================================================
+   845→    print("\n\n" + "▶" * 30 + " PHASE 1: DATA FETCHING " + "▶" * 30)
+   846→    
+   847→    data = {}
+   848→    for token in TOKENS:
+   849→        try:
+   850→            data[token] = fetch_real_data(token, TIMEFRAME, DAYS_OF_DATA)
+   851→        except Exception as e:
+   852→            print(f"  ✗ Failed to fetch {token}: {e}")
+   853→            # Try with fewer days
+   854→            try:
+   855→                data[token] = fetch_real_data(token, TIMEFRAME, 365)
+   856→            except Exception as e2:
+   857→                print(f"  ✗ Also failed with 365 days: {e2}")
+   858→    
+   859→    if not data:
+   860→        print("FATAL: No data fetched. Cannot proceed.")
+   861→        return
+   862→    
+   863→    # ========================================================================
+   864→    # PHASE 2: Cross-Token OOS with Current Weights (0.40/0.35/0.25)
+   865→    # ========================================================================
+   866→    print("\n\n" + "▶" * 30 + " PHASE 2: CROSS-TOKEN OOS (current weights) " + "▶" * 30)
+   867→    
+   868→    oos_results = {}
+   869→    for token, df in data.items():
+   870→        print(f"\n--- {token} ---")
+   871→        result = run_oos_backtest(
+   872→            df, symbol=token,
+   873→            config_name="current_40_35_25",
+   874→            weights=WEIGHT_CONFIGS["current_40_35_25"],
+   875→        )
+   876→        oos_results[token] = result
+   877→    
+   878→    all_results["oos_current_weights"] = {
+   879→        token: {
+   880→            "pnl_pct": r.total_pnl_pct,
+   881→            "trades": r.total_trades,
+   882→            "win_rate": r.win_rate,
+   883→            "profit_factor": r.profit_factor if r.profit_factor != float('inf') else 999,
+   884→            "sharpe": r.sharpe_ratio,
+   885→            "max_dd": r.max_drawdown,
+   886→            "long_trades": r.long_trades,
+   887→            "short_trades": r.short_trades,
+   888→            "long_wr": r.long_win_rate,
+   889→            "short_wr": r.short_win_rate,
+   890→        }
+   891→        for token, r in oos_results.items()
+   892→    }
+   893→    
+   894→    # ========================================================================
+   895→    # PHASE 3: Close-only Baseline (for comparison)
+   896→    # ========================================================================
+   897→    print("\n\n" + "▶" * 30 + " PHASE 3: CLOSE-ONLY BASELINE " + "▶" * 30)
+   898→    
+   899→    close_results = {}
+   900→    for token, df in data.items():
+   901→        print(f"\n--- {token} (close strategy) ---")
+   902→        result = run_oos_backtest(
+   903→            df, symbol=token,
+   904→            config_name="close_baseline",
+   905→            weights=WEIGHT_CONFIGS["current_40_35_25"],  # Weights don't matter for close
+   906→            sax_strategy="close",
+   907→        )
+   908→        close_results[token] = result
+   909→    
+   910→    all_results["oos_close_baseline"] = {
+   911→        token: {
+   912→            "pnl_pct": r.total_pnl_pct,
+   913→            "trades": r.total_trades,
+   914→            "win_rate": r.win_rate,
+   915→            "profit_factor": r.profit_factor if r.profit_factor != float('inf') else 999,
+   916→            "sharpe": r.sharpe_ratio,
+   917→            "max_dd": r.max_drawdown,
+   918→        }
+   919→        for token, r in close_results.items()
+   920→    }
+   921→    
+   922→    # ========================================================================
+   923→    # PHASE 4: Weight Sensitivity Analysis
+   924→    # ========================================================================
+   925→    print("\n\n" + "▶" * 30 + " PHASE 4: WEIGHT SENSITIVITY " + "▶" * 30)
+   926→    
+   927→    # Use BTC for weight sensitivity (most data)
+   928→    weight_token = "BTC/USDT"
+   929→    if weight_token not in data:
+   930→        weight_token = list(data.keys())[0]
+   931→    
+   932→    weight_results = {}
+   933→    for wname, wconfig in WEIGHT_CONFIGS.items():
+   934→        print(f"\n--- {wname} ---")
+   935→        result = run_oos_backtest(
+   936→            data[weight_token], symbol=weight_token,
+   937→            config_name=wname,
+   938→            weights=wconfig,
+   939→        )
+   940→        weight_results[wname] = {
+   941→            "pnl_pct": result.total_pnl_pct,
+   942→            "trades": result.total_trades,
+   943→            "win_rate": result.win_rate,
+   944→            "profit_factor": result.profit_factor if result.profit_factor != float('inf') else 999,
+   945→            "sharpe": result.sharpe_ratio,
+   946→            "max_dd": result.max_drawdown,
+   947→            "weights": wconfig,
+   948→        }
+   949→    
+   950→    all_results["weight_sensitivity"] = weight_results
+   951→    
+   952→    # ========================================================================
+   953→    # PHASE 5: Walk-Forward Testing (BTC)
+   954→    # ========================================================================
+   955→    print("\n\n" + "▶" * 30 + " PHASE 5: WALK-FORWARD TEST " + "▶" * 30)
+   956→    
+   957→    wf_token = "BTC/USDT"
+   958→    if wf_token not in data:
+   959→        wf_token = list(data.keys())[0]
+   960→    
+   961→    wf_results = run_walk_forward(
+   962→        data[wf_token], symbol=wf_token,
+   963→        num_folds=WF_NUM_FOLDS,
+   964→    )
+   965→    
+   966→    all_results["walk_forward"] = {
+   967→        f"fold_{w.fold}": {
+   968→            "train_pct": f"{w.train_end/len(data[wf_token]):.0%}",
+   969→            "test_range": f"{w.test_start}-{w.test_end}",
+   970→            "pnl_pct": w.test_pnl_pct,
+   971→            "trades": w.test_trades,
+   972→            "win_rate": w.test_win_rate,
+   973→            "profit_factor": w.test_profit_factor if w.test_profit_factor != float('inf') else 999,
+   974→            "sharpe": w.test_sharpe,
+   975→            "max_dd": w.test_max_dd,
+   976→        }
+   977→        for w in wf_results
+   978→    }
+   979→    
+   980→    # Walk-forward degradation analysis
+   981→    if len(wf_results) >= 2:
+   982→        pnl_values = [w.test_pnl_pct for w in wf_results]
+   983→        avg_pnl = sum(pnl_values) / len(pnl_values)
+   984→        std_pnl = (sum((p - avg_pnl)**2 for p in pnl_values) / len(pnl_values)) ** 0.5
+   985→        consistency = "CONSISTENT" if std_pnl < abs(avg_pnl) * 0.5 else "INCONSISTENT"
+   986→        all_results["walk_forward_analysis"] = {
+   987→            "avg_fold_pnl": avg_pnl,
+   988→            "std_fold_pnl": std_pnl,
+   989→            "consistency": consistency,
+   990→            "lookahead_risk": "LOW" if consistency == "CONSISTENT" else "HIGH",
+   991→        }
+   992→    
+   993→    # ========================================================================
+   994→    # PHASE 6: Monte Carlo Simulation
+   995→    # ========================================================================
+   996→    print("\n\n" + "▶" * 30 + " PHASE 6: MONTE CARLO SIMULATION " + "▶" * 30)
+   997→    
+   998→    mc_results = {}
+   999→    for token, oos_result in oos_results.items():
+  1000→        if oos_result.trades_pnl and len(oos_result.trades_pnl) >= 5:
+  1001→            print(f"\n--- {token} Monte Carlo ({len(oos_result.trades_pnl)} trades, 2000 sims) ---")
+  1002→            mc = run_monte_carlo(oos_result.trades_pnl, token=token, num_sims=2000)
+  1003→            mc_results[token] = mc
+  1004→            
+  1005→            print(f"  Probability of Profit: {mc['probability_of_profit']:.1%}")
+  1006→            print(f"  Risk of Ruin: {mc['risk_of_ruin']:.1%}")
+  1007→            print(f"  P95 Max Drawdown: {mc['p95_max_drawdown']:.1%}")
+  1008→            print(f"  Sharpe P5-P50-P95: {mc['sharpe_p05']:.2f} / {mc['sharpe_p50']:.2f} / {mc['sharpe_p95']:.2f}")
+  1009→    
+  1010→    all_results["monte_carlo"] = mc_results
+  1011→    
+  1012→    # ========================================================================
+  1013→    # FINAL SUMMARY
+  1014→    # ========================================================================
+  1015→    print("\n\n" + "=" * 70)
+  1016→    print("  FINAL SUMMARY — PPMT v0.6.2 OOS VALIDATION")
+  1017→    print("=" * 70)
+  1018→    
+  1019→    print("\n  1. CROSS-TOKEN OOS (additive composite, alpha=3, 70/30 split):")
+  1020→    print(f"  {'Token':<10} {'PnL%':>8} {'Trades':>7} {'WR':>6} {'PF':>6} {'Sharpe':>7} {'MaxDD':>6}")
+  1021→    print("  " + "-" * 50)
+  1022→    for token, r in all_results.get("oos_current_weights", {}).items():
+  1023→        pf_str = f"{r['profit_factor']:.2f}" if r['profit_factor'] < 999 else "INF"
+  1024→        print(f"  {token:<10} {r['pnl_pct']:>+8.2f} {r['trades']:>7} {r['win_rate']:>6.1%} "
+  1025→              f"{pf_str:>6} {r['sharpe']:>7.2f} {r['max_dd']:>6.1%}")
+  1026→    
+  1027→    print("\n  2. OHLCV vs CLOSE (head-to-head):")
+  1028→    print(f"  {'Token':<10} {'OHLCV PnL%':>12} {'Close PnL%':>12} {'OHLCV WR':>10} {'Close WR':>10}")
+  1029→    print("  " + "-" * 54)
+  1030→    for token in data.keys():
+  1031→        ohlcv_r = all_results.get("oos_current_weights", {}).get(token, {})
+  1032→        close_r = all_results.get("oos_close_baseline", {}).get(token, {})
+  1033→        if ohlcv_r and close_r:
+  1034→            print(f"  {token:<10} {ohlcv_r.get('pnl_pct', 0):>+12.2f} {close_r.get('pnl_pct', 0):>+12.2f} "
+  1035→                  f"{ohlcv_r.get('win_rate', 0):>10.1%} {close_r.get('win_rate', 0):>10.1%}")
+  1036→    
+  1037→    print("\n  3. WEIGHT SENSITIVITY (BTC/USDT, OOS):")
+  1038→    print(f"  {'Config':<25} {'PnL%':>8} {'Trades':>7} {'WR':>6} {'PF':>6} {'Sharpe':>7}")
+  1039→    print("  " + "-" * 59)
+  1040→    for wname, wr in all_results.get("weight_sensitivity", {}).items():
+  1041→        pf_str = f"{wr['profit_factor']:.2f}" if wr['profit_factor'] < 999 else "INF"
+  1042→        print(f"  {wname:<25} {wr['pnl_pct']:>+8.2f} {wr['trades']:>7} {wr['win_rate']:>6.1%} "
+  1043→              f"{pf_str:>6} {wr['sharpe']:>7.2f}")
+  1044→    
+  1045→    print("\n  4. WALK-FORWARD (BTC, 5 expanding folds):")
+  1046→    for fname, fr in all_results.get("walk_forward", {}).items():
+  1047→        pf_str = f"{fr['profit_factor']:.2f}" if fr['profit_factor'] < 999 else "INF"
+  1048→        print(f"    {fname}: PnL={fr['pnl_pct']:+.2f}%, Trades={fr['trades']}, "
+  1049→              f"WR={fr['win_rate']:.1%}, PF={pf_str}")
+  1050→    
+  1051→    wf_analysis = all_results.get("walk_forward_analysis", {})
+  1052→    if wf_analysis:
+  1053→        print(f"    → Consistency: {wf_analysis.get('consistency', 'N/A')}, "
+  1054→              f"Lookahead risk: {wf_analysis.get('lookahead_risk', 'N/A')}")
+  1055→    
+  1056→    print("\n  5. MONTE CARLO (2000 sims per token):")
+  1057→    for token, mc in all_results.get("monte_carlo", {}).items():
+  1058→        print(f"    {token}: P(profit)={mc['probability_of_profit']:.1%}, "
+  1059→              f"Risk of Ruin={mc['risk_of_ruin']:.1%}, "
+  1060→              f"P95 DD={mc['p95_max_drawdown']:.1%}, "
+  1061→              f"Sharpe [{mc['sharpe_p05']:.2f} - {mc['sharpe_p95']:.2f}]")
+  1062→    
+  1063→    # Save results
+  1064→    output_path = os.path.join(
+  1065→        os.path.dirname(__file__), '..', 'oos_validation_results.json'
+  1066→    )
+  1067→    with open(output_path, 'w') as f:
+  1068→        json.dump(all_results, f, indent=2, default=str)
+  1069→    print(f"\n  Results saved to: {output_path}")
+  1070→    
+  1071→    return all_results
+  1072→
+  1073→
+  1074→if __name__ == "__main__":
+  1075→    results = main()
+  1076→

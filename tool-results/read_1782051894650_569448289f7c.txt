@@ -1,0 +1,1255 @@
+     1→"""
+     2→PPMT Validation Suite — One-Click Statistical Validation Engine
+     3→
+     4→Runs three complementary validation tests to determine whether
+     5→the PPMT trading system is robust or overfit:
+     6→
+     7→  P0: Out-of-Sample (OOS) — Train/test split to detect overfitting
+     8→  P1: Monte Carlo — Trade order randomization to test robustness
+     9→  P2: Walk-Forward — Rolling window validation for regime consistency
+    10→
+    11→Produces a composite verdict: ROBUST / MARGINAL / OVERFIT / INSUFFICIENT_DATA
+    12→
+    13→Architecture:
+    14→  ┌─────────────────────────────────────────────┐
+    15→  │           Validation Suite                   │
+    16→  │  ┌─────────┐ ┌─────────┐ ┌──────────────┐  │
+    17→  │  │ P0: OOS │ │ P1: MC  │ │ P2: Walk-Fwd │  │
+    18→  │  │ 70/30   │ │ 1000sim │ │ 5 windows    │  │
+    19→  │  └────┬────┘ └────┬────┘ └──────┬───────┘  │
+    20→  │       │           │             │           │
+    21→  │       └───────────┼─────────────┘           │
+    22→  │                   ▼                         │
+    23→  │          ┌─────────────────┐                │
+    24→  │          │ Composite Score │                │
+    25→  │          │ 0-100 points    │                │
+    26→  │          └────────┬────────┘                │
+    27→  │                   ▼                         │
+    28→  │          ┌─────────────────┐                │
+    29→  │          │   VERDICT       │                │
+    30→  │          │ ROBUST/MARGINAL │                │
+    31→  │          │ /OVERFIT/INSUFF │                │
+    32→  │          └─────────────────┘                │
+    33→  └─────────────────────────────────────────────┘
+    34→"""
+    35→
+    36→from __future__ import annotations
+    37→
+    38→import time
+    39→import logging
+    40→from dataclasses import dataclass, field
+    41→from typing import Dict, List, Optional, Tuple
+    42→
+    43→import numpy as np
+    44→import pandas as pd
+    45→
+    46→
+    47→def _pythonify(obj):
+    48→    """Convert numpy types to native Python types for JSON serialization."""
+    49→    if isinstance(obj, (np.integer,)):
+    50→        return int(obj)
+    51→    if isinstance(obj, (np.floating,)):
+    52→        return float(obj)
+    53→    if isinstance(obj, (np.bool_,)):
+    54→        return bool(obj)
+    55→    if isinstance(obj, np.ndarray):
+    56→        return obj.tolist()
+    57→    return obj
+    58→
+    59→
+    60→from ppmt.core.sax import SAXEncoder
+    61→from ppmt.core.matcher import FuzzyMatcher
+    62→from ppmt.engine.ppmt import PPMT
+    63→from ppmt.data.classifier import AssetClassifier
+    64→from ppmt.engine.monte_carlo import MonteCarloEngine
+    65→
+    66→logger = logging.getLogger(__name__)
+    67→
+    68→
+    69→# ============================================================
+    70→# Configuration
+    71→# ============================================================
+    72→
+    73→@dataclass
+    74→class ValidationConfig:
+    75→    """Configuration for the full validation suite."""
+    76→
+    77→    symbol: str = "BTC/USDT"
+    78→    """Trading pair to validate."""
+    79→
+    80→    train_ratio: float = 0.7
+    81→    """P0: Fraction of data used for training (rest for testing)."""
+    82→
+    83→    mc_simulations: int = 1000
+    84→    """P1: Number of Monte Carlo simulation paths."""
+    85→
+    86→    wf_window_count: int = 5
+    87→    """P2: Number of walk-forward windows."""
+    88→
+    89→    wf_train_ratio: float = 0.7
+    90→    """P2: Train ratio within each walk-forward window."""
+    91→
+    92→    initial_capital: float = 10000.0
+    93→    """Starting capital for simulations."""
+    94→
+    95→    pattern_length: int = 5
+    96→    """SAX blocks per pattern."""
+    97→
+    98→    forward_window: int = 5
+    99→    """Forward window in SAX blocks for outcome measurement."""
+   100→
+   101→    position_size_pct: float = 1.0
+   102→    """Position size multiplier for backtest."""
+   103→
+   104→    ruin_threshold: float = 0.5
+   105→    """Equity fraction that defines 'ruin' in Monte Carlo."""
+   106→
+   107→    seed: int = 42
+   108→    """PRNG seed for reproducibility."""
+   109→
+   110→    # SAX config
+   111→    sax_alphabet_size: int = 8
+   112→    sax_window_size: int = 10
+   113→    sax_strategy: str = "ohlcv"
+   114→
+   115→    # Matching
+   116→    min_dir_count: int = 0
+   117→    """Min directional count for pattern to be considered valid."""
+   118→
+   119→
+   120→# ============================================================
+   121→# Result Data Classes
+   122→# ============================================================
+   123→
+   124→@dataclass
+   125→class OOSResult:
+   126→    """P0: Out-of-Sample validation results."""
+   127→
+   128→    train_candles: int = 0
+   129→    test_candles: int = 0
+   130→    patterns_trained: int = 0
+   131→
+   132→    # In-sample metrics (training period)
+   133→    is_total_trades: int = 0
+   134→    is_win_rate: float = 0.0
+   135→    is_total_pnl_pct: float = 0.0
+   136→    is_sharpe: float = 0.0
+   137→    is_max_dd_pct: float = 0.0
+   138→    is_long_trades: int = 0
+   139→    is_short_trades: int = 0
+   140→    is_long_wr: float = 0.0
+   141→    is_short_wr: float = 0.0
+   142→
+   143→    # Out-of-sample metrics (test period)
+   144→    oos_total_trades: int = 0
+   145→    oos_win_rate: float = 0.0
+   146→    oos_total_pnl_pct: float = 0.0
+   147→    oos_sharpe: float = 0.0
+   148→    oos_max_dd_pct: float = 0.0
+   149→    oos_long_trades: int = 0
+   150→    oos_short_trades: int = 0
+   151→    oos_long_wr: float = 0.0
+   152→    oos_short_wr: float = 0.0
+   153→
+   154→    # Degradation analysis
+   155→    pnl_degradation_pct: float = 0.0
+   156→    wr_degradation_pct: float = 0.0
+   157→    oos_ratio: float = 0.0  # Walk-Forward Efficiency equivalent
+   158→    avg_trade_degradation_pct: float = 0.0  # Degradation of avg trade PnL
+   159→    oos_avg_trade_ratio: float = 0.0  # OOS avg trade / IS avg trade
+   160→
+   161→    # Trade lists (capped for JSON size)
+   162→    is_trades: List[Dict] = field(default_factory=list)
+   163→    oos_trades: List[Dict] = field(default_factory=list)
+   164→    oos_equity_curve: List[float] = field(default_factory=list)
+   165→
+   166→
+   167→@dataclass
+   168→class MCValidationResult:
+   169→    """P1: Monte Carlo validation results."""
+   170→
+   171→    n_simulations: int = 0
+   172→    n_trades_used: int = 0
+   173→
+   174→    risk_of_ruin_pct: float = 0.0
+   175→    profit_probability_pct: float = 0.0
+   176→    p95_max_drawdown_pct: float = 0.0
+   177→    mean_final_equity: float = 0.0
+   178→    median_final_equity: float = 0.0
+   179→    ci_5: float = 0.0
+   180→    ci_25: float = 0.0
+   181→    ci_75: float = 0.0
+   182→    ci_95: float = 0.0
+   183→    sharpe_ratio: float = 0.0
+   184→    mean_win_rate_pct: float = 0.0
+   185→    mean_pnl_pct: float = 0.0
+   186→
+   187→
+   188→@dataclass
+   189→class WFWindowResult:
+   190→    """Single walk-forward window result."""
+   191→
+   192→    window_index: int = 0
+   193→    train_start_idx: int = 0
+   194→    train_end_idx: int = 0
+   195→    test_start_idx: int = 0
+   196→    test_end_idx: int = 0
+   197→    is_return_pct: float = 0.0
+   198→    oos_return_pct: float = 0.0
+   199→    is_trades: int = 0
+   200→    oos_trades: int = 0
+   201→    is_win_rate: float = 0.0
+   202→    oos_win_rate: float = 0.0
+   203→    wfe: float = 0.0
+   204→    degradation_pct: float = 0.0
+   205→
+   206→
+   207→@dataclass
+   208→class WFValidationResult:
+   209→    """P2: Walk-Forward validation results."""
+   210→
+   211→    windows: List[WFWindowResult] = field(default_factory=list)
+   212→    aggregate_wfe: float = 0.0
+   213→    avg_is_return: float = 0.0
+   214→    avg_oos_return: float = 0.0
+   215→    overall_degradation: float = 0.0
+   216→    profitable_windows: int = 0
+   217→    total_windows: int = 0
+   218→    consistency_pct: float = 0.0
+   219→
+   220→
+   221→@dataclass
+   222→class ValidationVerdict:
+   223→    """Composite validation verdict with all results."""
+   224→
+   225→    recommendation: str = "INSUFFICIENT_DATA"
+   226→    confidence_score: float = 0.0  # 0-100
+   227→
+   228→    # Breakdown scores per validation
+   229→    p0_score: float = 0.0  # 0-40
+   230→    p1_score: float = 0.0  # 0-30
+   231→    p2_score: float = 0.0  # 0-30
+   232→
+   233→    oos: OOSResult = field(default_factory=OOSResult)
+   234→    mc: MCValidationResult = field(default_factory=MCValidationResult)
+   235→    wf: WFValidationResult = field(default_factory=WFValidationResult)
+   236→
+   237→    symbol: str = ""
+   238→    total_candles: int = 0
+   239→    elapsed_seconds: float = 0.0
+   240→    summary: str = ""
+   241→
+   242→    def to_dict(self) -> Dict:
+   243→        """Serialize to dictionary for JSON output."""
+   244→        return {
+   245→            "recommendation": self.recommendation,
+   246→            "confidence_score": round(self.confidence_score, 1),
+   247→            "p0_score": round(self.p0_score, 1),
+   248→            "p1_score": round(self.p1_score, 1),
+   249→            "p2_score": round(self.p2_score, 1),
+   250→            "symbol": self.symbol,
+   251→            "total_candles": self.total_candles,
+   252→            "elapsed_seconds": round(self.elapsed_seconds, 1),
+   253→            "oos": self._oos_dict(),
+   254→            "mc": self._mc_dict(),
+   255→            "wf": self._wf_dict(),
+   256→            "summary": self.summary,
+   257→        }
+   258→
+   259→    def _oos_dict(self) -> Dict:
+   260→        o = self.oos
+   261→        return {
+   262→            "train_candles": o.train_candles,
+   263→            "test_candles": o.test_candles,
+   264→            "patterns_trained": o.patterns_trained,
+   265→            "is_total_trades": o.is_total_trades,
+   266→            "is_win_rate": round(o.is_win_rate, 4),
+   267→            "is_total_pnl_pct": round(o.is_total_pnl_pct, 2),
+   268→            "is_sharpe": round(o.is_sharpe, 2),
+   269→            "is_max_dd_pct": round(o.is_max_dd_pct, 2),
+   270→            "is_long_trades": o.is_long_trades,
+   271→            "is_short_trades": o.is_short_trades,
+   272→            "is_long_wr": round(o.is_long_wr, 4),
+   273→            "is_short_wr": round(o.is_short_wr, 4),
+   274→            "oos_total_trades": o.oos_total_trades,
+   275→            "oos_win_rate": round(o.oos_win_rate, 4),
+   276→            "oos_total_pnl_pct": round(o.oos_total_pnl_pct, 2),
+   277→            "oos_sharpe": round(o.oos_sharpe, 2),
+   278→            "oos_max_dd_pct": round(o.oos_max_dd_pct, 2),
+   279→            "oos_long_trades": o.oos_long_trades,
+   280→            "oos_short_trades": o.oos_short_trades,
+   281→            "oos_long_wr": round(o.oos_long_wr, 4),
+   282→            "oos_short_wr": round(o.oos_short_wr, 4),
+   283→            "pnl_degradation_pct": round(o.pnl_degradation_pct, 1),
+   284→            "wr_degradation_pct": round(o.wr_degradation_pct, 1),
+   285→            "oos_ratio": round(o.oos_ratio, 3),
+   286→            "oos_avg_trade_ratio": round(o.oos_avg_trade_ratio, 3),
+   287→            "avg_trade_degradation_pct": round(o.avg_trade_degradation_pct, 1),
+   288→            "oos_equity_curve": _cap_list(o.oos_equity_curve, 500),
+   289→            "oos_trades": _cap_list(o.oos_trades, 100),
+   290→            "is_trades": _cap_list(o.is_trades, 50),
+   291→        }
+   292→
+   293→    def _mc_dict(self) -> Dict:
+   294→        m = self.mc
+   295→        return {
+   296→            "n_simulations": m.n_simulations,
+   297→            "n_trades_used": m.n_trades_used,
+   298→            "risk_of_ruin_pct": round(m.risk_of_ruin_pct, 2),
+   299→            "profit_probability_pct": round(m.profit_probability_pct, 2),
+   300→            "p95_max_drawdown_pct": round(m.p95_max_drawdown_pct, 2),
+   301→            "mean_final_equity": round(m.mean_final_equity, 2),
+   302→            "median_final_equity": round(m.median_final_equity, 2),
+   303→            "ci_5": round(m.ci_5, 2),
+   304→            "ci_25": round(m.ci_25, 2),
+   305→            "ci_75": round(m.ci_75, 2),
+   306→            "ci_95": round(m.ci_95, 2),
+   307→            "sharpe_ratio": round(m.sharpe_ratio, 2),
+   308→            "mean_win_rate_pct": round(m.mean_win_rate_pct, 2),
+   309→            "mean_pnl_pct": round(m.mean_pnl_pct, 2),
+   310→        }
+   311→
+   312→    def _wf_dict(self) -> Dict:
+   313→        w = self.wf
+   314→        return {
+   315→            "aggregate_wfe": round(w.aggregate_wfe, 3),
+   316→            "avg_is_return": round(w.avg_is_return, 2),
+   317→            "avg_oos_return": round(w.avg_oos_return, 2),
+   318→            "overall_degradation": round(w.overall_degradation, 1),
+   319→            "profitable_windows": w.profitable_windows,
+   320→            "total_windows": w.total_windows,
+   321→            "consistency_pct": round(w.consistency_pct, 1),
+   322→            "windows": [
+   323→                {
+   324→                    "window_index": win.window_index,
+   325→                    "is_return_pct": round(win.is_return_pct, 2),
+   326→                    "oos_return_pct": round(win.oos_return_pct, 2),
+   327→                    "is_trades": win.is_trades,
+   328→                    "oos_trades": win.oos_trades,
+   329→                    "is_win_rate": round(win.is_win_rate, 4),
+   330→                    "oos_win_rate": round(win.oos_win_rate, 4),
+   331→                    "wfe": round(win.wfe, 3),
+   332→                    "degradation_pct": round(win.degradation_pct, 1),
+   333→                }
+   334→                for win in w.windows
+   335→            ],
+   336→        }
+   337→
+   338→
+   339→def _cap_list(lst, max_len):
+   340→    """Cap a list to max_len items for JSON size control."""
+   341→    if len(lst) <= max_len:
+   342→        return lst
+   343→    # Evenly sample for equity curves, take last N for trades
+   344→    if lst and isinstance(lst[0], (int, float)):
+   345→        step = len(lst) / max_len
+   346→        return [lst[int(i * step)] for i in range(max_len)]
+   347→    return lst[-max_len:]
+   348→
+   349→
+   350→# ============================================================
+   351→# Validation Engine
+   352→# ============================================================
+   353→
+   354→class ValidationEngine:
+   355→    """
+   356→    PPMT Validation Suite Engine.
+   357→
+   358→    Orchestrates three complementary validation tests to determine
+   359→    whether the PPMT trading system's results are robust or overfit.
+   360→
+   361→    Scoring system (100 points total):
+   362→      P0 Out-of-Sample:  40 points max
+   363→        - OOS profitability:   20 pts
+   364→        - OOS win rate:        10 pts
+   365→        - OOS ratio (WFE):    10 pts
+   366→      P1 Monte Carlo:    30 points max
+   367→        - Profit probability:  15 pts
+   368→        - Risk of ruin:        10 pts
+   369→        - P95 drawdown:         5 pts
+   370→      P2 Walk-Forward:   30 points max
+   371→        - Aggregate WFE:       10 pts
+   372→        - Consistency:         10 pts
+   373→        - Low degradation:     10 pts
+   374→
+   375→    Verdict thresholds:
+   376→      ROBUST:    score >= 70
+   377→      MARGINAL:  score >= 45
+   378→      OVERFIT:   score < 45 (with sufficient data)
+   379→      INSUFFICIENT_DATA: < 10 OOS trades
+   380→    """
+   381→
+   382→    def __init__(self, config: Optional[ValidationConfig] = None):
+   383→        self.config = config or ValidationConfig()
+   384→        self.rng = np.random.default_rng(self.config.seed)
+   385→
+   386→    def run_full_validation(self, df: pd.DataFrame) -> ValidationVerdict:
+   387→        """
+   388→        Run the complete validation suite: P0 + P1 + P2.
+   389→
+   390→        Args:
+   391→            df: OHLCV DataFrame with columns: open, high, low, close, volume
+   392→
+   393→        Returns:
+   394→            ValidationVerdict with all results and composite scoring
+   395→        """
+   396→        start_time = time.time()
+   397→        cfg = self.config
+   398→
+   399→        verdict = ValidationVerdict(
+   400→            symbol=cfg.symbol,
+   401→            total_candles=len(df),
+   402→        )
+   403→
+   404→        logger.info(f"=== PPMT Validation Suite for {cfg.symbol} ===")
+   405→        logger.info(f"  Data: {len(df)} candles")
+   406→        logger.info(f"  Train ratio: {cfg.train_ratio}")
+   407→        logger.info(f"  MC simulations: {cfg.mc_simulations}")
+   408→        logger.info(f"  WF windows: {cfg.wf_window_count}")
+   409→
+   410→        # ─── P0: Out-of-Sample validation ───
+   411→        logger.info("P0: Running Out-of-Sample validation...")
+   412→        oos_result = self._run_oos_validation(df)
+   413→        verdict.oos = oos_result
+   414→        logger.info(
+   415→            f"  P0 done: IS={oos_result.is_total_trades}t/{oos_result.is_win_rate:.0%}WR/{oos_result.is_total_pnl_pct:+.1f}% | "
+   416→            f"OOS={oos_result.oos_total_trades}t/{oos_result.oos_win_rate:.0%}WR/{oos_result.oos_total_pnl_pct:+.1f}% | "
+   417→            f"ratio={oos_result.oos_ratio:.3f}"
+   418→        )
+   419→
+   420→        # ─── P1: Monte Carlo validation ───
+   421→        logger.info("P1: Running Monte Carlo simulation on OOS trades...")
+   422→        mc_result = self._run_mc_validation(oos_result.oos_trades)
+   423→        verdict.mc = mc_result
+   424→        logger.info(
+   425→            f"  P1 done: RoR={mc_result.risk_of_ruin_pct:.2f}% | "
+   426→            f"Profit prob={mc_result.profit_probability_pct:.1f}% | "
+   427→            f"P95 DD={mc_result.p95_max_drawdown_pct:.1f}%"
+   428→        )
+   429→
+   430→        # ─── P2: Walk-Forward validation ───
+   431→        logger.info("P2: Running Walk-Forward analysis...")
+   432→        wf_result = self._run_wf_validation(df)
+   433→        verdict.wf = wf_result
+   434→        logger.info(
+   435→            f"  P2 done: WFE={wf_result.aggregate_wfe:.1%} | "
+   436→            f"Consistency={wf_result.consistency_pct:.0f}% | "
+   437→            f"Degradation={wf_result.overall_degradation:.1f}%"
+   438→        )
+   439→
+   440→        # ─── Composite scoring ───
+   441→        p0_score = self._score_p0(verdict.oos)
+   442→        p1_score = self._score_p1(verdict.mc, verdict.oos)
+   443→        p2_score = self._score_p2(verdict.wf)
+   444→        total_score = p0_score + p1_score + p2_score
+   445→
+   446→        verdict.p0_score = p0_score
+   447→        verdict.p1_score = p1_score
+   448→        verdict.p2_score = p2_score
+   449→        verdict.confidence_score = total_score
+   450→
+   451→        # Determine recommendation
+   452→        # v0.40.0: Lowered OOS threshold 10 → 5 trades to match the new
+   453→        # /api/validate gate (server.py:1844). With 5000-candle ingestion,
+   454→        # 5 OOS trades is enough for a tentative verdict; MC gives wider
+   455→        # confidence intervals which the verdict summary surfaces.
+   456→        if verdict.oos.oos_total_trades < 5:
+   457→            verdict.recommendation = "INSUFFICIENT_DATA"
+   458→        elif total_score >= 70:
+   459→            verdict.recommendation = "ROBUST"
+   460→        elif total_score >= 45:
+   461→            verdict.recommendation = "MARGINAL"
+   462→        else:
+   463→            verdict.recommendation = "OVERFIT"
+   464→
+   465→        verdict.summary = self._generate_summary(verdict)
+   466→        verdict.elapsed_seconds = time.time() - start_time
+   467→
+   468→        logger.info(f"=== VERDICT: {verdict.recommendation} (score: {total_score:.0f}/100) ===")
+   469→
+   470→        return verdict
+   471→
+   472→    # ──────────────────────────────────────────────
+   473→    # P0: Out-of-Sample Validation
+   474→    # ──────────────────────────────────────────────
+   475→
+   476→    def _run_oos_validation(self, df: pd.DataFrame) -> OOSResult:
+   477→        """
+   478→        P0: Train/test split validation.
+   479→
+   480→        Splits data into training and test sets, builds the PPMT trie
+   481→        on training data only, then walks through test data to evaluate
+   482→        prediction quality on unseen data.
+   483→
+   484→        Uses V7.9 normalization fix: training z-score stats propagate
+   485→        to test encoding for consistent SAX symbol mapping.
+   486→        """
+   487→        cfg = self.config
+   488→        result = OOSResult()
+   489→
+   490→        # Split data
+   491→        split_idx = int(len(df) * cfg.train_ratio)
+   492→        train_df = df.iloc[:split_idx]
+   493→        test_df = df.iloc[split_idx:]
+   494→
+   495→        result.train_candles = len(train_df)
+   496→        result.test_candles = len(test_df)
+   497→
+   498→        logger.info(f"  Split: {len(train_df)} train / {len(test_df)} test candles")
+   499→
+   500→        # Create SAX encoder
+   501→        encoder = SAXEncoder(
+   502→            alphabet_size=cfg.sax_alphabet_size,
+   503→            window_size=cfg.sax_window_size,
+   504→            strategy=cfg.sax_strategy,
+   505→        )
+   506→
+   507→        # V7.9: Encode training data first to establish normalization stats
+   508→        train_symbols, paa_mean, paa_std = encoder.encode_with_normalization(train_df)
+   509→
+   510→        # Encode ALL data using training normalization stats
+   511→        all_symbols, _, _ = encoder.encode_with_normalization(
+   512→            df, paa_mean=paa_mean, paa_std=paa_std
+   513→        )
+   514→
+   515→        if not train_symbols or not all_symbols:
+   516→            logger.warning("  SAX encoding produced no symbols")
+   517→            return result
+   518→
+   519→        # Build PPMT engine on training data
+   520→        classifier = AssetClassifier()
+   521→        info = classifier.classify(cfg.symbol)
+   522→
+   523→        engine = PPMT(
+   524→            symbol=cfg.symbol,
+   525→            asset_class=info.asset_class,
+   526→            sax_alphabet_size=cfg.sax_alphabet_size,
+   527→            sax_window_size=cfg.sax_window_size,
+   528→            sax_strategy=cfg.sax_strategy,
+   529→            weight_profile=info.weight_profile,
+   530→        )
+   531→
+   532→        train_count = engine.build(
+   533→            train_df,
+   534→            pattern_length=cfg.pattern_length,
+   535→            symbols=train_symbols,
+   536→        )
+   537→        result.patterns_trained = train_count
+   538→
+   539→        if train_count == 0:
+   540→            logger.warning("  Trie built 0 patterns from training data")
+   541→            return result
+   542→
+   543→        logger.info(f"  Built {train_count} patterns from training data")
+   544→
+   545→        # ── In-Sample backtest (training period) ──
+   546→        is_trades = self._match_and_trade(
+   547→            symbols=all_symbols[: len(train_symbols)],
+   548→            price_df=train_df,
+   549→            engine=engine,
+   550→            encoder=encoder,
+   551→            symbol_offset=0,
+   552→        )
+   553→        result.is_trades = is_trades
+   554→        result.is_total_trades = len(is_trades)
+   555→        if is_trades:
+   556→            is_wins = sum(1 for t in is_trades if t["won"])
+   557→            result.is_win_rate = is_wins / len(is_trades)
+   558→            result.is_total_pnl_pct = sum(t["pnl_pct"] for t in is_trades)
+   559→            result.is_sharpe = _compute_sharpe([t["pnl_pct"] for t in is_trades])
+   560→            result.is_max_dd_pct = _compute_max_dd([t["pnl_pct"] for t in is_trades])
+   561→
+   562→            longs = [t for t in is_trades if t["direction"] == "LONG"]
+   563→            shorts = [t for t in is_trades if t["direction"] == "SHORT"]
+   564→            result.is_long_trades = len(longs)
+   565→            result.is_short_trades = len(shorts)
+   566→            result.is_long_wr = sum(1 for t in longs if t["won"]) / len(longs) if longs else 0
+   567→            result.is_short_wr = sum(1 for t in shorts if t["won"]) / len(shorts) if shorts else 0
+   568→
+   569→        # ── Out-of-Sample backtest (test period) ──
+   570→        n_train_symbols = len(train_symbols)
+   571→        oos_trades = self._match_and_trade(
+   572→            symbols=all_symbols,
+   573→            price_df=df,
+   574→            engine=engine,
+   575→            encoder=encoder,
+   576→            symbol_offset=n_train_symbols,
+   577→        )
+   578→        result.oos_trades = oos_trades
+   579→        result.oos_total_trades = len(oos_trades)
+   580→
+   581→        if oos_trades:
+   582→            oos_wins = sum(1 for t in oos_trades if t["won"])
+   583→            result.oos_win_rate = oos_wins / len(oos_trades)
+   584→            result.oos_total_pnl_pct = sum(t["pnl_pct"] for t in oos_trades)
+   585→            result.oos_sharpe = _compute_sharpe([t["pnl_pct"] for t in oos_trades])
+   586→            result.oos_max_dd_pct = _compute_max_dd([t["pnl_pct"] for t in oos_trades])
+   587→
+   588→            longs = [t for t in oos_trades if t["direction"] == "LONG"]
+   589→            shorts = [t for t in oos_trades if t["direction"] == "SHORT"]
+   590→            result.oos_long_trades = len(longs)
+   591→            result.oos_short_trades = len(shorts)
+   592→            result.oos_long_wr = sum(1 for t in longs if t["won"]) / len(longs) if longs else 0
+   593→            result.oos_short_wr = sum(1 for t in shorts if t["won"]) / len(shorts) if shorts else 0
+   594→
+   595→            # Build equity curve
+   596→            equity = cfg.initial_capital
+   597→            curve = [equity]
+   598→            for t in oos_trades:
+   599→                equity *= (1 + t["pnl_pct"] / 100)
+   600→                curve.append(equity)
+   601→            result.oos_equity_curve = curve
+   602→
+   603→        # Compute degradation
+   604→        if result.is_total_pnl_pct > 0:
+   605→            result.oos_ratio = result.oos_total_pnl_pct / result.is_total_pnl_pct
+   606→            result.pnl_degradation_pct = max(0, (1 - result.oos_ratio) * 100)
+   607→        elif result.is_total_pnl_pct == 0 and result.oos_total_pnl_pct > 0:
+   608→            result.oos_ratio = float("inf")
+   609→            result.pnl_degradation_pct = 0
+   610→        else:
+   611→            result.oos_ratio = 0
+   612→            result.pnl_degradation_pct = 100
+   613→
+   614→        result.wr_degradation_pct = max(0, (result.is_win_rate - result.oos_win_rate) * 100)
+   615→
+   616→        # Avg trade PnL ratio (more meaningful than total PnL ratio)
+   617→        is_avg_trade = result.is_total_pnl_pct / result.is_total_trades if result.is_total_trades > 0 else 0
+   618→        oos_avg_trade = result.oos_total_pnl_pct / result.oos_total_trades if result.oos_total_trades > 0 else 0
+   619→        if is_avg_trade > 0:
+   620→            result.oos_avg_trade_ratio = oos_avg_trade / is_avg_trade
+   621→            result.avg_trade_degradation_pct = max(0, (1 - result.oos_avg_trade_ratio) * 100)
+   622→        elif oos_avg_trade > 0:
+   623→            result.oos_avg_trade_ratio = float("inf")
+   624→            result.avg_trade_degradation_pct = 0
+   625→        else:
+   626→            result.oos_avg_trade_ratio = 0
+   627→            result.avg_trade_degradation_pct = 100
+   628→
+   629→        return result
+   630→
+   631→    def _match_and_trade(
+   632→        self,
+   633→        symbols: List[str],
+   634→        price_df: pd.DataFrame,
+   635→        engine: PPMT,
+   636→        encoder: SAXEncoder,
+   637→        symbol_offset: int = 0,
+   638→    ) -> List[Dict]:
+   639→        """
+   640→        Walk through SAX symbols and generate simulated trades
+   641→        by matching patterns against the trie.
+   642→
+   643→        This is the core of the validation: it uses the exact same
+   644→        matching logic as the real PPMT engine (exact → fuzzy → prefix
+   645→        fallback across N1-N4 trie levels) but only trades on the
+   646→        region defined by symbol_offset.
+   647→
+   648→        Args:
+   649→            symbols: Full list of SAX symbols (encoded with training stats)
+   650→            price_df: Price data for computing entry/exit/PnL
+   651→            engine: PPMT engine with trie already built from training data
+   652→            encoder: SAX encoder (for window_size reference)
+   653→            symbol_offset: Start matching from this symbol index
+   654→                           (set to len(train_symbols) for OOS testing)
+   655→
+   656→        Returns:
+   657→            List of trade dictionaries with PnL, direction, pattern info
+   658→        """
+   659→        cfg = self.config
+   660→        trades = []
+   661→        fuzzy_matcher = FuzzyMatcher(sax_encoder=encoder, threshold=0.85)
+   662→        window_size = encoder.window_size
+   663→
+   664→        # Only process symbols from offset onwards
+   665→        start = max(symbol_offset, 0)
+   666→        end = len(symbols) - cfg.pattern_length
+   667→
+   668→        for i in range(start, max(start, end)):
+   669→            current_pattern = symbols[i : i + cfg.pattern_length]
+   670→
+   671→            # Search all trie levels: N4 (most specific) → N1 (universal)
+   672→            best_node = None
+   673→            best_level = None
+   674→
+   675→            for trie, level_name in [
+   676→                (engine.trie_n4, "N4"),
+   677→                (engine.trie_n3, "N3"),
+   678→                (engine.trie_n2, "N2"),
+   679→                (engine.trie_n1, "N1"),
+   680→            ]:
+   681→                # Exact match first
+   682→                node = trie.search(current_pattern)
+   683→                if node is not None and node.metadata.historical_count >= max(1, cfg.min_dir_count):
+   684→                    best_node = node
+   685→                    best_level = level_name
+   686→                    break
+   687→
+   688→                # Fuzzy match fallback
+   689→                match_result = fuzzy_matcher.best_match(trie, current_pattern)
+   690→                if (
+   691→                    match_result.node is not None
+   692→                    and match_result.node.metadata.historical_count >= max(1, cfg.min_dir_count)
+   693→                ):
+   694→                    best_node = match_result.node
+   695→                    best_level = f"{level_name}(fuzzy)"
+   696→                    break
+   697→
+   698→            # Prefix search fallback for shorter patterns
+   699→            if best_node is None and cfg.pattern_length > 3:
+   700→                for shorter_len in range(cfg.pattern_length - 1, 2, -1):
+   701→                    short_pattern = symbols[i : i + shorter_len]
+   702→                    for trie, level_name in [
+   703→                        (engine.trie_n4, "N4"),
+   704→                        (engine.trie_n3, "N3"),
+   705→                        (engine.trie_n2, "N2"),
+   706→                        (engine.trie_n1, "N1"),
+   707→                    ]:
+   708→                        node, matched_depth = trie.search_prefix(short_pattern)
+   709→                        if (
+   710→                            node is not None
+   711→                            and matched_depth >= shorter_len
+   712→                            and node.metadata.historical_count >= max(1, cfg.min_dir_count)
+   713→                        ):
+   714→                            best_node = node
+   715→                            best_level = f"{level_name}(prefix-{matched_depth})"
+   716→                            break
+   717→                    if best_node is not None:
+   718→                        break
+   719→
+   720→            if best_node is None:
+   721→                continue
+   722→
+   723→            meta = best_node.metadata
+   724→
+   725→            # Skip patterns with no directional signal
+   726→            if abs(meta.expected_move_pct) < 0.001:
+   727→                continue
+   728→
+   729→            direction = "LONG" if meta.expected_move_pct > 0 else "SHORT"
+   730→
+   731→            # Compute entry/exit from price data
+   732→            entry_candle = i * window_size
+   733→            # Use forward_window to determine trade exit point
+   734→            exit_candle = (i + cfg.pattern_length + cfg.forward_window) * window_size
+   735→
+   736→            if entry_candle >= len(price_df) or exit_candle > len(price_df):
+   737→                continue
+   738→
+   739→            entry_price = price_df["close"].iloc[entry_candle]
+   740→            exit_price = price_df["close"].iloc[exit_candle - 1]
+   741→
+   742→            if direction == "LONG":
+   743→                pnl_pct = ((exit_price - entry_price) / entry_price) * 100.0 * cfg.position_size_pct
+   744→            else:
+   745→                pnl_pct = ((entry_price - exit_price) / entry_price) * 100.0 * cfg.position_size_pct
+   746→
+   747→            won = bool(pnl_pct > 0)
+   748→            # NOTE (v0.40.23): This `won` is used for validator reporting
+   749→            # (win_rate stats), NOT for trie metadata. It intentionally stays
+   750→            # `pnl_pct > 0` because the validator answers "was this trade
+   751→            # profitable?" — different question from "did TP touch before SL?".
+   752→            # The trie-building callers (ppmt.py, paper_trader.py, profiles.py)
+   753→            # use outcome-SL/TP based `won` via compute_outcome_won().
+   754→
+   755→            # R:R computation from price window
+   756→            window_df = price_df.iloc[entry_candle:exit_candle]
+   757→            high = window_df["high"].max()
+   758→            low = window_df["low"].min()
+   759→
+   760→            if direction == "LONG":
+   761→                favorable = ((high - entry_price) / entry_price) * 100.0
+   762→                drawdown = ((low - entry_price) / entry_price) * 100.0
+   763→            else:
+   764→                favorable = ((entry_price - low) / entry_price) * 100.0
+   765→                drawdown = ((entry_price - high) / entry_price) * 100.0
+   766→
+   767→            rr = favorable / abs(drawdown) if abs(drawdown) > 1e-10 else 0
+   768→
+   769→            trades.append({
+   770→                "direction": direction,
+   771→                "entry_price": _pythonify(round(entry_price, 2)),
+   772→                "exit_price": _pythonify(round(exit_price, 2)),
+   773→                "pnl_pct": _pythonify(round(pnl_pct, 4)),
+   774→                "won": _pythonify(won),
+   775→                "rr": _pythonify(round(rr, 3)),
+   776→                "pattern": "".join(current_pattern),
+   777→                "match_level": best_level,
+   778→                "candle_idx": _pythonify(entry_candle),
+   779→                "win_rate_historical": _pythonify(round(meta.win_rate, 4)),
+   780→                "expected_move": _pythonify(round(meta.expected_move_pct, 4)),
+   781→                "sizing_signal": _pythonify(round(meta.sizing_signal, 3)),
+   782→                "historical_count": _pythonify(meta.historical_count),
+   783→            })
+   784→
+   785→        return trades
+   786→
+   787→    # ──────────────────────────────────────────────
+   788→    # P1: Monte Carlo Validation
+   789→    # ──────────────────────────────────────────────
+   790→
+   791→    def _run_mc_validation(self, oos_trades: List[Dict]) -> MCValidationResult:
+   792→        """
+   793→        P1: Monte Carlo simulation on out-of-sample trades.
+   794→
+   795→        Resamples the OOS trade PnLs with replacement to test whether
+   796→        the system's profitability is robust to trade ordering or
+   797→        merely a product of lucky sequencing.
+   798→        """
+   799→        cfg = self.config
+   800→        result = MCValidationResult()
+   801→
+   802→        if len(oos_trades) < 5:
+   803→            logger.warning(f"  Insufficient OOS trades for MC ({len(oos_trades)} < 5)")
+   804→            return result
+   805→
+   806→        trade_pnl_pcts = np.array([t["pnl_pct"] for t in oos_trades])
+   807→        trade_pnls = np.zeros(len(oos_trades))  # Placeholder (not used directly)
+   808→
+   809→        mc_engine = MonteCarloEngine(seed=cfg.seed)
+   810→        mc_result = mc_engine.simulate_from_trades(
+   811→            trade_pnls=trade_pnls,
+   812→            trade_pnl_pcts=trade_pnl_pcts,
+   813→            symbol=cfg.symbol,
+   814→            initial_capital=cfg.initial_capital,
+   815→            n_simulations=cfg.mc_simulations,
+   816→            ruin_threshold=cfg.ruin_threshold,
+   817→            position_size_pct=0.02,
+   818→        )
+   819→
+   820→        result.n_simulations = cfg.mc_simulations
+   821→        result.n_trades_used = len(oos_trades)
+   822→
+   823→        if mc_result.stats:
+   824→            s = mc_result.stats
+   825→            result.risk_of_ruin_pct = s.get("risk_of_ruin_pct", 0)
+   826→            result.profit_probability_pct = s.get("profit_probability_pct", 0)
+   827→            result.p95_max_drawdown_pct = s.get("worst_max_drawdown_pct", 0)
+   828→            result.mean_final_equity = s.get("mean_final_equity", 0)
+   829→            result.median_final_equity = s.get("ci_50", 0)
+   830→            result.ci_5 = s.get("ci_5", 0)
+   831→            result.ci_25 = s.get("ci_25", 0)
+   832→            result.ci_75 = s.get("ci_75", 0)
+   833→            result.ci_95 = s.get("ci_95", 0)
+   834→            result.sharpe_ratio = s.get("sharpe_ratio", 0)
+   835→            result.mean_win_rate_pct = s.get("mean_win_rate_pct", 0)
+   836→            result.mean_pnl_pct = s.get("mean_pnl_pct", 0)
+   837→
+   838→        return result
+   839→
+   840→    # ──────────────────────────────────────────────
+   841→    # P2: Walk-Forward Validation
+   842→    # ──────────────────────────────────────────────
+   843→
+   844→    def _run_wf_validation(self, df: pd.DataFrame) -> WFValidationResult:
+   845→        """
+   846→        P2: Walk-Forward analysis with rolling windows.
+   847→
+   848→        Divides the dataset into K windows. For each window:
+   849→          1. Train on the first portion (wf_train_ratio)
+   850→          2. Test on the remaining portion
+   851→          3. Compute IS and OOS returns
+   852→          4. Calculate Walk-Forward Efficiency (WFE = OOS/IS)
+   853→
+   854→        This reveals whether the system is consistently profitable
+   855→        across different market regimes, not just a single period.
+   856→        """
+   857→        cfg = self.config
+   858→        result = WFValidationResult()
+   859→        total_candles = len(df)
+   860→
+   861→        # Calculate window sizes
+   862→        window_total = total_candles // cfg.wf_window_count
+   863→        train_size = int(window_total * cfg.wf_train_ratio)
+   864→        test_size = window_total - train_size
+   865→
+   866→        if train_size < 100 or test_size < 50:
+   867→            logger.warning(
+   868→                f"  Walk-forward windows too small: train={train_size}, test={test_size}"
+   869→            )
+   870→            return result
+   871→
+   872→        logger.info(f"  Window sizes: train={train_size}, test={test_size} candles")
+   873→
+   874→        # Create reusable objects
+   875→        classifier = AssetClassifier()
+   876→        info = classifier.classify(cfg.symbol)
+   877→
+   878→        for w_idx in range(cfg.wf_window_count):
+   879→            window_start = w_idx * window_total
+   880→            train_start = window_start
+   881→            train_end = window_start + train_size
+   882→            test_start = train_end
+   883→            test_end = min(window_start + window_total, total_candles)
+   884→
+   885→            if test_end <= test_start + 50:
+   886→                break
+   887→
+   888→            train_df = df.iloc[train_start:train_end]
+   889→            window_df = df.iloc[train_start:test_end]
+   890→
+   891→            # Encode with V7.9 normalization
+   892→            encoder = SAXEncoder(
+   893→                alphabet_size=cfg.sax_alphabet_size,
+   894→                window_size=cfg.sax_window_size,
+   895→                strategy=cfg.sax_strategy,
+   896→            )
+   897→
+   898→            try:
+   899→                train_symbols, paa_mean, paa_std = encoder.encode_with_normalization(train_df)
+   900→                all_symbols, _, _ = encoder.encode_with_normalization(
+   901→                    window_df, paa_mean=paa_mean, paa_std=paa_std
+   902→                )
+   903→            except Exception as e:
+   904→                logger.warning(f"  Window {w_idx}: encoding failed: {e}")
+   905→                result.windows.append(
+   906→                    WFWindowResult(window_index=w_idx,
+   907→                                   train_start_idx=train_start, train_end_idx=train_end,
+   908→                                   test_start_idx=test_start, test_end_idx=test_end)
+   909→                )
+   910→                continue
+   911→
+   912→            if not train_symbols or not all_symbols:
+   913→                result.windows.append(
+   914→                    WFWindowResult(window_index=w_idx,
+   915→                                   train_start_idx=train_start, train_end_idx=train_end,
+   916→                                   test_start_idx=test_start, test_end_idx=test_end)
+   917→                )
+   918→                continue
+   919→
+   920→            # Build engine on training data
+   921→            engine = PPMT(
+   922→                symbol=cfg.symbol,
+   923→                asset_class=info.asset_class,
+   924→                sax_alphabet_size=cfg.sax_alphabet_size,
+   925→                sax_window_size=cfg.sax_window_size,
+   926→                sax_strategy=cfg.sax_strategy,
+   927→                weight_profile=info.weight_profile,
+   928→            )
+   929→            train_count = engine.build(
+   930→                train_df,
+   931→                pattern_length=cfg.pattern_length,
+   932→                symbols=train_symbols,
+   933→            )
+   934→
+   935→            if train_count == 0:
+   936→                result.windows.append(
+   937→                    WFWindowResult(window_index=w_idx,
+   938→                                   train_start_idx=train_start, train_end_idx=train_end,
+   939→                                   test_start_idx=test_start, test_end_idx=test_end)
+   940→                )
+   941→                continue
+   942→
+   943→            # In-sample trades (training period)
+   944→            is_trades = self._match_and_trade(
+   945→                symbols=all_symbols[: len(train_symbols)],
+   946→                price_df=train_df,
+   947→                engine=engine,
+   948→                encoder=encoder,
+   949→                symbol_offset=0,
+   950→            )
+   951→            is_return = sum(t["pnl_pct"] for t in is_trades) if is_trades else 0
+   952→            is_wr = sum(1 for t in is_trades if t["won"]) / len(is_trades) if is_trades else 0
+   953→
+   954→            # Out-of-sample trades (test period)
+   955→            oos_trades = self._match_and_trade(
+   956→                symbols=all_symbols,
+   957→                price_df=window_df,
+   958→                engine=engine,
+   959→                encoder=encoder,
+   960→                symbol_offset=len(train_symbols),
+   961→            )
+   962→            oos_return = sum(t["pnl_pct"] for t in oos_trades) if oos_trades else 0
+   963→            oos_wr = sum(1 for t in oos_trades if t["won"]) / len(oos_trades) if oos_trades else 0
+   964→
+   965→            # WFE calculation
+   966→            if is_return > 0:
+   967→                wfe = max(0, min(1.5, oos_return / is_return))
+   968→                degradation = max(0, (1 - wfe) * 100)
+   969→            elif oos_return > 0:
+   970→                wfe = 1.5  # OOS positive while IS zero is actually good
+   971→                degradation = 0
+   972→            else:
+   973→                wfe = 0
+   974→                degradation = 100
+   975→
+   976→            result.windows.append(WFWindowResult(
+   977→                window_index=w_idx,
+   978→                train_start_idx=train_start,
+   979→                train_end_idx=train_end,
+   980→                test_start_idx=test_start,
+   981→                test_end_idx=test_end,
+   982→                is_return_pct=round(is_return, 2),
+   983→                oos_return_pct=round(oos_return, 2),
+   984→                is_trades=len(is_trades),
+   985→                oos_trades=len(oos_trades),
+   986→                is_win_rate=is_wr,
+   987→                oos_win_rate=oos_wr,
+   988→                wfe=round(wfe, 3),
+   989→                degradation_pct=round(degradation, 1),
+   990→            ))
+   991→
+   992→            logger.info(
+   993→                f"  Window {w_idx + 1}/{cfg.wf_window_count}: "
+   994→                f"IS={len(is_trades)}t/{is_return:+.1f}% | "
+   995→                f"OOS={len(oos_trades)}t/{oos_return:+.1f}% | "
+   996→                f"WFE={wfe:.2f}"
+   997→            )
+   998→
+   999→        # Aggregate
+  1000→        if result.windows:
+  1001→            wfes = [w.wfe for w in result.windows if w.wfe > 0]
+  1002→            is_returns = [w.is_return_pct for w in result.windows]
+  1003→            oos_returns = [w.oos_return_pct for w in result.windows]
+  1004→
+  1005→            result.aggregate_wfe = float(np.mean(wfes)) if wfes else 0
+  1006→            result.avg_is_return = float(np.mean(is_returns)) if is_returns else 0
+  1007→            result.avg_oos_return = float(np.mean(oos_returns)) if oos_returns else 0
+  1008→            result.profitable_windows = sum(1 for w in result.windows if w.oos_return_pct > 0)
+  1009→            result.total_windows = len(result.windows)
+  1010→            result.consistency_pct = (
+  1011→                result.profitable_windows / result.total_windows * 100
+  1012→                if result.total_windows > 0
+  1013→                else 0
+  1014→            )
+  1015→
+  1016→            if result.avg_is_return > 0:
+  1017→                result.overall_degradation = max(
+  1018→                    0, (1 - result.avg_oos_return / result.avg_is_return) * 100
+  1019→                )
+  1020→            else:
+  1021→                result.overall_degradation = 100
+  1022→
+  1023→        return result
+  1024→
+  1025→    # ──────────────────────────────────────────────
+  1026→    # Scoring Functions
+  1027→    # ──────────────────────────────────────────────
+  1028→
+  1029→    @staticmethod
+  1030→    def _score_p0(oos: OOSResult) -> float:
+  1031→        """
+  1032→        Score P0 Out-of-Sample validation (0-40 points).
+  1033→
+  1034→        Evaluates:
+  1035→        - OOS profitability (0-20): Is the system profitable on unseen data?
+  1036→        - OOS win rate (0-10): Does it maintain a positive edge?
+  1037→        - OOS ratio / WFE (0-10): How much degrades from IS to OOS?
+  1038→        """
+  1039→        score = 0.0
+  1040→
+  1041→        if oos.oos_total_trades < 10:
+  1042→            return max(0, oos.oos_total_trades * 0.5)  # Tiny partial credit
+  1043→
+  1044→        # OOS profitability (20 pts)
+  1045→        if oos.oos_total_pnl_pct > 0:
+  1046→            score += 10
+  1047→            if oos.oos_total_pnl_pct > 50:
+  1048→                score += 5
+  1049→            if oos.oos_total_pnl_pct > 100:
+  1050→                score += 5
+  1051→
+  1052→        # OOS win rate (10 pts)
+  1053→        if oos.oos_win_rate >= 0.60:
+  1054→            score += 10
+  1055→        elif oos.oos_win_rate >= 0.55:
+  1056→            score += 8
+  1057→        elif oos.oos_win_rate >= 0.50:
+  1058→            score += 6
+  1059→        elif oos.oos_win_rate >= 0.45:
+  1060→            score += 3
+  1061→
+  1062→        # OOS avg trade ratio (better than total PnL ratio)
+  1063→        # Compares per-trade profitability, not total (which is skewed by trade count)
+  1064→        ratio = oos.oos_avg_trade_ratio if oos.oos_avg_trade_ratio > 0 else oos.oos_ratio
+  1065→        if ratio >= 0.7:
+  1066→            score += 10
+  1067→        elif ratio >= 0.5:
+  1068→            score += 8
+  1069→        elif ratio >= 0.3:
+  1070→            score += 5
+  1071→        elif ratio > 0:
+  1072→            score += 2
+  1073→
+  1074→        return min(score, 40)
+  1075→
+  1076→    @staticmethod
+  1077→    def _score_p1(mc: MCValidationResult, oos: OOSResult) -> float:
+  1078→        """
+  1079→        Score P1 Monte Carlo validation (0-30 points).
+  1080→
+  1081→        Evaluates:
+  1082→        - Profit probability (0-15): Chance of being profitable in random orderings
+  1083→        - Risk of ruin (0-10): Probability of catastrophic loss
+  1084→        - P95 drawdown (0-5): Worst-case drawdown at 95th percentile
+  1085→        """
+  1086→        score = 0.0
+  1087→
+  1088→        if mc.n_trades_used < 10:
+  1089→            return 0
+  1090→
+  1091→        # Profit probability (15 pts)
+  1092→        if mc.profit_probability_pct >= 90:
+  1093→            score += 15
+  1094→        elif mc.profit_probability_pct >= 80:
+  1095→            score += 12
+  1096→        elif mc.profit_probability_pct >= 70:
+  1097→            score += 10
+  1098→        elif mc.profit_probability_pct >= 60:
+  1099→            score += 7
+  1100→        elif mc.profit_probability_pct >= 50:
+  1101→            score += 4
+  1102→
+  1103→        # Risk of ruin (10 pts)
+  1104→        if mc.risk_of_ruin_pct < 0.5:
+  1105→            score += 10
+  1106→        elif mc.risk_of_ruin_pct < 1:
+  1107→            score += 9
+  1108→        elif mc.risk_of_ruin_pct < 2:
+  1109→            score += 8
+  1110→        elif mc.risk_of_ruin_pct < 5:
+  1111→            score += 6
+  1112→        elif mc.risk_of_ruin_pct < 10:
+  1113→            score += 3
+  1114→
+  1115→        # P95 drawdown (5 pts)
+  1116→        if mc.p95_max_drawdown_pct < 15:
+  1117→            score += 5
+  1118→        elif mc.p95_max_drawdown_pct < 25:
+  1119→            score += 4
+  1120→        elif mc.p95_max_drawdown_pct < 35:
+  1121→            score += 3
+  1122→        elif mc.p95_max_drawdown_pct < 50:
+  1123→            score += 1
+  1124→
+  1125→        return min(score, 30)
+  1126→
+  1127→    @staticmethod
+  1128→    def _score_p2(wf: WFValidationResult) -> float:
+  1129→        """
+  1130→        Score P2 Walk-Forward validation (0-30 points).
+  1131→
+  1132→        Evaluates:
+  1133→        - Aggregate WFE (0-10): Average Walk-Forward Efficiency
+  1134→        - Consistency (0-10): % of profitable windows
+  1135→        - Low degradation (0-10): How much performance degrades IS → OOS
+  1136→        """
+  1137→        score = 0.0
+  1138→
+  1139→        if wf.total_windows < 2:
+  1140→            return 0
+  1141→
+  1142→        # Aggregate WFE (10 pts)
+  1143→        if wf.aggregate_wfe >= 0.7:
+  1144→            score += 10
+  1145→        elif wf.aggregate_wfe >= 0.5:
+  1146→            score += 8
+  1147→        elif wf.aggregate_wfe >= 0.3:
+  1148→            score += 5
+  1149→        elif wf.aggregate_wfe >= 0.1:
+  1150→            score += 2
+  1151→
+  1152→        # Consistency (10 pts)
+  1153→        if wf.consistency_pct >= 80:
+  1154→            score += 10
+  1155→        elif wf.consistency_pct >= 70:
+  1156→            score += 8
+  1157→        elif wf.consistency_pct >= 60:
+  1158→            score += 6
+  1159→        elif wf.consistency_pct >= 50:
+  1160→            score += 3
+  1161→
+  1162→        # Low degradation (10 pts)
+  1163→        if wf.overall_degradation < 20:
+  1164→            score += 10
+  1165→        elif wf.overall_degradation < 30:
+  1166→            score += 8
+  1167→        elif wf.overall_degradation < 40:
+  1168→            score += 6
+  1169→        elif wf.overall_degradation < 60:
+  1170→            score += 3
+  1171→        elif wf.overall_degradation < 80:
+  1172→            score += 1
+  1173→
+  1174→        return min(score, 30)
+  1175→
+  1176→    # ──────────────────────────────────────────────
+  1177→    # Summary Generation
+  1178→    # ──────────────────────────────────────────────
+  1179→
+  1180→    @staticmethod
+  1181→    def _generate_summary(verdict: ValidationVerdict) -> str:
+  1182→        """Generate a human-readable summary of the validation results."""
+  1183→        oos = verdict.oos
+  1184→        mc = verdict.mc
+  1185→        wf = verdict.wf
+  1186→
+  1187→        rec_emoji = {
+  1188→            "ROBUST": "✓",
+  1189→            "MARGINAL": "⚠",
+  1190→            "OVERFIT": "✗",
+  1191→            "INSUFFICIENT_DATA": "?",
+  1192→        }.get(verdict.recommendation, "?")
+  1193→
+  1194→        lines = [
+  1195→            f"PPMT Validation Suite — {rec_emoji} {verdict.recommendation} "
+  1196→            f"(score: {verdict.confidence_score:.0f}/100)",
+  1197→            f"",
+  1198→            f"P0 Out-of-Sample ({oos.train_candles} train / {oos.test_candles} test):",
+  1199→            f"  Patterns trained: {oos.patterns_trained}",
+  1200→            f"  IS: {oos.is_total_trades} trades, WR={oos.is_win_rate:.1%}, "
+  1201→            f"PnL={oos.is_total_pnl_pct:+.1f}%, Sharpe={oos.is_sharpe:.2f}",
+  1202→            f"  OOS: {oos.oos_total_trades} trades, WR={oos.oos_win_rate:.1%}, "
+  1203→            f"PnL={oos.oos_total_pnl_pct:+.1f}%, Sharpe={oos.oos_sharpe:.2f}",
+  1204→            f"  OOS Ratio: {oos.oos_ratio:.3f}, "
+  1205→            f"Degradation: {oos.pnl_degradation_pct:.1f}%",
+  1206→            f"",
+  1207→            f"P1 Monte Carlo ({mc.n_simulations} sims on {mc.n_trades_used} OOS trades):",
+  1208→            f"  Profit Probability: {mc.profit_probability_pct:.1f}%",
+  1209→            f"  Risk of Ruin: {mc.risk_of_ruin_pct:.2f}%",
+  1210→            f"  P95 Max DD: {mc.p95_max_drawdown_pct:.1f}%",
+  1211→            f"  Median Final Equity: ${mc.median_final_equity:,.0f}",
+  1212→            f"",
+  1213→            f"P2 Walk-Forward ({wf.total_windows} windows):",
+  1214→            f"  Aggregate WFE: {wf.aggregate_wfe:.1%}",
+  1215→            f"  Consistency: {wf.consistency_pct:.0f}% profitable windows",
+  1216→            f"  Avg IS: {wf.avg_is_return:+.1f}%, Avg OOS: {wf.avg_oos_return:+.1f}%",
+  1217→            f"  Overall Degradation: {wf.overall_degradation:.1f}%",
+  1218→            f"",
+  1219→            f"Score Breakdown: P0={verdict.p0_score:.0f}/40 "
+  1220→            f"P1={verdict.p1_score:.0f}/30 P2={verdict.p2_score:.0f}/30",
+  1221→        ]
+  1222→
+  1223→        return "\n".join(lines)
+  1224→
+  1225→
+  1226→# ============================================================
+  1227→# Utility Functions
+  1228→# ============================================================
+  1229→
+  1230→def _compute_sharpe(pnl_pcts: List[float]) -> float:
+  1231→    """Compute annualized Sharpe ratio from trade PnL percentages."""
+  1232→    if len(pnl_pcts) < 2:
+  1233→        return 0.0
+  1234→    returns = [p / 100 for p in pnl_pcts]
+  1235→    mean_ret = np.mean(returns)
+  1236→    std_ret = np.std(returns, ddof=1)
+  1237→    if std_ret > 1e-10:
+  1238→        return float((mean_ret / std_ret) * np.sqrt(365))  # v0.19.1: crypto 365 days
+  1239→    return 0.0
+  1240→
+  1241→
+  1242→def _compute_max_dd(pnl_pcts: List[float]) -> float:
+  1243→    """Compute maximum drawdown percentage from trade PnL series."""
+  1244→    if not pnl_pcts:
+  1245→        return 0.0
+  1246→    cumulative = 0.0
+  1247→    peak = 0.0
+  1248→    max_dd = 0.0
+  1249→    for pnl in pnl_pcts:
+  1250→        cumulative += pnl
+  1251→        peak = max(peak, cumulative)
+  1252→        dd = cumulative - peak
+  1253→        max_dd = min(max_dd, dd)
+  1254→    return abs(max_dd)
+  1255→

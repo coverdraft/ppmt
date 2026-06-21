@@ -1,0 +1,794 @@
+     1→"""
+     2→Signal Generator - Trading Signals from Block Lifecycle Metadata
+     3→
+     4→Generates entry/exit/hold signals directly from the PPMT Trie's
+     5→Block Lifecycle Metadata. No external indicators needed.
+     6→
+     7→Signal Types:
+     8→  - ENTRY_LONG:  Pattern triggers bullish entry
+     9→  - ENTRY_SHORT: Pattern triggers bearish entry
+    10→  - EXIT:        Unknown block or pattern completion → exit
+    11→  - HOLD:        Pattern continues as expected
+    12→  - TRAILING:    Activate trailing stop (profit protection)
+    13→
+    14→V3 Enhancement: Signals now carry full prediction data:
+    15→  - predicted_path: Most likely future SAX blocks
+    16→  - estimated_time: When the move should complete
+    17→  - quality_score: Composite metric for adaptive sizing
+    18→  - sizing_hint: Suggested position size multiplier
+    19→"""
+    20→
+    21→from __future__ import annotations
+    22→
+    23→from dataclasses import dataclass, field
+    24→from enum import Enum
+    25→from typing import Optional
+    26→
+    27→from ppmt.core.metadata import BlockLifecycleMetadata
+    28→from ppmt.core.matcher import MatchResult
+    29→from ppmt.core.thresholds import SignalThresholds
+    30→
+    31→
+    32→class SignalType(Enum):
+    33→    """Trading signal types."""
+    34→    ENTRY_LONG = "ENTRY_LONG"
+    35→    ENTRY_SHORT = "ENTRY_SHORT"
+    36→    EXIT = "EXIT"
+    37→    HOLD = "HOLD"
+    38→    TRAILING = "TRAILING"
+    39→    NO_SIGNAL = "NO_SIGNAL"
+    40→
+    41→
+    42→@dataclass
+    43→class PredictionBlock:
+    44→    """
+    45→    A predicted future SAX block with its probability.
+    46→
+    47→    Represents one step in the predicted future path.
+    48→    Each block carries the same metadata as a real block,
+    49→    but with probability estimates.
+    50→    """
+    51→    symbol: str
+    52→    """SAX symbol for this predicted block."""
+    53→
+    54→    probability: float = 0.0
+    55→    """Probability of this block occurring (0-1)."""
+    56→
+    57→    expected_move_pct: float = 0.0
+    58→    """Expected price move if this block occurs."""
+    59→
+    60→    cumulative_probability: float = 0.0
+    61→    """Running probability from start to this block."""
+    62→
+    63→    estimated_candles: int = 0
+    64→    """Estimated number of candles for this block."""
+    65→
+    66→    metadata: Optional[BlockLifecycleMetadata] = None
+    67→    """Full metadata from the Trie node (if available)."""
+    68→
+    69→
+    70→@dataclass
+    71→class Signal:
+    72→    """
+    73→    A trading signal generated from PPMT pattern matching.
+    74→
+    75→    V3 Enhancement: The signal carries complete prediction data,
+    76→    enabling the Risk Manager to make intelligent sizing decisions
+    77→    based on pattern quality, not just entry/exit.
+    78→    """
+    79→
+    80→    signal_type: SignalType
+    81→    """Type of signal (entry, exit, hold, etc.)."""
+    82→
+    83→    confidence: float = 0.0
+    84→    """Signal confidence (0-1). Weighted across all 4 Trie levels."""
+    85→
+    86→    symbol: str = ""
+    87→    """Trading pair (e.g., 'BTC/USDT')."""
+    88→
+    89→    entry_price: Optional[float] = None
+    90→    """Suggested entry price (from current market)."""
+    91→
+    92→    sl_price: Optional[float] = None
+    93→    """Stop loss price level (from Block Lifecycle Metadata)."""
+    94→
+    95→    tp_price: Optional[float] = None
+    96→    """Take profit price level (from Block Lifecycle Metadata)."""
+    97→
+    98→    expected_move_pct: float = 0.0
+    99→    """Expected percentage move from Block Lifecycle Metadata."""
+   100→
+   101→    max_drawdown_pct: float = 0.0
+   102→    """Maximum expected drawdown from metadata."""
+   103→
+   104→    max_favorable_pct: float = 0.0
+   105→    """Maximum expected favorable excursion from metadata."""
+   106→
+   107→    remaining_candles: int = 0
+   108→    """Predicted candles remaining in this pattern."""
+   109→
+   110→    trigger_candle: int = 0
+   111→    """Which candle in the pattern triggers this signal."""
+   112→
+   113→    risk_reward_ratio: float = 0.0
+   114→    """Risk:reward ratio computed from metadata."""
+   115→
+   116→    win_rate: float = 0.0
+   117→    """Historical win rate for this pattern."""
+   118→
+   119→    historical_count: int = 0
+   120→    """Number of historical observations for this pattern."""
+   121→
+   122→    matched_pattern: list[str] = field(default_factory=list)
+   123→    """The SAX symbol sequence that matched."""
+   124→
+   125→    trie_level: str = ""
+   126→    """Which Trie level generated the strongest signal."""
+   127→
+   128→    is_fuzzy: bool = False
+   129→    """Whether this signal came from a fuzzy (non-exact) match."""
+   130→
+   131→    unknown_block_exit: bool = False
+   132→    """Whether this exit was triggered by an unknown block."""
+   133→
+   134→    timestamp: Optional[float] = None
+   135→    """Unix timestamp when the signal was generated."""
+   136→
+   137→    # === V3 Prediction Fields ===
+   138→
+   139→    predicted_path: list[PredictionBlock] = field(default_factory=list)
+   140→    """Most likely future SAX blocks with probabilities.
+   141→    This is the 'forward vision' of the pattern — what comes next
+   142→    and how likely each step is."""
+   143→
+   144→    estimated_completion_time: Optional[float] = None
+   145→    """Estimated Unix timestamp when the pattern should complete.
+   146→    Computed from remaining_candles × timeframe."""
+   147→
+   148→    # === V3 Quality & Sizing Fields ===
+   149→
+   150→    quality_score: float = 0.0
+   151→    """
+   152→    Composite quality score (0-1) for adaptive position sizing.
+   153→    Combines: confidence × win_rate × risk_reward_bonus × sample_size_bonus
+   154→    This is what the Risk Manager uses to decide position size.
+   155→    """
+   156→
+   157→    sizing_multiplier: float = 1.0
+   158→    """
+   159→    Position size multiplier based on quality_score.
+   160→    - quality_score > 0.8 → multiplier 2.0 (high conviction)
+   161→    - quality_score 0.6-0.8 → multiplier 1.0 (normal)
+   162→    - quality_score < 0.6 → multiplier 0.5 (low conviction)
+   163→    The Risk Manager uses this as: base_size × sizing_multiplier
+   164→    """
+   165→
+   166→    # === V3: Metadata-Driven Sizing Signal ===
+   167→
+   168→    probability_of_success: float = 0.0
+   169→    """
+   170→    Bayesian-adjusted probability that this pattern succeeds.
+   171→    Comes from BlockLifecycleMetadata.probability_of_success.
+   172→    The Money Manager reads this to gauge conviction.
+   173→    """
+   174→
+   175→    expected_profit_ahead: float = 0.0
+   176→    """
+   177→    Expected profit % including losses (expected value).
+   178→    Comes from BlockLifecycleMetadata.expected_profit_ahead.
+   179→    Combines win_rate × expected_move + (1-win_rate) × max_drawdown.
+   180→    """
+   181→
+   182→    metadata_sizing_signal: float = 0.0
+   183→    """
+   184→    Composite sizing signal from BlockLifecycleMetadata (0-2.0).
+   185→    This is the TIGHT INTEGRATION signal: the Trie's metadata
+   186→    directly tells the Risk Manager how much capital to allocate.
+   187→    
+   188→    Formula: 0.4×probability + 0.35×profit_score + 0.25×rr_score, scaled to 2.0
+   189→    
+   190→    Mapping:
+   191→      >= 1.5 → 2.0x base (high conviction)
+   192→      1.0-1.5 → 1.0x base (normal)
+   193→      0.5-1.0 → 0.5x base (low conviction)
+   194→      < 0.5  → 0.25x or reject
+   195→    """
+   196→
+   197→    # === Computed Properties ===
+   198→
+   199→    @property
+   200→    def is_entry(self) -> bool:
+   201→        return self.signal_type in (SignalType.ENTRY_LONG, SignalType.ENTRY_SHORT)
+   202→
+   203→    @property
+   204→    def is_exit(self) -> bool:
+   205→        return self.signal_type in (SignalType.EXIT, SignalType.TRAILING)
+   206→
+   207→    @property
+   208→    def direction(self) -> Optional[str]:
+   209→        if self.signal_type == SignalType.ENTRY_LONG:
+   210→            return "LONG"
+   211→        elif self.signal_type == SignalType.ENTRY_SHORT:
+   212→            return "SHORT"
+   213→        return None
+   214→
+   215→    @property
+   216→    def predicted_path_symbols(self) -> list[str]:
+   217→        """Get just the symbols from the predicted path."""
+   218→        return [b.symbol for b in self.predicted_path]
+   219→
+   220→    @property
+   221→    def path_probability(self) -> float:
+   222→        """Overall probability of the predicted path completing."""
+   223→        if not self.predicted_path:
+   224→            return 0.0
+   225→        return self.predicted_path[-1].cumulative_probability
+   226→
+   227→    def compute_quality_score(self) -> float:
+   228→        """
+   229→        Compute composite quality score from signal metadata.
+   230→
+   231→        This is the key metric for adaptive position sizing.
+   232→        High quality = high confidence + high win rate + good R:R + many observations.
+   233→
+   234→        Formula:
+   235→          quality = confidence × (0.4 + 0.3 × win_rate + 0.2 × rr_bonus + 0.1 × sample_bonus)
+   236→
+   237→        Where:
+   238→          - win_rate: directly from metadata (0-1)
+   239→          - rr_bonus: risk_reward_ratio normalized (cap at 5 → 1.0)
+   240→          - sample_bonus: log(count) / log(1000) → caps at 1.0 at 1000 observations
+   241→        """
+   242→        import numpy as np
+   243→
+   244→        # Win rate component (0-1)
+   245→        wr = self.win_rate
+   246→
+   247→        # Risk:reward bonus (normalize: RR of 5+ is max)
+   248→        rr_bonus = min(self.risk_reward_ratio / 5.0, 1.0)
+   249→
+   250→        # Sample size bonus (more observations = more reliable)
+   251→        if self.historical_count > 0:
+   252→            sample_bonus = min(np.log1p(self.historical_count) / np.log(1000), 1.0)
+   253→        else:
+   254→            sample_bonus = 0.0
+   255→
+   256→        # Composite
+   257→        quality = self.confidence * (0.4 + 0.3 * wr + 0.2 * rr_bonus + 0.1 * sample_bonus)
+   258→        return min(quality, 1.0)
+   259→
+   260→    def compute_sizing_multiplier(
+   261→        self,
+   262→        min_multiplier: float = 0.25,
+   263→        max_multiplier: float = 3.0,
+   264→    ) -> float:
+   265→        """
+   266→        Compute position sizing multiplier from quality score.
+   267→
+   268→        The multiplier scales the base position size:
+   269→          actual_size = base_size × multiplier
+   270→
+   271→        Mapping:
+   272→          quality > 0.8  → 2.0x  (high conviction, size up)
+   273→          quality 0.6-0.8 → 1.0x  (normal)
+   274→          quality 0.4-0.6 → 0.5x  (low conviction, size down)
+   275→          quality < 0.4  → 0.25x  (very low, minimal exposure)
+   276→        """
+   277→        quality = self.quality_score if self.quality_score > 0 else self.compute_quality_score()
+   278→
+   279→        if quality >= 0.8:
+   280→            multiplier = 2.0
+   281→        elif quality >= 0.6:
+   282→            multiplier = 1.0
+   283→        elif quality >= 0.4:
+   284→            multiplier = 0.5
+   285→        else:
+   286→            multiplier = 0.25
+   287→
+   288→        return max(min_multiplier, min(max_multiplier, multiplier))
+   289→
+   290→    def to_dict(self) -> dict:
+   291→        """Serialize signal to dictionary."""
+   292→        return {
+   293→            "signal_type": self.signal_type.value,
+   294→            "confidence": round(self.confidence, 4),
+   295→            "symbol": self.symbol,
+   296→            "entry_price": self.entry_price,
+   297→            "sl_price": self.sl_price,
+   298→            "tp_price": self.tp_price,
+   299→            "expected_move_pct": round(self.expected_move_pct, 4),
+   300→            "max_drawdown_pct": round(self.max_drawdown_pct, 4),
+   301→            "max_favorable_pct": round(self.max_favorable_pct, 4),
+   302→            "remaining_candles": self.remaining_candles,
+   303→            "risk_reward_ratio": round(self.risk_reward_ratio, 4),
+   304→            "win_rate": round(self.win_rate, 4),
+   305→            "historical_count": self.historical_count,
+   306→            "matched_pattern": self.matched_pattern,
+   307→            "trie_level": self.trie_level,
+   308→            "is_fuzzy": self.is_fuzzy,
+   309→            "unknown_block_exit": self.unknown_block_exit,
+   310→            "quality_score": round(self.quality_score, 4),
+   311→            "sizing_multiplier": round(self.sizing_multiplier, 2),
+   312→            "probability_of_success": round(self.probability_of_success, 4),
+   313→            "expected_profit_ahead": round(self.expected_profit_ahead, 4),
+   314→            "metadata_sizing_signal": round(self.metadata_sizing_signal, 4),
+   315→            "predicted_path": [
+   316→                {
+   317→                    "symbol": b.symbol,
+   318→                    "probability": round(b.probability, 4),
+   319→                    "cumulative_probability": round(b.cumulative_probability, 4),
+   320→                    "expected_move_pct": round(b.expected_move_pct, 4),
+   321→                    "estimated_candles": b.estimated_candles,
+   322→                }
+   323→                for b in self.predicted_path
+   324→            ],
+   325→            "estimated_completion_time": self.estimated_completion_time,
+   326→        }
+   327→
+   328→
+   329→class SignalGenerator:
+   330→    """
+   331→    Generates trading signals from PPMT pattern matching results.
+   332→
+   333→    V3 Enhancement: Signals now carry prediction data and quality scores,
+   334→    creating a rich communication channel between PPMT and the Risk Manager.
+   335→
+   336→    The Risk Manager doesn't just see "buy/sell" — it sees:
+   337→    - How confident is this pattern?
+   338→    - What's the expected path ahead?
+   339→    - How much should we size this position?
+   340→    - When should it complete?
+   341→
+   342→    This makes the PPMT-RiskManager integration fundamentally different
+   343→    from a traditional indicator → signal → fixed-size pipeline.
+   344→    """
+   345→
+   346→    def __init__(
+   347→        self,
+   348→        min_confidence: float = 0.60,
+   349→        min_risk_reward: float = 1.5,
+   350→        unknown_block_exit: bool = True,
+   351→        trailing_activation_pct: float = 0.03,
+   352→        trailing_distance_pct: float = 0.015,
+   353→        prediction_depth: int = 5,
+   354→        validation_mode: bool = False,
+   355→    ):
+   356→        """
+   357→        v0.38.8: Thresholds now sourced from SignalThresholds (core/thresholds.py).
+   358→        The min_confidence / min_risk_reward params still work for backwards
+   359→        compatibility but the regime-adaptive lookup goes through
+   360→        self.thresholds (SignalThresholds.paper() or .real() based on
+   361→        validation_mode).
+   362→
+   363→        Bug fix: regime names are now lowercase (matching RegimeDetector
+   364→        output). Previously 'TRENDING_UP' was looked up against the dict
+   365→        keyed with 'TRENDING_UP' (uppercase) — and RegimeDetector returns
+   366→        'trending_up' (lowercase), so the lookup always fell back to
+   367→        'UNKNOWN'. Now both sides use lowercase.
+   368→        """
+   369→        self.min_confidence = min_confidence
+   370→        self.min_risk_reward = min_risk_reward
+   371→        self.unknown_block_exit = unknown_block_exit
+   372→        self.trailing_activation_pct = trailing_activation_pct
+   373→        self.trailing_distance_pct = trailing_distance_pct
+   374→        self.prediction_depth = prediction_depth
+   375→        self.validation_mode = validation_mode
+   376→
+   377→        # v0.38.8: Unified thresholds from core/thresholds.py.
+   378→        # .paper() for validation_mode=True, .real() otherwise.
+   379→        # The regime_min_confidence/regime_min_risk_reward dicts inside
+   380→        # have lowercase keys (matching RegimeDetector output).
+   381→        self.thresholds = SignalThresholds.for_mode(validation_mode)
+   382→
+   383→        # Backwards-compat shim: expose a regime_thresholds dict whose
+   384→        # keys are LOWERCASE (callers that did
+   385→        #   self.regime_thresholds['TRENDING_UP']['min_confidence']
+   386→        # will now miss the lookup and fall back, which is the correct
+   387→        # behaviour since the actual regime strings are lowercase).
+   388→        # New code should use self.thresholds.regime_confidence(name)
+   389→        # and self.thresholds.regime_risk_reward(name) instead.
+   390→        self.regime_thresholds = {
+   391→            'trending_up':   {'min_confidence': self.thresholds.regime_confidence('trending_up'),
+   392→                              'min_risk_reward': self.thresholds.regime_risk_reward('trending_up')},
+   393→            'trending_down': {'min_confidence': self.thresholds.regime_confidence('trending_down'),
+   394→                              'min_risk_reward': self.thresholds.regime_risk_reward('trending_down')},
+   395→            'ranging':       {'min_confidence': self.thresholds.regime_confidence('ranging'),
+   396→                              'min_risk_reward': self.thresholds.regime_risk_reward('ranging')},
+   397→            'volatile':      {'min_confidence': self.thresholds.regime_confidence('volatile'),
+   398→                              'min_risk_reward': self.thresholds.regime_risk_reward('volatile')},
+   399→            'unknown':       {'min_confidence': self.thresholds.regime_confidence('unknown'),
+   400→                              'min_risk_reward': self.thresholds.regime_risk_reward('unknown')},
+   401→        }
+   402→
+   403→    def get_adaptive_thresholds(self, regime_name: str = 'unknown') -> tuple[float, float]:
+   404→        """
+   405→        Get min_confidence and min_risk_reward adjusted for the current regime.
+   406→
+   407→        Regime-adaptive signal thresholds:
+   408→        - TRENDING: Lower confidence (0.45) + lower R:R (1.2) → more signals
+   409→        - RANGING: Standard confidence (0.60) + standard R:R (1.5)
+   410→        - VOLATILE: Higher R:R (1.8) required → fewer but better signals
+   411→
+   412→        v0.38.8: regime_name is case-insensitive (delegates to
+   413→        SignalThresholds.regime_confidence / regime_risk_reward).
+   414→        Bug fix: previously the dict keys were 'TRENDING_UP' (uppercase)
+   415→        but RegimeDetector returns 'trending_up' (lowercase), so this
+   416→        always fell back to 'UNKNOWN'. Now both sides use lowercase.
+   417→        """
+   418→        return (
+   419→            self.thresholds.regime_confidence(regime_name),
+   420→            self.thresholds.regime_risk_reward(regime_name),
+   421→        )
+   422→
+   423→    def generate_prediction_path(
+   424→        self,
+   425→        node: "TrieNode",
+   426→        current_prob: float = 1.0,
+   427→        depth: int = 0,
+   428→    ) -> list[PredictionBlock]:
+   429→        """
+   430→        Generate predicted future path from a Trie node.
+   431→
+   432→        Walks the Trie forward, choosing the highest-probability
+   433→        continuation at each step. Each step's probability is
+   434→        conditioned on the previous steps occurring.
+   435→
+   436→        Args:
+   437→            node: Current Trie node
+   438→            current_prob: Running probability
+   439→            depth: Current prediction depth
+   440→        """
+   441→        from ppmt.core.trie import TrieNode
+   442→
+   443→        if depth >= self.prediction_depth or node is None:
+   444→            return []
+   445→
+   446→        predictions = []
+   447→
+   448→        # Get all children sorted by historical count (most frequent first)
+   449→        children = sorted(
+   450→            node.children.items(),
+   451→            key=lambda x: x[1].metadata.historical_count if x[1].metadata else 0,
+   452→            reverse=True,
+   453→        )
+   454→
+   455→        if not children:
+   456→            return []
+   457→
+   458→        # Take the most likely continuation
+   459→        total_count = sum(
+   460→            c.metadata.historical_count for _, c in children if c.metadata
+   461→        )
+   462→
+   463→        if total_count == 0:
+   464→            return []
+   465→
+   466→        # Generate predictions for top continuations
+   467→        for sym, child in children[:3]:  # Top 3 continuations
+   468→            child_count = child.metadata.historical_count if child.metadata else 0
+   469→            prob = (child_count / total_count) * current_prob
+   470→            cum_prob = prob
+   471→
+   472→            pred = PredictionBlock(
+   473→                symbol=sym,
+   474→                probability=child_count / total_count,
+   475→                cumulative_probability=cum_prob,
+   476→                expected_move_pct=child.metadata.expected_move_pct if child.metadata else 0.0,
+   477→                estimated_candles=child.metadata.avg_duration if child.metadata else 0,
+   478→                metadata=child.metadata if child.metadata else None,
+   479→            )
+   480→
+   481→            # Recurse for the most likely path
+   482→            if depth < self.prediction_depth - 1:
+   483→                sub_path = self.generate_prediction_path(child, cum_prob, depth + 1)
+   484→                predictions.append(pred)
+   485→                predictions.extend(sub_path)
+   486→                break  # Only follow the most likely path for deep prediction
+   487→            else:
+   488→                predictions.append(pred)
+   489→
+   490→        return predictions
+   491→
+   492→    def generate_entry_signal(
+   493→        self,
+   494→        match_result: MatchResult,
+   495→        symbol: str,
+   496→        current_price: float,
+   497→        confidence: float,
+   498→        trie_level: str = "",
+   499→        regime_name: str = "UNKNOWN",
+   500→    ) -> Optional[Signal]:
+   501→        """
+   502→        Generate an entry signal from a pattern match.
+   503→
+   504→        Entry conditions:
+   505→        1. Match confidence >= min_confidence (regime-adaptive)
+   506→        2. Expected move is significant enough
+   507→        3. Risk:reward ratio meets minimum threshold (regime-adaptive)
+   508→        4. Sufficient historical observations
+   509→
+   510→        V3: Also generates prediction path and quality score.
+   511→        V4: Regime-adaptive thresholds — trending markets need lower confidence.
+   512→        v0.40.1 FIX-3: Lowered count and RR thresholds to be reachable with
+   513→          sparse tries (1-2 obs/leaf). Before: count>=3 AND RR>=1.5 →
+   514→          signal.py was DEAD CODE in production (0% approval rate, see
+   515→          docs/AUDIT_TRAZABILIDAD_CAPAS_1_2_3.md CAPA 3 #4).
+   516→          Now: count>=1 (any non-zero observation) AND RR>=0.5
+   517→          (allows symmetric-or-worse RR; SL/TP rule FIX-4 will compensate).
+   518→        v0.40.7 FIX-11: Removed the `not match_result.matched` hard gate.
+   519→          After FIX-10, the FuzzyMatcher returns `node` even when
+   520→          `matched=False` (i.e., confidence < 0.15) so the engine can
+   521→          still read metadata. The `not match_result.matched` check
+   522→          made signal.py reject 100% of those candidates immediately,
+   523→          defeating FIX-3's relaxed count/RR thresholds.
+   524→          The `confidence < adaptive_min_conf` check below is now the
+   525→          SOLE confidence gate. adaptive_min_conf is capped at 0.20 by
+   526→          FIX-3 part 2, so nodes with confidence 0.08-0.20 still pass.
+   527→        """
+   528→        # v0.40.7 FIX-11: was `if not match_result.matched or match_result.node is None`.
+   529→        # Now we only require a node. The `matched` flag is a SOFT signal
+   530→        # that downstream code (paper_trader, portfolio_runner) can use
+   531→        # for additional filtering if needed. The confidence gate below
+   532→        # is the real filter.
+   533→        if match_result.node is None:
+   534→            return None
+   535→
+   536→        meta = match_result.node.metadata
+   537→
+   538→        # Get regime-adaptive thresholds
+   539→        adaptive_min_conf, adaptive_min_rr = self.get_adaptive_thresholds(regime_name)
+   540→
+   541→        # v0.40.1 FIX-3 (part 2): Cap adaptive_min_conf at 0.20 to make it
+   542→        # reachable with current motor output. The SignalThresholds defaults
+   543→        # (0.45 trending, 0.60 ranging, 0.55 volatile) were calibrated for a
+   544→        # mature trie with 10+ obs/leaf producing confidence in 0.40-0.70.
+   545→        # With sparse tries (1-2 obs/leaf), confidence is structurally in
+   546→        # 0.08-0.20 (see CAPA 1 #2). Without this cap, signal.py rejects
+   547→        # 100% of attempts regardless of the count/RR thresholds below.
+   548→        # The cap of 0.20 still filters nodes with confidence < 0.20 (about
+   549→        # 60% of nodes per CAPA 1 distribution).
+   550→        #
+   551→        # v0.40.7 FIX-12: Lowered cap from 0.20 to per_trade_min_confidence
+   552→        # (default 0.08). The 0.20 cap was still too high — TF 5m/1m tries
+   553→        # with 2000 candles produce max confidence of 0.13-0.14 (Bayesian
+   554→        # shrinkage with prior_strength=10 + count_bonus scaling). The 0.20
+   555→        # cap rejected 100% of candidates, making signal.py DEAD CODE again
+   556→        # despite FIX-3. The new cap = per_trade_min_confidence makes the
+   557→        # cap consistent with the absolute floor defined in SignalThresholds.
+   558→        # This is the RIGHT behavior: adaptive_min_conf is the "soft"
+   559→        # threshold (regime-dependent), but it can never go below the
+   560→        # absolute floor.
+   561→        absolute_floor = self.thresholds.per_trade_min_confidence  # default 0.08
+   562→        adaptive_min_conf = min(adaptive_min_conf, absolute_floor)
+   563→
+   564→        # Check minimum confidence (regime-adaptive)
+   565→        if confidence < adaptive_min_conf:
+   566→            return None
+   567→
+   568→        # v0.40.1 FIX-3: was `meta.historical_count < 3` (unreachable with
+   569→        # sparse tries). Lowered to <1 — any observation is acceptable, since
+   570→        # the FuzzyMatcher gate (min_confidence=0.15) already filters the
+   571→        # purely decorative nodes. The signal.py count gate was redundant
+   572→        # with the matcher gate AND structurally unreachable.
+   573→        if meta.historical_count < 1:
+   574→            return None
+   575→
+   576→        # Determine direction using V4.4 (P7) policy: bayesian-shrunk
+   577→        # per-direction edge + quality gate.
+   578→        #
+   579→        # v0.40.22-audit: replaces the legacy `sign(expected_move_pct)`
+   580→        # logic. The legacy policy mixed LONG and SHORT moves in
+   581→        # expected_move_pct and could be near-zero even when both
+   582→        # directions had strong edges. P7 picks the direction with the
+   583→        # higher bayesian-shrunk × avg_move edge, with a quality gate
+   584→        # (min_edge_pct) to skip trades where neither direction has
+   585→        # enough expected edge to clear fee noise.
+   586→        #
+   587→        # Validation (8 tokens × 3 windows, 304,685 trades):
+   588→        #   P1 (legacy):  PnL -8650%, WR 0.421, PF 0.612
+   589→        #   P7 (this):    PnL -8090%, WR 0.421, PF 0.625
+   590→        #   Δ P7-P1: +560pp PnL total, 7/8 tokens improve, 3/3 windows improve.
+   591→        #
+   592→        # v0.38.8 hard_move_floor is now applied to the per-direction
+   593→        # avg_move (not the mixed expected_move_pct). In paper mode
+   594→        # (validation_mode=True) the floor is 0.05; in real mode it is 0.5.
+   595→        direction_str = meta.best_direction_p7(
+   596→            min_edge_pct=self.thresholds.p7_min_edge_pct,
+   597→            alpha=self.thresholds.p7_bayesian_alpha,
+   598→            beta=self.thresholds.p7_bayesian_beta,
+   599→        )
+   600→        if direction_str is None:
+   601→            return None
+   602→
+   603→        signal_type = (
+   604→            SignalType.ENTRY_LONG if direction_str == "LONG"
+   605→            else SignalType.ENTRY_SHORT
+   606→        )
+   607→
+   608→        # Hard move floor on the chosen direction's avg_move (not the
+   609→        # mixed expected_move_pct). This catches patterns where the chosen
+   610→        # direction has a strong bayesian edge but a tiny absolute move.
+   611→        effective_move = (
+   612→            meta.avg_move_long
+   613→            if signal_type == SignalType.ENTRY_LONG
+   614→            else abs(meta.avg_move_short)
+   615→        )
+   616→        if effective_move < self.thresholds.hard_move_floor:
+   617→            return None
+   618→
+   619→        # Compute SL/TP from metadata
+   620→        meta.compute_sl_tp(current_price)
+   621→
+   622→        # v0.40.1 FIX-3: was `meta.risk_reward_ratio < adaptive_min_rr`
+   623→        # where adaptive_min_rr defaults to 1.5. With sparse tries (1-2 obs),
+   624→        # RR is essentially 1.0 (max_drawdown = the single move). The 1.5
+   625→        # gate made signal.py reject 100% of attempts. Lowered to 0.5 —
+   626→        # this lets signal.py become a real path again (was DEAD CODE).
+   627→        # The SL/TP rule (FIX-4) is now what protects against bad RR.
+   628→        min_rr_effective = min(adaptive_min_rr, 0.5)
+   629→        if meta.risk_reward_ratio < min_rr_effective:
+   630→            return None
+   631→
+   632→        # Generate prediction path
+   633→        predicted_path = self.generate_prediction_path(match_result.node)
+   634→
+   635→        # Create signal with all metadata
+   636→        signal = Signal(
+   637→            signal_type=signal_type,
+   638→            confidence=confidence,
+   639→            symbol=symbol,
+   640→            entry_price=current_price,
+   641→            sl_price=meta.sl_price,
+   642→            tp_price=meta.tp_price,
+   643→            expected_move_pct=meta.expected_move_pct,
+   644→            max_drawdown_pct=meta.max_drawdown_pct,
+   645→            max_favorable_pct=meta.max_favorable_pct,
+   646→            remaining_candles=meta.remaining_candles,
+   647→            trigger_candle=meta.trigger_candle,
+   648→            risk_reward_ratio=meta.risk_reward_ratio,
+   649→            win_rate=meta.win_rate,
+   650→            historical_count=meta.historical_count,
+   651→            matched_pattern=match_result.symbols,
+   652→            trie_level=trie_level,
+   653→            is_fuzzy=not match_result.is_exact,
+   654→            unknown_block_exit=False,
+   655→            predicted_path=predicted_path,
+   656→        )
+   657→
+   658→        # Compute quality score and sizing multiplier
+   659→        signal.quality_score = signal.compute_quality_score()
+   660→        signal.sizing_multiplier = signal.compute_sizing_multiplier()
+   661→
+   662→        # V3: Pass metadata-driven sizing signal from BlockLifecycleMetadata
+   663→        signal.probability_of_success = meta.probability_of_success
+   664→        signal.expected_profit_ahead = meta.expected_profit_ahead
+   665→        signal.metadata_sizing_signal = meta.sizing_signal
+   666→
+   667→        return signal
+   668→
+   669→    def generate_continuation_signal(
+   670→        self,
+   671→        continuation_result: MatchResult,
+   672→        current_price: float,
+   673→        entry_price: float,
+   674→        current_pnl_pct: float,
+   675→        symbol: str = "",
+   676→    ) -> Signal:
+   677→        """
+   678→        Generate a continuation signal based on pattern state.
+   679→
+   680→        v0.6.5: Fuzzy Pattern Break — graduated decisions based on
+   681→        pattern_break_score instead of binary HOLD/EXIT:
+   682→          - break_score >= 0.7: HOLD (pattern continues confidently)
+   683→          - break_score 0.4-0.7: TRAILING (pattern weakening)
+   684→          - break_score < 0.4: EXIT (pattern broken)
+   685→
+   686→        This prevents premature exits on noisy continuation symbols
+   687→        while still exiting when the pattern truly breaks down.
+   688→        """
+   689→        break_score = continuation_result.pattern_break_score
+   690→
+   691→        # Unknown block → check break score for graduated exit
+   692→        if continuation_result.unknown_block or not continuation_result.matched:
+   693→            meta = continuation_result.node.metadata if continuation_result.node else None
+   694→
+   695→            # Graduated decision based on pattern break score
+   696→            if break_score >= 0.4:
+   697→                # Pattern weakening but not broken → TRAILING stop
+   698→                # Protect profits while giving the pattern a chance
+   699→                trailing_sl = current_price * (1 - self.trailing_distance_pct / 100.0)
+   700→                return Signal(
+   701→                    signal_type=SignalType.TRAILING,
+   702→                    confidence=0.7 + 0.2 * break_score,  # 0.7-0.9 based on break score
+   703→                    symbol=symbol,
+   704→                    sl_price=trailing_sl,
+   705→                    tp_price=meta.tp_price if meta else None,
+   706→                    unknown_block_exit=False,  # Not a full exit — trailing
+   707→                    is_fuzzy=True,
+   708→                    quality_score=break_score,
+   709→                    sizing_multiplier=0.5 if break_score < 0.6 else 1.0,
+   710→                )
+   711→
+   712→            # Pattern truly broken → EXIT
+   713→            if current_pnl_pct >= self.trailing_activation_pct:
+   714→                trailing_sl = current_price * (1 - self.trailing_distance_pct / 100.0)
+   715→                return Signal(
+   716→                    signal_type=SignalType.TRAILING,
+   717→                    confidence=0.9,
+   718→                    symbol=symbol,
+   719→                    sl_price=trailing_sl,
+   720→                    tp_price=None,
+   721→                    unknown_block_exit=True,
+   722→                    is_fuzzy=continuation_result.is_exact is False,
+   723→                    quality_score=0.9,
+   724→                    sizing_multiplier=0.0,
+   725→                )
+   726→
+   727→            sl = meta.sl_price if meta else entry_price * 0.97
+   728→            return Signal(
+   729→                signal_type=SignalType.EXIT,
+   730→                confidence=0.9,
+   731→                symbol=symbol,
+   732→                sl_price=sl,
+   733→                unknown_block_exit=True,
+   734→                quality_score=break_score,
+   735→                sizing_multiplier=0.0,
+   736→            )
+   737→
+   738→        # Pattern continues → check if fuzzy or exact, adjust confidence
+   739→        if continuation_result.matched and continuation_result.node:
+   740→            meta = continuation_result.node.metadata
+   741→
+   742→            # Generate prediction path for hold signal
+   743→            predicted_path = self.generate_prediction_path(continuation_result.node)
+   744→
+   745→            # Fuzzy continuation → lower confidence, may trigger trailing
+   746→            is_fuzzy_cont = not continuation_result.is_exact
+   747→            effective_confidence = meta.confidence
+   748→            if is_fuzzy_cont:
+   749→                # Reduce confidence for fuzzy matches
+   750→                effective_confidence *= continuation_result.similarity
+   751→
+   752→            if current_pnl_pct >= self.trailing_activation_pct:
+   753→                trailing_sl = current_price * (1 - self.trailing_distance_pct / 100.0)
+   754→                signal = Signal(
+   755→                    signal_type=SignalType.TRAILING,
+   756→                    confidence=effective_confidence,
+   757→                    symbol=symbol,
+   758→                    sl_price=trailing_sl,
+   759→                    tp_price=meta.tp_price,
+   760→                    remaining_candles=meta.remaining_candles,
+   761→                    win_rate=meta.win_rate,
+   762→                    matched_pattern=continuation_result.symbols,
+   763→                    expected_move_pct=meta.expected_move_pct,
+   764→                    historical_count=meta.historical_count,
+   765→                    risk_reward_ratio=meta.risk_reward_ratio,
+   766→                    predicted_path=predicted_path,
+   767→                    is_fuzzy=is_fuzzy_cont,
+   768→                )
+   769→                signal.quality_score = signal.compute_quality_score()
+   770→                return signal
+   771→
+   772→            signal = Signal(
+   773→                signal_type=SignalType.HOLD,
+   774→                confidence=effective_confidence,
+   775→                symbol=symbol,
+   776→                sl_price=meta.sl_price,
+   777→                tp_price=meta.tp_price,
+   778→                expected_move_pct=meta.expected_move_pct,
+   779→                remaining_candles=meta.remaining_candles,
+   780→                win_rate=meta.win_rate,
+   781→                matched_pattern=continuation_result.symbols,
+   782→                historical_count=meta.historical_count,
+   783→                risk_reward_ratio=meta.risk_reward_ratio,
+   784→                max_drawdown_pct=meta.max_drawdown_pct,
+   785→                max_favorable_pct=meta.max_favorable_pct,
+   786→                predicted_path=predicted_path,
+   787→                is_fuzzy=is_fuzzy_cont,
+   788→            )
+   789→            signal.quality_score = signal.compute_quality_score()
+   790→            signal.sizing_multiplier = signal.compute_sizing_multiplier()
+   791→            return signal
+   792→
+   793→        return Signal(signal_type=SignalType.NO_SIGNAL, symbol=symbol)
+   794→
