@@ -5,31 +5,31 @@ import TopBar from './components/TopBar';
 import TradingChart from './components/TradingChart';
 import RightPanel from './components/RightPanel';
 import AuthModal from './components/AuthModal';
+import TokenMatrix from './components/TokenMatrix';
+import type { ActiveTrade } from './components/TokenMatrix';
 import { usePaperLive } from './hooks/usePaperLive';
 import { useLiveTrading } from './hooks/useLiveTrading';
 import type { LiveConnectionStatus } from './hooks/useLiveTrading';
 
-/** Default token for PAPER LIVE mode */
-const DEFAULT_SYMBOL = 'DOGE/USDT';
-const DEFAULT_TIMEFRAME = '1m';
-
 export default function App() {
   const [mode, setMode] = useState<OperationMode>('PAPER_LIVE');
   const [showAuthModal, setShowAuthModal] = useState(false);
+  const [activeTrade, setActiveTrade] = useState<ActiveTrade | null>(null);
 
   // Mock position state (used in ANALYSIS mode and as fallback)
   const [mockPosition, setMockPosition] = useState<PositionState>(getMockPosition);
 
   // ─── PAPER LIVE hook ────────────────────────────────────────
+  // Only connect when activeTrade is set AND we're in PAPER_LIVE mode
   const paperLive = usePaperLive(
-    mode === 'PAPER_LIVE' ? DEFAULT_SYMBOL : null,
-    DEFAULT_TIMEFRAME
+    mode === 'PAPER_LIVE' && activeTrade ? activeTrade.symbol : null,
+    activeTrade?.timeframe ?? '1m'
   );
 
   // ─── LIVE TRADING hook (manual connect) ─────────────────────
   const { state: liveState, connect: liveConnect, disconnect: liveDisconnect, _wsRef: liveWsRef } = useLiveTrading(
-    mode === 'LIVE_TRADING' ? DEFAULT_SYMBOL : null,
-    DEFAULT_TIMEFRAME
+    mode === 'LIVE_TRADING' && activeTrade ? activeTrade.symbol : null,
+    activeTrade?.timeframe ?? '1m'
   );
 
   // Cleanup live WS on unmount
@@ -58,6 +58,16 @@ export default function App() {
       setShowAuthModal(false);
     }
   }, [mode, liveDisconnect]);
+
+  // ─── Token selection handler ────────────────────────────────
+  const handleTokenSelect = useCallback((trade: ActiveTrade) => {
+    setActiveTrade(trade);
+  }, []);
+
+  // ─── Back to matrix handler ─────────────────────────────────
+  const handleBackToMatrix = useCallback(() => {
+    setActiveTrade(null);
+  }, []);
 
   // ─── Auth modal handlers ────────────────────────────────────
   const handleAuthConnect = useCallback(
@@ -125,6 +135,10 @@ export default function App() {
     }
   }, [isLiveTrading, liveState.status]);
 
+  // ─── Resolved display symbol/timeframe ─────────────────────
+  const displaySymbol = activeTrade?.symbol ?? '—';
+  const displayTimeframe = activeTrade?.timeframe ?? '—';
+
   return (
     <div className="h-screen flex flex-col bg-terminal-bg overflow-hidden">
       <TopBar mode={mode} onModeChange={handleModeChange} />
@@ -132,6 +146,7 @@ export default function App() {
       {/* Main content area */}
       <main className="flex-1 flex overflow-hidden">
         {mode === 'ANALYSIS' ? (
+          /* ─── ANALYSIS: Offline placeholder ─── */
           <div className="flex-1 flex items-center justify-center">
             <div className="text-center">
               <div className="text-6xl mb-4">{'\uD83D\uDCCA'}</div>
@@ -144,17 +159,29 @@ export default function App() {
               </p>
             </div>
           </div>
+        ) : !activeTrade ? (
+          /* ─── TOKEN MATRIX: No token selected yet ─── */
+          <TokenMatrix onSelect={handleTokenSelect} />
         ) : (
-          /* Two-panel layout: 60% chart / 40% right panel */
+          /* ─── TRADING LAYOUT: 60% chart / 40% right panel ─── */
           <div className="flex-1 flex gap-3 p-3 overflow-hidden">
             {/* Left panel — Chart (60%) */}
             <div className="w-[60%] flex flex-col min-w-0">
               <div className="flex items-center justify-between mb-2 flex-shrink-0">
                 <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleBackToMatrix}
+                    className="text-gray-500 hover:text-white transition-colors mr-1"
+                    title="Volver a selección de token"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
+                    </svg>
+                  </button>
                   <span className="font-mono font-semibold text-white text-sm">
-                    DOGE/USDT
+                    {displaySymbol}
                   </span>
-                  <span className="text-[10px] text-gray-500 font-mono">1m</span>
+                  <span className="text-[10px] text-gray-500 font-mono">{displayTimeframe}</span>
                   {/* Connection status indicator */}
                   <span className={`flex items-center gap-1 text-[10px] font-mono ${
                     connected ? 'text-emerald-400' : 'text-red-400'
