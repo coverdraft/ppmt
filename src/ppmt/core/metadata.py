@@ -74,9 +74,24 @@ def _parse_es_key(k: str) -> tuple[str, ...]:
 # Threshold chosen from cross-AI review: historical_count >= 5 is where
 # SL/TP starts to stabilize (max_dd converges within ±0.05% of final value
 # for ~70% of nodes, per audit). Below 5: use floors. Above: use real.
+#
+# v0.54.0 (TAREA 15): DEPRECATED — these floors are NO LONGER used during
+# build(). The build now uses compute_outcome_directional() which measures
+# REAL directional movement, not artificial SL/TP simulation. These constants
+# are kept for backward compatibility with compute_outcome_won() which is
+# still used by signal generation (paper_trader) where SL/TP simulation is
+# appropriate for risk management.
 HIST_COUNT_MATURE = 5
 OUTCOME_FLOOR_SL_PCT = 0.15
 OUTCOME_FLOOR_TP_PCT = 0.15
+
+# v0.54.0 (TAREA 15): Micro-floor for directional outcome classification.
+# A move of exactly 0.00% is treated as a loss (no signal). Moves with
+# |real_move_pct| < DIRECTIONAL_MICRO_FLOOR are also treated as losses
+# to avoid classifying micro-noise as directional signal. The 0.01%
+# threshold is intentionally tiny — it only filters degenerate cases
+# where price returns to entry within floating-point precision.
+DIRECTIONAL_MICRO_FLOOR = 0.01
 
 
 def simulate_first_touch(
@@ -195,6 +210,74 @@ def compute_outcome_won(
         use_tp = tp_pct if tp_pct is not None and tp_pct > 0 else OUTCOME_FLOOR_TP_PCT
 
     return simulate_first_touch(window_df, entry_price, use_sl, use_tp, direction)
+
+
+def compute_outcome_directional(
+    post_pattern_df,
+    entry_price: float,
+    move_pct: float,
+) -> bool:
+    """V5.0 (TAREA 15, v0.54.0): Compute `won` flag from REAL directional movement.
+
+    This is the BUILD-TIME replacement for compute_outcome_won(). Instead of
+    simulating first-touch SL/TP with artificial 0.15% thresholds (which
+    measures micro-structure noise, not predictive power), this function
+    asks a simple question:
+
+        "Did the price move in the direction predicted by the pattern?"
+
+    TAREA 14 AUDIT FINDING: With SL/TP=0.15%, the first-touch simulation
+    produced WR=46% on DOGE 1m — below random. The root cause: 0.15% is
+    18-22x smaller than real candle ranges (±1-5%), so micro-dips trigger
+    SL before the real directional move materializes. Pattern "cbc" had
+    expected_move_pct=+0.35% (REAL directional signal) but win_rate=41%
+    (SL=0.15% triggered by noise first).
+
+    NEW LOGIC:
+      1. Direction is inferred from sign(move_pct) of the PATTERN window.
+      2. real_move_pct = (post_pattern close[-1] - entry_price) / entry_price × 100
+         This is the ACTUAL price movement over the W candles after the pattern.
+      3. For LONG: won = (real_move_pct > DIRECTIONAL_MICRO_FLOOR)
+         For SHORT: won = (real_move_pct < -DIRECTIONAL_MICRO_FLOOR)
+      4. Micro-floor of 0.01% filters degenerate zero-move cases only.
+
+    WHY THIS IS BETTER:
+      - Measures PREDICTIVE POWER: "Did the pattern's direction call work?"
+      - No artificial SL/TP thresholds that are timeframe-dependent
+      - No first-touch noise contamination from micro-structure
+      - WR naturally reflects genuine signal: random = 50%, skilled > 50%
+      - Works identically across 1m/5m/15m — the move_pct scales with time
+
+    Args:
+        post_pattern_df: DataFrame with 'close' column for the POST-PATTERN
+            window (W candles immediately AFTER the pattern ends). MUST have
+            at least 1 row, otherwise returns False (timeout = loss).
+        entry_price: entry price (close of the LAST pattern candle, i.e. the
+            candle immediately before post_pattern_df.iloc[0]).
+        move_pct: observed move_pct from the PATTERN window. Used ONLY to
+            infer direction via sign — the actual outcome is measured from
+            post_pattern_df's close prices.
+
+    Returns:
+        True if the post-pattern price moved in the predicted direction
+        (beyond the micro-floor), False otherwise.
+    """
+    if move_pct == 0:
+        return False
+
+    if len(post_pattern_df) == 0:
+        return False  # timeout = loss
+
+    direction = "LONG" if move_pct > 0 else "SHORT"
+
+    # Real movement: last close of the post-pattern window vs entry
+    actual_close = float(post_pattern_df["close"].iloc[-1])
+    real_move_pct = (actual_close - entry_price) / entry_price * 100.0
+
+    if direction == "LONG":
+        return real_move_pct > DIRECTIONAL_MICRO_FLOOR
+    else:  # SHORT
+        return real_move_pct < -DIRECTIONAL_MICRO_FLOOR
 
 
 @dataclass

@@ -452,17 +452,15 @@ class PPMTStorage:
         Backwards-compatible: old tries with single-symbol keys ('a', 'b', ...)
         continue to load correctly.
 
-        v0.53.0: Added `timeframe` parameter. Tries are now keyed by
-        (symbol, timeframe, level) so that 1m, 5m, and 15m tries can
-        coexist in the same database without overwriting each other.
-        Default "" preserves backward compatibility for callers that
-        don't pass timeframe.
+        v0.54.0 (TAREA 15): Added `timeframe` parameter to match the
+        (symbol, timeframe, level) PRIMARY KEY in the tries table.
 
         Args:
             symbol: Trading pair
             level: Trie level ('n1', 'n2', 'n3', 'n4')
             trie: PPMTTrie instance to serialize
-            timeframe: Timeframe identifier ('1m', '5m', '15m'). Default "".
+            timeframe: Candle interval (e.g., '1m', '5m', '15m').
+                Default '' for backward compatibility.
         """
         data = json.dumps(trie.to_dict())
         cursor = self._ensure_conn().cursor()
@@ -488,14 +486,14 @@ class PPMTStorage:
         an empty PPMTTrie on every restart — see
         docs/AUDIT_TRAZABILIDAD_CAPAS_1_2_3.md H2 (persistence bug).
 
-        v0.53.0: Added `timeframe` parameter for per-timeframe trie lookup.
-        Tries are now keyed by (symbol, timeframe, level). Default "" for
-        backward compatibility.
+        v0.54.0 (TAREA 15): Added `timeframe` parameter to match the
+        (symbol, timeframe, level) PRIMARY KEY in the tries table.
 
         Args:
             symbol: Trading pair (or special pool key: __UNIVERSAL__, __CLASS_*__)
             level: Trie level ('n1', 'n2', 'n3', 'n4')
-            timeframe: Timeframe identifier ('1m', '5m', '15m'). Default "".
+            timeframe: Candle interval (e.g., '1m', '5m', '15m').
+                Default '' for backward compatibility.
 
         Returns:
             PPMTTrie / RegimePartitionedTrie instance or None if not found.
@@ -536,8 +534,8 @@ class PPMTStorage:
         §3.1-3.4) where N1 is the universal safety-net and N2 is the
         competitive-advantage class pool.
 
-        v0.53.0: Added `timeframe` parameter for per-timeframe trie lookup.
-        All levels (N1-N4) are loaded with the same timeframe key.
+        v0.54.0 (TAREA 15): Added `timeframe` parameter for per-timeframe
+        trie loading.
 
         When `asset_class` is None (backwards compatibility), N1/N2 are loaded
         from the symbol's own storage key — the v0.40.2 behavior. This is
@@ -549,7 +547,7 @@ class PPMTStorage:
             asset_class: Optional asset class ('blue_chip', 'large_cap',
                 'mid_cap', 'defi', 'meme', 'new_launch'). When provided,
                 N1/N2 load from shared pools.
-            timeframe: Timeframe identifier ('1m', '5m', '15m'). Default "".
+            timeframe: Candle interval (e.g., '1m', '5m', '15m').
 
         Returns:
             Dict with keys 'n1', 'n2', 'n3', 'n4' mapping to PPMTTrie or None.

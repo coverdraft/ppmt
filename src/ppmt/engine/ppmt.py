@@ -51,7 +51,7 @@ import pandas as pd
 from ppmt.core.sax import SAXEncoder, SAXDualEncoder, get_alpha_for_level, get_dual_alpha_for_level, LEVEL_WINDOW_CONFIG, LEVEL_PATTERN_CONFIG
 from ppmt.core.trie import PPMTTrie, TrieNode, RegimePartitionedTrie
 from ppmt.core.matcher import FuzzyMatcher, MatchResult
-from ppmt.core.metadata import BlockLifecycleMetadata, compute_outcome_won
+from ppmt.core.metadata import BlockLifecycleMetadata, compute_outcome_won, compute_outcome_directional
 from ppmt.core.regime import RegimeDetector
 from ppmt.engine.weights import AdaptiveWeights, LevelStats, WEIGHT_PROFILES
 from ppmt.engine.signal import SignalGenerator, Signal, SignalType
@@ -730,38 +730,33 @@ class PPMT:
                 duration = len(window_df)
 
                 # Compute won from post-pattern candles
-                # v0.51.0: Use bootstrap floors (SL=TP=0.15%) for ALL levels during build.
+                # v0.54.0 (TAREA 15): Use DIRECTIONAL outcome — measure REAL
+                # price movement after the pattern instead of simulating
+                # first-touch SL/TP with artificial 0.15% thresholds.
                 #
-                # BUG FIX: Previously, only N3 looked up existing_node for SL/TP,
-                # while N1/N2/N4 always used bootstrap floors. This created an
-                # asymmetry where N1 got win_rate ≈ 0.44 (fair SL/TP ratio) but
-                # N3 got win_rate ≈ 0.03-0.13 (SL = max_dd*1.5 >> TP). With
-                # SL >> TP, the first-touch simulation almost always hits SL first,
-                # making N3 confidence permanently low regardless of density.
+                # TAREA 14 AUDIT FINDING: The old SL/TP=0.15% simulation
+                # measured micro-structure noise, not predictive power.
+                # Pattern "cbc" had expected_move_pct=+0.35% (real signal)
+                # but win_rate=41% because SL=0.15% triggered on noise first.
+                # The fix: ask "Did the price move in the predicted direction?"
+                # instead of "Did TP=0.15% hit before SL=0.15%?"
                 #
-                # The fix: use bootstrap floors for ALL levels during build().
-                # This makes win_rate consistent across levels and allows density
-                # (historical_count) to properly differentiate confidence.
-                # Node-specific SL/TP is still used for signal generation in the
-                # trading engine — only the `won` flag during build uses floors.
-                sl_pct_for_outcome = None
-                tp_pct_for_outcome = None
-                hist_count_for_outcome = 0
+                # compute_outcome_directional() uses the last close of the
+                # post-pattern window vs entry_price to determine direction.
+                # No artificial thresholds, no SL/TP, no first-touch noise.
+                # This measures TRUE predictive power of the pattern.
 
-                # Post-pattern window for SL/TP simulation
+                # Post-pattern window for directional outcome
                 post_pattern_window_size = pl * w_size
                 post_pattern_start = end_candle
                 post_pattern_end = min(end_candle + post_pattern_window_size, len(df))
                 post_pattern_df = df.iloc[post_pattern_start:post_pattern_end]
                 entry_price_for_outcome = window_df["close"].iloc[-1]
 
-                won = compute_outcome_won(
-                    window_df=post_pattern_df,
+                won = compute_outcome_directional(
+                    post_pattern_df=post_pattern_df,
                     entry_price=entry_price_for_outcome,
                     move_pct=move_pct,
-                    sl_pct=sl_pct_for_outcome,
-                    tp_pct=tp_pct_for_outcome,
-                    historical_count=hist_count_for_outcome,
                 )
 
                 # Detect regime
