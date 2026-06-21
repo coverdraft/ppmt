@@ -102,12 +102,33 @@ LEVEL_DUAL_ALPHA_CONFIG: dict[str, dict[str, int]] = {
     "n2_meme": {"price": 3, "volume": 0},   # v0.43.1: price-only for memes too (3^5=243, not 5^5=3125)
     "n2_new_launch": {"price": 3, "volume": 0},  # v0.43.1: same reasoning as memes
     "n2_default": {"price": 3, "volume": 0},     # v0.43.1: ALL N2 price-only (volume is noise at class level)
-    # v0.51.0: N3/N4 price-only (volume=0) for 1m density optimization.
-    # With dual encoding (price=4, vol=3), effective α=12, 12^4=20736 patterns
-    # → ~1 obs/node → confidence ≤ 0.10. Price-only α=3, P=3 → 27 patterns
-    # → ~100+ obs/node → confidence ≥ 0.35. Volume is noise at per-token 1m level.
+    # v0.55.0 (TAREA 16): N3/N4 price+volume for 1m — volume detects conviction,
+    # body_anatomy (body_score) replaces close to detect wick rejections.
+    # For 1m: α_p=3, α_v=2 → 6 composite, P=3 → 6^3=216 patterns.
+    # With ~2400 obs → ~11 obs/node → acceptable density with richer features.
+    # For other timeframes: volume=0 (price-only), same as before.
     "n3": {"price": 3, "volume": 0},
     "n4": {"price": 3, "volume": 0},
+    "n5": {"price": 3, "volume": 0},  # v0.55.0: N5 BTC context level
+}
+
+# v0.55.0 (TAREA 16): Per-timeframe overrides for dual-alpha config.
+#
+# At 1m, volume and candle anatomy are critical: a green candle with a long
+# upper wick is a rejection, not a bullish signal. Price-only SAX misses this.
+# With body_anatomy (body_score) as price input + volume dimension, 1m N3/N4/N5
+# gain two features that detect conviction (volume) and traps (wick rejection).
+#
+# Effective alphabet: α_p=3 × α_v=2 = 6 symbols, P=3 → 6^3=216 patterns.
+# Density: ~2400 obs / 216 ≈ 11 obs/node — acceptable for Bayesian shrinkage.
+#
+# Other timeframes remain price-only (volume=0) to preserve density.
+LEVEL_DUAL_ALPHA_TF_OVERRIDES: dict[str, dict[str, dict[str, int]]] = {
+    "1m": {
+        "n3": {"price": 3, "volume": 2},
+        "n4": {"price": 3, "volume": 2},
+        "n5": {"price": 3, "volume": 2},
+    },
 }
 
 # v0.48.0 (FASE 2A): Per-level window size by timeframe.
@@ -218,6 +239,7 @@ def get_dual_alpha_for_level(
     level: str,
     asset_class: str = "default",
     calibrated_alpha: int | None = None,
+    timeframe: str | None = None,
 ) -> dict[str, int]:
     """
     Get the dual SAX (price, volume) alphabet sizes for a given trie level.
@@ -225,22 +247,29 @@ def get_dual_alpha_for_level(
     v0.43.0: Stratified SAX Dual — N1 is price-only (volume=0),
     N2/N3/N4 use dual encoding with different (price, volume) alphas.
 
+    v0.55.0 (TAREA 16): Timeframe-aware overrides. For 1m, N3/N4/N5
+    get volume=2 to detect conviction + body_anatomy for wick rejection.
+
+    Args:
+        level: Trie level — "n1", "n2", "n3", "n4", or "n5".
+        asset_class: Asset class — used for N2 differentiation.
+        calibrated_alpha: Token's calibrated alpha (from CalibrationEngine).
+            If provided, used for N3/N4 instead of the default.
+        timeframe: Optional timeframe for per-TF overrides (e.g. "1m").
+
     Returns:
         Dict with keys "price" and "volume". When volume=0, the level
         should use a plain SAXEncoder (no volume dimension).
-
-    Examples:
-        >>> get_dual_alpha_for_level("n1")
-        {'price': 3, 'volume': 0}
-        >>> get_dual_alpha_for_level("n2", "meme")
-        {'price': 3, 'volume': 2}
-        >>> get_dual_alpha_for_level("n2", "blue_chip")
-        {'price': 4, 'volume': 2}
-        >>> get_dual_alpha_for_level("n3")
-        {'price': 4, 'volume': 3}
-        >>> get_dual_alpha_for_level("n4")
-        {'price': 4, 'volume': 3}
     """
+    # Check timeframe-specific overrides first (v0.55.0 TAREA 16)
+    if timeframe is not None and timeframe in LEVEL_DUAL_ALPHA_TF_OVERRIDES:
+        tf_overrides = LEVEL_DUAL_ALPHA_TF_OVERRIDES[timeframe]
+        if level in tf_overrides:
+            base = tf_overrides[level]
+            if calibrated_alpha is not None:
+                return {"price": calibrated_alpha, "volume": base["volume"]}
+            return base.copy()
+
     if level == "n1":
         return LEVEL_DUAL_ALPHA_CONFIG["n1"]
 
@@ -252,7 +281,6 @@ def get_dual_alpha_for_level(
 
     elif level == "n3":
         if calibrated_alpha is not None:
-            # Override price alpha with calibrated value, keep volume=3
             return {"price": calibrated_alpha, "volume": LEVEL_DUAL_ALPHA_CONFIG["n3"]["volume"]}
         return LEVEL_DUAL_ALPHA_CONFIG["n3"]
 
@@ -261,8 +289,14 @@ def get_dual_alpha_for_level(
             return {"price": calibrated_alpha, "volume": LEVEL_DUAL_ALPHA_CONFIG["n4"]["volume"]}
         return LEVEL_DUAL_ALPHA_CONFIG["n4"]
 
+    elif level == "n5":
+        # v0.55.0: N5 BTC context level — uses same config as N3 base
+        if calibrated_alpha is not None:
+            return {"price": calibrated_alpha, "volume": LEVEL_DUAL_ALPHA_CONFIG["n5"]["volume"]}
+        return LEVEL_DUAL_ALPHA_CONFIG["n5"]
+
     else:
-        raise ValueError(f"Unknown trie level: {level!r}. Must be one of: n1, n2, n3, n4")
+        raise ValueError(f"Unknown trie level: {level!r}. Must be one of: n1, n2, n3, n4, n5")
 
 
 @dataclass
@@ -270,7 +304,7 @@ class SAXConfig:
     """Configuration for SAX encoding."""
     alphabet_size: int = 8
     window_size: int = 10  # PAA window: candles per SAX block
-    strategy: Literal["ohlcv", "close", "typical_price", "volume"] = "ohlcv"
+    strategy: Literal["ohlcv", "close", "typical_price", "volume", "body_anatomy"] = "ohlcv"
 
 
 class SAXEncoder:
@@ -320,6 +354,33 @@ class SAXEncoder:
 
         if self.strategy == "close":
             return df["close"].values.astype(float)
+
+        elif self.strategy == "body_anatomy":
+            # v0.55.0 (TAREA 16): Candle anatomy encoding for 1m N3/N4/N5.
+            #
+            # body_score = (close - open) / (high - low + 1e-8)
+            #
+            # Returns a value between -1.0 (pure bearish, no wicks) and +1.0
+            # (pure bullish, no wicks). A candle with a large upper wick
+            # (close near open, high well above) gets a score near 0 or
+            # negative, correctly reflecting REJECTION, not bullishness.
+            #
+            # This fixes the "close-only sees green but misses the wick trap"
+            # problem: at 1m, a candle that closes green but has a 2x upper
+            # wick is a rejection signal, not a buy signal. Close-only SAX
+            # maps it as "up" because close > open. body_anatomy maps it
+            # near 0.0 (neutral/rejection) because the body is tiny vs range.
+            #
+            # The resulting distribution is approximately symmetric around 0,
+            # which matches SAX's z-score normalization assumptions well.
+            o = df["open"].values.astype(float)
+            h = df["high"].values.astype(float)
+            l = df["low"].values.astype(float)
+            c = df["close"].values.astype(float)
+            rng = h - l
+            rng = np.where(rng == 0, 1e-8, rng)  # prevent division by zero
+            body_score = (c - o) / rng
+            return body_score
 
         elif self.strategy == "typical_price":
             return ((df["high"] + df["low"] + df["close"]) / 3.0).values.astype(float)

@@ -48,7 +48,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from ppmt.core.sax import SAXEncoder, SAXDualEncoder, get_alpha_for_level, get_dual_alpha_for_level, LEVEL_WINDOW_CONFIG, LEVEL_PATTERN_CONFIG
+from ppmt.core.sax import SAXEncoder, SAXDualEncoder, get_alpha_for_level, get_dual_alpha_for_level, LEVEL_WINDOW_CONFIG, LEVEL_PATTERN_CONFIG, LEVEL_DUAL_ALPHA_TF_OVERRIDES
 from ppmt.core.trie import PPMTTrie, TrieNode, RegimePartitionedTrie
 from ppmt.core.matcher import FuzzyMatcher, MatchResult
 from ppmt.core.metadata import BlockLifecycleMetadata, compute_outcome_won, compute_outcome_directional
@@ -199,10 +199,10 @@ class PPMT:
         #   N4: price=4, vol=3
         # Only pass calibrated_alpha when the user explicitly set it AND
         # it differs from the timeframe default (i.e., manual calibration).
-        n1_dual = get_dual_alpha_for_level("n1", asset_class)
-        n2_dual = get_dual_alpha_for_level("n2", asset_class)
-        n3_dual = get_dual_alpha_for_level("n3", asset_class)
-        n4_dual = get_dual_alpha_for_level("n4", asset_class)
+        n1_dual = get_dual_alpha_for_level("n1", asset_class, timeframe=timeframe)
+        n2_dual = get_dual_alpha_for_level("n2", asset_class, timeframe=timeframe)
+        n3_dual = get_dual_alpha_for_level("n3", asset_class, timeframe=timeframe)
+        n4_dual = get_dual_alpha_for_level("n4", asset_class, timeframe=timeframe)
 
         # v0.48.0 (FASE 2A): Each encoder uses its own window_size.
         _w_n1 = _tf_window_config["n1"]
@@ -213,6 +213,10 @@ class PPMT:
         logger.info(
             f"Per-level windows: N1={_w_n1}, N2={_w_n2}, N3={_w_n3}, N4={_w_n4}, N5={_w_n5} | "
             f"Pattern lengths: N1={self.pl_n1}, N2={self.pl_n2}, N3={self.pl_n3}, N4={self.pl_n4}, N5={self.pl_n5}"
+        )
+        logger.info(
+            f"Per-level dual-alpha: N1={n1_dual}, N2={n2_dual}, N3={n3_dual}, N4={n4_dual} | "
+            f"TF={timeframe}"
         )
 
         # N1: PRICE-ONLY — uses SAXEncoder (no volume dimension).
@@ -240,35 +244,37 @@ class PPMT:
                     window_size=_w_n2,
                     price_strategy=sax_strategy,
                 )
-            # v0.51.0: N3/N4 with volume=0 use SAXEncoder (price-only), same as N1/N2.
-            # This enables ultra-dense per-token patterns for 1m where dual encoding
-            # creates too many patterns (12^4=20736) for the available data.
-            # Price-only N3 with α=3, P=3 gives 3^3=27 patterns → high obs/node → high conf.
+            # v0.55.0 (TAREA 16): For 1m, N3/N4 use body_anatomy strategy
+            # (body_score = (close-open)/(high-low)) which detects wick rejections.
+            # Combined with volume=2 for 1m, this gives richer inputs.
+            _n3_price_strategy = "body_anatomy" if timeframe == "1m" else sax_strategy
+            _n4_price_strategy = "body_anatomy" if timeframe == "1m" else sax_strategy
+
             if n3_dual["volume"] == 0:
                 self.sax_n3 = SAXEncoder(
                     alphabet_size=n3_dual["price"],
                     window_size=_w_n3,
-                    strategy=sax_strategy,
+                    strategy=_n3_price_strategy,
                 )
             else:
                 self.sax_n3 = SAXDualEncoder(
                     price_alphabet_size=n3_dual["price"],
                     volume_alphabet_size=n3_dual["volume"],
                     window_size=_w_n3,
-                    price_strategy=sax_strategy,
+                    price_strategy=_n3_price_strategy,
                 )
             if n4_dual["volume"] == 0:
                 self.sax_n4 = SAXEncoder(
                     alphabet_size=n4_dual["price"],
                     window_size=_w_n4,
-                    strategy=sax_strategy,
+                    strategy=_n4_price_strategy,
                 )
             else:
                 self.sax_n4 = SAXDualEncoder(
                     price_alphabet_size=n4_dual["price"],
                     volume_alphabet_size=n4_dual["volume"],
                     window_size=_w_n4,
-                    price_strategy=sax_strategy,
+                    price_strategy=_n4_price_strategy,
                 )
         else:
             # Legacy single-composite encoding
@@ -292,29 +298,32 @@ class PPMT:
             )
 
         # v0.48.0 (FASE 2B): N5 — BTC Context Level (1m only).
-        # N5 uses same encoding as N3 (including price-only when volume=0).
+        # N5 uses same encoding as N3 (including volume and body_anatomy for 1m).
         # Partitions by BTC context (bull/bear/neutral) instead of regime.
         # Only created for timeframe="1m".
         self.sax_n5 = None
+        _n5_dual = get_dual_alpha_for_level("n5", asset_class, timeframe=timeframe)
+        _n5_price_strategy = "body_anatomy" if timeframe == "1m" else sax_strategy
+
         if _w_n5 is not None and dual_sax:
-            if n3_dual["volume"] == 0:
+            if _n5_dual["volume"] == 0:
                 self.sax_n5 = SAXEncoder(
-                    alphabet_size=n3_dual["price"],
+                    alphabet_size=_n5_dual["price"],
                     window_size=_w_n5,
-                    strategy=sax_strategy,
+                    strategy=_n5_price_strategy,
                 )
             else:
                 self.sax_n5 = SAXDualEncoder(
-                    price_alphabet_size=n3_dual["price"],  # same alpha as N3
-                    volume_alphabet_size=n3_dual["volume"],
+                    price_alphabet_size=_n5_dual["price"],
+                    volume_alphabet_size=_n5_dual["volume"],
                     window_size=_w_n5,
-                    price_strategy=sax_strategy,
+                    price_strategy=_n5_price_strategy,
                 )
         elif _w_n5 is not None:
             self.sax_n5 = SAXEncoder(
-                alphabet_size=n3_dual["price"],
+                alphabet_size=_n5_dual["price"],
                 window_size=_w_n5,
-                strategy=sax_strategy,
+                strategy=_n5_price_strategy,
             )
 
         # Backwards compatibility: self.sax = N3's encoder
