@@ -52,7 +52,7 @@ from rich.markup import escape as _rich_escape
 import numpy as np
 import pandas as pd
 
-from ppmt.data.storage import PPMTStorage
+from ppmt.data.storage import PPMTStorage, UNIVERSAL_POOL_KEY, class_pool_key
 from ppmt.data.classifier import AssetClassifier
 from ppmt.core.trie import PPMTTrie
 from ppmt.core.sax import SAXEncoder
@@ -67,6 +67,8 @@ from ppmt.risk.manager import RiskManager, RiskConfig
 from ppmt.risk.money_manager import MoneyManager, MoneyManagerConfig
 from ppmt.risk.position_sizing import AdvancedPositionSizer
 from ppmt.engine.buffer import StreamingPatternBuffer
+from ppmt.engine.divergence_monitor import PatternDivergenceMonitor
+from ppmt.engine.btc_filter import BTCContextFilter
 
 # v0.15.0: TerminalState integration for live dashboard
 try:
@@ -897,6 +899,16 @@ class RealtimeTrader:
         consecutive_breaks = 0
         last_losing_trade_idx = -999
 
+        # v0.46.0: Pattern Divergence Monitor & BTC Context Filter
+        divergence_monitor = PatternDivergenceMonitor(divergence_threshold=0.667)
+        btc_filter = BTCContextFilter()
+
+        # v0.47.0: Active learning — captures per-level patterns at entry
+        # so outcomes can be written back to N1/N2/N3 tries on close.
+        _active_learning = None  # dict with pattern_n1, pattern_n3, entry_price, direction, entry_ts
+        _learning_n1_buffer = PPMTTrie(name="learning_n1_buffer")
+        _learning_n2_buffer = PPMTTrie(name="learning_n2_buffer")
+
         # ATR tracking (rolling window)
         atr_prices = []
         atr_highs = []
@@ -982,6 +994,13 @@ class RealtimeTrader:
                         regime_info = regime_detector.detect_detailed(regime_prices)
                         current_regime = regime_info.regime
 
+                    # v0.46.0: Update BTC context filter periodically
+                    # If this IS BTC, feed its prices directly.
+                    # For altcoins, BTC prices must come from a separate feed (future).
+                    if result.candles_processed % 100 == 0 and len(atr_prices) >= 50:
+                        if cfg.symbol == "BTC/USDT":
+                            btc_filter.update_btc_context(btc_prices=np.array(atr_prices))
+
                     # === POSITION MANAGEMENT ===
                     if position_state != PositionState.FLAT and current_position is not None:
                         pos = risk_mgr._positions.get(cfg.symbol)
@@ -1038,6 +1057,14 @@ class RealtimeTrader:
                             else:
                                 unrealized_loss = (current_price - pos.entry_price) / pos.entry_price * 100
                             if unrealized_loss >= cfg.catastrophic_loss_pct:
+                                # v0.47.0: Insert trade outcome into tries (learning loop)
+                                _learning_insert_outcome(
+                                    _active_learning, current_position, current_price,
+                                    "catastrophic_stop", trie_n1, trie_n2, trie,
+                                    _learning_n1_buffer, _learning_n2_buffer,
+                                    regime=current_regime,
+                                )
+                                _active_learning = None
                                 self._close_trade(risk_mgr, current_position, current_price,
                                                   current_time, "catastrophic_stop", result,
                                                   source="backtest")
@@ -1058,6 +1085,36 @@ class RealtimeTrader:
 
                         if catastrophic_close:
                             continue
+
+                        # v0.46.0: Pattern Divergence Exit
+                        # Compare real SAX stream with expected_sequences from
+                        # the node that generated the entry signal.
+                        if (divergence_monitor.expected_sequence is not None
+                                and len(pattern_buffer) >= 3):
+                            recent_symbols = pattern_buffer[-3:]
+                            div_result = divergence_monitor.check_divergence(recent_symbols)
+                            if div_result['diverged']:
+                                # v0.47.0: Insert trade outcome into tries (learning loop)
+                                _learning_insert_outcome(
+                                    _active_learning, current_position, current_price,
+                                    "pattern_broken", trie_n1, trie_n2, trie,
+                                    _learning_n1_buffer, _learning_n2_buffer,
+                                    regime=current_regime,
+                                )
+                                _active_learning = None
+                                self._close_trade(
+                                    risk_mgr, current_position, current_price,
+                                    current_time, "pattern_broken", result,
+                                    source="backtest",
+                                )
+                                position_state = PositionState.FLAT
+                                current_position = None
+                                consecutive_breaks = 0
+                                try:
+                                    self._update_terminal_state(open_position=None)
+                                except Exception:
+                                    pass
+                                continue
 
                         # Trailing stop update
                         if pos.tp_price is not None:
@@ -1089,6 +1146,14 @@ class RealtimeTrader:
 
                         if sl_hit:
                             exit_reason = "trailing_stop" if current_position.trailing_activated else "stop_loss"
+                            # v0.47.0: Insert trade outcome into tries (learning loop)
+                            _learning_insert_outcome(
+                                _active_learning, current_position, current_price,
+                                exit_reason, trie_n1, trie_n2, trie,
+                                _learning_n1_buffer, _learning_n2_buffer,
+                                regime=current_regime,
+                            )
+                            _active_learning = None
                             self._close_trade(risk_mgr, current_position, current_price,
                                               current_time, exit_reason, result,
                                               source="backtest")
@@ -1098,6 +1163,14 @@ class RealtimeTrader:
                             continue
 
                         elif tp_hit:
+                            # v0.47.0: Insert trade outcome into tries (learning loop)
+                            _learning_insert_outcome(
+                                _active_learning, current_position, current_price,
+                                "take_profit", trie_n1, trie_n2, trie,
+                                _learning_n1_buffer, _learning_n2_buffer,
+                                regime=current_regime,
+                            )
+                            _active_learning = None
                             self._close_trade(risk_mgr, current_position, current_price,
                                               current_time, "take_profit", result,
                                               source="backtest")
@@ -1141,9 +1214,19 @@ class RealtimeTrader:
                         match_result = None
 
                         if ppmt_engine is not None:
+                            # v0.47.0: Pass recent_candles DataFrame so each level's
+                            # encoder re-encodes with the correct symbol type.
+                            # This fixes the string/tuple mismatch where N3/N4
+                            # (SAXDualEncoder) expect tuples but received strings.
+                            _recent_df = None
+                            _w = cfg.sax_window_size
+                            _n_needed = _w * cfg.pattern_length
+                            if candle_idx >= _n_needed:
+                                _recent_df = df.iloc[candle_idx - _n_needed + 1:candle_idx + 1]
                             ppmt_result = ppmt_engine.match_raw(
                                 current_symbols=current_symbols,
                                 current_price=current_price,
+                                recent_candles=_recent_df,
                             )
                             weighted_confidence = ppmt_result.weighted_confidence
                             match_result = ppmt_result
@@ -1159,6 +1242,22 @@ class RealtimeTrader:
                             if weighted_confidence <= 0 and prediction.confidence > 0:
                                 weighted_confidence = prediction.confidence
                                 best_trie_level = "n3"
+
+                        # v0.46.0: BTC Context Filter
+                        # Adjust confidence based on BTC market regime.
+                        # Longs in BTC downtrend get penalized; shorts in BTC uptrend get penalized.
+                        if btc_filter._btc_regime is not None and weighted_confidence > 0:
+                            btc_result = btc_filter.filter_signal(
+                                prediction.direction, weighted_confidence,
+                            )
+                            if btc_result['rejected']:
+                                if result.candles_processed % 50 == 0:
+                                    console.print(
+                                        f"[dim][{cfg.symbol}] BTC filter rejected {prediction.direction}: "
+                                        f"btc_regime={btc_result['btc_regime']} conf={weighted_confidence:.2f}[/dim]"
+                                    )
+                                continue
+                            weighted_confidence = btc_result['adjusted_confidence']
 
                         # Entry signal generation
                         effective_min_conf = cfg.min_confidence
@@ -1427,6 +1526,39 @@ class RealtimeTrader:
                                 position_state = PositionState.LONG if signal.direction == "LONG" else PositionState.SHORT
                                 trade_counter += 1
 
+                                # v0.46.0: Set expected sequence for divergence monitoring
+                                try:
+                                    matched_node = trie.search(current_symbols)
+                                    if matched_node and matched_node.metadata.expected_sequences:
+                                        divergence_monitor.set_expected(matched_node.metadata)
+                                except Exception:
+                                    pass
+
+                                # v0.47.0: Capture per-level patterns for learning loop.
+                                # When the position closes, the outcome (won/move_pct)
+                                # will be written back to N1/N2/N3 tries.
+                                if ppmt_engine is not None:
+                                    try:
+                                        _pl = cfg.pattern_length
+                                        _w = cfg.sax_window_size
+                                        _n_needed = _w * _pl
+                                        if candle_idx >= _n_needed:
+                                            _entry_df = df.iloc[candle_idx - _n_needed + 1:candle_idx + 1]
+                                            _entry_patterns = ppmt_engine.encode_pattern_per_level(
+                                                _entry_df, pattern_length=_pl
+                                            )
+                                            _active_learning = {
+                                                "pattern_n1": _entry_patterns["n1"],
+                                                "pattern_n2": _entry_patterns["n2"],
+                                                "pattern_n3": _entry_patterns["n3"],
+                                                "entry_price": current_price,
+                                                "direction": signal.direction or "LONG",
+                                                "entry_ts": candle_idx,
+                                                "regime": current_regime,
+                                            }
+                                    except Exception:
+                                        _active_learning = None
+
                                 # v0.15.0: Update TerminalState — position opened
                                 self._update_terminal_state(
                                     signal={
@@ -1689,6 +1821,8 @@ class RealtimeTrader:
         exchange=None,
         paa_mean: float = None,  # v0.21.0: training stats for consistent SAX
         paa_std: float = None,
+        divergence_monitor=None,  # v0.46.0: Pattern Divergence Monitor
+        btc_filter=None,  # v0.46.0: BTC Context Filter
     ) -> tuple:
         """
         Process a single closed candle through the full PPMT pipeline.
@@ -1762,6 +1896,11 @@ class RealtimeTrader:
                 regime_info = regime_detector.detect_detailed(np.array(recent_prices))
                 current_regime = regime_info.regime
 
+            # v0.46.0: Update BTC context filter periodically
+            if btc_filter is not None and result.candles_processed % 100 == 0 and len(recent_prices) >= 50:
+                if cfg.symbol == "BTC/USDT":
+                    btc_filter.update_btc_context(btc_prices=np.array(recent_prices))
+
             # === POSITION MANAGEMENT ===
             if position_state != PositionState.FLAT and current_position is not None:
                 pos = risk_mgr._positions.get(cfg.symbol)
@@ -1773,8 +1912,38 @@ class RealtimeTrader:
                         else:
                             unrealized_loss = (current_price - pos.entry_price) / pos.entry_price * 100
                         if unrealized_loss >= cfg.catastrophic_loss_pct:
+                            # v0.47.0: Insert trade outcome into tries (learning loop)
+                            _learning_insert_outcome(
+                                _active_learning, current_position, current_price,
+                                "catastrophic_stop", trie_n1, trie_n2, trie,
+                                _learning_n1_buffer, _learning_n2_buffer,
+                                regime=current_regime,
+                            )
+                            _active_learning = None
                             self._close_trade(risk_mgr, current_position, current_price,
                                               current_time, "catastrophic_stop", result)
+                            position_state = PositionState.FLAT
+                            current_position = None
+                            return (sax_buffer, pattern_buffer, position_state, current_position,
+                                    trade_counter, current_regime, peak_capital, last_losing_trade_idx)
+
+                    # v0.46.0: Pattern Divergence Exit (live mode)
+                    if (divergence_monitor is not None
+                            and divergence_monitor.expected_sequence is not None
+                            and len(pattern_buffer) >= 3):
+                        recent_symbols = pattern_buffer[-3:]
+                        div_result = divergence_monitor.check_divergence(recent_symbols)
+                        if div_result['diverged']:
+                            # v0.47.0: Insert trade outcome into tries (learning loop)
+                            _learning_insert_outcome(
+                                _active_learning, current_position, current_price,
+                                "pattern_broken", trie_n1, trie_n2, trie,
+                                _learning_n1_buffer, _learning_n2_buffer,
+                                regime=current_regime,
+                            )
+                            _active_learning = None
+                            self._close_trade(risk_mgr, current_position, current_price,
+                                              current_time, "pattern_broken", result)
                             position_state = PositionState.FLAT
                             current_position = None
                             return (sax_buffer, pattern_buffer, position_state, current_position,
@@ -1812,6 +1981,14 @@ class RealtimeTrader:
                         exit_reason = ("trailing_stop"
                                        if getattr(current_position, 'trailing_activated', False)
                                        else "stop_loss")
+                        # v0.47.0: Insert trade outcome into tries (learning loop)
+                        _learning_insert_outcome(
+                            _active_learning, current_position, current_price,
+                            exit_reason, trie_n1, trie_n2, trie,
+                            _learning_n1_buffer, _learning_n2_buffer,
+                            regime=current_regime,
+                        )
+                        _active_learning = None
                         self._close_trade(risk_mgr, current_position, current_price,
                                           current_time, exit_reason, result)
                         position_state = PositionState.FLAT
@@ -1840,6 +2017,14 @@ class RealtimeTrader:
                                 trade_counter, current_regime, peak_capital, last_losing_trade_idx)
 
                     elif tp_hit:
+                        # v0.47.0: Insert trade outcome into tries (learning loop)
+                        _learning_insert_outcome(
+                            _active_learning, current_position, current_price,
+                            "take_profit", trie_n1, trie_n2, trie,
+                            _learning_n1_buffer, _learning_n2_buffer,
+                            regime=current_regime,
+                        )
+                        _active_learning = None
                         self._close_trade(risk_mgr, current_position, current_price,
                                           current_time, "take_profit", result)
                         position_state = PositionState.FLAT
@@ -1883,9 +2068,28 @@ class RealtimeTrader:
                 best_trie_level = "n3"
 
                 if ppmt_engine is not None:
+                    # v0.47.0: Pass recent_candles DataFrame so each level's
+                    # encoder re-encodes with the correct symbol type.
+                    _recent_df = None
+                    try:
+                        _w = cfg.sax_window_size
+                        _n_needed = _w * cfg.pattern_length
+                        if len(recent_prices) >= _n_needed:
+                            # Build mini DataFrame from recent prices for encoding
+                            _s = len(recent_prices) - _n_needed
+                            _recent_df = pd.DataFrame({
+                                'close': recent_prices[_s:],
+                                'high': recent_highs[_s:],
+                                'low': recent_lows[_s:],
+                                'open': recent_prices[_s:],  # approximate
+                                'volume': [0] * _n_needed,  # no volume in live buffer
+                            })
+                    except Exception:
+                        _recent_df = None
                     ppmt_result = ppmt_engine.match_raw(
                         current_symbols=current_symbols,
                         current_price=current_price,
+                        recent_candles=_recent_df,
                     )
                     weighted_confidence = ppmt_result.weighted_confidence
 
@@ -1900,6 +2104,17 @@ class RealtimeTrader:
                     if weighted_confidence <= 0 and prediction.confidence > 0:
                         weighted_confidence = prediction.confidence
                         best_trie_level = "n3"
+
+                # v0.46.0: BTC Context Filter (live mode)
+                if btc_filter is not None and btc_filter._btc_regime is not None and weighted_confidence > 0:
+                    btc_result = btc_filter.filter_signal(
+                        prediction.direction, weighted_confidence,
+                    )
+                    if btc_result['rejected']:
+                        result.candles_processed += 1
+                        return (sax_buffer, pattern_buffer, position_state, current_position,
+                                trade_counter, current_regime, peak_capital, last_losing_trade_idx)
+                    weighted_confidence = btc_result['adjusted_confidence']
 
                 effective_min_conf = cfg.min_confidence
 
@@ -2138,6 +2353,46 @@ class RealtimeTrader:
                                           if prediction.direction == "LONG"
                                           else PositionState.SHORT)
                         trade_counter += 1
+
+                        # v0.46.0: Set expected sequence for divergence monitoring (live mode)
+                        if divergence_monitor is not None:
+                            try:
+                                matched_node = trie.search(current_symbols)
+                                if matched_node and matched_node.metadata.expected_sequences:
+                                    divergence_monitor.set_expected(matched_node.metadata)
+                            except Exception:
+                                pass
+
+                        # v0.47.0: Capture per-level patterns for learning loop (live mode).
+                        if ppmt_engine is not None:
+                            try:
+                                _pl = cfg.pattern_length
+                                _w = cfg.sax_window_size
+                                _n_needed = _w * _pl
+                                if len(recent_prices) >= _n_needed:
+                                    _s = len(recent_prices) - _n_needed
+                                    _entry_df = pd.DataFrame({
+                                        'close': recent_prices[_s:],
+                                        'high': recent_highs[_s:],
+                                        'low': recent_lows[_s:],
+                                        'open': recent_prices[_s:],
+                                        'volume': [0] * _n_needed,
+                                    })
+                                    _entry_patterns = ppmt_engine.encode_pattern_per_level(
+                                        _entry_df, pattern_length=_pl
+                                    )
+                                    _active_learning = {
+                                        "pattern_n1": _entry_patterns["n1"],
+                                        "pattern_n2": _entry_patterns["n2"],
+                                        "pattern_n3": _entry_patterns["n3"],
+                                        "entry_price": current_price,
+                                        "direction": signal.direction or "LONG",
+                                        "entry_ts": result.candles_processed,
+                                        "regime": current_regime,
+                                    }
+                            except Exception:
+                                _active_learning = None
+
                         # v0.38.1: Log trade execution so user can see WHY trades happen
                         console.print(
                             f"[bold green]TRADE #{trade_counter}[/bold green] "
@@ -2343,6 +2598,10 @@ class RealtimeTrader:
             ppmt_engine.set_tries(trie_n1, trie_n2, trie_n3, trie_n4)
             ppmt_engine.adapt_weights()
             console.print(f"  [bold cyan]4-level matching enabled[/bold cyan]: weights={ppmt_engine.weights}")
+
+        # v0.46.0: Pattern Divergence Monitor & BTC Context Filter (live mode)
+        divergence_monitor = PatternDivergenceMonitor(divergence_threshold=0.667)
+        btc_filter = BTCContextFilter()
 
         # Setup ccxt exchange for order execution (optional — only needed for real orders)
         exchange = None
@@ -2576,6 +2835,8 @@ class RealtimeTrader:
                             exchange=exchange,
                             paa_mean=_paa_mean,
                             paa_std=_paa_std,
+                            divergence_monitor=divergence_monitor,
+                            btc_filter=btc_filter,
                         )
 
                         # v0.38.1 FIX: Replaced incremental sync (which had multiple
@@ -2626,6 +2887,53 @@ class RealtimeTrader:
                                 ]:
                                     if level_trie is not None:
                                         storage.save_trie(cfg.symbol, level_name, level_trie)
+
+                                # v0.47.0: Flush learning N1/N2 buffers to shared pools.
+                                # These buffers accumulate real trade outcomes from the
+                                # learning loop and need to be merged into the cross-asset
+                                # universal (__UNIVERSAL__) and class (__CLASS_*__) pools.
+                                if _learning_n1_buffer.pattern_count > 0:
+                                    try:
+                                        existing_n1 = storage.load_trie(UNIVERSAL_POOL_KEY, "n1")
+                                        if existing_n1 is None:
+                                            storage.save_trie(UNIVERSAL_POOL_KEY, "n1", _learning_n1_buffer)
+                                        else:
+                                            for _pat, _node in _learning_n1_buffer.get_all_patterns(min_count=1):
+                                                _meta = _node.metadata
+                                                for _obs in range(_meta.historical_count):
+                                                    existing_n1.insert_with_observations(
+                                                        symbols=_pat,
+                                                        move_pct=_meta.expected_move_pct,
+                                                        won=_meta.win_rate > 0.5,
+                                                        regime=_meta.regime_distribution,
+                                                    )
+                                            storage.save_trie(UNIVERSAL_POOL_KEY, "n1", existing_n1)
+                                        _learning_n1_buffer = PPMTTrie(name="learning_n1_buffer")
+                                        logger.info("[LEARN] Flushed N1 learning buffer to __UNIVERSAL__ pool")
+                                    except Exception as e:
+                                        logger.warning(f"[LEARN] N1 buffer flush failed: {e}")
+
+                                if _learning_n2_buffer.pattern_count > 0:
+                                    try:
+                                        _n2_key = class_pool_key(info.asset_class)
+                                        existing_n2 = storage.load_trie(_n2_key, "n2")
+                                        if existing_n2 is None:
+                                            storage.save_trie(_n2_key, "n2", _learning_n2_buffer)
+                                        else:
+                                            for _pat, _node in _learning_n2_buffer.get_all_patterns(min_count=1):
+                                                _meta = _node.metadata
+                                                for _obs in range(_meta.historical_count):
+                                                    existing_n2.insert_with_observations(
+                                                        symbols=_pat,
+                                                        move_pct=_meta.expected_move_pct,
+                                                        won=_meta.win_rate > 0.5,
+                                                        regime=_meta.regime_distribution,
+                                                    )
+                                            storage.save_trie(_n2_key, "n2", existing_n2)
+                                        _learning_n2_buffer = PPMTTrie(name="learning_n2_buffer")
+                                        logger.info(f"[LEARN] Flushed N2 learning buffer to {_n2_key} pool")
+                                    except Exception as e:
+                                        logger.warning(f"[LEARN] N2 buffer flush failed: {e}")
                             except Exception:
                                 pass  # Non-critical
 
@@ -2822,6 +3130,8 @@ class RealtimeTrader:
                                 recent_lows=recent_lows, peak_capital=peak_capital,
                                 last_losing_trade_idx=last_losing_trade_idx,
                                 paa_mean=_paa_mean, paa_std=_paa_std,
+                                divergence_monitor=divergence_monitor,
+                                btc_filter=btc_filter,
                             )
                             # v0.38.1 FIX: Authoritative sync (same as WS mode)
                             if pattern_buffer != stream_buf._pattern_buffer:
@@ -2917,6 +3227,8 @@ class RealtimeTrader:
                                         last_losing_trade_idx=last_losing_trade_idx,
                                         exchange=exchange if not cfg.dry_run else poll_exchange,
                                         paa_mean=_paa_mean, paa_std=_paa_std,
+                                        divergence_monitor=divergence_monitor,
+                                        btc_filter=btc_filter,
                                     )
                                     # v0.38.1 FIX: Authoritative sync (same as WS mode)
                                     if pattern_buffer != stream_buf._pattern_buffer:
@@ -3253,6 +3565,90 @@ def _living_trie_update(
             trie.propagate_metadata()
         except Exception:
             pass
+
+
+def _learning_insert_outcome(
+    active_learning: dict,
+    current_position,
+    current_price: float,
+    exit_reason: str,
+    trie_n1,
+    trie_n2,
+    trie_n3,
+    n1_buffer: PPMTTrie,
+    n2_buffer: PPMTTrie,
+    regime: str = None,
+) -> None:
+    """v0.47.0: Insert trade outcome into N1/N2/N3 tries (learning loop).
+
+    Called when a position closes. Computes won/move_pct/duration/drawdown
+    from the position and inserts the observation into each trie level.
+    Also accumulates observations in N1/N2 buffers for later flush to
+    shared pools (__UNIVERSAL__ and __CLASS_*__).
+    """
+    if active_learning is None or current_position is None:
+        return
+
+    try:
+        entry_price = active_learning.get("entry_price", current_position.entry_price)
+        direction = active_learning.get("direction", current_position.direction)
+
+        # Compute outcome
+        if direction == "LONG":
+            move_pct = (current_price - entry_price) / entry_price * 100
+        else:
+            move_pct = (entry_price - current_price) / entry_price * 100
+
+        won = exit_reason == "take_profit"
+        drawdown_pct = min(move_pct, 0) if move_pct < 0 else 0
+        favorable_pct = max(move_pct, 0) if move_pct > 0 else 0
+        duration = max(1, getattr(current_position, '_candles_held', 1))
+
+        # Insert into N3 (per-symbol trie)
+        pattern_n3 = active_learning.get("pattern_n3")
+        if pattern_n3 and trie_n3 is not None:
+            trie_n3.insert_with_observations(
+                symbols=pattern_n3,
+                move_pct=move_pct,
+                drawdown_pct=drawdown_pct,
+                favorable_pct=favorable_pct,
+                duration=duration,
+                won=won,
+                regime=regime,
+            )
+            logger.info(
+                f"[LEARN] N3: won={won} move={move_pct:.2f}% "
+                f"reason={exit_reason} pattern={pattern_n3}"
+            )
+
+        # Insert into N1 (universal pool buffer)
+        pattern_n1 = active_learning.get("pattern_n1")
+        if pattern_n1 and n1_buffer is not None:
+            n1_buffer.insert_with_observations(
+                symbols=pattern_n1,
+                move_pct=move_pct,
+                drawdown_pct=drawdown_pct,
+                favorable_pct=favorable_pct,
+                duration=duration,
+                won=won,
+                regime=regime,
+            )
+
+        # Insert into N2 (class pool buffer)
+        pattern_n2 = active_learning.get("pattern_n2")
+        if pattern_n2 and n2_buffer is not None:
+            n2_buffer.insert_with_observations(
+                symbols=pattern_n2,
+                move_pct=move_pct,
+                drawdown_pct=drawdown_pct,
+                favorable_pct=favorable_pct,
+                duration=duration,
+                won=won,
+                regime=regime,
+            )
+
+    except Exception as e:
+        logger.warning(f"[LEARN] Failed to insert outcome: {e}")
 
 
 def _recalibrate(sax_encoder, cfg, storage, info) -> None:

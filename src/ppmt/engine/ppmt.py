@@ -485,6 +485,28 @@ class PPMT:
             "n4": self._encode(self.sax_n4, df),
         }
 
+    def encode_pattern_per_level(self, df: pd.DataFrame, pattern_length: int = 5) -> dict[str, list]:
+        """Encode OHLCV data and return the LAST pattern_length symbols per level.
+
+        v0.47.0: Used by the learning loop to capture the exact per-level
+        pattern at the moment of entry. Each level may produce different
+        symbol types (strings for N1/N2, tuples for N3/N4), so we return
+        the last `pattern_length` symbols from each level's full encoding.
+
+        Args:
+            df: DataFrame with OHLCV columns (at least window_size * pattern_length rows)
+            pattern_length: Number of trailing symbols to return per level
+
+        Returns:
+            Dict with keys 'n1', 'n2', 'n3', 'n4' containing the last
+            pattern_length symbols from each level's encoding.
+        """
+        full = self.encode_all_levels(df)
+        return {
+            level: syms[-pattern_length:] if len(syms) >= pattern_length else syms
+            for level, syms in full.items()
+        }
+
     def build(self, df: pd.DataFrame, pattern_length: int = 5) -> int:
         """
         Build the 4-level Trie from historical OHLCV data.
@@ -895,6 +917,7 @@ class PPMT:
         current_symbols_n2: Optional[list[str]] = None,
         current_symbols_n3: Optional[list[str]] = None,
         current_symbols_n4: Optional[list[str]] = None,
+        recent_candles: Optional[pd.DataFrame] = None,
     ) -> PPMTResult:
         """
         Raw 4-level match without signal generation.
@@ -904,30 +927,55 @@ class PPMT:
         but does NOT generate a trading signal (that's done by the
         PaperTrader's own entry logic).
 
-        FASE 1 Tarea 1.1: Each level now uses its own SAXEncoder for
-        matching. The caller can provide per-level symbol sequences
-        directly. If not provided, falls back to current_symbols for
-        all levels (backwards compatibility).
+        v0.47.0: When `recent_candles` (DataFrame with OHLCV columns) is
+        provided, each level's SAX encoder re-encodes the data independently.
+        This fixes the string/tuple mismatch: N3/N4 use SAXDualEncoder which
+        produces tuples like ('a','x'), but realtime.py was passing plain
+        strings from pattern_buffer. With recent_candles, the encoders produce
+        the correct symbol type for each level automatically.
+
+        When recent_candles is None, falls back to current_symbols for all
+        levels (backwards compatibility for old tests).
 
         Args:
-            current_symbols: Current SAX symbol sequence (N3 encoding, backwards compat)
+            current_symbols: Current SAX symbol sequence (backwards compat)
             current_price: Current market price (unused, for compatibility)
             current_symbols_n1: N1-encoded symbols (if None, uses current_symbols)
             current_symbols_n2: N2-encoded symbols (if None, uses current_symbols)
             current_symbols_n3: N3-encoded symbols (if None, uses current_symbols)
             current_symbols_n4: N4-encoded symbols (if None, uses current_symbols)
+            recent_candles: DataFrame with OHLCV columns. When provided, each
+                level's encoder re-encodes the data, producing the correct
+                symbol type (strings for N1/N2, tuples for N3/N4).
 
         Returns:
             PPMTResult with match details and weighted confidence
         """
         start_time = time.perf_counter()
 
-        # FASE 1 Tarea 1.1: Use per-level matchers with per-level symbols.
-        # Each matcher knows its level's alphabet size for fuzzy distance.
-        syms_n1 = current_symbols_n1 if current_symbols_n1 is not None else current_symbols
-        syms_n2 = current_symbols_n2 if current_symbols_n2 is not None else current_symbols
-        syms_n3 = current_symbols_n3 if current_symbols_n3 is not None else current_symbols
-        syms_n4 = current_symbols_n4 if current_symbols_n4 is not None else current_symbols
+        # v0.47.0: When recent_candles is provided, encode with each level's
+        # encoder to get the correct symbol types. This fixes the bug where
+        # N3/N4 (SAXDualEncoder) expect tuples but received strings.
+        if recent_candles is not None and len(recent_candles) >= self.sax_n1.window_size:
+            try:
+                encoded = self.encode_all_levels(recent_candles)
+                syms_n1 = encoded["n1"]
+                syms_n2 = encoded["n2"]
+                syms_n3 = encoded["n3"]
+                syms_n4 = encoded["n4"]
+            except Exception:
+                # Fallback to current_symbols if encoding fails
+                syms_n1 = current_symbols_n1 if current_symbols_n1 is not None else current_symbols
+                syms_n2 = current_symbols_n2 if current_symbols_n2 is not None else current_symbols
+                syms_n3 = current_symbols_n3 if current_symbols_n3 is not None else current_symbols
+                syms_n4 = current_symbols_n4 if current_symbols_n4 is not None else current_symbols
+        else:
+            # FASE 1 Tarea 1.1: Use per-level matchers with per-level symbols.
+            # Each matcher knows its level's alphabet size for fuzzy distance.
+            syms_n1 = current_symbols_n1 if current_symbols_n1 is not None else current_symbols
+            syms_n2 = current_symbols_n2 if current_symbols_n2 is not None else current_symbols
+            syms_n3 = current_symbols_n3 if current_symbols_n3 is not None else current_symbols
+            syms_n4 = current_symbols_n4 if current_symbols_n4 is not None else current_symbols
 
         # Search all 4 levels with per-level matchers
         n1_match = self.matcher_n1.best_match(self.trie_n1, syms_n1)
@@ -1025,6 +1073,7 @@ class PPMT:
         current_symbols_n2: Optional[list[str]] = None,
         current_symbols_n3: Optional[list[str]] = None,
         current_symbols_n4: Optional[list[str]] = None,
+        recent_candles: Optional[pd.DataFrame] = None,
     ) -> PPMTResult:
         """
         Match current SAX sequence against all 4 Trie levels.
@@ -1034,13 +1083,11 @@ class PPMT:
 
         This is the main real-time method called on each new candle.
 
-        FASE 1 Tarea 1.1: Each level uses its own SAXEncoder for
-        matching. The caller can provide per-level symbol sequences
-        directly. If not provided, falls back to current_symbols for
-        all levels (backwards compatibility).
+        v0.47.0: When `recent_candles` is provided, each level's encoder
+        re-encodes the data independently, fixing the string/tuple mismatch.
 
         Args:
-            current_symbols: Current SAX symbol sequence (N3 encoding, backwards compat)
+            current_symbols: Current SAX symbol sequence (backwards compat)
             current_price: Current market price
             is_in_position: Whether we already have an open position
             entry_price: Entry price of current position (if any)
@@ -1048,17 +1095,35 @@ class PPMT:
             current_symbols_n2: N2-encoded symbols (if None, uses current_symbols)
             current_symbols_n3: N3-encoded symbols (if None, uses current_symbols)
             current_symbols_n4: N4-encoded symbols (if None, uses current_symbols)
+            recent_candles: DataFrame with OHLCV columns. When provided, each
+                level's encoder re-encodes the data, producing the correct
+                symbol type (strings for N1/N2, tuples for N3/N4).
 
         Returns:
             PPMTResult with signal and matching details
         """
         start_time = time.perf_counter()
 
-        # FASE 1 Tarea 1.1: Use per-level matchers with per-level symbols.
-        syms_n1 = current_symbols_n1 if current_symbols_n1 is not None else current_symbols
-        syms_n2 = current_symbols_n2 if current_symbols_n2 is not None else current_symbols
-        syms_n3 = current_symbols_n3 if current_symbols_n3 is not None else current_symbols
-        syms_n4 = current_symbols_n4 if current_symbols_n4 is not None else current_symbols
+        # v0.47.0: When recent_candles is provided, encode with each level's
+        # encoder to get the correct symbol types.
+        if recent_candles is not None and len(recent_candles) >= self.sax_n1.window_size:
+            try:
+                encoded = self.encode_all_levels(recent_candles)
+                syms_n1 = encoded["n1"]
+                syms_n2 = encoded["n2"]
+                syms_n3 = encoded["n3"]
+                syms_n4 = encoded["n4"]
+            except Exception:
+                syms_n1 = current_symbols_n1 if current_symbols_n1 is not None else current_symbols
+                syms_n2 = current_symbols_n2 if current_symbols_n2 is not None else current_symbols
+                syms_n3 = current_symbols_n3 if current_symbols_n3 is not None else current_symbols
+                syms_n4 = current_symbols_n4 if current_symbols_n4 is not None else current_symbols
+        else:
+            # FASE 1 Tarea 1.1: Use per-level matchers with per-level symbols.
+            syms_n1 = current_symbols_n1 if current_symbols_n1 is not None else current_symbols
+            syms_n2 = current_symbols_n2 if current_symbols_n2 is not None else current_symbols
+            syms_n3 = current_symbols_n3 if current_symbols_n3 is not None else current_symbols
+            syms_n4 = current_symbols_n4 if current_symbols_n4 is not None else current_symbols
 
         # Search all 4 levels with per-level matchers
         n1_match = self.matcher_n1.best_match(self.trie_n1, syms_n1)
