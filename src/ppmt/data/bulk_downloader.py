@@ -150,6 +150,26 @@ class BulkDownloader:
                     try:
                         df = self.download_token(symbol, tf, days, request_delay=request_delay)
                         if len(df) > 0:
+                            # ENTREGABLE 13 FIX: Price sanity check for DOGE
+                            # Binance returns DOGE prices correctly (~0.064),
+                            # but if the decimal point is lost (64473 instead of 0.064473),
+                            # we detect and fix it here.
+                            avg_close = df["close"].mean()
+                            price_sanity = {
+                                "DOGE/USDT": 1.0,    # DOGE should be < $1
+                                "PEPE/USDT": 1.0,    # PEPE should be < $1
+                                "WIF/USDT": 10.0,    # WIF should be < $10
+                            }
+                            sanity_max = price_sanity.get(symbol)
+                            if sanity_max is not None and avg_close > sanity_max * 100:
+                                factor = 1_000_000.0
+                                print(f"  ⚠ PRICE FIX: {symbol} avg={avg_close:.4f} > {sanity_max}")
+                                print(f"  Dividing prices by {factor:.0f}")
+                                for col in ["open", "high", "low", "close"]:
+                                    df[col] = df[col] / factor
+                                avg_close = df["close"].mean()
+                                print(f"  ✓ Fixed: new avg={avg_close:.6f}")
+
                             stats['total_downloaded'] += 1
                             stats['total_rows'] += len(df)
                             

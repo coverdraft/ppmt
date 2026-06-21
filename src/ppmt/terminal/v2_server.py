@@ -253,6 +253,14 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                 })
 
             logger.info(f"[WS] Warmup complete: {len(df)} candles, {warmup_count} SAX outputs")
+            # Log SAX buffer state after warmup to verify engine is alive
+            _w_buf = getattr(engine, '_streaming_buffer', None)
+            _w_n1 = getattr(engine, '_streaming_buffer_n1', None)
+            _w_len = len(_w_buf._pattern_buffer) if _w_buf else 0
+            _w_n1_len = len(_w_n1._pattern_buffer) if _w_n1 else 0
+            logger.info(
+                f"[WS] Post-warmup SAX: buf_n3={_w_len} symbols, buf_n1={_w_n1_len} symbols"
+            )
     except Exception as e:
         logger.warning(f"[WS] Warmup fetch failed: {e}. Continuing without historical data.")
 
@@ -299,7 +307,7 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                 }
                 await websocket.send_json(candle_msg)
                 logger.info(
-                    f"[WS] Candle: ts={ts_sec} C={c:.6f}"
+                    f"[WS] Candle: ts={ts_sec} C={float(c):.6f} ({symbol})"
                 )
 
                 # ─── Feed to PPMT engine ──────────────────────
@@ -313,6 +321,19 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                     current_price=current_price,
                     is_in_position=executor.is_in_position,
                     entry_price=executor.position.entry_price if executor.position else None,
+                )
+
+                # ─── SAX output log (ENTREGABLE 13 FIX) ───────
+                # Log current SAX buffer state on EVERY candle so we can
+                # verify the engine keeps thinking after warmup.
+                _sax_buf = getattr(engine, '_streaming_buffer', None)
+                _sax_n1_buf = getattr(engine, '_streaming_buffer_n1', None)
+                _buf_len = len(_sax_buf._pattern_buffer) if _sax_buf else 0
+                _buf_n1_len = len(_sax_n1_buf._pattern_buffer) if _sax_n1_buf else 0
+                _sax_sym = str(_sax_buf._pattern_buffer[-1]) if _sax_buf and _sax_buf._pattern_buffer else "—"
+                logger.info(
+                    f"[WS] SAX output: [{_sax_sym}] buf_n3={_buf_len} buf_n1={_buf_n1_len}"
+                    f" result={'YES' if result else 'no'} C={current_price:.6f}"
                 )
 
                 # ─── Emit brain_update ────────────────────────
@@ -852,6 +873,17 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
                 result = engine.process_new_candle(
                     candle_df=candle_df, current_price=current_price,
                     is_in_position=_in_pos, entry_price=_entry,
+                )
+
+                # ─── SAX output log (ENTREGABLE 13 FIX) ───────
+                _sax_buf = getattr(engine, '_streaming_buffer', None)
+                _sax_n1_buf = getattr(engine, '_streaming_buffer_n1', None)
+                _buf_len = len(_sax_buf._pattern_buffer) if _sax_buf else 0
+                _buf_n1_len = len(_sax_n1_buf._pattern_buffer) if _sax_n1_buf else 0
+                _sax_sym = str(_sax_buf._pattern_buffer[-1]) if _sax_buf and _sax_buf._pattern_buffer else "—"
+                logger.info(
+                    f"[WS-LIVE] SAX output: [{_sax_sym}] buf_n3={_buf_len} buf_n1={_buf_n1_len}"
+                    f" result={'YES' if result else 'no'} C={current_price:.6f}"
                 )
 
                 # brain_update (identical logic)

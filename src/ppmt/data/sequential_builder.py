@@ -27,6 +27,48 @@ BUILD_ORDER = [
 ]
 
 
+def _verify_pools_in_db(storage: PPMTStorage, asset_classes_seen: set) -> None:
+    """Direct SQL query to verify N1/N2 pools were actually written to DB.
+
+    This bypasses the load_trie() method to catch serialization bugs.
+    """
+    import sqlite3
+    conn = storage._ensure_conn()
+    cursor = conn.cursor()
+
+    # Check N1 universal
+    cursor.execute(
+        "SELECT length(data), updated_at FROM tries WHERE symbol = ? AND level = 'n1'",
+        (UNIVERSAL_POOL_KEY,),
+    )
+    row = cursor.fetchone()
+    if row:
+        print(f"  ✓ N1 universal pool in DB: {row[0]} bytes, updated {row[1]}")
+    else:
+        print(f"  ✗ N1 universal pool MISSING from DB!")
+
+    # Check N2 class pools
+    for ac in asset_classes_seen:
+        key = class_pool_key(ac)
+        cursor.execute(
+            "SELECT length(data), updated_at FROM tries WHERE symbol = ? AND level = 'n2'",
+            (key,),
+        )
+        row = cursor.fetchone()
+        if row:
+            print(f"  ✓ N2 {ac} pool in DB: {row[0]} bytes, updated {row[1]}")
+        else:
+            print(f"  ✗ N2 {ac} pool MISSING from DB!")
+
+    # Check N3 per-symbol pools
+    cursor.execute(
+        "SELECT symbol, length(data) FROM tries WHERE level = 'n3' ORDER BY symbol",
+    )
+    rows = cursor.fetchall()
+    for sym, size in rows:
+        print(f"  ✓ N3 {sym}: {size} bytes")
+
+
 def build_all_tries(timeframe: str = "15m", pattern_length: int = 5, 
                     storage: PPMTStorage = None,
                     symbols: list[str] | None = None) -> dict:
@@ -86,6 +128,20 @@ def build_all_tries(timeframe: str = "15m", pattern_length: int = 5,
                     stats['errors'].append(msg)
                     continue
                 
+                # Price sanity check (ENTREGABLE 13 FIX: Bug 3)
+                # Detect prices that are 1M× too large (decimal point lost)
+                avg_close = df["close"].mean()
+                if symbol == "DOGE/USDT" and avg_close > 1.0:
+                    print(f"  ⚠ PRICE BUG: DOGE avg close = {avg_close:.4f} (expected < 1.0)")
+                    print(f"  Fixing: dividing all prices by 1,000,000")
+                    for col in ["open", "high", "low", "close"]:
+                        df[col] = df[col] / 1_000_000.0
+                    # Re-save corrected data
+                    storage.save_ohlcv(symbol, timeframe, df)
+                    print(f"  ✓ Corrected prices saved (new avg close = {df['close'].mean():.6f})")
+                
+                print(f"  Data: {len(df)} candles, avg close = {df['close'].mean():.6f}")
+                
                 # Get asset class info
                 info = classifier.classify(symbol)
                 
@@ -100,6 +156,11 @@ def build_all_tries(timeframe: str = "15m", pattern_length: int = 5,
                 
                 # Build
                 count = engine.build(df, pattern_length=pattern_length)
+                
+                if count == 0:
+                    print(f"  ⚠ build() returned 0 patterns! Check SAX encoding.")
+                    stats['errors'].append(f"{symbol}: build returned 0 patterns")
+                    continue
                 
                 # Verify pools after build
                 pool_status = engine.ensure_shared_pools(storage)
@@ -127,6 +188,7 @@ def build_all_tries(timeframe: str = "15m", pattern_length: int = 5,
     print("FINAL POOL VERIFICATION")
     print(f"{'='*60}")
     
+    # Method 1: Via PPMTStorage.load_trie()
     n1 = storage.load_trie(UNIVERSAL_POOL_KEY, "n1")
     stats['pool_status']['n1_universal'] = {
         'exists': n1 is not None,
@@ -142,6 +204,10 @@ def build_all_tries(timeframe: str = "15m", pattern_length: int = 5,
             'pattern_count': n2.pattern_count if n2 else 0,
         }
         print(f"N2 {ac}: {stats['pool_status'][key]}")
+    
+    # Method 2: Direct SQL verification
+    print(f"\n--- Direct SQL Verification ---")
+    _verify_pools_in_db(storage, asset_classes_seen)
     
     return stats
 
