@@ -1,0 +1,877 @@
+     1→     1→"""
+     2→     2→SAX (Symbolic Aggregate approXimation) Encoder
+     3→     3→
+     4→     4→Converts continuous OHLCV price data into discrete SAX symbols,
+     5→     5→enabling Trie storage and O(k) pattern matching.
+     6→     6→
+     7→     7→Pipeline:
+     8→     8→  1. Normalize price data (z-score per window)
+     9→     9→  2. PAA (Piecewise Aggregate Approximation) — reduce dimensionality
+    10→    10→  3. Discretize into SAX symbols using breakpoints
+    11→    11→
+    12→    12→The SAX alphabet size controls granularity:
+    13→    13→  - 4 symbols: coarse (strong directional only)
+    14→    14→  - 8 symbols: balanced (default)
+    15→    15→  - 16 symbols: fine-grained (more noise sensitivity)
+    16→    16→"""
+    17→    17→
+    18→    18→from __future__ import annotations
+    19→    19→
+    20→    20→from dataclasses import dataclass
+    21→    21→from typing import Literal
+    22→    22→
+    23→    23→import numpy as np
+    24→    24→import pandas as pd
+    25→    25→from scipy.stats import norm
+    26→    26→
+    27→    27→# SAX breakpoints for different alphabet sizes
+    28→    28→# These are the z-score boundaries that divide a normal distribution
+    29→    29→# into equal-probability regions
+    30→    30→SAX_BREAKPOINTS: dict[int, np.ndarray] = {
+    31→    31→    2: np.array([0.0]),  # Binary split: below/above median
+    32→    32→    3: np.array([-0.43, 0.43]),
+    33→    33→    4: np.array([-0.67, 0.0, 0.67]),
+    34→    34→    5: np.array([-0.84, -0.25, 0.25, 0.84]),
+    35→    35→    6: np.array([-0.97, -0.43, 0.0, 0.43, 0.97]),
+    36→    36→    7: np.array([-1.07, -0.57, -0.18, 0.18, 0.57, 1.07]),
+    37→    37→    8: np.array([-1.15, -0.67, -0.32, 0.0, 0.32, 0.67, 1.15]),
+    38→    38→    10: np.array([-1.28, -0.84, -0.52, -0.25, 0.0, 0.25, 0.52, 0.84, 1.28]),
+    39→    39→    12: np.array([-1.38, -1.00, -0.67, -0.43, -0.21, 0.0, 0.21, 0.43, 0.67, 1.00, 1.38]),
+    40→    40→    16: np.array([-1.53, -1.15, -0.89, -0.67, -0.49, -0.32, -0.16, 0.0,
+    41→    41→                   0.16, 0.32, 0.49, 0.67, 0.89, 1.15, 1.53]),
+    42→    42→}
+    43→    43→
+    44→    44→SAX_ALPHABET = "abcdefghijklmnopqrstuvwxyz"
+    45→    45→
+    46→    46→
+    47→    47→# === Per-Level Alphabet Size Configuration (FASE 1 Tarea 1.1) ===
+    48→    48→#
+    49→    49→# The 4-level Trie architecture needs DIFFERENT alphabet sizes per level:
+    50→    50→#
+    51→    51→#   N1 (Universal): shared across ALL tokens — small α so patterns fill fast.
+    52→    52→#     α=3 → 3^5 = 243 patterns. With 5M+ observations from all assets,
+    53→    53→#     every pattern gets 20,000+ repetitions → rock-solid confidence.
+    54→    54→#     IMPORTANT: N1 uses ONLY PRICE (no volume) — Transfer Learning is about
+    55→    55→#     price SHAPE, not volume. Volume adds noise at the universal level.
+    56→    56→#
+    57→    57→#   N2 (Asset Class): shared within asset class — SAX DUAL (price+volume).
+    58→    58→#     α_price=3 (meme/new_launch) or 4 (default), α_vol=2.
+    59→    59→#     Volume starts to matter here because we know the asset class context.
+    60→    60→#
+    61→    61→#   N3 (Per-Token): SAX DUAL. α_price=4, α_vol=3.
+    62→    62→#     Token-specific data allows more granularity.
+    63→    63→#
+    64→    64→#   N4 (Per-Token+Regime): SAX DUAL, same as N3.
+    65→    65→#
+    66→    66→# WHY: When N1 used SAXDualEncoder (α_price=3, α_vol=2), the effective
+    67→    67→# alphabet was 3×2=6 symbols, creating 6^5=7,776 possible patterns.
+    68→    68→# With ~11,000 observations, each node had ~1.4 obs → the Bayesian prior
+    69→    69→# (strength=10) dominated and confidence never exceeded 0.19.
+    70→    70→# By making N1 PRICE-ONLY (α=3, max 243 patterns), each node gets ~45 obs
+    71→    71→# and confidence > 0.6 becomes achievable. This is the key mathematical fix.
+    72→    72→LEVEL_ALPHA_CONFIG: dict[str, int] = {
+    73→    73→    "n1": 3,          # Universal: PRICE-ONLY, 3^5 = 243 patterns max
+    74→    74→    "n2_meme": 3,     # Asset class meme/new_launch (price alpha for dual)
+    75→    75→    "n2_new_launch": 3,  # Asset class new_launch (price alpha for dual)
+    76→    76→    "n2_default": 4,  # Asset class blue_chip/large_cap/mid_cap/defi (price alpha for dual)
+    77→    77→    "n3": 4,          # Per-token: price alpha for dual (vol=3 separately)
+    78→    78→    "n4": 4,          # Per-token+regime: same as N3
+    79→    79→}
+    80→    80→
+    81→    81→# === Per-Level Dual SAX Configuration (v0.43.0) ===
+    82→    82→#
+    83→    83→# N1 is PRICE-ONLY — uses SAXEncoder, not SAXDualEncoder.
+    84→    84→# N2/N3/N4 use SAXDualEncoder with these (price_alpha, volume_alpha) pairs.
+    85→    85→#
+    86→    86→# The key insight: volume is NOISE at the universal level (N1) but
+    87→    87→# becomes useful when we know the asset class (N2) or specific token (N3/N4).
+    88→    88→# This prevents the combinatorial explosion that was killing N1 confidence.
+    89→    89→#
+    90→    90→# Effective alphabet sizes per level:
+    91→    91→#   N1: α=3 → 3^5 = 243 patterns (PRICE ONLY, Transfer Learning)
+    92→    92→#   N2 (meme):      3×2=6 → 6^5 = 7,776 patterns (but class-specific, fills OK)
+    93→    93→#   N2 (default):   4×2=8 → 8^5 = 32,768 patterns (class-specific, more tokens)
+    94→    94→#   N3:             4×3=12 → 12^5 = 248,832 (per-token, unique patterns)
+    95→    95→#   N4:             4×3=12 → same as N3 (regime-partitioned, even more specific)
+    96→    96→#
+    97→    97→# N1 density is the critical metric: 11,000 obs / 243 nodes ≈ 45 obs/node → conf > 0.6
+    98→    98→# N2 density: ~2,000 obs / 7,776 nodes ≈ 0.26 obs/node → sparse, but N2 has lower weight
+    99→    99→#   and receives observations from multiple tokens of the same class.
+   100→   100→LEVEL_DUAL_ALPHA_CONFIG: dict[str, dict[str, int]] = {
+   101→   101→    "n1": {"price": 3, "volume": 0},       # volume=0 means NO volume encoder (price-only)
+   102→   102→    "n2_meme": {"price": 3, "volume": 0},   # v0.43.1: price-only for memes too (3^5=243, not 5^5=3125)
+   103→   103→    "n2_new_launch": {"price": 3, "volume": 0},  # v0.43.1: same reasoning as memes
+   104→   104→    "n2_default": {"price": 3, "volume": 0},     # v0.43.1: ALL N2 price-only (volume is noise at class level)
+   105→   105→    "n3": {"price": 4, "volume": 3},
+   106→   106→    "n4": {"price": 4, "volume": 3},
+   107→   107→}
+   108→   108→
+   109→   109→# v0.48.0 (FASE 2A): Per-level window size by timeframe.
+   110→   110→#
+   111→   111→# Lower timeframes produce too many symbols with large windows, making N3
+   112→   112→# impossible to fill (e.g. 1m W=45 → 225 candles for P=5 → few patterns
+   113→   113→# per symbol → sparse trie). With smaller windows for N3/N4, the local
+   114→   114→# tries fill faster while N1/N2 keep large windows for stable patterns.
+   115→   115→#
+   116→   116→# Window semantics: W=number of candles per SAX symbol.
+   117→   117→# Total candles needed for P symbols = W * P.
+   118→   118→#   1m N1: 60*5=300 candles (5h), N3: 20*4=80 candles (80min)
+   119→   119→#   5m N1: 24*5=120 candles (10h), N3: 10*4=40 candles (200min)
+   120→   120→#   1h N1: 8*5=40 candles (40h), N3: 8*4=32 candles (32h) — same W
+   121→   121→LEVEL_WINDOW_CONFIG: dict[str, dict[str, int]] = {
+   122→   122→    "1m":  {"n1": 60, "n2": 60, "n3": 20, "n4": 20, "n5": 20},  # v0.48.0 (FASE 2B): N5=BTC context, 1m only
+   123→   123→    "5m":  {"n1": 24, "n2": 24, "n3": 10, "n4": 10},
+   124→   124→    "15m": {"n1": 12, "n2": 12, "n3": 6,  "n4": 6},
+   125→   125→    "30m": {"n1": 10, "n2": 10, "n3": 8,  "n4": 8},
+   126→   126→    "1h":  {"n1": 8,  "n2": 8,  "n3": 8,  "n4": 8},
+   127→   127→    "4h":  {"n1": 10, "n2": 10, "n3": 10, "n4": 10},
+   128→   128→    "1d":  {"n1": 10, "n2": 10, "n3": 10, "n4": 10},
+   129→   129→}
+   130→   130→
+   131→   131→# v0.48.0 (FASE 2A): Per-level pattern length.
+   132→   132→#
+   133→   133→# N3/N4 use shorter patterns (4 vs 5) because:
+   134→   134→# 1. Local tries have fewer observations → shorter patterns = more matches
+   135→   135→# 2. Dual encoders (SAXDualEncoder) produce tuples → 4^4=256 vs 4^5=1024 combos
+   136→   136→# 3. N1/N2 keep P=5 for stability (universal pools have enough obs for 5-length)
+   137→   137→LEVEL_PATTERN_CONFIG: dict[str, int] = {
+   138→   138→    "n1": 5,
+   139→   139→    "n2": 5,
+   140→   140→    "n3": 4,
+   141→   141→    "n4": 4,
+   142→   142→    "n5": 4,  # v0.48.0 (FASE 2B): N5 BTC context, same as N3/N4
+   143→   143→}
+   144→   144→
+   145→   145→
+   146→   146→def get_alpha_for_level(
+   147→   147→    level: str,
+   148→   148→    asset_class: str = "default",
+   149→   149→    calibrated_alpha: int | None = None,
+   150→   150→) -> int:
+   151→   151→    """
+   152→   152→    Get the alphabet size for a given trie level and asset class.
+   153→   153→
+   154→   154→    v0.43.0: N3/N4 default changed from 5 to 4 (used as price_alpha for dual).
+   155→   155→    The calibrated_alpha still overrides for N3/N4 when provided.
+   156→   156→
+   157→   157→    FASE 1 Tarea 1.1: Per-level differentiated alphabet sizes.
+   158→   158→
+   159→   159→    Args:
+   160→   160→        level: Trie level — "n1", "n2", "n3", or "n4".
+   161→   161→        asset_class: Asset class — used for N2 differentiation.
+   162→   162→        calibrated_alpha: Token's calibrated alpha (from CalibrationEngine).
+   163→   163→            If provided, used for N3/N4 instead of the default.
+   164→   164→
+   165→   165→    Returns:
+   166→   166→        Alphabet size (int) for the SAXEncoder at this level.
+   167→   167→            For N1: price-only α (no volume).
+   168→   168→            For N2/N3/N4: price α (volume α is separate, see get_dual_alpha_for_level).
+   169→   169→
+   170→   170→    Examples:
+   171→   171→        >>> get_alpha_for_level("n1")
+   172→   172→        3
+   173→   173→        >>> get_alpha_for_level("n2", "meme")
+   174→   174→        3
+   175→   175→        >>> get_alpha_for_level("n2", "blue_chip")
+   176→   176→        4
+   177→   177→        >>> get_alpha_for_level("n3")
+   178→   178→        4
+   179→   179→        >>> get_alpha_for_level("n3", calibrated_alpha=5)
+   180→   180→        5
+   181→   181→    """
+   182→   182→    if level == "n1":
+   183→   183→        return LEVEL_ALPHA_CONFIG["n1"]
+   184→   184→
+   185→   185→    elif level == "n2":
+   186→   186→        # Meme and new_launch get α=3 (fewer tokens in class, need fewer patterns)
+   187→   187→        if asset_class in ("meme", "new_launch"):
+   188→   188→            return LEVEL_ALPHA_CONFIG["n2_meme"]
+   189→   189→        else:
+   190→   190→            # blue_chip, large_cap, mid_cap, defi, default → α=4
+   191→   191→            return LEVEL_ALPHA_CONFIG["n2_default"]
+   192→   192→
+   193→   193→    elif level == "n3":
+   194→   194→        # Per-token: use calibrated alpha if available, else default
+   195→   195→        if calibrated_alpha is not None:
+   196→   196→            return calibrated_alpha
+   197→   197→        return LEVEL_ALPHA_CONFIG["n3"]
+   198→   198→
+   199→   199→    elif level == "n4":
+   200→   200→        # Per-token+regime: same as N3
+   201→   201→        if calibrated_alpha is not None:
+   202→   202→            return calibrated_alpha
+   203→   203→        return LEVEL_ALPHA_CONFIG["n4"]
+   204→   204→
+   205→   205→    else:
+   206→   206→        raise ValueError(f"Unknown trie level: {level!r}. Must be one of: n1, n2, n3, n4")
+   207→   207→
+   208→   208→
+   209→   209→def get_dual_alpha_for_level(
+   210→   210→    level: str,
+   211→   211→    asset_class: str = "default",
+   212→   212→    calibrated_alpha: int | None = None,
+   213→   213→) -> dict[str, int]:
+   214→   214→    """
+   215→   215→    Get the dual SAX (price, volume) alphabet sizes for a given trie level.
+   216→   216→
+   217→   217→    v0.43.0: Stratified SAX Dual — N1 is price-only (volume=0),
+   218→   218→    N2/N3/N4 use dual encoding with different (price, volume) alphas.
+   219→   219→
+   220→   220→    Returns:
+   221→   221→        Dict with keys "price" and "volume". When volume=0, the level
+   222→   222→        should use a plain SAXEncoder (no volume dimension).
+   223→   223→
+   224→   224→    Examples:
+   225→   225→        >>> get_dual_alpha_for_level("n1")
+   226→   226→        {'price': 3, 'volume': 0}
+   227→   227→        >>> get_dual_alpha_for_level("n2", "meme")
+   228→   228→        {'price': 3, 'volume': 2}
+   229→   229→        >>> get_dual_alpha_for_level("n2", "blue_chip")
+   230→   230→        {'price': 4, 'volume': 2}
+   231→   231→        >>> get_dual_alpha_for_level("n3")
+   232→   232→        {'price': 4, 'volume': 3}
+   233→   233→        >>> get_dual_alpha_for_level("n4")
+   234→   234→        {'price': 4, 'volume': 3}
+   235→   235→    """
+   236→   236→    if level == "n1":
+   237→   237→        return LEVEL_DUAL_ALPHA_CONFIG["n1"]
+   238→   238→
+   239→   239→    elif level == "n2":
+   240→   240→        if asset_class in ("meme", "new_launch"):
+   241→   241→            return LEVEL_DUAL_ALPHA_CONFIG["n2_meme"]
+   242→   242→        else:
+   243→   243→            return LEVEL_DUAL_ALPHA_CONFIG["n2_default"]
+   244→   244→
+   245→   245→    elif level == "n3":
+   246→   246→        if calibrated_alpha is not None:
+   247→   247→            # Override price alpha with calibrated value, keep volume=3
+   248→   248→            return {"price": calibrated_alpha, "volume": LEVEL_DUAL_ALPHA_CONFIG["n3"]["volume"]}
+   249→   249→        return LEVEL_DUAL_ALPHA_CONFIG["n3"]
+   250→   250→
+   251→   251→    elif level == "n4":
+   252→   252→        if calibrated_alpha is not None:
+   253→   253→            return {"price": calibrated_alpha, "volume": LEVEL_DUAL_ALPHA_CONFIG["n4"]["volume"]}
+   254→   254→        return LEVEL_DUAL_ALPHA_CONFIG["n4"]
+   255→   255→
+   256→   256→    else:
+   257→   257→        raise ValueError(f"Unknown trie level: {level!r}. Must be one of: n1, n2, n3, n4")
+   258→   258→
+   259→   259→
+   260→   260→@dataclass
+   261→   261→class SAXConfig:
+   262→   262→    """Configuration for SAX encoding."""
+   263→   263→    alphabet_size: int = 8
+   264→   264→    window_size: int = 10  # PAA window: candles per SAX block
+   265→   265→    strategy: Literal["ohlcv", "close", "typical_price", "volume"] = "ohlcv"
+   266→   266→
+   267→   267→
+   268→   268→class SAXEncoder:
+   269→   269→    """
+   270→   270→    SAX Symbolic Encoder for OHLCV data.
+   271→   271→
+   272→   272→    Converts continuous price series into discrete symbols suitable
+   273→   273→    for Trie storage and O(k) pattern matching.
+   274→   274→
+   275→   275→    Usage:
+   276→   276→        encoder = SAXEncoder(alphabet_size=8, window_size=10)
+   277→   277→        symbols = encoder.encode(df)  # df has OHLCV columns
+   278→   278→        # symbols = ['a', 'd', 'b', 'h', 'e', ...]
+   279→   279→    """
+   280→   280→
+   281→   281→    def __init__(
+   282→   282→        self,
+   283→   283→        alphabet_size: int = 8,
+   284→   284→        window_size: int = 10,
+   285→   285→        strategy: str = "ohlcv",
+   286→   286→    ):
+   287→   287→        if alphabet_size not in SAX_BREAKPOINTS:
+   288→   288→            supported = sorted(SAX_BREAKPOINTS.keys())
+   289→   289→            raise ValueError(
+   290→   290→                f"alphabet_size must be one of {supported}, "
+   291→   291→                f"got {alphabet_size}"
+   292→   292→            )
+   293→   293→        self.alphabet_size = alphabet_size
+   294→   294→        self.window_size = window_size
+   295→   295→        self.strategy = strategy
+   296→   296→        self.breakpoints = SAX_BREAKPOINTS[alphabet_size]
+   297→   297→
+   298→   298→    def _extract_series(self, df: pd.DataFrame) -> np.ndarray:
+   299→   299→        """
+   300→   300→        Extract a 1D series from OHLCV DataFrame based on strategy.
+   301→   301→
+   302→   302→        Returns empty array for empty DataFrames.
+   303→   303→
+   304→   304→        Strategies:
+   305→   305→        - 'close': Simple close prices
+   306→   306→        - 'typical_price': (H + L + C) / 3
+   307→   307→        - 'ohlcv': Weighted composite of O, H, L, C, V
+   308→   308→          This captures the full candlestick information in one symbol.
+   309→   309→        """
+   310→   310→        if len(df) == 0:
+   311→   311→            return np.array([])
+   312→   312→
+   313→   313→        if self.strategy == "close":
+   314→   314→            return df["close"].values.astype(float)
+   315→   315→
+   316→   316→        elif self.strategy == "typical_price":
+   317→   317→            return ((df["high"] + df["low"] + df["close"]) / 3.0).values.astype(float)
+   318→   318→
+   319→   319→        elif self.strategy == "volume":
+   320→   320→            # FASE 1 Tarea 1.3: Pure volume encoding for SAX Dual.
+   321→   321→            #
+   322→   322→            # Unlike the 'ohlcv' strategy where volume is just 25% of a
+   323→   323→            # composite, this strategy encodes ONLY volume information.
+   324→   324→            # The resulting symbols represent volume patterns independently
+   325→   325→            # from price — enabling the dual encoder to preserve volume
+   326→   326→            # signals that the single-composite approach loses.
+   327→   327→            #
+   328→   328→            # The encoding normalizes volume as a ratio vs its local moving
+   329→   329→            # average, clipped to [0.5, 5.0]. This produces a near-Gaussian
+   330→   330→            # distribution after z-scoring, which matches SAX assumptions.
+   331→   331→            v = df["volume"].values.astype(float) if "volume" in df.columns else np.ones(len(df))
+   332→   332→
+   333→   333→            vol_window = min(20, len(v))
+   334→   334→            if vol_window > 0 and len(v) > 0:
+   335→   335→                vol_mean = np.convolve(v, np.ones(vol_window) / vol_window, mode="same")
+   336→   336→                vol_mean = np.where(vol_mean == 0, 1.0, vol_mean)
+   337→   337→                vol_ratio = np.clip(v / vol_mean, 0.5, 5.0)
+   338→   338→                return vol_ratio
+   339→   339→            return np.ones_like(v)
+   340→   340→
+   341→   341→        elif self.strategy == "ohlcv":
+   342→   342→            # Additive composite capturing candlestick body, wicks, and volume.
+   343→   343→            #
+   344→   344→            # V0.6.2 FIX: Replaced multiplicative composite with additive.
+   345→   345→            #
+   346→   346→            # The previous formula `body_center * direction * vol_ratio` was
+   347→   347→            # DEGENERATE: when direction ≈ 0 (small-body candles, 60%+ of data),
+   348→   348→            # the entire composite collapsed to ~0, destroying body position and
+   349→   349→            # volume information. After z-scoring, 92.5% of symbols mapped to
+   350→   350→            # the middle symbol, producing near-zero information.
+   351→   351→            #
+   352→   352→            # The additive formula preserves all three features independently:
+   353→   353→            #   - body_position (0.4 weight): WHERE in the range the body sits
+   354→   354→            #   - direction (0.35 weight): WHICH WAY the candle moved
+   355→   355→            #   - volume_signal (0.25 weight): HOW MUCH volume vs normal
+   356→   356→            #
+   357→   357→            # The resulting distribution is near-Gaussian, which matches the
+   358→   358→            # SAX breakpoint assumptions and produces well-distributed symbols.
+   359→   359→            o = df["open"].values.astype(float)
+   360→   360→            h = df["high"].values.astype(float)
+   361→   361→            l = df["low"].values.astype(float)
+   362→   362→            c = df["close"].values.astype(float)
+   363→   363→            v = df["volume"].values.astype(float) if "volume" in df.columns else np.ones_like(c)
+   364→   364→
+   365→   365→            # Prevent division by zero
+   366→   366→            rng = h - l
+   367→   367→            rng = np.where(rng == 0, 1e-10, rng)
+   368→   368→
+   369→   369→            # Feature 1: Body position within range (0 to 1, ~0.5 for doji)
+   370→   370→            # Captures WHERE the candle body sits relative to the full range.
+   371→   371→            # A value near 0 = body near the low, near 1 = body near the high.
+   372→   372→            body_position = ((c + o) / 2.0 - l) / rng
+   373→   373→
+   374→   374→            # Feature 2: Direction strength (-1 to +1)
+   375→   375→            # Captures both direction AND body size.
+   376→   376→            # Near 0 = small body (doji), near ±1 = large body in one direction.
+   377→   377→            direction = (c - o) / rng
+   378→   378→
+   379→   379→            # Feature 3: Relative volume signal (normalized to ~0-1 range)
+   380→   380→            # Captures whether this candle had above/below average volume.
+   381→   381→            vol_window = min(20, len(v))
+   382→   382→            if vol_window > 0 and len(v) > 0:
+   383→   383→                vol_mean = np.convolve(v, np.ones(vol_window) / vol_window, mode="same")
+   384→   384→                vol_mean = np.where(vol_mean == 0, 1.0, vol_mean)
+   385→   385→                vol_ratio = np.clip(v / vol_mean, 0.5, 2.0)
+   386→   386→                # Normalize to [0, 1]: vol_ratio 0.5→0.0, 1.0→0.33, 2.0→1.0
+   387→   387→                vol_signal = (vol_ratio - 0.5) / 1.5
+   388→   388→            else:
+   389→   389→                vol_signal = np.full_like(v, 0.33)
+   390→   390→
+   391→   391→            # Additive composite: preserves all three features independently.
+   392→   392→            # Weights prioritize body position (most stable) and direction
+   393→   393→            # (most predictive), with volume as confirming signal.
+   394→   394→            # Range: body_position [0,1] × 0.4 = [0, 0.4]
+   395→   395→            #        direction [-1,1] × 0.35 = [-0.35, 0.35]
+   396→   396→            #        vol_signal [0,1] × 0.25 = [0, 0.25]
+   397→   397→            # Total range: [-0.35, 1.0], near-Gaussian after z-scoring
+   398→   398→            composite = (
+   399→   399→                body_position * 0.4
+   400→   400→                + direction * 0.35
+   401→   401→                + vol_signal * 0.25
+   402→   402→            )
+   403→   403→            return composite
+   404→   404→
+   405→   405→        else:
+   406→   406→            raise ValueError(f"Unknown strategy: {self.strategy}")
+   407→   407→
+   408→   408→    def _paa(self, series: np.ndarray) -> np.ndarray:
+   409→   409→        """
+   410→   410→        Piecewise Aggregate Approximation.
+   411→   411→
+   412→   412→        Reduces the series dimensionality by averaging over windows.
+   413→   413→        E.g., 100 candles with window_size=10 → 10 PAA values.
+   414→   414→        """
+   415→   415→        n = len(series)
+   416→   416→        window = self.window_size
+   417→   417→
+   418→   418→        # Trim to exact multiple of window_size
+   419→   419→        trim = (n // window) * window
+   420→   420→        if trim == 0:
+   421→   421→            return np.array([])
+   422→   422→
+   423→   423→        trimmed = series[:trim]
+   424→   424→
+   425→   425→        # Reshape and compute mean per window
+   426→   426→        return trimmed.reshape(-1, window).mean(axis=1)
+   427→   427→
+   428→   428→    def _discretize(self, paa_values: np.ndarray) -> list[str]:
+   429→   429→        """
+   430→   430→        Convert PAA values to SAX symbols using breakpoints.
+   431→   431→
+   432→   432→        Each PAA value is z-scored within its local context, then
+   433→   433→        mapped to a symbol based on which breakpoint interval it falls in.
+   434→   434→        """
+   435→   435→        if len(paa_values) == 0:
+   436→   436→            return []
+   437→   437→
+   438→   438→        # Z-score normalization
+   439→   439→        std = np.std(paa_values)
+   440→   440→        if std < 1e-10:
+   441→   441→            # Constant series → all same middle symbol
+   442→   442→            mid = self.alphabet_size // 2
+   443→   443→            return [SAX_ALPHABET[mid]] * len(paa_values)
+   444→   444→
+   445→   445→        z_scores = (paa_values - np.mean(paa_values)) / std
+   446→   446→
+   447→   447→        # Map each z-score to a symbol
+   448→   448→        symbols = []
+   449→   449→        for z in z_scores:
+   450→   450→            idx = int(np.searchsorted(self.breakpoints, z))
+   451→   451→            symbols.append(SAX_ALPHABET[idx])
+   452→   452→
+   453→   453→        return symbols
+   454→   454→
+   455→   455→    def encode(self, df: pd.DataFrame) -> list[str]:
+   456→   456→        """
+   457→   457→        Encode an OHLCV DataFrame into SAX symbols.
+   458→   458→
+   459→   459→        Args:
+   460→   460→            df: DataFrame with columns: open, high, low, close, volume
+   461→   461→
+   462→   462→        Returns:
+   463→   463→            List of SAX symbols, one per window of candles.
+   464→   464→            Length = len(df) // window_size
+   465→   465→        """
+   466→   466→        series = self._extract_series(df)
+   467→   467→        paa_values = self._paa(series)
+   468→   468→        return self._discretize(paa_values)
+   469→   469→
+   470→   470→    def encode_with_normalization(
+   471→   471→        self,
+   472→   472→        df: pd.DataFrame,
+   473→   473→        paa_mean: float | None = None,
+   474→   474→        paa_std: float | None = None,
+   475→   475→    ) -> tuple[list[str], float, float]:
+   476→   476→        """
+   477→   477→        Encode an OHLCV DataFrame with explicit z-score normalization.
+   478→   478→
+   479→   479→        v0.6.3 (V7.9 backport): Training z-score stats must be used for test
+   480→   480→        encoding to ensure SAX symbols are consistent between train and test
+   481→   481→        windows. Without this, regime shifts cause different symbol mappings
+   482→   482→        and the trie never matches.
+   483→   483→
+   484→   484→        When called with paa_mean=None, paa_std=None (training mode), computes
+   485→   485→        stats from the current data and returns them. When called with explicit
+   486→   486→        stats (test mode), uses those instead — ensuring consistent symbols.
+   487→   487→
+   488→   488→        Args:
+   489→   489→            df: DataFrame with columns: open, high, low, close, volume
+   490→   490→            paa_mean: If provided, use this mean instead of computing from data
+   491→   491→            paa_std: If provided, use this std instead of computing from data
+   492→   492→
+   493→   493→        Returns:
+   494→   494→            Tuple of (symbols, paa_mean, paa_std) where the stats can be
+   495→   495→            reused for consistent encoding of test data.
+   496→   496→        """
+   497→   497→        series = self._extract_series(df)
+   498→   498→        paa_values = self._paa(series)
+   499→   499→
+   500→   500→        if len(paa_values) == 0:
+   501→   501→            return [], 0.0, 1.0
+   502→   502→
+   503→   503→        # Use provided stats or compute from current data
+   504→   504→        if paa_mean is None:
+   505→   505→            paa_mean = float(np.mean(paa_values))
+   506→   506→        if paa_std is None:
+   507→   507→            paa_std = float(np.std(paa_values))
+   508→   508→
+   509→   509→        if paa_std < 1e-10:
+   510→   510→            mid = self.alphabet_size // 2
+   511→   511→            return [SAX_ALPHABET[mid]] * len(paa_values), paa_mean, paa_std
+   512→   512→
+   513→   513→        z_scores = (paa_values - paa_mean) / paa_std
+   514→   514→
+   515→   515→        symbols = []
+   516→   516→        for z in z_scores:
+   517→   517→            idx = int(np.searchsorted(self.breakpoints, z))
+   518→   518→            symbols.append(SAX_ALPHABET[idx])
+   519→   519→
+   520→   520→        return symbols, paa_mean, paa_std
+   521→   521→
+   522→   522→    def encode_incremental(
+   523→   523→        self,
+   524→   524→        new_candles: pd.DataFrame,
+   525→   525→        buffer: list[float] | None = None,
+   526→   526→        paa_mean: float | None = None,
+   527→   527→        paa_std: float | None = None,
+   528→   528→    ) -> tuple[list[str], list[float]]:
+   529→   529→        """
+   530→   530→        Incremental SAX encoding for real-time streaming.
+   531→   531→
+   532→   532→        Instead of re-encoding the entire series, this method maintains
+   533→   533→        a buffer of partial window data and only produces a new symbol
+   534→   534→        when a full window is completed.
+   535→   535→
+   536→   536→        v0.19.1 FIX: The previous implementation z-scored each window against
+   537→   537→        itself (mean of window - mean of window = 0), always producing the
+   538→   538→        middle symbol. Now uses one of three normalization strategies:
+   539→   539→
+   540→   540→        1. **External stats** (paa_mean, paa_std provided): Uses training
+   541→   541→           statistics for consistent encoding between build and live. This
+   542→   542→           is the RECOMMENDED mode for production — call encode_with_normalization()
+   543→   543→           during build, then pass the same stats here.
+   544→   544→
+   545→   545→        2. **Running stats** (no external stats, buffer has enough history):
+   546→   546→           Maintains a running mean/std over all observed PAA values and
+   547→   547→           z-scores new windows against the global distribution. This provides
+   548→   548→           reasonable incremental encoding without requiring precomputed stats.
+   549→   549→
+   550→   550→        3. **Window-only** (no external stats, insufficient history):
+   551→   551→           Falls back to z-scoring the window mean against 0 with unit std,
+   552→   552→           which effectively just discretizes the raw PAA value. This is a
+   553→   553→           degraded mode — at minimum 2 symbols should be accumulated before
+   554→   554→           meaningful encoding is possible.
+   555→   555→
+   556→   556→        Args:
+   557→   557→            new_candles: New candle data (can be 1 or more rows)
+   558→   558→            buffer: Previous partial window buffer (or None for first call)
+   559→   559→            paa_mean: Training PAA mean for consistent z-scoring (recommended)
+   560→   560→            paa_std: Training PAA std for consistent z-scoring (recommended)
+   561→   561→
+   562→   562→        Returns:
+   563→   563→            Tuple of (new_symbols, updated_buffer)
+   564→   564→        """
+   565→   565→        if buffer is None:
+   566→   566→            buffer = []
+   567→   567→
+   568→   568→        series = self._extract_series(new_candles)
+   569→   569→        buffer.extend(series.tolist())
+   570→   570→
+   571→   571→        # Running PAA statistics for incremental normalization
+   572→   572→        # These accumulate across calls to maintain a global reference distribution
+   573→   573→        if not hasattr(self, '_running_paa_values'):
+   574→   574→            self._running_paa_values: list[float] = []
+   575→   575→        if paa_mean is not None:
+   576→   576→            # Use external stats — reset running values since we have the truth
+   577→   577→            self._running_paa_mean = paa_mean
+   578→   578→            self._running_paa_std = paa_std if paa_std is not None else 1.0
+   579→   579→        elif not hasattr(self, '_running_paa_mean'):
+   580→   580→            self._running_paa_mean = None
+   581→   581→            self._running_paa_std = None
+   582→   582→
+   583→   583→        symbols = []
+   584→   584→        while len(buffer) >= self.window_size:
+   585→   585→            window_data = np.array(buffer[:self.window_size])
+   586→   586→            buffer = buffer[self.window_size:]
+   587→   587→
+   588→   588→            # Compute PAA value (mean of window)
+   589→   589→            paa_value = float(np.mean(window_data))
+   590→   590→
+   591→   591→            # Update running stats
+   592→   592→            self._running_paa_values.append(paa_value)
+   593→   593→            # Keep last 500 PAA values for running stats (prevents unbounded growth)
+   594→   594→            if len(self._running_paa_values) > 500:
+   595→   595→                self._running_paa_values = self._running_paa_values[-500:]
+   596→   596→
+   597→   597→            # Z-score normalization
+   598→   598→            if self._running_paa_mean is not None:
+   599→   599→                # Strategy 1: External stats (from training) — best quality
+   600→   600→                mean = self._running_paa_mean
+   601→   601→                std = self._running_paa_std
+   602→   602→            elif len(self._running_paa_values) >= 2:
+   603→   603→                # Strategy 2: Running stats — good quality after warmup
+   604→   604→                arr = np.array(self._running_paa_values)
+   605→   605→                mean = float(np.mean(arr))
+   606→   606→                std = float(np.std(arr))
+   607→   607→            else:
+   608→   608→                # Strategy 3: Degraded — first window only, can't z-score yet
+   609→   609→                # Use the PAA value directly mapped to breakpoints
+   610→   610→                # Since breakpoints are z-score boundaries, we assume mean=0, std=sigma
+   611→   611→                # where sigma is estimated from the PAA value magnitude
+   612→   612→                mean = 0.0
+   613→   613→                std = max(abs(paa_value), 1e-10)
+   614→   614→
+   615→   615→            if std < 1e-10:
+   616→   616→                mid = self.alphabet_size // 2
+   617→   617→                symbols.append(SAX_ALPHABET[mid])
+   618→   618→            else:
+   619→   619→                z = (paa_value - mean) / std
+   620→   620→                idx = int(np.searchsorted(self.breakpoints, z))
+   621→   621→                symbols.append(SAX_ALPHABET[idx])
+   622→   622→
+   623→   623→        return symbols, buffer
+   624→   624→
+   625→   625→    def symbol_distance(self, a: str, b: str) -> float:
+   626→   626→        """
+   627→   627→        Compute distance between two SAX symbols.
+   628→   628→
+   629→   629→        Uses the SAX distance table based on breakpoint differences.
+   630→   630→        This enables fuzzy matching — symbols that are 'close' in the
+   631→   631→        alphabet represent similar price movements.
+   632→   632→        """
+   633→   633→        idx_a = SAX_ALPHABET.index(a)
+   634→   634→        idx_b = SAX_ALPHABET.index(b)
+   635→   635→
+   636→   636→        if idx_a == idx_b:
+   637→   637→            return 0.0
+   638→   638→
+   639→   639→        # Distance based on breakpoint gap
+   640→   640→        lo, hi = min(idx_a, idx_b), max(idx_a, idx_b)
+   641→   641→
+   642→   642→        if lo == 0 and hi < len(self.breakpoints):
+   643→   643→            return abs(self.breakpoints[hi])
+   644→   644→        elif hi >= len(self.breakpoints) and lo < len(self.breakpoints):
+   645→   645→            return abs(self.breakpoints[lo])
+   646→   646→        elif lo < len(self.breakpoints) and hi < len(self.breakpoints):
+   647→   647→            return abs(self.breakpoints[hi] - self.breakpoints[lo])
+   648→   648→        else:
+   649→   649→            return float(hi - lo)
+   650→   650→
+   651→   651→    def sequence_distance(self, seq_a: list[str], seq_b: list[str]) -> float:
+   652→   652→        """
+   653→   653→        Compute distance between two SAX sequences of equal length.
+   654→   654→
+   655→   655→        Lower distance = more similar patterns.
+   656→   656→        Used by the FuzzyMatcher for noise-tolerant matching.
+   657→   657→        """
+   658→   658→        if len(seq_a) != len(seq_b):
+   659→   659→            raise ValueError("Sequences must be equal length")
+   660→   660→
+   661→   661→        if len(seq_a) == 0:
+   662→   662→            return 0.0
+   663→   663→
+   664→   664→        total = sum(self.symbol_distance(a, b) for a, b in zip(seq_a, seq_b))
+   665→   665→        return total / len(seq_a)
+   666→   666→
+   667→   667→
+   668→   668→# ===================================================================== #
+   669→   669→# FASE 1 Tarea 1.3: SAX Dual Encoder (Precio + Volumen)
+   670→   670→# ===================================================================== #
+   671→   671→
+   672→   672→# Separator for converting tuple symbols to string keys.
+   673→   673→# Must not conflict with SAX_ALPHABET characters (a-z lowercase).
+   674→   674→DUAL_SYMBOL_SEPARATOR = "|"
+   675→   675→
+   676→   676→
+   677→   677→def make_symbol_key(symbol) -> str:
+   678→   678→    """Convert a symbol (str or tuple) to a string key for Trie storage.
+   679→   679→
+   680→   680→    DEPRECATED (v0.42.0): The trie now uses tuple keys natively.
+   681→   681→    This function is kept ONLY for backward-compatible deserialization
+   682→   682→    of old DB entries. Do NOT use in new code.
+   683→   683→
+   684→   684→    Single symbols pass through unchanged: 'a' -> 'a'
+   685→   685→    Tuple symbols are joined with DUAL_SYMBOL_SEPARATOR:
+   686→   686→        ('a', 'x') -> 'a|x'
+   687→   687→    """
+   688→   688→    if isinstance(symbol, tuple):
+   689→   689→        return DUAL_SYMBOL_SEPARATOR.join(str(s) for s in symbol)
+   690→   690→    return str(symbol)
+   691→   691→
+   692→   692→
+   693→   693→def parse_symbol_key(key: str):
+   694→   694→    """Parse a string key back into a symbol or tuple.
+   695→   695→
+   696→   696→    DEPRECATED (v0.42.0): Only used for backward-compatible deserialization.
+   697→   697→    New code uses tuples directly.
+   698→   698→
+   699→   699→    Keys without the separator pass through: 'a' -> 'a'
+   700→   700→    Keys with the separator become tuples: 'a|x' -> ('a', 'x')
+   701→   701→
+   702→   702→    This is the inverse of make_symbol_key().
+   703→   703→    """
+   704→   704→    if DUAL_SYMBOL_SEPARATOR in key:
+   705→   705→        return tuple(key.split(DUAL_SYMBOL_SEPARATOR))
+   706→   706→    return key
+   707→   707→
+   708→   708→
+   709→   709→class SAXDualEncoder:
+   710→   710→    """Dual SAX encoder that produces independent price and volume symbols.
+   711→   711→
+   712→   712→    FASE 1 Tarea 1.3: Instead of a single composite symbol per position
+   713→   713→    (where volume contributes only 25%), each position is a TUPLE of
+   714→   714→    (price_symbol, volume_symbol). This preserves volume information
+   715→   715→    that the single-composite approach loses.
+   716→   716→
+   717→   717→    Example (α_price=3, α_vol=2, window=7):
+   718→   718→        Input:  100 candles of OHLCV data
+   719→   719→        Output: [('a','x'), ('b','y'), ('a','x'), ('c','z'), ('b','x')]
+   720→   720→
+   721→   721→    The tuples become KEYS in the Trie's children dict, converted to
+   722→   722→    strings like 'a|x' via make_symbol_key(). This means the Trie
+   723→   723→    internals don't need to change at all.
+   724→   724→
+   725→   725→    Composite alphabet size = α_price × α_vol (for compatibility with
+   726→   726→    code that queries alphabet_size, e.g. FuzzyMatcher's alphabet
+   727→   727→    enumeration).
+   728→   728→    """
+   729→   729→
+   730→   730→    def __init__(
+   731→   731→        self,
+   732→   732→        price_alphabet_size: int = 3,
+   733→   733→        volume_alphabet_size: int = 2,
+   734→   734→        window_size: int = 7,
+   735→   735→        price_strategy: str = "ohlcv",
+   736→   736→    ):
+   737→   737→        self.price_encoder = SAXEncoder(
+   738→   738→            alphabet_size=price_alphabet_size,
+   739→   739→            window_size=window_size,
+   740→   740→            strategy=price_strategy,
+   741→   741→        )
+   742→   742→        self.volume_encoder = SAXEncoder(
+   743→   743→            alphabet_size=volume_alphabet_size,
+   744→   744→            window_size=window_size,
+   745→   745→            strategy="volume",
+   746→   746→        )
+   747→   747→        self.price_alphabet_size = price_alphabet_size
+   748→   748→        self.volume_alphabet_size = volume_alphabet_size
+   749→   749→        self.window_size = window_size
+   750→   750→        self.strategy = price_strategy  # for compatibility
+   751→   751→
+   752→   752→    @property
+   753→   753→    def alphabet_size(self) -> int:
+   754→   754→        """Composite alphabet size (α_price × α_vol).
+   755→   755→
+   756→   756→        Used by FuzzyMatcher for alphabet enumeration and distance
+   757→   757→        computation. The effective symbol space is the Cartesian product
+   758→   758→        of price × volume symbols.
+   759→   759→        """
+   760→   760→        return self.price_alphabet_size * self.volume_alphabet_size
+   761→   761→
+   762→   762→    @property
+   763→   763→    def breakpoints(self) -> np.ndarray:
+   764→   764→        """Breakpoints from the price encoder (for compatibility)."""
+   765→   765→        return self.price_encoder.breakpoints
+   766→   766→
+   767→   767→    def encode(self, df: pd.DataFrame) -> list[tuple[str, str]]:
+   768→   768→        """Encode OHLCV DataFrame into dual symbols.
+   769→   769→
+   770→   770→        Returns a list of (price_symbol, volume_symbol) tuples.
+   771→   771→        Both encoders use the same window_size, so the output lists
+   772→   772→        have equal length.
+   773→   773→        """
+   774→   774→        price_symbols = self.price_encoder.encode(df)
+   775→   775→        volume_symbols = self.volume_encoder.encode(df)
+   776→   776→        min_len = min(len(price_symbols), len(volume_symbols))
+   777→   777→        return [(price_symbols[i], volume_symbols[i]) for i in range(min_len)]
+   778→   778→
+   779→   779→    def encode_with_normalization(
+   780→   780→        self,
+   781→   781→        df: pd.DataFrame,
+   782→   782→        paa_mean: float | None = None,
+   783→   783→        paa_std: float | None = None,
+   784→   784→    ) -> tuple[list[tuple[str, str]], float, float]:
+   785→   785→        """Encode with explicit z-score normalization (price encoder stats).
+   786→   786→
+   787→   787→        Returns (dual_symbols, paa_mean, paa_std) where stats come from
+   788→   788→        the price encoder for backwards compatibility.
+   789→   789→        """
+   790→   790→        price_symbols, p_mean, p_std = self.price_encoder.encode_with_normalization(
+   791→   791→            df, paa_mean=paa_mean, paa_std=paa_std,
+   792→   792→        )
+   793→   793→        volume_symbols, _, _ = self.volume_encoder.encode_with_normalization(df)
+   794→   794→        min_len = min(len(price_symbols), len(volume_symbols))
+   795→   795→        dual = [(price_symbols[i], volume_symbols[i]) for i in range(min_len)]
+   796→   796→        return dual, p_mean, p_std
+   797→   797→
+   798→   798→    def encode_incremental(
+   799→   799→        self,
+   800→   800→        new_candles: pd.DataFrame,
+   801→   801→        buffer: list[float] | None = None,
+   802→   802→        paa_mean: float | None = None,
+   803→   803→        paa_std: float | None = None,
+   804→   804→    ) -> tuple[list[tuple[str, str]], list[float]]:
+   805→   805→        """Incremental dual encoding for streaming.
+   806→   806→
+   807→   807→        Maintains separate buffers for price and volume encoders.
+   808→   808→        Returns (new_dual_symbols, updated_price_buffer).
+   809→   809→
+   810→   810→        Note: the returned buffer is the price encoder's buffer. The
+   811→   811→        volume encoder's buffer is maintained internally.
+   812→   812→        """
+   813→   813→        if buffer is None:
+   814→   814→            buffer = []
+   815→   815→
+   816→   816→        # Maintain separate volume buffer
+   817→   817→        if not hasattr(self, '_vol_buffer'):
+   818→   818→            self._vol_buffer: list[float] = []
+   819→   819→
+   820→   820→        price_symbols, updated_price_buffer = self.price_encoder.encode_incremental(
+   821→   821→            new_candles, buffer,
+   822→   822→            paa_mean=paa_mean, paa_std=paa_std,
+   823→   823→        )
+   824→   824→        volume_symbols, self._vol_buffer = self.volume_encoder.encode_incremental(
+   825→   825→            new_candles, self._vol_buffer,
+   826→   826→        )
+   827→   827→
+   828→   828→        # Pair up symbols
+   829→   829→        min_len = min(len(price_symbols), len(volume_symbols))
+   830→   830→        dual = [(price_symbols[i], volume_symbols[i]) for i in range(min_len)]
+   831→   831→
+   832→   832→        return dual, updated_price_buffer
+   833→   833→
+   834→   834→    def symbol_distance(self, a, b) -> float:
+   835→   835→        """Compute distance between two symbols (single or dual).
+   836→   836→
+   837→   837→        For dual symbols (tuples), the distance is a weighted sum:
+   838→   838→          distance = 0.6 × price_distance + 0.4 × volume_distance
+   839→   839→
+   840→   840→        Price gets higher weight because it's more predictive for
+   841→   841→        trading decisions. Volume is confirming signal.
+   842→   842→
+   843→   843→        For single symbols, delegates to the price encoder.
+   844→   844→        """
+   845→   845→        if isinstance(a, tuple) and isinstance(b, tuple):
+   846→   846→            price_dist = self.price_encoder.symbol_distance(a[0], b[0])
+   847→   847→            vol_dist = self.volume_encoder.symbol_distance(a[1], b[1])
+   848→   848→            # Normalize each distance to [0, 1] range for fair weighting
+   849→   849→            max_price_dist = self.price_encoder.breakpoints[-1] * 2 if len(self.price_encoder.breakpoints) > 0 else 1.0
+   850→   850→            max_vol_dist = self.volume_encoder.breakpoints[-1] * 2 if len(self.volume_encoder.breakpoints) > 0 else 1.0
+   851→   851→            norm_price = min(price_dist / max(max_price_dist, 1e-10), 1.0)
+   852→   852→            norm_vol = min(vol_dist / max(max_vol_dist, 1e-10), 1.0)
+   853→   853→            return 0.6 * norm_price + 0.4 * norm_vol
+   854→   854→        # Single symbol: delegate to price encoder
+   855→   855→        a_str = a[0] if isinstance(a, tuple) else a
+   856→   856→        b_str = b[0] if isinstance(b, tuple) else b
+   857→   857→        return self.price_encoder.symbol_distance(a_str, b_str)
+   858→   858→
+   859→   859→    def sequence_distance(self, seq_a: list, seq_b: list) -> float:
+   860→   860→        """Compute distance between two dual-symbol sequences."""
+   861→   861→        if len(seq_a) != len(seq_b):
+   862→   862→            raise ValueError("Sequences must be equal length")
+   863→   863→        if len(seq_a) == 0:
+   864→   864→            return 0.0
+   865→   865→        total = sum(self.symbol_distance(a, b) for a, b in zip(seq_a, seq_b))
+   866→   866→        return total / len(seq_a)
+   867→   867→
+   868→   868→    def get_alphabet_list(self) -> list[tuple[str, str]]:
+   869→   869→        """Get the full Cartesian product alphabet for dual symbols.
+   870→   870→
+   871→   871→        Returns list of all (price_sym, vol_sym) tuples.
+   872→   872→        Used by FuzzyMatcher for edit-distance enumeration.
+   873→   873→        """
+   874→   874→        price_syms = [SAX_ALPHABET[i] for i in range(self.price_alphabet_size)]
+   875→   875→        vol_syms = [SAX_ALPHABET[i] for i in range(self.volume_alphabet_size)]
+   876→   876→        return [(p, v) for p in price_syms for v in vol_syms]
+   877→   877→
