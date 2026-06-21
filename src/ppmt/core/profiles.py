@@ -146,6 +146,20 @@ ASSET_CLASS_DEFAULTS = {
     },
 }
 
+# v0.57.0 (TAREA 19): Estimated spread+slippage per asset class.
+# These represent the total round-trip friction (spread + slippage)
+# as a percentage of price. Used by the Net EV Gate to discount
+# theoretical expected_move by real execution costs.
+# Conservative estimates based on Binance orderbook analysis:
+SPREAD_ESTIMATES: dict[str, float] = {
+    "blue_chip": 0.010,   # 0.01% (BTC, ETH — deepest liquidity)
+    "large_cap": 0.015,   # 0.015% (SOL, AVAX, LINK — good liquidity)
+    "alt":       0.020,   # 0.02% (UNI, CRV — moderate liquidity)
+    "defi":      0.025,   # 0.025% (AAVE, MKR — sector-specific)
+    "meme":      0.050,   # 0.05% (DOGE, PEPE — high slippage, thin books)
+    "new_launch": 0.080,  # 0.08% (newly listed — extreme slippage)
+}
+
 
 @dataclass
 class TokenProfile:

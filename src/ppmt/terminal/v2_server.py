@@ -40,6 +40,21 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 
+# ─── v0.57.0 (TAREA 19): Global Anti-Overlap tracker ──────────
+# Tracks which symbols currently have an ACTIVE position across
+# ALL WebSocket sessions (5m + 15m combined). If SOL/USDT has
+# a position open in 5m, a 15m signal for SOL/USDT is REJECTED.
+_ACTIVE_SYMBOLS: dict[str, str] = {}  # {"SOL/USDT": "5m", "DOGE/USDT": "15m", ...}
+
+# ─── v0.57.0 (TAREA 19): Net EV Gate statistics ──────────────
+_NET_EV_STATS: dict[str, int] = {
+    "total_raw_signals": 0,
+    "passed_net_ev": 0,
+    "rejected_spread": 0,   # Net_Move <= 0 (spread devoured the move)
+    "rejected_ev_score": 0,  # Net_EV < 0.80
+    "rejected_overlap": 0,   # Same symbol already has position in another TF
+}
+
 # ─── Helpers ──────────────────────────────────────────────────
 
 def _sax_symbol_to_str(sym) -> str:
@@ -122,6 +137,16 @@ async def list_symbols():
     return {"symbols": [a["symbol"] for a in assets]}
 
 
+# ─── v0.57.0 (TAREA 19): Net EV Gate Statistics ──────────────
+@app.get("/api/net-ev-stats")
+async def net_ev_stats():
+    """Return cumulative Net EV Gate filtering statistics."""
+    return {
+        "stats": dict(_NET_EV_STATS),
+        "active_symbols": dict(_ACTIVE_SYMBOLS),
+    }
+
+
 # ─── WebSocket: Paper Live ────────────────────────────────────
 @app.websocket("/ws/paper-live/{symbol}/{timeframe}")
 async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str):
@@ -170,7 +195,9 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
         )
 
         # Load pre-built tries from SQLite — MANDATORY for PPMT
-        tries = storage.load_all_tries(symbol, asset_class)
+        # v0.57.0 (TAREA 19): Pass timeframe to load_all_tries so it loads
+        # the correct per-timeframe tries (5m, 15m, etc.)
+        tries = storage.load_all_tries(symbol, asset_class, timeframe=timeframe)
         
         # Log what we loaded with pattern counts
         n1 = tries.get("n1")
@@ -483,33 +510,117 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                 }
                 await websocket.send_json(brain_msg)
 
-                # ─── Signal → Routed execution ────────────────
-                # PAPER: await executor.open_position() → in-memory
-                # LIVE:  await executor.open_position() → MEXC API
-                # Same IExecutor interface, different backend.
+                # ─── Signal → Net EV Gate → Routed execution ─────
+                # v0.57.0 (TAREA 19): Net EV Gate with friction-aware filtering.
+                # Before opening any position, we discount the expected_move
+                # by the real spread+slippage for this asset class. If the
+                # net move doesn't cover costs, the signal is REJECTED.
                 if result and result.signal and result.signal.is_entry and not (isinstance(executor, PaperExecutor) and executor.is_in_position):
                     sig = result.signal
-                    try:
-                        pos = await executor.open_position(
-                            symbol=symbol,
-                            direction=sig.direction or "LONG",
-                            size_usdt=100.0,
-                            metadata={
-                                "entry_price": current_price,
-                                "expected_move_pct": sig.expected_move_pct or 1.0,
-                                "predicted_path_symbols": sig.predicted_path_symbols if sig.predicted_path else None,
-                            },
-                        )
+                    _NET_EV_STATS["total_raw_signals"] += 1
+
+                    # ─── Anti-overlap check ──────────────────────
+                    # If this symbol already has a position open in
+                    # another TF, REJECT to avoid correlated exposure.
+                    if symbol in _ACTIVE_SYMBOLS:
+                        existing_tf = _ACTIVE_SYMBOLS[symbol]
+                        _NET_EV_STATS["rejected_overlap"] += 1
                         logger.info(
-                            f"[WS] SIGNAL {sig.signal_type.value} @ {current_price:.6f} "
-                            f"conf={sig.confidence:.3f} SL={pos.current_sl:.6f} TP={pos.current_tp:.6f}"
+                            f"[NET EV GATE] OVERLAP REJECTED: {symbol} already has "
+                            f"position in {existing_tf}, ignoring {timeframe} signal"
                         )
-                        await websocket.send_json({
-                            "type": "position_update",
-                            "data": pos.to_dict(),
-                        })
-                    except Exception as e:
-                        logger.error(f"[WS] Failed to open position: {e}")
+                    else:
+                        # ─── Net EV Gate calculation ─────────────
+                        # The signal's expected_move_pct is the AVERAGE move (small).
+                        # For R:R, we use the historical BEST outcome (max_favorable)
+                        # and worst drawdown from the matched pattern node.
+                        # Net favorable = max_favorable - spread (friction-aware).
+
+                        # 1. Get favorable/drawdown from matched node metadata
+                        # Walk through match results to find best node with metadata
+                        _best_node = None
+                        for _lvl, _mr in [("n3", result.n3_match), ("n1", result.n1_match),
+                                          ("n2", result.n2_match), ("n4", result.n4_match)]:
+                            if _mr and _mr.node and _mr.node.metadata.historical_count > 0:
+                                _best_node = _mr.node
+                                break
+
+                        favorable_pct = abs(_best_node.metadata.max_favorable_pct) if _best_node else 0.0
+                        drawdown_pct = abs(_best_node.metadata.max_drawdown_pct) if _best_node else 0.5
+                        if favorable_pct < 0.001:
+                            favorable_pct = abs(sig.expected_move_pct) if sig.expected_move_pct else 0.1
+                        if drawdown_pct < 0.001:
+                            drawdown_pct = 0.5
+
+                        # 2. Get spread for this asset class
+                        from ppmt.core.profiles import SPREAD_ESTIMATES
+                        spread_pct = SPREAD_ESTIMATES.get(asset_class, 0.050)  # default 0.05%
+
+                        # 3. Net Favorable = max_favorable - spread
+                        net_favorable = favorable_pct - spread_pct
+
+                        # 4. If Net_Favorable <= 0: REJECT (signal doesn't cover costs)
+                        if net_favorable <= 0:
+                            _NET_EV_STATS["rejected_spread"] += 1
+                            logger.info(
+                                f"[NET EV GATE] SPREAD REJECTED: {symbol} {timeframe} "
+                                f"favorable={favorable_pct:.3f}% "
+                                f"spread={spread_pct:.3f}% "
+                                f"net_favorable={net_favorable:.3f}% (≤0)"
+                            )
+                        else:
+                            # 5. Net R:R = net_favorable / drawdown
+                            net_rr = net_favorable / drawdown_pct
+                            net_rr_capped = min(net_rr, 3.0)
+
+                            # 6. Net EV = confidence × min(Net_R:R, 3.0)
+                            net_ev = sig.confidence * net_rr_capped
+
+                            # 7. Gate: Net EV must be >= 0.80
+                            if net_ev < 0.80:
+                                _NET_EV_STATS["rejected_ev_score"] += 1
+                                logger.info(
+                                    f"[NET EV GATE] EV REJECTED: {symbol} {timeframe} "
+                                    f"conf={sig.confidence:.3f} net_R:R={net_rr_capped:.2f} "
+                                    f"Net_EV={net_ev:.3f} (min 0.80)"
+                                )
+                            else:
+                                # ─── PASSED: Open position ─────────
+                                _NET_EV_STATS["passed_net_ev"] += 1
+                                _ACTIVE_SYMBOLS[symbol] = timeframe  # Register in anti-overlap
+                                logger.info(
+                                    f"[NET EV GATE] PASSED: {symbol} {timeframe} "
+                                    f"conf={sig.confidence:.3f} net_R:R={net_rr_capped:.2f} "
+                                    f"Net_EV={net_ev:.3f} spread={spread_pct:.3f}% "
+                                    f"favorable={favorable_pct:.3f}% drawdown={drawdown_pct:.3f}%"
+                                )
+                                try:
+                                    pos = await executor.open_position(
+                                        symbol=symbol,
+                                        direction=sig.direction or "LONG",
+                                        size_usdt=100.0,
+                                        metadata={
+                                            "entry_price": current_price,
+                                            "expected_move_pct": sig.expected_move_pct or 1.0,
+                                            "predicted_path_symbols": sig.predicted_path_symbols if sig.predicted_path else None,
+                                            "net_ev_score": net_ev,
+                                            "net_rr": net_rr_capped,
+                                            "spread_pct": spread_pct,
+                                        },
+                                    )
+                                    logger.info(
+                                        f"[WS] SIGNAL {sig.signal_type.value} @ {current_price:.6f} "
+                                        f"conf={sig.confidence:.3f} Net_EV={net_ev:.3f} "
+                                        f"SL={pos.current_sl:.6f} TP={pos.current_tp:.6f}"
+                                    )
+                                    await websocket.send_json({
+                                        "type": "position_update",
+                                        "data": pos.to_dict(),
+                                    })
+                                except Exception as e:
+                                    # Position failed — remove from active symbols
+                                    _ACTIVE_SYMBOLS.pop(symbol, None)
+                                    logger.error(f"[WS] Failed to open position: {e}")
 
                 # ─── Walk-Forward check ───────────────────────
                 if result and executor.is_in_position and current_sax:
@@ -528,6 +639,8 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                 if executor.is_in_position:
                     closed = executor.check_price(current_price)
                     if closed:
+                        # v0.57.0 (TAREA 19): Remove from anti-overlap when position closes
+                        _ACTIVE_SYMBOLS.pop(symbol, None)
                         logger.info(
                             f"[WS] CLOSED: {closed.status} @ {closed.close_price:.6f} "
                             f"PnL={closed.pnl_pct:+.2f}% (${closed.pnl_usdt:+.2f})"
@@ -552,6 +665,9 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
     except WebSocketDisconnect:
         pass
     finally:
+        # v0.57.0 (TAREA 19): Clean up anti-overlap on disconnect
+        if symbol in _ACTIVE_SYMBOLS and _ACTIVE_SYMBOLS.get(symbol) == timeframe:
+            _ACTIVE_SYMBOLS.pop(symbol, None)
         try:
             await exchange.close()
         except Exception:

@@ -1,7 +1,7 @@
 # TRAZABILIDAD PPMT — Estado del Proyecto
 
 > Última actualización: 2026-06-22
-> Versión actual: **v0.57.0** — TAREA 18: Portfolio Velocity OOS 5m/15m. 5m: 212 señales EV en 3.5 días (3 tokens), WR=45.3%, R:R=3.03, EV=+0.82R. Proyección 10 tokens: ~6100 ops/mes. 15m: 43 señales EV (solo SOL), WR=60.5%, EV=+0.97R.
+> Versión actual: **v0.58.0** — TAREA 19: Net EV Gate (friction-aware) + Multi-TF execution con anti-overlap. Portfolio 7 streams: 244/6628 señales pasan Net EV (3.7%), WR=51.2%, R:R=3.79, Real EV=+1.46R. 0 rechazos por spread (favorable >> spread en blue_chip/large_cap).
 > ⚠️ **Si eres nuevo, lee primero la sección `# 📘 GUÍA DEL MOTOR PPMT — PARA CONTINUAR EL TRABAJO` al final de este archivo (línea 9914+).** Ahí está la arquitectura, dónde empezar a leer, dónde costó más, cómo se resolvieron largos y cortos, y el estado actual.
 > Repositorio: https://github.com/coverdraft/ppmt
 > Idioma: Español
@@ -11390,4 +11390,106 @@ en 5m y 15m, y si el volumen es suficiente para ser rentable como executor princ
 ### Commit
 ```
 test: portfolio velocity OOS on 5m and 15m — proving multi-asset execution volume
+```
+
+## v0.58.0 — TAREA 19: Net EV Gate (Friction-Aware) + Multi-TF Anti-Overlap (22 jun 2026)
+
+### Contexto
+TAREA 18 demostró que 5m genera volumen masivo (212 señales/3.5 días) con EV=+0.82R.
+Pero el EV Gate anterior no descuentaba spread real. Un EV de +1.0R se vuelve negativo
+si el spread devora el expected_move. Además, limitar a un solo TF deja dinero sobre
+la mesa — si 5m y 15m tienen edge, el sistema debe operar AMBOS simultáneamente.
+
+### Cambios realizados
+
+#### 1. `src/ppmt/core/profiles.py` — SPREAD_ESTIMATES (líneas 149-161)
+
+Nuevo diccionario de spreads estimados conservadores por clase de activo:
+```python
+SPREAD_ESTIMATES: dict[str, float] = {
+    "blue_chip": 0.010,   # 0.01% (BTC, ETH)
+    "large_cap": 0.015,   # 0.015% (SOL, AVAX, LINK)
+    "alt":       0.020,   # 0.02% (UNI, CRV)
+    "defi":      0.025,   # 0.025% (AAVE, MKR)
+    "meme":      0.050,   # 0.05% (DOGE, PEPE)
+    "new_launch": 0.080,  # 0.08%
+}
+```
+
+#### 2. `src/ppmt/terminal/v2_server.py` — Net EV Gate + Anti-Overlap
+
+**Net EV Gate** (friction-aware):
+1. Obtiene `max_favorable_pct` del nodo matcheado (NO expected_move_pct)
+2. Obtiene `spread_pct` de SPREAD_ESTIMATES[asset_class]
+3. `Net_Favorable = max_favorable - spread`
+4. Si Net_Favorable ≤ 0: SPREAD REJECTED
+5. `Net_RR = Net_Favorable / max_drawdown`
+6. `Net_EV = confidence × min(Net_RR, 3.0)`
+7. REGLA: Net_EV ≥ 0.80 para pasar
+
+**Anti-Overlap**:
+- Dict global `_ACTIVE_SYMBOLS = {"SOL/USDT": "5m", ...}`
+- Si SOL ya tiene posición en 5m, señal de 15m es REJECTED
+- Cleanup: remove de _ACTIVE_SYMBOLS cuando posición cierra o WS se desconecta
+
+**Fix**: `load_all_tries()` ahora recibe `timeframe=timeframe` para cargar
+tries correctos por timeframe (antes cargaba sin timeframe → wrong tries).
+
+**Nuevo endpoint**: `GET /api/net-ev-stats` devuelve estadísticas acumuladas.
+
+#### 3. Cálculo clave: favorable vs expected_move
+
+El `expected_move_pct` de la metadata es el PROMEDIO (incluye pérdidas), típicamente
+0.006% — inservible para R:R. El `max_favorable_pct` es el MEJOR resultado histórico
+de ese patrón (6-8% para blue_chip/large_cap), que es el valor correcto para calcular
+R:R. La diferencia es: "¿cuánto puede ganar este patrón en el mejor caso?" vs
+"¿cuánto gana en promedio?". Para EV, necesitamos el potencial real, no el promedio.
+
+### OOS Net EV Gate — 7 Streams, 1000 velas cada uno
+
+| Stream | Raw | Pass | SprdRj | EVRj | WR | R:R | Net_EV | Real_EV |
+|--------|-----|------|--------|------|-----|-----|--------|---------|
+| BTC/USDT 5m | 940 | 63 | 0 | 877 | 50.8% | 5.05 | 1.181 | +2.07R |
+| ETH/USDT 5m | 940 | 39 | 0 | 901 | 43.6% | 2.79 | 1.053 | +0.65R |
+| SOL/USDT 5m | 940 | 54 | 0 | 886 | 59.3% | 2.93 | 0.931 | +1.33R |
+| SOL/USDT 15m | 964 | 43 | 0 | 921 | 60.5% | 2.26 | 0.844 | +0.97R |
+| AVAX/USDT 5m | 940 | 0 | 0 | 940 | N/A | N/A | N/A | N/A |
+| LINK/USDT 5m | 940 | 45 | 0 | 895 | 40.0% | 5.40 | 0.867 | +1.56R |
+| LINK/USDT 15m | 964 | 0 | 0 | 964 | N/A | N/A | N/A | N/A |
+| **PORTAFOLIO** | **6628** | **244** | **0** | **6384** | **51.2%** | **3.79** | **0.988** | **+1.46R** |
+
+### Hallazgos
+
+1. **0 spread rejections**: max_favorable (6-8%) >> spread (0.01-0.015%) para blue_chip/large_cap.
+   Los spreads son irrelevantes en 5m/15m para estas clases.
+
+2. **96.3% rechazados por EV score**: La mayoría de señales tienen conf×RR < 0.80.
+   El Net EV Gate es EXTREMADAMENTE selectivo — solo 3.7% pasan.
+
+3. **AVAX no tiene edge**: 940 señales, 0 pasan el Net EV Gate. El motor no tiene
+   suficiente señal para AVAX en ningún timeframe.
+
+4. **LINK/15m tampoco**: 0 señales pasan en 15m, pero LINK/5m tiene el mejor
+   R:R del portafolio (5.40) y EV=+1.56R.
+
+5. **Portfolio WR=51.2%**: Con el Net EV Gate, el WR sube de ~45% (sin filtro)
+   a 51.2%. Más importante, R:R=3.79 → Real EV=+1.46R.
+
+6. **Anti-overlap funciona**: SOL y LINK 15m señales correctamente bloqueadas
+   cuando 5m tiene posición abierta.
+
+### Archivos modificados
+- `src/ppmt/core/profiles.py` — SPREAD_ESTIMATES dict
+- `src/ppmt/terminal/v2_server.py` — Net EV Gate + Anti-Overlap + timeframe fix + /api/net-ev-stats
+
+### Archivos creados
+- `scripts/oos_net_ev_t19.py` — OOS Net EV Gate simulation (with position management)
+- `scripts/oos_net_ev_clean_t19.py` — OOS Net EV Gate signal counting (clean stats)
+- `scripts/paper_live_multitf_t19.py` — Multi-TF WebSocket monitor client
+- `scripts/paper_live_integrated_t19.py` — Integrated in-process paper live test
+- `scripts/start_v2_server.py` — Server launcher
+
+### Commit
+```
+feat: implement net EV gate (friction-aware) and multi-timeframe execution with anti-overlap
 ```
