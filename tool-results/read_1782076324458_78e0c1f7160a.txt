@@ -1,0 +1,426 @@
+   200→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   201→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   202→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   203→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   204→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   205→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   206→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   207→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   208→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   209→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   210→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   211→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   212→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   213→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   214→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   215→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   216→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   217→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   218→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   219→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   220→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   221→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   222→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   223→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   224→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   225→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   226→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   227→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   228→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   229→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   230→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   231→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   232→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   233→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   234→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   235→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   236→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   237→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   238→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   239→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   240→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   241→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   242→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   243→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   244→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   245→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   246→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   247→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   248→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   249→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   250→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   251→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   252→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   253→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   254→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   255→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   256→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   257→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   258→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   259→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   260→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   261→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   262→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   263→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   264→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   265→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   266→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   267→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   268→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   269→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   270→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   271→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   272→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   273→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   274→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   275→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   276→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   277→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   278→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   279→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   280→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   281→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   282→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   283→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   284→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   285→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   286→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   287→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   288→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   289→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   290→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   291→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   292→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   293→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   294→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   295→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   296→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   297→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   298→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   299→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   300→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   301→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   302→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   303→  [NET EV GATE] OVERLAP REJECTED: SOL/USDT/15m — already active in 5m
+   304→
+   305→──────────────────────────────────────────────────────────────────────────────
+   306→  AVAX/USDT/5m (large_cap)
+   307→──────────────────────────────────────────────────────────────────────────────
+   308→  Downloading 300 5m candles...
+   309→  Got 300 candles
+   310→  [AVAX/USDT/5m] Tries: N1=243 N2=243 N3=27 N4=106 spread=0.015%
+   311→
+   312→──────────────────────────────────────────────────────────────────────────────
+   313→  LINK/USDT/5m (large_cap)
+   314→──────────────────────────────────────────────────────────────────────────────
+   315→  Downloading 300 5m candles...
+   316→  Got 300 candles
+   317→  [LINK/USDT/5m] Tries: N1=243 N2=243 N3=27 N4=106 spread=0.015%
+   318→  [NET EV GATE] PASSED: LINK/USDT/5m LONG @ 7.989000 conf=0.289 net_R:R=3.00 Net_EV=0.868 spread=0.015% favorable=14.444% drawdown=2.674%
+   319→
+   320→──────────────────────────────────────────────────────────────────────────────
+   321→  LINK/USDT/15m (large_cap)
+   322→──────────────────────────────────────────────────────────────────────────────
+   323→  Downloading 300 15m candles...
+   324→  Got 300 candles
+   325→  [LINK/USDT/15m] Tries: N1=243 N2=243 N3=27 N4=93 spread=0.015%
+   326→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   327→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   328→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   329→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   330→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   331→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   332→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   333→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   334→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   335→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   336→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   337→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   338→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   339→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   340→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   341→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   342→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   343→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   344→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   345→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   346→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   347→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   348→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   349→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   350→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   351→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   352→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   353→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   354→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   355→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   356→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   357→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   358→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   359→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   360→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   361→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   362→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   363→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   364→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   365→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   366→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   367→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   368→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   369→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   370→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   371→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   372→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   373→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   374→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   375→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   376→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   377→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   378→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   379→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   380→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   381→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   382→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   383→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   384→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   385→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   386→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   387→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   388→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   389→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   390→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   391→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   392→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   393→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   394→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   395→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   396→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   397→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   398→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   399→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   400→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   401→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   402→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   403→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   404→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   405→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   406→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   407→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   408→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   409→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   410→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   411→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   412→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   413→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   414→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   415→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   416→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   417→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   418→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   419→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   420→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   421→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   422→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   423→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   424→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   425→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   426→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   427→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   428→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   429→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   430→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   431→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   432→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   433→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   434→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   435→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   436→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   437→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   438→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   439→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   440→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   441→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   442→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   443→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   444→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   445→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   446→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   447→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   448→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   449→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   450→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   451→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   452→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   453→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   454→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   455→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   456→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   457→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   458→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   459→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   460→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   461→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   462→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   463→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   464→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   465→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   466→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   467→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   468→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   469→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   470→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   471→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   472→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   473→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   474→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   475→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   476→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   477→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   478→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   479→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   480→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   481→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   482→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   483→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   484→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   485→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   486→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   487→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   488→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   489→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   490→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   491→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   492→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   493→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   494→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   495→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   496→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   497→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   498→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   499→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   500→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   501→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   502→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   503→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   504→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   505→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   506→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   507→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   508→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   509→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   510→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   511→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   512→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   513→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   514→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   515→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   516→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   517→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   518→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   519→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   520→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   521→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   522→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   523→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   524→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   525→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   526→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   527→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   528→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   529→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   530→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   531→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   532→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   533→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   534→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   535→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   536→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   537→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   538→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   539→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   540→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   541→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   542→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   543→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   544→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   545→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   546→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   547→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   548→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   549→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   550→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   551→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   552→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   553→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   554→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   555→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   556→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   557→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   558→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   559→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   560→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   561→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   562→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   563→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   564→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   565→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   566→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   567→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   568→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   569→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   570→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   571→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   572→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   573→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   574→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   575→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   576→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   577→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   578→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   579→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   580→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   581→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   582→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   583→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   584→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   585→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   586→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   587→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   588→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   589→  [NET EV GATE] OVERLAP REJECTED: LINK/USDT/15m — already active in 5m
+   590→
+   591→==============================================================================
+   592→TAREA 19: FINAL REPORT — Net EV Gate + Multi-TF
+   593→==============================================================================
+   594→
+   595→  NET EV GATE SUMMARY:
+   596→    Total raw signals:     790
+   597→    Passed Net EV:         4
+   598→    Rejected by spread:    0
+   599→    Rejected by EV score:  258
+   600→    Rejected by overlap:   528
+   601→    Pass rate:             0.5%
+   602→
+   603→  PER-STREAM DETAILS:
+   604→  Stream              Candles   Raw  Pass SprdRj  EVRj OvlpRj  Open  Clsd    W/L
+   605→  ────────────────── ──────── ───── ───── ────── ───── ────── ───── ───── ──────
+   606→  BTC/USDT/5m             300     8     1      0     7      0     1     0 0/0
+   607→  ETH/USDT/5m             300     4     1      0     3      0     1     0 0/0
+   608→  SOL/USDT/5m             300     6     1      0     5      0     1     0 0/0
+   609→  SOL/USDT/15m            300   264     0      0     0    264     0     0 0/0
+   610→  AVAX/USDT/5m            300   240     0      0   240      0     0     0 0/0
+   611→  LINK/USDT/5m            300     4     1      0     3      0     1     0 0/0
+   612→  LINK/USDT/15m           300   264     0      0     0    264     0     0 0/0
+   613→
+   614→  NET EV SCORE DISTRIBUTION (passed signals):
+   615→    Count: 4
+   616→    Mean:  1.008
+   617→    Min:   0.868
+   618→    Max:   1.181
+   619→    Net_EV >= 0.80: 4
+   620→    Net_EV >= 1.00: 2
+   621→    Net_EV >= 1.20: 0
+   622→    Net_EV >= 1.50: 0
+   623→    Net_EV >= 2.00: 0
+   624→
+   625→Done.

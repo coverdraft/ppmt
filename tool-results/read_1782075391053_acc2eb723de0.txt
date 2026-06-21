@@ -1,0 +1,598 @@
+   555→        try:
+   556→            await exchange.close()
+   557→        except Exception:
+   558→            pass
+   559→        logger.info(f"[WS] Session closed: {symbol}/{timeframe}")
+   560→
+   561→
+   562→# ─── WebSocket: Live Trading (MEXC Futures) ───────────────────
+   563→# v0.45.0: ENTREGABLE 6 — Encrypted credentials + Walk-Forward Loop
+   564→
+   565→# Helper: normalize a SAX symbol (str, list, or tuple) to a flat string
+   566→# for safe comparison across trie levels (N1/N2 produce str, N3/N4 produce tuple).
+   567→def _norm_sax(sym) -> str:
+   568→    """Normalize a SAX symbol to a flat string for comparison.
+   569→    
+   570→    'a'       → 'a'
+   571→    ['d','x'] → 'd'   (price dimension only)
+   572→    ('a','y') → 'a'
+   573→    """
+   574→    if isinstance(sym, (tuple, list)):
+   575→        return str(sym[0])  # price symbol only
+   576→    return str(sym)
+   577→
+   578→
+   579→# Helper: check if any IExecutor has an active position
+   580→def _executor_in_position(executor: IExecutor) -> bool:
+   581→    """Check if executor has an active (open) position — works for all IExecutor impls."""
+   582→    if isinstance(executor, PaperExecutor):
+   583→        return executor.is_in_position
+   584→    # MexcFuturesExecutor and future impls store current position
+   585→    pos = getattr(executor, '_position', None) or getattr(executor, 'position', None)
+   586→    return pos is not None and pos.status in ("ACTIVE", "BREAK_EVEN_SECURED", "TP_EXTENDED")
+   587→
+   588→
+   589→def _executor_position(executor: IExecutor) -> Optional[PositionState]:
+   590→    """Get current position from any IExecutor — works for all impls."""
+   591→    if isinstance(executor, PaperExecutor):
+   592→        return executor.position
+   593→    return getattr(executor, '_position', None) or getattr(executor, 'position', None)
+   594→
+   595→
+   596→@app.websocket("/ws/live-trading/{symbol}/{timeframe}")
+   597→async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: str):
+   598→    """
+   599→    Real-money trading WebSocket via MEXC Futures.
+   600→
+   601→    v0.45.0: ENTREGABLE 6
+   602→    - Credentials are Fernet-encrypted in transit.
+   603→    - Full Walk-Forward Loop monitors open positions on every candle.
+   604→    - Divergence → close. Match → advance SL/TP along expected sequence.
+   605→
+   606→    Auth flow:
+   607→      1. Frontend encrypts api_key + api_secret with Fernet using a key
+   608→         derived from the user's session password (PBKDF2-SHA256).
+   609→      2. Frontend sends: {"type":"auth", "api_key":"<enc>", "api_secret":"<enc>",
+   610→         "session_password_hash":"<sha256_hex>"}
+   611→      3. Backend decrypts, instantiates MexcFuturesExecutor, zeroes plaintext.
+   612→    """
+   613→
+   614→    await websocket.accept()
+   615→
+   616→    # ─── 1. Instantiate executor ────────────────────────────────
+   617→    # v0.50.0: ENTREGABLE 11 — If PPMT_MOCK_LIVE=1, use PaperExecutor
+   618→    # instead of MexcFuturesExecutor to test the frontend without real money.
+   619→    # Injected signals: entry at 10s, MATCH at 20s, DIVERGE at 30s.
+   620→    allocated_usdt: float = 100.0
+   621→    custom_base_url: str = ""
+   622→
+   623→    if MOCK_LIVE:
+   624→        # ── MOCK MODE: Skip auth entirely, use PaperExecutor ──
+   625→        logger.info("[WS-LIVE-MOCK] Using PaperExecutor (Mock Live Test mode)")
+   626→        executor: IExecutor = PaperExecutor(capital_usdt=allocated_usdt)
+   627→        executor._position = None  # v0.49.0 (FASE 3 BUG 2): Force clean state
+   628→
+   629→        # Still send auth_ok so the frontend proceeds to config
+   630→        await websocket.send_json({"type": "auth_ok"})
+   631→
+   632→        # Read config message (allocated_usdt + optional custom_base_url)
+   633→        try:
+   634→            config_raw = await asyncio.wait_for(websocket.receive_json(), timeout=10.0)
+   635→            if config_raw.get("type") == "config":
+   636→                allocated_usdt = float(config_raw.get("allocated_usdt", 100.0))
+   637→                if allocated_usdt <= 0:
+   638→                    allocated_usdt = 100.0
+   639→                custom_base_url = str(config_raw.get("custom_base_url", "")).strip()
+   640→                logger.info(f"[WS-LIVE-MOCK] Config: allocated_usdt={allocated_usdt}, custom_base_url={'<set>' if custom_base_url else '<default>'}")
+   641→        except asyncio.TimeoutError:
+   642→            logger.warning("[WS-LIVE-MOCK] No config message received")
+   643→
+   644→        # Update PaperExecutor capital with the user's allocated amount
+   645→        if isinstance(executor, PaperExecutor):
+   646→            executor.capital_usdt = allocated_usdt
+   647→
+   648→    else:
+   649→        # ── PRODUCTION MODE: Real MEXC Futures ──
+   650→        # Wait for encrypted credentials
+   651→        try:
+   652→            auth_raw = await asyncio.wait_for(websocket.receive_json(), timeout=15.0)
+   653→        except asyncio.TimeoutError:
+   654→            await websocket.send_json({"type": "error", "data": {"message": "Auth timeout — send encrypted auth within 15s"}})
+   655→            await websocket.close()
+   656→            return
+   657→
+   658→        if auth_raw.get("type") != "auth":
+   659→            await websocket.send_json({"type": "error", "data": {"message": "First message must be {type:auth, ...}"}})
+   660→            await websocket.close()
+   661→            return
+   662→
+   663→        # Decrypt credentials
+   664→        api_key, api_secret = decrypt_auth_payload(auth_raw)
+   665→
+   666→        if api_key is None or api_secret is None:
+   667→            await websocket.send_json({"type": "error", "data": {"message": "Decryption failed — wrong session password or tampered payload"}})
+   668→            await websocket.close()
+   669→            return
+   670→
+   671→        # Defer executor creation until AFTER config (need custom_base_url)
+   672→        _api_key = api_key
+   673→        _api_secret = api_secret
+   674→        del api_key
+   675→        del api_secret
+   676→
+   677→        # Read config message (allocated_usdt + custom_base_url)
+   678→        try:
+   679→            config_raw = await asyncio.wait_for(websocket.receive_json(), timeout=10.0)
+   680→            if config_raw.get("type") == "config":
+   681→                allocated_usdt = float(config_raw.get("allocated_usdt", 100.0))
+   682→                if allocated_usdt <= 0:
+   683→                    allocated_usdt = 100.0
+   684→                custom_base_url = str(config_raw.get("custom_base_url", "")).strip()
+   685→                logger.info(f"[WS-LIVE] Config received: allocated_usdt={allocated_usdt}, custom_base_url={'<set>' if custom_base_url else '<default>'}")
+   686→        except asyncio.TimeoutError:
+   687→            logger.warning("[WS-LIVE] No config message received, defaulting to 100 USDT")
+   688→
+   689→        # Create MexcFuturesExecutor with optional custom_base_url
+   690→        executor = MexcFuturesExecutor(
+   691→            api_key=_api_key,
+   692→            secret=_api_secret,
+   693→            base_url=custom_base_url,
+   694→        )
+   695→        del _api_key
+   696→        del _api_secret
+   697→
+   698→        logger.info(f"[WS-LIVE] Auth OK — MexcFuturesExecutor created (base_url={'custom' if custom_base_url else 'default'}, credentials zeroed)")
+   699→        await websocket.send_json({"type": "auth_ok"})
+   700→
+   701→    # ─── 2. Same engine init as paper-live ─────────────────────
+   702→    internal_symbol = symbol.replace("-", "/")
+   703→    api_symbol = internal_symbol.replace("/", "")
+   704→    symbol = internal_symbol
+   705→
+   706→    logger.info(f"[WS-LIVE] Connected: {symbol}/{timeframe}")
+   707→    storage = get_storage()
+   708→
+   709→    try:
+   710→        asset_class = "meme"
+   711→        weight_profile = "meme"
+   712→        try:
+   713→            from ppmt.data.classifier import AssetClassifier
+   714→            classifier = AssetClassifier()
+   715→            info = classifier.classify(symbol)
+   716→            asset_class = info.asset_class
+   717→            weight_profile = info.weight_profile
+   718→        except Exception as e:
+   719→            logger.warning(f"[WS-LIVE] AssetClassifier unavailable ({e}), defaulting to 'meme'")
+   720→
+   721→        engine = PPMT(
+   722→            symbol=symbol, asset_class=asset_class,
+   723→            weight_profile=weight_profile, dual_sax=True,
+   724→            min_confidence=0.08, timeframe=timeframe,
+   725→        )
+   726→
+   727→        tries = storage.load_all_tries(symbol, asset_class)
+   728→        n1, n2, n3, n4 = tries.get("n1"), tries.get("n2"), tries.get("n3"), tries.get("n4")
+   729→        n1c = n1.pattern_count if n1 else 0
+   730→        n2c = n2.pattern_count if n2 else 0
+   731→        n3c = n3.pattern_count if n3 else 0
+   732→        n4c = n4.pattern_count if hasattr(n4, 'pattern_count') and n4 else 0
+   733→        logger.info(f"[WS-LIVE] Loaded N1: {n1c} N2: {n2c} N3: {n3c} N4: {n4c}")
+   734→
+   735→        if n1 or n2 or n3:
+   736→            from ppmt.core.trie import PPMTTrie, RegimePartitionedTrie
+   737→            # v0.49.0 (FASE 3 BUG 3): Same fix as paper_live_websocket.
+   738→            _n1 = n1 if n1 is not None else None
+   739→            _n2 = n2 if n2 is not None else None
+   740→            if _n1 is None:
+   741→                _n1 = PPMTTrie(name="universal_empty")
+   742→                logger.warning(f"[WS-LIVE] N1 universal pool not found for {symbol}. Using empty trie.")
+   743→            if _n2 is None:
+   744→                _n2 = PPMTTrie(name=f"class_empty:{asset_class}")
+   745→                logger.warning(f"[WS-LIVE] N2 class pool not found for {asset_class}. Using empty trie.")
+   746→            engine.set_tries(
+   747→                trie_n1=_n1,
+   748→                trie_n2=_n2,
+   749→                trie_n3=n3 or PPMTTrie(name="n3_empty"),
+   750→                trie_n4=n4 if n4 is not None else engine.trie_n4,
+   751→            )
+   752→    except Exception as e:
+   753→        logger.error(f"[WS-LIVE] Engine init failed: {e}")
+   754→        await websocket.send_json({"type": "error", "data": {"message": f"Engine init failed: {e}"}})
+   755→        await websocket.close()
+   756→        return
+   757→
+   758→    # ─── 3. Exchange poller + warmup (same as paper) ───────────
+   759→    from ppmt.engine.realtime import _DirectPollExchange
+   760→    exchange = _DirectPollExchange("binance")
+   761→
+   762→    try:
+   763→        ohlcv_raw = await exchange.fetch_ohlcv(api_symbol, timeframe, limit=500)
+   764→        if ohlcv_raw:
+   765→            df = pd.DataFrame(ohlcv_raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
+   766→            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+   767→            df.set_index("timestamp", inplace=True)
+   768→            for i in range(len(df) - 1):
+   769→                engine.process_new_candle(candle_df=df.iloc[[i]], current_price=float(df["close"].iloc[i]))
+   770→            for i in range(max(0, len(df) - 50), len(df)):
+   771→                r = df.iloc[i]
+   772→                await websocket.send_json({"type": "candle", "data": {"time": int(df.index[i].timestamp()) if isinstance(df.index[i], pd.Timestamp) else int(df.index[i]), "open": float(r["open"]), "high": float(r["high"]), "low": float(r["low"]), "close": float(r["close"])}})
+   773→    except Exception as e:
+   774→        logger.warning(f"[WS-LIVE] Warmup failed: {e}")
+   775→
+   776→    tf_seconds = {"1m": 5, "5m": 10, "15m": 15, "1h": 30}
+   777→    poll_interval = tf_seconds.get(timeframe, 5)
+   778→    last_candle_ts = 0
+   779→    heartbeat_counter = 0  # ticks every loop iteration; used to throttle heartbeat
+   780→
+   781→    # ─── v0.50.0: ENTREGABLE 11 — Mock Live Test state ────────
+   782→    # The mock injection runs as a separate asyncio task so it fires
+   783→    # independently of the candle poll loop (which may skip iterations
+   784→    # when the same candle timestamp repeats on 1m+ timeframes).
+   785→    mock_task: asyncio.Task | None = None
+   786→    mock_t0 = time.monotonic()
+   787→
+   788→    async def _mock_inject_signals():
+   789→        """Inject fake signals at 10s (entry), 20s (MATCH→BE), 30s (DIVERGE→close)."""
+   790→        nonlocal mock_t0
+   791→        mock_injected_entry = False
+   792→        mock_injected_match = False
+   793→        mock_injected_diverge = False
+   794→
+   795→        while True:
+   796→            await asyncio.sleep(1)  # check every second
+   797→            elapsed = time.monotonic() - mock_t0
+   798→
+   799→            # +10s: Inject ENTRY signal
+   800→            if not mock_injected_entry and elapsed >= 10.0:
+   801→                _ip = _executor_in_position(executor)
+   802→                if not _ip:
+   803→                    mock_injected_entry = True
+   804→                    # Use latest known price from exchange, or a fallback
+   805→                    mock_entry_price = 0.08350  # fallback DOGE price
+   806→                    # Try to get the real current price from the last candle
+   807→                    if last_candle_ts > 0:
+   808→                        pass  # We already have current_price from the poll loop
+   809→
+   810→                    try:
+   811→                        pos = await executor.open_position(
+   812→                            symbol=symbol,
+   813→                            direction="LONG",
+   814→                            size_usdt=allocated_usdt,
+   815→                            metadata={
+   816→                                "entry_price": mock_entry_price,
+   817→                                "expected_move_pct": 1.5,
+   818→                                "predicted_path_symbols": ["a", "b", "c"],
+   819→                            },
+   820→                        )
+   821→                        logger.info(
+   822→                            f"[WS-LIVE-MOCK] INJECTED ENTRY @ {mock_entry_price:.6f} "
+   823→                            f"SL={pos.current_sl:.6f} TP={pos.current_tp:.6f}"
+   824→                        )
+   825→                        await websocket.send_json({"type": "position_update", "data": pos.to_dict()})
+   826→                    except Exception as e:
+   827→                        logger.error(f"[WS-LIVE-MOCK] Failed to inject entry: {e}")
+   828→
+   829→            # +20s: Inject MATCH → SL moves to break-even
+   830→            if mock_injected_entry and not mock_injected_match and elapsed >= 20.0:
+   831→                _ip = _executor_in_position(executor)
+   832→                if _ip:
+   833→                    mock_injected_match = True
+   834→                    pos = _executor_position(executor)
+   835→                    if pos and pos.status == "ACTIVE":
+   836→                        new_sl = pos.entry_price
+   837→                        await executor.update_position(pos, new_sl=new_sl, new_tp=None)
+   838→                        pos.status = "BREAK_EVEN_SECURED"
+   839→                        pos.sequence_index = 1
+   840→                        logger.info(
+   841→                            f"[WS-LIVE-MOCK] INJECTED MATCH → SL→BE "
+   842→                            f"SL={new_sl:.6f} status=BREAK_EVEN_SECURED"
+   843→                        )
+   844→                        await websocket.send_json({"type": "position_update", "data": pos.to_dict()})
+   845→
+   846→            # +30s: Inject DIVERGE → position closes
+   847→            if mock_injected_match and not mock_injected_diverge and elapsed >= 30.0:
+   848→                _ip = _executor_in_position(executor)
+   849→                if _ip:
+   850→                    mock_injected_diverge = True
+   851→                    pos = _executor_position(executor)
+   852→                    if pos and pos.status in ("ACTIVE", "BREAK_EVEN_SECURED", "TP_EXTENDED"):
+   853→                        close_price = pos.current_tp  # close at TP for a positive PnL
+   854→                        logger.warning(
+   855→                            f"[WS-LIVE-MOCK] INJECTED DIVERGENCE → CLOSING @ {close_price:.6f}"
+   856→                        )
+   857→                        closed = await executor.close_position(pos, "CLOSED_BY_DIVERGENCE")
+   858→                        await websocket.send_json({"type": "position_update", "data": closed.to_dict()})
+   859→
+   860→            # Stop after all injections
+   861→            if mock_injected_diverge:
+   862→                logger.info("[WS-LIVE-MOCK] All mock signals injected, task complete")
+   863→                break
+   864→
+   865→    if MOCK_LIVE:
+   866→        mock_task = asyncio.create_task(_mock_inject_signals())
+   867→        logger.info("[WS-LIVE-MOCK] Mock signal injection task started (10s/20s/30s)")
+   868→
+   869→    # ─── 4. Main poll loop — routed execution + Walk-Forward ───
+   870→    try:
+   871→        while True:
+   872→            try:
+   873→                ohlcv_raw = await exchange.fetch_ohlcv(api_symbol, timeframe, limit=2)
+   874→                if not ohlcv_raw:
+   875→                    await asyncio.sleep(poll_interval)
+   876→                    continue
+   877→
+   878→                latest = ohlcv_raw[-1]
+   879→                ts_ms, o, h, l, c, v = latest
+   880→                ts_sec = int(ts_ms / 1000)
+   881→                if ts_sec <= last_candle_ts:
+   882→                    await asyncio.sleep(poll_interval)
+   883→                    continue
+   884→                last_candle_ts = ts_sec
+   885→                current_price = float(c)
+   886→
+   887→                await websocket.send_json({"type": "candle", "data": {"time": ts_sec, "open": float(o), "high": float(h), "low": float(l), "close": float(c)}})
+   888→
+   889→                candle_df = pd.DataFrame(
+   890→                    {"open": [o], "high": [h], "low": [l], "close": [c], "volume": [v]},
+   891→                    index=pd.DatetimeIndex([datetime.fromtimestamp(ts_sec, tz=timezone.utc)]),
+   892→                )
+   893→
+   894→                # Position state — works for any IExecutor
+   895→                _in_pos = _executor_in_position(executor)
+   896→                _entry = _executor_position(executor).entry_price if _in_pos else None
+   897→
+   898→                result = engine.process_new_candle(
+   899→                    candle_df=candle_df, current_price=current_price,
+   900→                    is_in_position=_in_pos, entry_price=_entry,
+   901→                )
+   902→
+   903→                # ─── SAX output log (ENTREGABLE 13 FIX) ───────
+   904→                _sax_buf = getattr(engine, '_streaming_buffer', None)
+   905→                _sax_n1_buf = getattr(engine, '_streaming_buffer_n1', None)
+   906→                _buf_len = len(_sax_buf._pattern_buffer) if _sax_buf else 0
+   907→                _buf_n1_len = len(_sax_n1_buf._pattern_buffer) if _sax_n1_buf else 0
+   908→                _sax_sym = str(_sax_buf._pattern_buffer[-1]) if _sax_buf and _sax_buf._pattern_buffer else "—"
+   909→                logger.info(
+   910→                    f"[WS-LIVE] SAX output: [{_sax_sym}] buf_n3={_buf_len} buf_n1={_buf_n1_len}"
+   911→                    f" result={'YES' if result else 'no'} C={current_price:.6f}"
+   912→                )
+   913→
+   914→                # brain_update (identical logic)
+   915→                current_sax, active_path_ids = [], ["root"]
+   916→                n1_conf, n2_conf, weighted_conf, signal_type = 0.0, 0.0, 0.0, "NO_SIGNAL"
+   917→
+   918→                if result is not None:
+   919→                    if result.sax_symbols:
+   920→                        last_sym = result.sax_symbols[-1]
+   921→                        current_sax = [str(s) for s in last_sym] if isinstance(last_sym, (tuple, list)) else [str(last_sym)]
+   922→                    best_match, best_level = None, None
+   923→                    for level, match in [("n3", result.n3_match), ("n2", result.n2_match), ("n4", result.n4_match), ("n1", result.n1_match)]:
+   924→                        if match and match.node:
+   925→                            conf = match.node.metadata.confidence if match.node.metadata else 0.0
+   926→                            if best_match is None or conf > (best_match.node.metadata.confidence if best_match.node and best_match.node.metadata else 0.0):
+   927→                                best_match, best_level = match, level
+   928→                    if best_match and best_match.node:
+   929→                        active_path_ids = _build_active_path_ids(best_match.node.get_backward_path())
+   930→                    n1_conf, n2_conf, weighted_conf = result.n1_confidence, result.n2_confidence, result.weighted_confidence
+   931→                    signal_type = result.signal.signal_type.value if result.signal else "NO_SIGNAL"
+   932→                else:
+   933→                    buf = getattr(engine, '_streaming_buffer', None)
+   934→                    if buf and buf._pattern_buffer:
+   935→                        last_sym = buf._pattern_buffer[-1]
+   936→                        current_sax = [str(s) for s in last_sym] if isinstance(last_sym, (tuple, list)) else [str(last_sym)]
+   937→                    if buf and buf.has_pattern():
+   938→                        try:
+   939→                            qr = engine.match(current_symbols=buf.get_pattern(), current_price=current_price, is_in_position=_in_pos, entry_price=_entry)
+   940→                            if qr:
+   941→                                n1_conf, n2_conf, weighted_conf = qr.n1_confidence, qr.n2_confidence, qr.weighted_confidence
+   942→                                best_match = None
+   943→                                for level, match in [("n3", qr.n3_match), ("n2", qr.n2_match), ("n4", qr.n4_match), ("n1", qr.n1_match)]:
+   944→                                    if match and match.node:
+   945→                                        conf = match.node.metadata.confidence if match.node.metadata else 0.0
+   946→                                        if best_match is None or conf > (best_match.node.metadata.confidence if best_match.node and best_match.node.metadata else 0.0):
+   947→                                            best_match, best_level = match, level
+   948→                                if best_match and best_match.node:
+   949→                                    active_path_ids = _build_active_path_ids(best_match.node.get_backward_path())
+   950→                        except Exception:
+   951→                            pass
+   952→
+   953→                await websocket.send_json({"type": "brain_update", "data": {"current_sax_symbol": current_sax, "active_path_ids": active_path_ids, "n1_confidence": round(n1_conf, 4), "n2_confidence": round(n2_conf, 4), "weighted_confidence": round(weighted_conf, 4), "signal_type": signal_type}})
+   954→
+   955→                # ── ROUTED EXECUTION: paper vs live ────────────
+   956→                if result and result.signal and result.signal.is_entry and not _in_pos:
+   957→                    sig = result.signal
+   958→                    try:
+   959→                        pos = await executor.open_position(
+   960→                            symbol=symbol,
+   961→                            direction=sig.direction or "LONG",
+   962→                            size_usdt=allocated_usdt,
+   963→                            metadata={
+   964→                                "entry_price": current_price,
+   965→                                "expected_move_pct": sig.expected_move_pct or 1.0,
+   966→                                "predicted_path_symbols": sig.predicted_path_symbols if sig.predicted_path else None,
+   967→                            },
+   968→                        )
+   969→                        logger.info(
+   970→                            f"[WS-LIVE] SIGNAL {sig.signal_type.value} @ {current_price:.6f} "
+   971→                            f"conf={sig.confidence:.3f} SL={pos.current_sl:.6f} TP={pos.current_tp:.6f}"
+   972→                        )
+   973→                        await websocket.send_json({"type": "position_update", "data": pos.to_dict()})
+   974→                    except Exception as e:
+   975→                        logger.error(f"[WS-LIVE] Failed to open position: {e}")
+   976→                        await websocket.send_json({"type": "error", "data": {"message": str(e)}})
+   977→
+   978→                # ── WALK-FORWARD LOOP ──────────────────────────
+   979→                # ENTREGABLE 6: Full position lifecycle monitoring.
+   980→                # On every candle while in position:
+   981→                #   1. Compare current SAX symbol vs expected_sequence[index]
+   982→                #   2. DIVERGE → close position
+   983→                #   3. MATCH  → advance index, move SL/TP
+   984→                #
+   985→                # v0.46.0 FIX: Normalize both sides with _norm_sax() before
+   986→                # comparison to prevent false divergences when one side is a
+   987→                # string ('a') and the other is a list/tuple (['a','x']).
+   988→                if _in_pos and current_sax:
+   989→                    pos = _executor_position(executor)
+   990→                    if pos and pos.sequence_index < len(pos.expected_sequence):
+   991→                        expected = pos.expected_sequence[pos.sequence_index]
+   992→
+   993→                        # Normalize: extract price dimension from both sides
+   994→                        cur_norm = _norm_sax(current_sax[0]) if current_sax else ""
+   995→                        exp_norm = _norm_sax(expected[0]) if expected else ""
+   996→
+   997→                        if cur_norm == exp_norm:
+   998→                            # ── MATCH: Advance sequence ──────────
+   999→                            pos.sequence_index += 1
+  1000→                            idx = pos.sequence_index  # 1-based after increment
+  1001→
+  1002→                            if idx == 1:
+  1003→                                # First match → SL to break-even
+  1004→                                new_sl = pos.entry_price
+  1005→                                await executor.update_position(pos, new_sl=new_sl, new_tp=None)
+  1006→                                pos.status = "BREAK_EVEN_SECURED"
+  1007→                                logger.info(
+  1008→                                    f"[WS-LIVE] Walk-Forward: MATCH #{idx} → SL→BE "
+  1009→                                    f"SL={new_sl:.6f} status=BREAK_EVEN_SECURED"
+  1010→                                )
+  1011→                            else:
+  1012→                                # Subsequent match → Walk the Trie, extend TP
+  1013→                                # Read expected_move from next trie node if available
+  1014→                                # Default extension: 0.5% per matched step
+  1015→                                move_pct = 0.5
+  1016→                                # If the result has node metadata with expected_move, use it
+  1017→                                if result and result.signal and result.signal.expected_move_pct:
+  1018→                                    move_pct = result.signal.expected_move_pct
+  1019→                                extension = pos.entry_price * (move_pct / 100.0)
+  1020→
+  1021→                                if pos.direction == "LONG":
+  1022→                                    new_tp = pos.current_tp + extension
+  1023→                                    if new_tp > pos.current_tp:
+  1024→                                        await executor.update_position(pos, new_sl=None, new_tp=new_tp)
+  1025→                                        pos.status = "TP_EXTENDED"
+  1026→                                else:
+  1027→                                    new_tp = pos.current_tp - extension
+  1028→                                    if new_tp < pos.current_tp:
+  1029→                                        await executor.update_position(pos, new_sl=None, new_tp=new_tp)
+  1030→                                        pos.status = "TP_EXTENDED"
+  1031→
+  1032→                                logger.info(
+  1033→                                    f"[WS-LIVE] Walk-Forward: MATCH #{idx} → TP extended "
+  1034→                                    f"TP={pos.current_tp:.6f} status={pos.status}"
+  1035→                                )
+  1036→
+  1037→                            # Send updated position to frontend (React chart lines move)
+  1038→                            await websocket.send_json({"type": "position_update", "data": pos.to_dict()})
+  1039→
+  1040→                        else:
+  1041→                            # ── DIVERGE: Close position immediately ──
+  1042→                            logger.warning(
+  1043→                                f"[WS-LIVE] Walk-Forward: DIVERGENCE at idx={pos.sequence_index} "
+  1044→                                f"expected={expected} got={current_sax} → CLOSING"
+  1045→                            )
+  1046→                            closed = await executor.close_position(pos, "CLOSED_BY_DIVERGENCE")
+  1047→                            await websocket.send_json({"type": "position_update", "data": closed.to_dict()})
+  1048→
+  1049→                # ── HEARTBEAT: Check if position is still alive on MEXC ──
+  1050→                # v0.47.0: ENTREGABLE 8
+  1051→                # Every 3 iterations (~15-90s depending on timeframe), verify the
+  1052→                # position still exists on MEXC. If MEXC closed it (SL/TP hit
+  1053→                # physically), update local state and notify the frontend.
+  1054→                heartbeat_counter += 1
+  1055→                if _in_pos and heartbeat_counter % 3 == 0:
+  1056→                    pos = _executor_position(executor)
+  1057→                    if pos and isinstance(executor, MexcFuturesExecutor):
+  1058→                        alive = await executor.check_position_alive(symbol)
+  1059→                        if alive is None:
+  1060→                            # MEXC closed the position — determine why
+  1061→                            close_reason = "CLOSED_BY_SL"  # default assumption
+  1062→                            if pos.direction == "LONG":
+  1063→                                if current_price >= pos.current_tp:
+  1064→                                    close_reason = "CLOSED_BY_TP"
+  1065→                                elif current_price <= pos.catastrophic_sl:
+  1066→                                    close_reason = "CLOSED_CATASTROPHIC"
+  1067→                            else:
+  1068→                                if current_price <= pos.current_tp:
+  1069→                                    close_reason = "CLOSED_BY_TP"
+  1070→                                elif current_price >= pos.catastrophic_sl:
+  1071→                                    close_reason = "CLOSED_CATASTROPHIC"
+  1072→
+  1073→                            pos.close_price = current_price
+  1074→                            pos.close_reason = close_reason
+  1075→                            pos.status = close_reason
+  1076→                            if pos.direction == "LONG":
+  1077→                                pos.pnl_pct = ((current_price - pos.entry_price) / pos.entry_price) * 100.0
+  1078→                            else:
+  1079→                                pos.pnl_pct = ((pos.entry_price - current_price) / pos.entry_price) * 100.0
+  1080→                            pos.pnl_usdt = pos.size_usdt * (pos.pnl_pct / 100.0)
+  1081→
+  1082→                            # Remove from executor's internal tracking
+  1083→                            executor._positions.pop(symbol, None)
+  1084→
+  1085→                            logger.warning(
+  1086→                                f"[WS-LIVE] HEARTBEAT: MEXC closed position! "
+  1087→                                f"reason={close_reason} @ {current_price:.6f} "
+  1088→                                f"PnL={pos.pnl_pct:+.2f}%"
+  1089→                            )
+  1090→                            await websocket.send_json({"type": "position_update", "data": pos.to_dict()})
+  1091→                        elif isinstance(alive, dict) and alive.get("_error"):
+  1092→                            logger.debug("[WS-LIVE] Heartbeat API failed — skipping this cycle")
+  1093→
+  1094→                # ── Check SL/TP hit (price-based) ──────────────
+  1095→                if _in_pos:
+  1096→                    pos = _executor_position(executor)
+  1097→                    if pos and pos.status in ("ACTIVE", "BREAK_EVEN_SECURED", "TP_EXTENDED"):
+  1098→                        hit = False
+  1099→                        close_reason = None
+  1100→                        if pos.direction == "LONG":
+  1101→                            if current_price <= pos.catastrophic_sl:
+  1102→                                hit, close_reason = True, "CLOSED_CATASTROPHIC"
+  1103→                            elif current_price <= pos.current_sl:
+  1104→                                hit, close_reason = True, "CLOSED_BY_SL"
+  1105→                            elif current_price >= pos.current_tp:
+  1106→                                hit, close_reason = True, "CLOSED_BY_TP"
+  1107→                        else:
+  1108→                            if current_price >= pos.catastrophic_sl:
+  1109→                                hit, close_reason = True, "CLOSED_CATASTROPHIC"
+  1110→                            elif current_price >= pos.current_sl:
+  1111→                                hit, close_reason = True, "CLOSED_BY_SL"
+  1112→                            elif current_price <= pos.current_tp:
+  1113→                                hit, close_reason = True, "CLOSED_BY_TP"
+  1114→
+  1115→                        if hit and close_reason:
+  1116→                            closed = await executor.close_position(pos, close_reason)
+  1117→                            logger.info(
+  1118→                                f"[WS-LIVE] CLOSED: {closed.status} @ {current_price:.6f} "
+  1119→                                f"PnL={closed.pnl_pct:+.2f}% (${closed.pnl_usdt:+.2f})"
+  1120→                            )
+  1121→                            await websocket.send_json({"type": "position_update", "data": closed.to_dict()})
+  1122→
+  1123→            except WebSocketDisconnect:
+  1124→                break
+  1125→            except Exception as e:
+  1126→                logger.error(f"[WS-LIVE] Poll loop error: {e}", exc_info=True)
+  1127→
+  1128→            await asyncio.sleep(poll_interval)
+  1129→    except WebSocketDisconnect:
+  1130→        pass
+  1131→    finally:
+  1132→        # Cancel mock injection task if running
+  1133→        if mock_task and not mock_task.done():
+  1134→            mock_task.cancel()
+  1135→            try:
+  1136→                await mock_task
+  1137→            except asyncio.CancelledError:
+  1138→                pass
+  1139→        try:
+  1140→            await exchange.close()
+  1141→        except Exception:
+  1142→            pass
+  1143→        if isinstance(executor, MexcFuturesExecutor):
+  1144→            await executor.close()
+  1145→        logger.info(f"[WS-LIVE] Session closed: {symbol}/{timeframe}")
+  1146→
+  1147→
+  1148→# ─── Run directly ─────────────────────────────────────────────
+  1149→if __name__ == "__main__":
+  1150→    import uvicorn
+  1151→    uvicorn.run(app, host="0.0.0.0", port=8000)
+  1152→

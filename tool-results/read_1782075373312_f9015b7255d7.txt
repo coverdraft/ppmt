@@ -1,0 +1,1152 @@
+     1→"""
+     2→PPMT V2 Terminal — FastAPI WebSocket Bridge.
+     3→
+     4→This server provides the real-time bridge between the PPMT Python engine
+     5→and the React terminal frontend. It exposes a single WebSocket endpoint
+     6→per token that streams candle, brain, and position updates.
+     7→
+     8→v0.50.0: ENTREGABLE 11 — Proxy/VPN URL support + Mock Live Test mode.
+     9→
+    10→Usage:
+    11→    uvicorn ppmt.terminal.v2_server:app --host 0.0.0.0 --port 8000 --reload
+    12→"""
+    13→
+    14→from __future__ import annotations
+    15→
+    16→import asyncio
+    17→import json
+    18→import logging
+    19→import os
+    20→import time
+    21→from datetime import datetime, timezone
+    22→from typing import Optional
+    23→
+    24→import pandas as pd
+    25→from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+    26→from fastapi.middleware.cors import CORSMiddleware
+    27→
+    28→from ppmt.data.storage import PPMTStorage
+    29→from ppmt.engine.ppmt import PPMT, PPMTResult
+    30→from ppmt.terminal.paper_executor import PaperExecutor
+    31→from ppmt.execution.models import PositionState, PositionStatus
+    32→from ppmt.execution.interfaces import IExecutor
+    33→from ppmt.execution.mexc_futures import MexcFuturesExecutor
+    34→from ppmt.execution.crypto import decrypt_auth_payload
+    35→
+    36→logger = logging.getLogger("ppmt.v2")
+    37→logging.basicConfig(
+    38→    level=logging.INFO,
+    39→    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    40→    datefmt="%H:%M:%S",
+    41→)
+    42→
+    43→# ─── Helpers ──────────────────────────────────────────────────
+    44→
+    45→def _sax_symbol_to_str(sym) -> str:
+    46→    """Convert a SAX symbol (str or tuple) to a pure string.
+    47→    
+    48→    Single: 'a' → 'a'
+    49→    Dual:   ('a', 'x') → 'a'  (price symbol only, for path IDs)
+    50→    """
+    51→    if isinstance(sym, tuple):
+    52→        return str(sym[0])  # price symbol
+    53→    return str(sym)
+    54→
+    55→
+    56→def _sax_symbol_to_json(sym) -> list[str] | str:
+    57→    """Convert a SAX symbol to JSON-safe format.
+    58→    
+    59→    Single: 'a' → 'a'
+    60→    Dual:   ('a', 'x') → ['a', 'x']  (pure JSON string array)
+    61→    """
+    62→    if isinstance(sym, tuple):
+    63→        return [str(s) for s in sym]
+    64→    return str(sym)
+    65→
+    66→
+    67→def _build_active_path_ids(backward_path: list) -> list[str]:
+    68→    """Build cumulative path IDs from a backward path.
+    69→    
+    70→    backward_path: ['a', 'b', 'c'] or [('a','x'), ('b','y'), ('c','z')]
+    71→    Result: ["root", "a", "a-b", "a-b-c"]
+    72→    """
+    73→    ids = ["root"]
+    74→    cumulative = []
+    75→    for sym in backward_path:
+    76→        key = _sax_symbol_to_str(sym)
+    77→        cumulative.append(key)
+    78→        ids.append("-".join(cumulative))
+    79→    return ids
+    80→
+    81→
+    82→# ─── App ──────────────────────────────────────────────────────
+    83→app = FastAPI(title="PPMT V2 Terminal", version="2.0.0")
+    84→
+    85→app.add_middleware(
+    86→    CORSMiddleware,
+    87→    allow_origins=["*"],
+    88→    allow_methods=["*"],
+    89→    allow_headers=["*"],
+    90→)
+    91→
+    92→# ─── Global state ─────────────────────────────────────────────
+    93→_storage: Optional[PPMTStorage] = None
+    94→
+    95→# v0.50.0: ENTREGABLE 11 — Mock Live Test mode.
+    96→# When PPMT_MOCK_LIVE=1, the live-trading endpoint uses PaperExecutor
+    97→# instead of MexcFuturesExecutor, and injects fake signals to test the
+    98→# frontend chart + position card lifecycle without real money.
+    99→MOCK_LIVE = os.environ.get("PPMT_MOCK_LIVE", "0") == "1"
+   100→if MOCK_LIVE:
+   101→    logger.warning("⚠️  PPMT_MOCK_LIVE=1 — Live trading uses PaperExecutor (NO REAL MONEY)")
+   102→
+   103→
+   104→def get_storage() -> PPMTStorage:
+   105→    global _storage
+   106→    if _storage is None:
+   107→        _storage = PPMTStorage()
+   108→    return _storage
+   109→
+   110→
+   111→# ─── REST: Health check ───────────────────────────────────────
+   112→@app.get("/api/health")
+   113→async def health():
+   114→    return {"status": "ok", "version": "2.0.0"}
+   115→
+   116→
+   117→# ─── REST: Available symbols ─────────────────────────────────
+   118→@app.get("/api/symbols")
+   119→async def list_symbols():
+   120→    storage = get_storage()
+   121→    assets = storage.get_assets()
+   122→    return {"symbols": [a["symbol"] for a in assets]}
+   123→
+   124→
+   125→# ─── WebSocket: Paper Live ────────────────────────────────────
+   126→@app.websocket("/ws/paper-live/{symbol}/{timeframe}")
+   127→async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str):
+   128→    """
+   129→    Real-time paper trading WebSocket.
+   130→
+   131→    Flow:
+   132→    1. Accept connection
+   133→    2. Load tries from SQLite, warmup engine with historical data
+   134→    3. Poll loop: fetch candle from exchange → feed PPMT → emit messages
+   135→    """
+   136→
+   137→    await websocket.accept()
+   138→    
+   139→    # Normalize symbol: URL path uses "DOGE-USDT" (no slashes in URL segments)
+   140→    # Convert to internal format "DOGE/USDT" and API format "DOGEUSDT"
+   141→    internal_symbol = symbol.replace("-", "/")  # "DOGE-USDT" → "DOGE/USDT"
+   142→    api_symbol = internal_symbol.replace("/", "")  # "DOGE/USDT" → "DOGEUSDT"
+   143→    symbol = internal_symbol
+   144→    
+   145→    logger.info(f"[WS] Connected: {symbol}/{timeframe}")
+   146→    storage = get_storage()
+   147→
+   148→    # ─── 1. Initialize PPMT Engine ────────────────────────────
+   149→    try:
+   150→        # FIX #1: AssetClassifier.classify() returns AssetInfo object, NOT dict
+   151→        asset_class = "meme"  # Default fallback
+   152→        weight_profile = "meme"
+   153→        try:
+   154→            from ppmt.data.classifier import AssetClassifier
+   155→            classifier = AssetClassifier()
+   156→            info = classifier.classify(symbol)
+   157→            asset_class = info.asset_class       # NOT info.get("asset_class")
+   158→            weight_profile = info.weight_profile  # Also extract weight_profile
+   159→            logger.info(f"[WS] Classified: {symbol} → asset_class={asset_class}, weight_profile={weight_profile}")
+   160→        except Exception as e:
+   161→            logger.warning(f"[WS] AssetClassifier unavailable ({e}), defaulting to 'meme'")
+   162→
+   163→        engine = PPMT(
+   164→            symbol=symbol,
+   165→            asset_class=asset_class,
+   166→            weight_profile=weight_profile,   # Pass correct weight_profile
+   167→            dual_sax=True,
+   168→            min_confidence=0.08,
+   169→            timeframe=timeframe,             # Pass timeframe for correct SAX params
+   170→        )
+   171→
+   172→        # Load pre-built tries from SQLite — MANDATORY for PPMT
+   173→        tries = storage.load_all_tries(symbol, asset_class)
+   174→        
+   175→        # Log what we loaded with pattern counts
+   176→        n1 = tries.get("n1")
+   177→        n2 = tries.get("n2")
+   178→        n3 = tries.get("n3")
+   179→        n4 = tries.get("n4")
+   180→        
+   181→        n1_count = n1.pattern_count if n1 else 0
+   182→        n2_count = n2.pattern_count if n2 else 0
+   183→        n3_count = n3.pattern_count if n3 else 0
+   184→        n4_count = n4.pattern_count if hasattr(n4, 'pattern_count') and n4 else 0
+   185→        
+   186→        logger.info(
+   187→            f"[WS] Loaded N1: {n1_count} patterns, "
+   188→            f"N2: {n2_count} patterns, "
+   189→            f"N3: {n3_count} patterns, "
+   190→            f"N4: {n4_count} patterns"
+   191→        )
+   192→        
+   193→        if n1 or n2 or n3:
+   194→            # N4 may be None — keep the default RegimePartitionedTrie instead
+   195→            from ppmt.core.trie import PPMTTrie, RegimePartitionedTrie
+   196→            # v0.49.0 (FASE 3 BUG 3): DO NOT fall back to engine.trie_n1/n2 —
+   197→            # those are empty in storage mode and would mask a missing shared pool.
+   198→            # Use empty tries + WARNING instead (same as realtime.py FIX-1B).
+   199→            _n1 = n1 if n1 is not None else None
+   200→            _n2 = n2 if n2 is not None else None
+   201→            if _n1 is None:
+   202→                _n1 = PPMTTrie(name="universal_empty")
+   203→                logger.warning(f"[WS] N1 universal pool not found for {symbol}. Using empty trie — confidence will be 0.")
+   204→            if _n2 is None:
+   205→                _n2 = PPMTTrie(name=f"class_empty:{asset_class}")
+   206→                logger.warning(f"[WS] N2 class pool not found for {asset_class}. Using empty trie — confidence will be 0.")
+   207→            engine.set_tries(
+   208→                trie_n1=_n1,
+   209→                trie_n2=_n2,
+   210→                trie_n3=n3 or PPMTTrie(name="n3_empty"),
+   211→                trie_n4=n4 if n4 is not None else engine.trie_n4,
+   212→            )
+   213→            logger.info(f"[WS] Tries injected into engine — Transfer Learning ACTIVE")
+   214→        else:
+   215→            logger.warning(f"[WS] No tries found for {symbol}/{asset_class}, engine runs without tries")
+   216→
+   217→    except Exception as e:
+   218→        import traceback
+   219→        logger.error(f"[WS] Engine init failed: {e}")
+   220→        traceback.print_exc()
+   221→        await websocket.send_json({"type": "error", "data": {"message": f"Engine init failed: {e}"}})
+   222→        await websocket.close()
+   223→        return
+   224→
+   225→    # ─── 2. Initialize PaperExecutor (via IExecutor interface) ──
+   226→    # v0.49.0 (FASE 3 BUG 2): Ensure clean state on new WS session.
+   227→    # Previously, if a session restarted, stale position data from
+   228→    # a prior session could leak through. Now we explicitly reset.
+   229→    executor: IExecutor = PaperExecutor(capital_usdt=100.0)
+   230→    executor._position = None  # Force FLAT state
+   231→
+   232→    # ─── 3. Initialize Exchange Poller ────────────────────────
+   233→    from ppmt.engine.realtime import _DirectPollExchange
+   234→    exchange = _DirectPollExchange("binance")
+   235→
+   236→    # ─── 4. Warmup: Load historical candles into engine ───────
+   237→    warmup_count = 0
+   238→    try:
+   239→        ohlcv_raw = await exchange.fetch_ohlcv(api_symbol, timeframe, limit=500)
+   240→        if ohlcv_raw:
+   241→            # Convert to DataFrame
+   242→            df = pd.DataFrame(ohlcv_raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
+   243→            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+   244→            df.set_index("timestamp", inplace=True)
+   245→
+   246→            # Feed all but the last candle for warmup
+   247→            for i in range(len(df) - 1):
+   248→                row = df.iloc[[i]]
+   249→                result = engine.process_new_candle(
+   250→                    candle_df=row,
+   251→                    current_price=float(row["close"].iloc[0]),
+   252→                )
+   253→                if result is not None:
+   254→                    warmup_count += 1
+   255→
+   256→            # Send the last 50 candles to the frontend for chart display
+   257→            for i in range(max(0, len(df) - 50), len(df)):
+   258→                r = df.iloc[i]
+   259→                await websocket.send_json({
+   260→                    "type": "candle",
+   261→                    "data": {
+   262→                        "time": int(df.index[i].timestamp()) if isinstance(df.index[i], pd.Timestamp) else int(df.index[i]),
+   263→                        "open": float(r["open"]),
+   264→                        "high": float(r["high"]),
+   265→                        "low": float(r["low"]),
+   266→                        "close": float(r["close"]),
+   267→                    },
+   268→                })
+   269→
+   270→            logger.info(f"[WS] Warmup complete: {len(df)} candles, {warmup_count} SAX outputs")
+   271→            # Log SAX buffer state after warmup to verify engine is alive
+   272→            _w_buf = getattr(engine, '_streaming_buffer', None)
+   273→            _w_n1 = getattr(engine, '_streaming_buffer_n1', None)
+   274→            _w_len = len(_w_buf._pattern_buffer) if _w_buf else 0
+   275→            _w_n1_len = len(_w_n1._pattern_buffer) if _w_n1 else 0
+   276→            logger.info(
+   277→                f"[WS] Post-warmup SAX: buf_n3={_w_len} symbols, buf_n1={_w_n1_len} symbols"
+   278→            )
+   279→    except Exception as e:
+   280→        logger.warning(f"[WS] Warmup fetch failed: {e}. Continuing without historical data.")
+   281→
+   282→    # ─── 5. Polling interval ─────────────────────────────────
+   283→    tf_seconds = {"1m": 5, "5m": 10, "15m": 15, "1h": 30}
+   284→    poll_interval = tf_seconds.get(timeframe, 5)
+   285→
+   286→    last_candle_ts = 0
+   287→
+   288→    # ─── 6. Main poll loop ────────────────────────────────────
+   289→    try:
+   290→        while True:
+   291→            try:
+   292→                # Fetch latest candle
+   293→                ohlcv_raw = await exchange.fetch_ohlcv(api_symbol, timeframe, limit=2)
+   294→
+   295→                if not ohlcv_raw:
+   296→                    await asyncio.sleep(poll_interval)
+   297→                    continue
+   298→
+   299→                # Get the most recent closed candle
+   300→                latest = ohlcv_raw[-1]
+   301→                ts_ms, o, h, l, c, v = latest
+   302→                ts_sec = int(ts_ms / 1000)
+   303→
+   304→                # Skip if we've already processed this candle
+   305→                if ts_sec <= last_candle_ts:
+   306→                    await asyncio.sleep(poll_interval)
+   307→                    continue
+   308→
+   309→                last_candle_ts = ts_sec
+   310→                current_price = float(c)
+   311→
+   312→                # ─── Emit candle to frontend ──────────────────
+   313→                candle_msg = {
+   314→                    "type": "candle",
+   315→                    "data": {
+   316→                        "time": ts_sec,
+   317→                        "open": float(o),
+   318→                        "high": float(h),
+   319→                        "low": float(l),
+   320→                        "close": float(c),
+   321→                    },
+   322→                }
+   323→                await websocket.send_json(candle_msg)
+   324→                logger.info(
+   325→                    f"[WS] Candle: ts={ts_sec} C={float(c):.6f} ({symbol})"
+   326→                )
+   327→
+   328→                # ─── Feed to PPMT engine ──────────────────────
+   329→                candle_df = pd.DataFrame(
+   330→                    {"open": [o], "high": [h], "low": [l], "close": [c], "volume": [v]},
+   331→                    index=pd.DatetimeIndex([datetime.fromtimestamp(ts_sec, tz=timezone.utc)]),
+   332→                )
+   333→
+   334→                result: Optional[PPMTResult] = engine.process_new_candle(
+   335→                    candle_df=candle_df,
+   336→                    current_price=current_price,
+   337→                    is_in_position=executor.is_in_position,
+   338→                    entry_price=executor.position.entry_price if executor.position else None,
+   339→                )
+   340→
+   341→                # ─── SAX output log (ENTREGABLE 13 FIX) ───────
+   342→                # Log current SAX buffer state on EVERY candle so we can
+   343→                # verify the engine keeps thinking after warmup.
+   344→                _sax_buf = getattr(engine, '_streaming_buffer', None)
+   345→                _sax_n1_buf = getattr(engine, '_streaming_buffer_n1', None)
+   346→                _buf_len = len(_sax_buf._pattern_buffer) if _sax_buf else 0
+   347→                _buf_n1_len = len(_sax_n1_buf._pattern_buffer) if _sax_n1_buf else 0
+   348→                _sax_sym = str(_sax_buf._pattern_buffer[-1]) if _sax_buf and _sax_buf._pattern_buffer else "—"
+   349→                logger.info(
+   350→                    f"[WS] SAX output: [{_sax_sym}] buf_n3={_buf_len} buf_n1={_buf_n1_len}"
+   351→                    f" result={'YES' if result else 'no'} C={current_price:.6f}"
+   352→                )
+   353→
+   354→                # ─── Emit brain_update ────────────────────────
+   355→                # FIX #2: SAX serialization — decompose tuples into pure JSON string arrays
+   356→                # FIX #3: Build active_path_ids from matched Trie nodes
+   357→                #
+   358→                # IMPORTANT: process_new_candle() only returns a PPMTResult when
+   359→                # a SAX window completes (every W=45 candles for 1m). We must
+   360→                # extract the current SAX state from the engine's streaming buffers
+   361→                # on EVERY candle so the frontend gets continuous updates.
+   362→                current_sax = []
+   363→                active_path_ids = ["root"]
+   364→                n1_conf = 0.0
+   365→                n2_conf = 0.0
+   366→                weighted_conf = 0.0
+   367→                signal_type = "NO_SIGNAL"
+   368→                _last_best_level = None  # Track last known active path level
+   369→
+   370→                if result is not None:
+   371→                    # A SAX window completed — extract full match data
+   372→                    # Current SAX symbol(s) — extract last symbol, decompose tuples
+   373→                    if result.sax_symbols:
+   374→                        last_sym = result.sax_symbols[-1]
+   375→                        if isinstance(last_sym, tuple):
+   376→                            current_sax = [str(s) for s in last_sym]
+   377→                        elif isinstance(last_sym, list):
+   378→                            current_sax = [str(s) for s in last_sym]
+   379→                        else:
+   380→                            current_sax = [str(last_sym)]
+   381→
+   382→                    # Active path from match results — build cumulative path IDs
+   383→                    best_match = None
+   384→                    best_level = None
+   385→                    for level, match in [
+   386→                        ("n3", result.n3_match),
+   387→                        ("n2", result.n2_match),
+   388→                        ("n4", result.n4_match),
+   389→                        ("n1", result.n1_match),
+   390→                    ]:
+   391→                        if match and match.node:
+   392→                            conf = match.node.metadata.confidence if match.node.metadata else 0.0
+   393→                            if best_match is None or conf > (best_match.node.metadata.confidence if best_match.node and best_match.node.metadata else 0.0):
+   394→                                best_match = match
+   395→                                best_level = level
+   396→                    
+   397→                    if best_match and best_match.node:
+   398→                        backward_path = best_match.node.get_backward_path()
+   399→                        active_path_ids = _build_active_path_ids(backward_path)
+   400→                        _last_best_level = best_level
+   401→                        logger.info(
+   402→                            f"[WS] Active path ({best_level}): {active_path_ids} "
+   403→                            f"conf={f'{best_match.node.metadata.confidence:.3f}' if best_match.node.metadata else '0.000'}"
+   404→                        )
+   405→
+   406→                    n1_conf = result.n1_confidence
+   407→                    n2_conf = result.n2_confidence
+   408→                    weighted_conf = result.weighted_confidence
+   409→                    signal_type = result.signal.signal_type.value if result.signal else "NO_SIGNAL"
+   410→                else:
+   411→                    # No SAX window completed this candle — still extract
+   412→                    # current buffer state so the frontend shows partial progress
+   413→                    buf = getattr(engine, '_streaming_buffer', None)
+   414→                    buf_n1 = getattr(engine, '_streaming_buffer_n1', None)
+   415→                    buf_n2 = getattr(engine, '_streaming_buffer_n2', None)
+   416→                    
+   417→                    if buf and buf._pattern_buffer:
+   418→                        last_sym = buf._pattern_buffer[-1]
+   419→                        if isinstance(last_sym, tuple):
+   420→                            current_sax = [str(s) for s in last_sym]
+   421→                        else:
+   422→                            current_sax = [str(last_sym)]
+   423→                    
+   424→                    # Re-run a quick match on current buffer state to get active_path
+   425→                    if buf and buf.has_pattern():
+   426→                        try:
+   427→                            current_pattern_n3 = buf.get_pattern()
+   428→                            current_pattern_n1 = buf_n1.get_pattern() if buf_n1 else None
+   429→                            current_pattern_n2 = buf_n2.get_pattern() if buf_n2 else None
+   430→                            
+   431→                            quick_result = engine.match(
+   432→                                current_symbols=current_pattern_n3,
+   433→                                current_price=current_price,
+   434→                                is_in_position=executor.is_in_position,
+   435→                                entry_price=executor.position.entry_price if executor.position else None,
+   436→                                current_symbols_n1=current_pattern_n1 or None,
+   437→                                current_symbols_n2=current_pattern_n2 or None,
+   438→                                current_symbols_n3=current_pattern_n3,
+   439→                            )
+   440→                            if quick_result:
+   441→                                n1_conf = quick_result.n1_confidence
+   442→                                n2_conf = quick_result.n2_confidence
+   443→                                weighted_conf = quick_result.weighted_confidence
+   444→                                
+   445→                                # Find best match for active path
+   446→                                best_match = None
+   447→                                best_level = None
+   448→                                for level, match in [
+   449→                                    ("n3", quick_result.n3_match),
+   450→                                    ("n2", quick_result.n2_match),
+   451→                                    ("n4", quick_result.n4_match),
+   452→                                    ("n1", quick_result.n1_match),
+   453→                                ]:
+   454→                                    if match and match.node:
+   455→                                        conf = match.node.metadata.confidence if match.node.metadata else 0.0
+   456→                                        if best_match is None or conf > (best_match.node.metadata.confidence if best_match.node and best_match.node.metadata else 0.0):
+   457→                                            best_match = match
+   458→                                            best_level = level
+   459→                                
+   460→                                if best_match and best_match.node:
+   461→                                    backward_path = best_match.node.get_backward_path()
+   462→                                    active_path_ids = _build_active_path_ids(backward_path)
+   463→                                    _last_best_level = best_level
+   464→                                    logger.info(
+   465→                                        f"[WS] Quick match ({best_level}): path={active_path_ids} "
+   466→                                        f"n1={n1_conf:.3f} n2={n2_conf:.3f} wconf={weighted_conf:.3f}"
+   467→                                    )
+   468→                        except Exception as e:
+   469→                            logger.debug(f"[WS] Quick match failed: {e}")
+   470→                    else:
+   471→                        logger.debug(f"[WS] No pattern in buffer yet (buf={buf is not None}, symbols={len(buf._pattern_buffer) if buf else 0})")
+   472→
+   473→                brain_msg = {
+   474→                    "type": "brain_update",
+   475→                    "data": {
+   476→                        "current_sax_symbol": current_sax,
+   477→                        "active_path_ids": active_path_ids,
+   478→                        "n1_confidence": round(n1_conf, 4),
+   479→                        "n2_confidence": round(n2_conf, 4),
+   480→                        "weighted_confidence": round(weighted_conf, 4),
+   481→                        "signal_type": signal_type,
+   482→                    },
+   483→                }
+   484→                await websocket.send_json(brain_msg)
+   485→
+   486→                # ─── Signal → Routed execution ────────────────
+   487→                # PAPER: await executor.open_position() → in-memory
+   488→                # LIVE:  await executor.open_position() → MEXC API
+   489→                # Same IExecutor interface, different backend.
+   490→                if result and result.signal and result.signal.is_entry and not (isinstance(executor, PaperExecutor) and executor.is_in_position):
+   491→                    sig = result.signal
+   492→                    try:
+   493→                        pos = await executor.open_position(
+   494→                            symbol=symbol,
+   495→                            direction=sig.direction or "LONG",
+   496→                            size_usdt=100.0,
+   497→                            metadata={
+   498→                                "entry_price": current_price,
+   499→                                "expected_move_pct": sig.expected_move_pct or 1.0,
+   500→                                "predicted_path_symbols": sig.predicted_path_symbols if sig.predicted_path else None,
+   501→                            },
+   502→                        )
+   503→                        logger.info(
+   504→                            f"[WS] SIGNAL {sig.signal_type.value} @ {current_price:.6f} "
+   505→                            f"conf={sig.confidence:.3f} SL={pos.current_sl:.6f} TP={pos.current_tp:.6f}"
+   506→                        )
+   507→                        await websocket.send_json({
+   508→                            "type": "position_update",
+   509→                            "data": pos.to_dict(),
+   510→                        })
+   511→                    except Exception as e:
+   512→                        logger.error(f"[WS] Failed to open position: {e}")
+   513→
+   514→                # ─── Walk-Forward check ───────────────────────
+   515→                if result and executor.is_in_position and current_sax:
+   516→                    updated = executor.check_walk_forward(current_sax, current_price)
+   517→                    if updated:
+   518→                        logger.info(
+   519→                            f"[WS] Walk-Forward: seq_idx={updated.sequence_index} "
+   520→                            f"status={updated.status} SL={updated.current_sl:.6f} TP={updated.current_tp:.6f}"
+   521→                        )
+   522→                        await websocket.send_json({
+   523→                            "type": "position_update",
+   524→                            "data": updated.to_dict(),
+   525→                        })
+   526→
+   527→                # ─── Check SL/TP hit ──────────────────────────
+   528→                if executor.is_in_position:
+   529→                    closed = executor.check_price(current_price)
+   530→                    if closed:
+   531→                        logger.info(
+   532→                            f"[WS] CLOSED: {closed.status} @ {closed.close_price:.6f} "
+   533→                            f"PnL={closed.pnl_pct:+.2f}% (${closed.pnl_usdt:+.2f})"
+   534→                        )
+   535→                        await websocket.send_json({
+   536→                            "type": "position_update",
+   537→                            "data": closed.to_dict(),
+   538→                        })
+   539→
+   540→            except WebSocketDisconnect:
+   541→                logger.info(f"[WS] Client disconnected: {symbol}/{timeframe}")
+   542→                break
+   543→            except Exception as e:
+   544→                logger.error(f"[WS] Poll loop error: {e}", exc_info=True)
+   545→                try:
+   546→                    await websocket.send_json({"type": "error", "data": {"message": str(e)}})
+   547→                except Exception:
+   548→                    break
+   549→
+   550→            await asyncio.sleep(poll_interval)
+   551→
+   552→    except WebSocketDisconnect:
+   553→        pass
+   554→    finally:
+   555→        try:
+   556→            await exchange.close()
+   557→        except Exception:
+   558→            pass
+   559→        logger.info(f"[WS] Session closed: {symbol}/{timeframe}")
+   560→
+   561→
+   562→# ─── WebSocket: Live Trading (MEXC Futures) ───────────────────
+   563→# v0.45.0: ENTREGABLE 6 — Encrypted credentials + Walk-Forward Loop
+   564→
+   565→# Helper: normalize a SAX symbol (str, list, or tuple) to a flat string
+   566→# for safe comparison across trie levels (N1/N2 produce str, N3/N4 produce tuple).
+   567→def _norm_sax(sym) -> str:
+   568→    """Normalize a SAX symbol to a flat string for comparison.
+   569→    
+   570→    'a'       → 'a'
+   571→    ['d','x'] → 'd'   (price dimension only)
+   572→    ('a','y') → 'a'
+   573→    """
+   574→    if isinstance(sym, (tuple, list)):
+   575→        return str(sym[0])  # price symbol only
+   576→    return str(sym)
+   577→
+   578→
+   579→# Helper: check if any IExecutor has an active position
+   580→def _executor_in_position(executor: IExecutor) -> bool:
+   581→    """Check if executor has an active (open) position — works for all IExecutor impls."""
+   582→    if isinstance(executor, PaperExecutor):
+   583→        return executor.is_in_position
+   584→    # MexcFuturesExecutor and future impls store current position
+   585→    pos = getattr(executor, '_position', None) or getattr(executor, 'position', None)
+   586→    return pos is not None and pos.status in ("ACTIVE", "BREAK_EVEN_SECURED", "TP_EXTENDED")
+   587→
+   588→
+   589→def _executor_position(executor: IExecutor) -> Optional[PositionState]:
+   590→    """Get current position from any IExecutor — works for all impls."""
+   591→    if isinstance(executor, PaperExecutor):
+   592→        return executor.position
+   593→    return getattr(executor, '_position', None) or getattr(executor, 'position', None)
+   594→
+   595→
+   596→@app.websocket("/ws/live-trading/{symbol}/{timeframe}")
+   597→async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: str):
+   598→    """
+   599→    Real-money trading WebSocket via MEXC Futures.
+   600→
+   601→    v0.45.0: ENTREGABLE 6
+   602→    - Credentials are Fernet-encrypted in transit.
+   603→    - Full Walk-Forward Loop monitors open positions on every candle.
+   604→    - Divergence → close. Match → advance SL/TP along expected sequence.
+   605→
+   606→    Auth flow:
+   607→      1. Frontend encrypts api_key + api_secret with Fernet using a key
+   608→         derived from the user's session password (PBKDF2-SHA256).
+   609→      2. Frontend sends: {"type":"auth", "api_key":"<enc>", "api_secret":"<enc>",
+   610→         "session_password_hash":"<sha256_hex>"}
+   611→      3. Backend decrypts, instantiates MexcFuturesExecutor, zeroes plaintext.
+   612→    """
+   613→
+   614→    await websocket.accept()
+   615→
+   616→    # ─── 1. Instantiate executor ────────────────────────────────
+   617→    # v0.50.0: ENTREGABLE 11 — If PPMT_MOCK_LIVE=1, use PaperExecutor
+   618→    # instead of MexcFuturesExecutor to test the frontend without real money.
+   619→    # Injected signals: entry at 10s, MATCH at 20s, DIVERGE at 30s.
+   620→    allocated_usdt: float = 100.0
+   621→    custom_base_url: str = ""
+   622→
+   623→    if MOCK_LIVE:
+   624→        # ── MOCK MODE: Skip auth entirely, use PaperExecutor ──
+   625→        logger.info("[WS-LIVE-MOCK] Using PaperExecutor (Mock Live Test mode)")
+   626→        executor: IExecutor = PaperExecutor(capital_usdt=allocated_usdt)
+   627→        executor._position = None  # v0.49.0 (FASE 3 BUG 2): Force clean state
+   628→
+   629→        # Still send auth_ok so the frontend proceeds to config
+   630→        await websocket.send_json({"type": "auth_ok"})
+   631→
+   632→        # Read config message (allocated_usdt + optional custom_base_url)
+   633→        try:
+   634→            config_raw = await asyncio.wait_for(websocket.receive_json(), timeout=10.0)
+   635→            if config_raw.get("type") == "config":
+   636→                allocated_usdt = float(config_raw.get("allocated_usdt", 100.0))
+   637→                if allocated_usdt <= 0:
+   638→                    allocated_usdt = 100.0
+   639→                custom_base_url = str(config_raw.get("custom_base_url", "")).strip()
+   640→                logger.info(f"[WS-LIVE-MOCK] Config: allocated_usdt={allocated_usdt}, custom_base_url={'<set>' if custom_base_url else '<default>'}")
+   641→        except asyncio.TimeoutError:
+   642→            logger.warning("[WS-LIVE-MOCK] No config message received")
+   643→
+   644→        # Update PaperExecutor capital with the user's allocated amount
+   645→        if isinstance(executor, PaperExecutor):
+   646→            executor.capital_usdt = allocated_usdt
+   647→
+   648→    else:
+   649→        # ── PRODUCTION MODE: Real MEXC Futures ──
+   650→        # Wait for encrypted credentials
+   651→        try:
+   652→            auth_raw = await asyncio.wait_for(websocket.receive_json(), timeout=15.0)
+   653→        except asyncio.TimeoutError:
+   654→            await websocket.send_json({"type": "error", "data": {"message": "Auth timeout — send encrypted auth within 15s"}})
+   655→            await websocket.close()
+   656→            return
+   657→
+   658→        if auth_raw.get("type") != "auth":
+   659→            await websocket.send_json({"type": "error", "data": {"message": "First message must be {type:auth, ...}"}})
+   660→            await websocket.close()
+   661→            return
+   662→
+   663→        # Decrypt credentials
+   664→        api_key, api_secret = decrypt_auth_payload(auth_raw)
+   665→
+   666→        if api_key is None or api_secret is None:
+   667→            await websocket.send_json({"type": "error", "data": {"message": "Decryption failed — wrong session password or tampered payload"}})
+   668→            await websocket.close()
+   669→            return
+   670→
+   671→        # Defer executor creation until AFTER config (need custom_base_url)
+   672→        _api_key = api_key
+   673→        _api_secret = api_secret
+   674→        del api_key
+   675→        del api_secret
+   676→
+   677→        # Read config message (allocated_usdt + custom_base_url)
+   678→        try:
+   679→            config_raw = await asyncio.wait_for(websocket.receive_json(), timeout=10.0)
+   680→            if config_raw.get("type") == "config":
+   681→                allocated_usdt = float(config_raw.get("allocated_usdt", 100.0))
+   682→                if allocated_usdt <= 0:
+   683→                    allocated_usdt = 100.0
+   684→                custom_base_url = str(config_raw.get("custom_base_url", "")).strip()
+   685→                logger.info(f"[WS-LIVE] Config received: allocated_usdt={allocated_usdt}, custom_base_url={'<set>' if custom_base_url else '<default>'}")
+   686→        except asyncio.TimeoutError:
+   687→            logger.warning("[WS-LIVE] No config message received, defaulting to 100 USDT")
+   688→
+   689→        # Create MexcFuturesExecutor with optional custom_base_url
+   690→        executor = MexcFuturesExecutor(
+   691→            api_key=_api_key,
+   692→            secret=_api_secret,
+   693→            base_url=custom_base_url,
+   694→        )
+   695→        del _api_key
+   696→        del _api_secret
+   697→
+   698→        logger.info(f"[WS-LIVE] Auth OK — MexcFuturesExecutor created (base_url={'custom' if custom_base_url else 'default'}, credentials zeroed)")
+   699→        await websocket.send_json({"type": "auth_ok"})
+   700→
+   701→    # ─── 2. Same engine init as paper-live ─────────────────────
+   702→    internal_symbol = symbol.replace("-", "/")
+   703→    api_symbol = internal_symbol.replace("/", "")
+   704→    symbol = internal_symbol
+   705→
+   706→    logger.info(f"[WS-LIVE] Connected: {symbol}/{timeframe}")
+   707→    storage = get_storage()
+   708→
+   709→    try:
+   710→        asset_class = "meme"
+   711→        weight_profile = "meme"
+   712→        try:
+   713→            from ppmt.data.classifier import AssetClassifier
+   714→            classifier = AssetClassifier()
+   715→            info = classifier.classify(symbol)
+   716→            asset_class = info.asset_class
+   717→            weight_profile = info.weight_profile
+   718→        except Exception as e:
+   719→            logger.warning(f"[WS-LIVE] AssetClassifier unavailable ({e}), defaulting to 'meme'")
+   720→
+   721→        engine = PPMT(
+   722→            symbol=symbol, asset_class=asset_class,
+   723→            weight_profile=weight_profile, dual_sax=True,
+   724→            min_confidence=0.08, timeframe=timeframe,
+   725→        )
+   726→
+   727→        tries = storage.load_all_tries(symbol, asset_class)
+   728→        n1, n2, n3, n4 = tries.get("n1"), tries.get("n2"), tries.get("n3"), tries.get("n4")
+   729→        n1c = n1.pattern_count if n1 else 0
+   730→        n2c = n2.pattern_count if n2 else 0
+   731→        n3c = n3.pattern_count if n3 else 0
+   732→        n4c = n4.pattern_count if hasattr(n4, 'pattern_count') and n4 else 0
+   733→        logger.info(f"[WS-LIVE] Loaded N1: {n1c} N2: {n2c} N3: {n3c} N4: {n4c}")
+   734→
+   735→        if n1 or n2 or n3:
+   736→            from ppmt.core.trie import PPMTTrie, RegimePartitionedTrie
+   737→            # v0.49.0 (FASE 3 BUG 3): Same fix as paper_live_websocket.
+   738→            _n1 = n1 if n1 is not None else None
+   739→            _n2 = n2 if n2 is not None else None
+   740→            if _n1 is None:
+   741→                _n1 = PPMTTrie(name="universal_empty")
+   742→                logger.warning(f"[WS-LIVE] N1 universal pool not found for {symbol}. Using empty trie.")
+   743→            if _n2 is None:
+   744→                _n2 = PPMTTrie(name=f"class_empty:{asset_class}")
+   745→                logger.warning(f"[WS-LIVE] N2 class pool not found for {asset_class}. Using empty trie.")
+   746→            engine.set_tries(
+   747→                trie_n1=_n1,
+   748→                trie_n2=_n2,
+   749→                trie_n3=n3 or PPMTTrie(name="n3_empty"),
+   750→                trie_n4=n4 if n4 is not None else engine.trie_n4,
+   751→            )
+   752→    except Exception as e:
+   753→        logger.error(f"[WS-LIVE] Engine init failed: {e}")
+   754→        await websocket.send_json({"type": "error", "data": {"message": f"Engine init failed: {e}"}})
+   755→        await websocket.close()
+   756→        return
+   757→
+   758→    # ─── 3. Exchange poller + warmup (same as paper) ───────────
+   759→    from ppmt.engine.realtime import _DirectPollExchange
+   760→    exchange = _DirectPollExchange("binance")
+   761→
+   762→    try:
+   763→        ohlcv_raw = await exchange.fetch_ohlcv(api_symbol, timeframe, limit=500)
+   764→        if ohlcv_raw:
+   765→            df = pd.DataFrame(ohlcv_raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
+   766→            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+   767→            df.set_index("timestamp", inplace=True)
+   768→            for i in range(len(df) - 1):
+   769→                engine.process_new_candle(candle_df=df.iloc[[i]], current_price=float(df["close"].iloc[i]))
+   770→            for i in range(max(0, len(df) - 50), len(df)):
+   771→                r = df.iloc[i]
+   772→                await websocket.send_json({"type": "candle", "data": {"time": int(df.index[i].timestamp()) if isinstance(df.index[i], pd.Timestamp) else int(df.index[i]), "open": float(r["open"]), "high": float(r["high"]), "low": float(r["low"]), "close": float(r["close"])}})
+   773→    except Exception as e:
+   774→        logger.warning(f"[WS-LIVE] Warmup failed: {e}")
+   775→
+   776→    tf_seconds = {"1m": 5, "5m": 10, "15m": 15, "1h": 30}
+   777→    poll_interval = tf_seconds.get(timeframe, 5)
+   778→    last_candle_ts = 0
+   779→    heartbeat_counter = 0  # ticks every loop iteration; used to throttle heartbeat
+   780→
+   781→    # ─── v0.50.0: ENTREGABLE 11 — Mock Live Test state ────────
+   782→    # The mock injection runs as a separate asyncio task so it fires
+   783→    # independently of the candle poll loop (which may skip iterations
+   784→    # when the same candle timestamp repeats on 1m+ timeframes).
+   785→    mock_task: asyncio.Task | None = None
+   786→    mock_t0 = time.monotonic()
+   787→
+   788→    async def _mock_inject_signals():
+   789→        """Inject fake signals at 10s (entry), 20s (MATCH→BE), 30s (DIVERGE→close)."""
+   790→        nonlocal mock_t0
+   791→        mock_injected_entry = False
+   792→        mock_injected_match = False
+   793→        mock_injected_diverge = False
+   794→
+   795→        while True:
+   796→            await asyncio.sleep(1)  # check every second
+   797→            elapsed = time.monotonic() - mock_t0
+   798→
+   799→            # +10s: Inject ENTRY signal
+   800→            if not mock_injected_entry and elapsed >= 10.0:
+   801→                _ip = _executor_in_position(executor)
+   802→                if not _ip:
+   803→                    mock_injected_entry = True
+   804→                    # Use latest known price from exchange, or a fallback
+   805→                    mock_entry_price = 0.08350  # fallback DOGE price
+   806→                    # Try to get the real current price from the last candle
+   807→                    if last_candle_ts > 0:
+   808→                        pass  # We already have current_price from the poll loop
+   809→
+   810→                    try:
+   811→                        pos = await executor.open_position(
+   812→                            symbol=symbol,
+   813→                            direction="LONG",
+   814→                            size_usdt=allocated_usdt,
+   815→                            metadata={
+   816→                                "entry_price": mock_entry_price,
+   817→                                "expected_move_pct": 1.5,
+   818→                                "predicted_path_symbols": ["a", "b", "c"],
+   819→                            },
+   820→                        )
+   821→                        logger.info(
+   822→                            f"[WS-LIVE-MOCK] INJECTED ENTRY @ {mock_entry_price:.6f} "
+   823→                            f"SL={pos.current_sl:.6f} TP={pos.current_tp:.6f}"
+   824→                        )
+   825→                        await websocket.send_json({"type": "position_update", "data": pos.to_dict()})
+   826→                    except Exception as e:
+   827→                        logger.error(f"[WS-LIVE-MOCK] Failed to inject entry: {e}")
+   828→
+   829→            # +20s: Inject MATCH → SL moves to break-even
+   830→            if mock_injected_entry and not mock_injected_match and elapsed >= 20.0:
+   831→                _ip = _executor_in_position(executor)
+   832→                if _ip:
+   833→                    mock_injected_match = True
+   834→                    pos = _executor_position(executor)
+   835→                    if pos and pos.status == "ACTIVE":
+   836→                        new_sl = pos.entry_price
+   837→                        await executor.update_position(pos, new_sl=new_sl, new_tp=None)
+   838→                        pos.status = "BREAK_EVEN_SECURED"
+   839→                        pos.sequence_index = 1
+   840→                        logger.info(
+   841→                            f"[WS-LIVE-MOCK] INJECTED MATCH → SL→BE "
+   842→                            f"SL={new_sl:.6f} status=BREAK_EVEN_SECURED"
+   843→                        )
+   844→                        await websocket.send_json({"type": "position_update", "data": pos.to_dict()})
+   845→
+   846→            # +30s: Inject DIVERGE → position closes
+   847→            if mock_injected_match and not mock_injected_diverge and elapsed >= 30.0:
+   848→                _ip = _executor_in_position(executor)
+   849→                if _ip:
+   850→                    mock_injected_diverge = True
+   851→                    pos = _executor_position(executor)
+   852→                    if pos and pos.status in ("ACTIVE", "BREAK_EVEN_SECURED", "TP_EXTENDED"):
+   853→                        close_price = pos.current_tp  # close at TP for a positive PnL
+   854→                        logger.warning(
+   855→                            f"[WS-LIVE-MOCK] INJECTED DIVERGENCE → CLOSING @ {close_price:.6f}"
+   856→                        )
+   857→                        closed = await executor.close_position(pos, "CLOSED_BY_DIVERGENCE")
+   858→                        await websocket.send_json({"type": "position_update", "data": closed.to_dict()})
+   859→
+   860→            # Stop after all injections
+   861→            if mock_injected_diverge:
+   862→                logger.info("[WS-LIVE-MOCK] All mock signals injected, task complete")
+   863→                break
+   864→
+   865→    if MOCK_LIVE:
+   866→        mock_task = asyncio.create_task(_mock_inject_signals())
+   867→        logger.info("[WS-LIVE-MOCK] Mock signal injection task started (10s/20s/30s)")
+   868→
+   869→    # ─── 4. Main poll loop — routed execution + Walk-Forward ───
+   870→    try:
+   871→        while True:
+   872→            try:
+   873→                ohlcv_raw = await exchange.fetch_ohlcv(api_symbol, timeframe, limit=2)
+   874→                if not ohlcv_raw:
+   875→                    await asyncio.sleep(poll_interval)
+   876→                    continue
+   877→
+   878→                latest = ohlcv_raw[-1]
+   879→                ts_ms, o, h, l, c, v = latest
+   880→                ts_sec = int(ts_ms / 1000)
+   881→                if ts_sec <= last_candle_ts:
+   882→                    await asyncio.sleep(poll_interval)
+   883→                    continue
+   884→                last_candle_ts = ts_sec
+   885→                current_price = float(c)
+   886→
+   887→                await websocket.send_json({"type": "candle", "data": {"time": ts_sec, "open": float(o), "high": float(h), "low": float(l), "close": float(c)}})
+   888→
+   889→                candle_df = pd.DataFrame(
+   890→                    {"open": [o], "high": [h], "low": [l], "close": [c], "volume": [v]},
+   891→                    index=pd.DatetimeIndex([datetime.fromtimestamp(ts_sec, tz=timezone.utc)]),
+   892→                )
+   893→
+   894→                # Position state — works for any IExecutor
+   895→                _in_pos = _executor_in_position(executor)
+   896→                _entry = _executor_position(executor).entry_price if _in_pos else None
+   897→
+   898→                result = engine.process_new_candle(
+   899→                    candle_df=candle_df, current_price=current_price,
+   900→                    is_in_position=_in_pos, entry_price=_entry,
+   901→                )
+   902→
+   903→                # ─── SAX output log (ENTREGABLE 13 FIX) ───────
+   904→                _sax_buf = getattr(engine, '_streaming_buffer', None)
+   905→                _sax_n1_buf = getattr(engine, '_streaming_buffer_n1', None)
+   906→                _buf_len = len(_sax_buf._pattern_buffer) if _sax_buf else 0
+   907→                _buf_n1_len = len(_sax_n1_buf._pattern_buffer) if _sax_n1_buf else 0
+   908→                _sax_sym = str(_sax_buf._pattern_buffer[-1]) if _sax_buf and _sax_buf._pattern_buffer else "—"
+   909→                logger.info(
+   910→                    f"[WS-LIVE] SAX output: [{_sax_sym}] buf_n3={_buf_len} buf_n1={_buf_n1_len}"
+   911→                    f" result={'YES' if result else 'no'} C={current_price:.6f}"
+   912→                )
+   913→
+   914→                # brain_update (identical logic)
+   915→                current_sax, active_path_ids = [], ["root"]
+   916→                n1_conf, n2_conf, weighted_conf, signal_type = 0.0, 0.0, 0.0, "NO_SIGNAL"
+   917→
+   918→                if result is not None:
+   919→                    if result.sax_symbols:
+   920→                        last_sym = result.sax_symbols[-1]
+   921→                        current_sax = [str(s) for s in last_sym] if isinstance(last_sym, (tuple, list)) else [str(last_sym)]
+   922→                    best_match, best_level = None, None
+   923→                    for level, match in [("n3", result.n3_match), ("n2", result.n2_match), ("n4", result.n4_match), ("n1", result.n1_match)]:
+   924→                        if match and match.node:
+   925→                            conf = match.node.metadata.confidence if match.node.metadata else 0.0
+   926→                            if best_match is None or conf > (best_match.node.metadata.confidence if best_match.node and best_match.node.metadata else 0.0):
+   927→                                best_match, best_level = match, level
+   928→                    if best_match and best_match.node:
+   929→                        active_path_ids = _build_active_path_ids(best_match.node.get_backward_path())
+   930→                    n1_conf, n2_conf, weighted_conf = result.n1_confidence, result.n2_confidence, result.weighted_confidence
+   931→                    signal_type = result.signal.signal_type.value if result.signal else "NO_SIGNAL"
+   932→                else:
+   933→                    buf = getattr(engine, '_streaming_buffer', None)
+   934→                    if buf and buf._pattern_buffer:
+   935→                        last_sym = buf._pattern_buffer[-1]
+   936→                        current_sax = [str(s) for s in last_sym] if isinstance(last_sym, (tuple, list)) else [str(last_sym)]
+   937→                    if buf and buf.has_pattern():
+   938→                        try:
+   939→                            qr = engine.match(current_symbols=buf.get_pattern(), current_price=current_price, is_in_position=_in_pos, entry_price=_entry)
+   940→                            if qr:
+   941→                                n1_conf, n2_conf, weighted_conf = qr.n1_confidence, qr.n2_confidence, qr.weighted_confidence
+   942→                                best_match = None
+   943→                                for level, match in [("n3", qr.n3_match), ("n2", qr.n2_match), ("n4", qr.n4_match), ("n1", qr.n1_match)]:
+   944→                                    if match and match.node:
+   945→                                        conf = match.node.metadata.confidence if match.node.metadata else 0.0
+   946→                                        if best_match is None or conf > (best_match.node.metadata.confidence if best_match.node and best_match.node.metadata else 0.0):
+   947→                                            best_match, best_level = match, level
+   948→                                if best_match and best_match.node:
+   949→                                    active_path_ids = _build_active_path_ids(best_match.node.get_backward_path())
+   950→                        except Exception:
+   951→                            pass
+   952→
+   953→                await websocket.send_json({"type": "brain_update", "data": {"current_sax_symbol": current_sax, "active_path_ids": active_path_ids, "n1_confidence": round(n1_conf, 4), "n2_confidence": round(n2_conf, 4), "weighted_confidence": round(weighted_conf, 4), "signal_type": signal_type}})
+   954→
+   955→                # ── ROUTED EXECUTION: paper vs live ────────────
+   956→                if result and result.signal and result.signal.is_entry and not _in_pos:
+   957→                    sig = result.signal
+   958→                    try:
+   959→                        pos = await executor.open_position(
+   960→                            symbol=symbol,
+   961→                            direction=sig.direction or "LONG",
+   962→                            size_usdt=allocated_usdt,
+   963→                            metadata={
+   964→                                "entry_price": current_price,
+   965→                                "expected_move_pct": sig.expected_move_pct or 1.0,
+   966→                                "predicted_path_symbols": sig.predicted_path_symbols if sig.predicted_path else None,
+   967→                            },
+   968→                        )
+   969→                        logger.info(
+   970→                            f"[WS-LIVE] SIGNAL {sig.signal_type.value} @ {current_price:.6f} "
+   971→                            f"conf={sig.confidence:.3f} SL={pos.current_sl:.6f} TP={pos.current_tp:.6f}"
+   972→                        )
+   973→                        await websocket.send_json({"type": "position_update", "data": pos.to_dict()})
+   974→                    except Exception as e:
+   975→                        logger.error(f"[WS-LIVE] Failed to open position: {e}")
+   976→                        await websocket.send_json({"type": "error", "data": {"message": str(e)}})
+   977→
+   978→                # ── WALK-FORWARD LOOP ──────────────────────────
+   979→                # ENTREGABLE 6: Full position lifecycle monitoring.
+   980→                # On every candle while in position:
+   981→                #   1. Compare current SAX symbol vs expected_sequence[index]
+   982→                #   2. DIVERGE → close position
+   983→                #   3. MATCH  → advance index, move SL/TP
+   984→                #
+   985→                # v0.46.0 FIX: Normalize both sides with _norm_sax() before
+   986→                # comparison to prevent false divergences when one side is a
+   987→                # string ('a') and the other is a list/tuple (['a','x']).
+   988→                if _in_pos and current_sax:
+   989→                    pos = _executor_position(executor)
+   990→                    if pos and pos.sequence_index < len(pos.expected_sequence):
+   991→                        expected = pos.expected_sequence[pos.sequence_index]
+   992→
+   993→                        # Normalize: extract price dimension from both sides
+   994→                        cur_norm = _norm_sax(current_sax[0]) if current_sax else ""
+   995→                        exp_norm = _norm_sax(expected[0]) if expected else ""
+   996→
+   997→                        if cur_norm == exp_norm:
+   998→                            # ── MATCH: Advance sequence ──────────
+   999→                            pos.sequence_index += 1
+  1000→                            idx = pos.sequence_index  # 1-based after increment
+  1001→
+  1002→                            if idx == 1:
+  1003→                                # First match → SL to break-even
+  1004→                                new_sl = pos.entry_price
+  1005→                                await executor.update_position(pos, new_sl=new_sl, new_tp=None)
+  1006→                                pos.status = "BREAK_EVEN_SECURED"
+  1007→                                logger.info(
+  1008→                                    f"[WS-LIVE] Walk-Forward: MATCH #{idx} → SL→BE "
+  1009→                                    f"SL={new_sl:.6f} status=BREAK_EVEN_SECURED"
+  1010→                                )
+  1011→                            else:
+  1012→                                # Subsequent match → Walk the Trie, extend TP
+  1013→                                # Read expected_move from next trie node if available
+  1014→                                # Default extension: 0.5% per matched step
+  1015→                                move_pct = 0.5
+  1016→                                # If the result has node metadata with expected_move, use it
+  1017→                                if result and result.signal and result.signal.expected_move_pct:
+  1018→                                    move_pct = result.signal.expected_move_pct
+  1019→                                extension = pos.entry_price * (move_pct / 100.0)
+  1020→
+  1021→                                if pos.direction == "LONG":
+  1022→                                    new_tp = pos.current_tp + extension
+  1023→                                    if new_tp > pos.current_tp:
+  1024→                                        await executor.update_position(pos, new_sl=None, new_tp=new_tp)
+  1025→                                        pos.status = "TP_EXTENDED"
+  1026→                                else:
+  1027→                                    new_tp = pos.current_tp - extension
+  1028→                                    if new_tp < pos.current_tp:
+  1029→                                        await executor.update_position(pos, new_sl=None, new_tp=new_tp)
+  1030→                                        pos.status = "TP_EXTENDED"
+  1031→
+  1032→                                logger.info(
+  1033→                                    f"[WS-LIVE] Walk-Forward: MATCH #{idx} → TP extended "
+  1034→                                    f"TP={pos.current_tp:.6f} status={pos.status}"
+  1035→                                )
+  1036→
+  1037→                            # Send updated position to frontend (React chart lines move)
+  1038→                            await websocket.send_json({"type": "position_update", "data": pos.to_dict()})
+  1039→
+  1040→                        else:
+  1041→                            # ── DIVERGE: Close position immediately ──
+  1042→                            logger.warning(
+  1043→                                f"[WS-LIVE] Walk-Forward: DIVERGENCE at idx={pos.sequence_index} "
+  1044→                                f"expected={expected} got={current_sax} → CLOSING"
+  1045→                            )
+  1046→                            closed = await executor.close_position(pos, "CLOSED_BY_DIVERGENCE")
+  1047→                            await websocket.send_json({"type": "position_update", "data": closed.to_dict()})
+  1048→
+  1049→                # ── HEARTBEAT: Check if position is still alive on MEXC ──
+  1050→                # v0.47.0: ENTREGABLE 8
+  1051→                # Every 3 iterations (~15-90s depending on timeframe), verify the
+  1052→                # position still exists on MEXC. If MEXC closed it (SL/TP hit
+  1053→                # physically), update local state and notify the frontend.
+  1054→                heartbeat_counter += 1
+  1055→                if _in_pos and heartbeat_counter % 3 == 0:
+  1056→                    pos = _executor_position(executor)
+  1057→                    if pos and isinstance(executor, MexcFuturesExecutor):
+  1058→                        alive = await executor.check_position_alive(symbol)
+  1059→                        if alive is None:
+  1060→                            # MEXC closed the position — determine why
+  1061→                            close_reason = "CLOSED_BY_SL"  # default assumption
+  1062→                            if pos.direction == "LONG":
+  1063→                                if current_price >= pos.current_tp:
+  1064→                                    close_reason = "CLOSED_BY_TP"
+  1065→                                elif current_price <= pos.catastrophic_sl:
+  1066→                                    close_reason = "CLOSED_CATASTROPHIC"
+  1067→                            else:
+  1068→                                if current_price <= pos.current_tp:
+  1069→                                    close_reason = "CLOSED_BY_TP"
+  1070→                                elif current_price >= pos.catastrophic_sl:
+  1071→                                    close_reason = "CLOSED_CATASTROPHIC"
+  1072→
+  1073→                            pos.close_price = current_price
+  1074→                            pos.close_reason = close_reason
+  1075→                            pos.status = close_reason
+  1076→                            if pos.direction == "LONG":
+  1077→                                pos.pnl_pct = ((current_price - pos.entry_price) / pos.entry_price) * 100.0
+  1078→                            else:
+  1079→                                pos.pnl_pct = ((pos.entry_price - current_price) / pos.entry_price) * 100.0
+  1080→                            pos.pnl_usdt = pos.size_usdt * (pos.pnl_pct / 100.0)
+  1081→
+  1082→                            # Remove from executor's internal tracking
+  1083→                            executor._positions.pop(symbol, None)
+  1084→
+  1085→                            logger.warning(
+  1086→                                f"[WS-LIVE] HEARTBEAT: MEXC closed position! "
+  1087→                                f"reason={close_reason} @ {current_price:.6f} "
+  1088→                                f"PnL={pos.pnl_pct:+.2f}%"
+  1089→                            )
+  1090→                            await websocket.send_json({"type": "position_update", "data": pos.to_dict()})
+  1091→                        elif isinstance(alive, dict) and alive.get("_error"):
+  1092→                            logger.debug("[WS-LIVE] Heartbeat API failed — skipping this cycle")
+  1093→
+  1094→                # ── Check SL/TP hit (price-based) ──────────────
+  1095→                if _in_pos:
+  1096→                    pos = _executor_position(executor)
+  1097→                    if pos and pos.status in ("ACTIVE", "BREAK_EVEN_SECURED", "TP_EXTENDED"):
+  1098→                        hit = False
+  1099→                        close_reason = None
+  1100→                        if pos.direction == "LONG":
+  1101→                            if current_price <= pos.catastrophic_sl:
+  1102→                                hit, close_reason = True, "CLOSED_CATASTROPHIC"
+  1103→                            elif current_price <= pos.current_sl:
+  1104→                                hit, close_reason = True, "CLOSED_BY_SL"
+  1105→                            elif current_price >= pos.current_tp:
+  1106→                                hit, close_reason = True, "CLOSED_BY_TP"
+  1107→                        else:
+  1108→                            if current_price >= pos.catastrophic_sl:
+  1109→                                hit, close_reason = True, "CLOSED_CATASTROPHIC"
+  1110→                            elif current_price >= pos.current_sl:
+  1111→                                hit, close_reason = True, "CLOSED_BY_SL"
+  1112→                            elif current_price <= pos.current_tp:
+  1113→                                hit, close_reason = True, "CLOSED_BY_TP"
+  1114→
+  1115→                        if hit and close_reason:
+  1116→                            closed = await executor.close_position(pos, close_reason)
+  1117→                            logger.info(
+  1118→                                f"[WS-LIVE] CLOSED: {closed.status} @ {current_price:.6f} "
+  1119→                                f"PnL={closed.pnl_pct:+.2f}% (${closed.pnl_usdt:+.2f})"
+  1120→                            )
+  1121→                            await websocket.send_json({"type": "position_update", "data": closed.to_dict()})
+  1122→
+  1123→            except WebSocketDisconnect:
+  1124→                break
+  1125→            except Exception as e:
+  1126→                logger.error(f"[WS-LIVE] Poll loop error: {e}", exc_info=True)
+  1127→
+  1128→            await asyncio.sleep(poll_interval)
+  1129→    except WebSocketDisconnect:
+  1130→        pass
+  1131→    finally:
+  1132→        # Cancel mock injection task if running
+  1133→        if mock_task and not mock_task.done():
+  1134→            mock_task.cancel()
+  1135→            try:
+  1136→                await mock_task
+  1137→            except asyncio.CancelledError:
+  1138→                pass
+  1139→        try:
+  1140→            await exchange.close()
+  1141→        except Exception:
+  1142→            pass
+  1143→        if isinstance(executor, MexcFuturesExecutor):
+  1144→            await executor.close()
+  1145→        logger.info(f"[WS-LIVE] Session closed: {symbol}/{timeframe}")
+  1146→
+  1147→
+  1148→# ─── Run directly ─────────────────────────────────────────────
+  1149→if __name__ == "__main__":
+  1150→    import uvicorn
+  1151→    uvicorn.run(app, host="0.0.0.0", port=8000)
+  1152→
