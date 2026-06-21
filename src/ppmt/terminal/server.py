@@ -3194,12 +3194,13 @@ async def decision_trace(symbol: str, timeframe: str = "15m") -> dict:
 
             # Level weights from the engine's weight profile
             from ppmt.engine.weights import AdaptiveWeights
-            weights = AdaptiveWeights.from_profile(info.weight_profile)
+            weights = AdaptiveWeights.from_profile(info.weight_profile, timeframe=timeframe)
             trace["level_details"]["weights"] = {
                 "n1_universal": weights.n1_universal,
                 "n2_asset_class": weights.n2_asset_class,
                 "n3_per_asset": weights.n3_per_asset,
                 "n4_per_asset_regime": weights.n4_per_asset_regime,
+                "n5_btc_context": weights.n5_btc_context,
             }
 
             # Trie maturity context

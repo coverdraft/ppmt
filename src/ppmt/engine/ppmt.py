@@ -76,6 +76,7 @@ class PPMTResult:
     n2_confidence: float = 0.0
     n3_confidence: float = 0.0
     n4_confidence: float = 0.0
+    n5_confidence: float = 0.0  # v0.52.0: BTC Context confidence (1m only)
 
     weighted_confidence: float = 0.0
     sax_symbols: list[str] = field(default_factory=list)
@@ -379,12 +380,12 @@ class PPMT:
                 regimes=["btc_bull", "btc_bear", "btc_neutral"],
             )
 
-        # Adaptive weights
+        # Adaptive weights (v0.52.0: pass timeframe for per-TF weight overrides)
         if weight_profile:
-            self.weights = AdaptiveWeights.from_profile(weight_profile)
+            self.weights = AdaptiveWeights.from_profile(weight_profile, timeframe=timeframe)
         else:
             self.weights = AdaptiveWeights.from_profile(
-                self._infer_weight_profile(asset_class)
+                self._infer_weight_profile(asset_class), timeframe=timeframe
             )
 
         # Incremental SAX buffer
@@ -1060,58 +1061,57 @@ class PPMT:
             if node_count > 0:
                 n2_avg_obs = total_obs / node_count
 
-        safe_weights = AdaptiveWeights.from_profile(self.weights.profile)
+        # v0.52.0: Build safe_weights with timeframe awareness so N5 weight
+        # is included for 1m and safe_default_weights uses micro-structure-
+        # first redistribution.
+        safe_weights = AdaptiveWeights.from_profile(self.weights.profile, timeframe=self.timeframe)
         safe_weights.n1_universal = self.weights.n1_universal
         safe_weights.n2_asset_class = self.weights.n2_asset_class
         safe_weights.n3_per_asset = self.weights.n3_per_asset
         safe_weights.n4_per_asset_regime = self.weights.n4_per_asset_regime
+        safe_weights.n5_btc_context = self.weights.n5_btc_context
+
+        # v0.48.0 (FASE 2B): N5 — BTC Context Level (1m only).
+        # v0.52.0: N5 is now part of the weight system. Match N5 first so
+        # we can pass n5_confidence to compute_weighted_confidence() and
+        # let the weight profile handle N5 allocation naturally.
+        n5_conf = 0.0
+        n5_match = None
+        n5_count = 0
+        if self.trie_n5 is not None and self.sax_n5 is not None and recent_candles is not None:
+            try:
+                n5_syms = self._encode(self.sax_n5, recent_candles)
+                n5_syms = n5_syms[-self.pl_n5:] if len(n5_syms) >= self.pl_n5 else n5_syms
+
+                btc_context = self._get_btc_context(btc_recent_candles)
+                self.trie_n5.set_current_regime(btc_context)
+
+                n5_match = self.matcher_n5.best_match(self.trie_n5, n5_syms)
+                n5_conf = n5_match.node.metadata.confidence if n5_match.node else 0.0
+
+                n5_conf = apply_time_decay(
+                    n5_conf, n5_match.node.metadata.last_seen_timestamp
+                ) if n5_match.node and n5_conf > 0 else n5_conf
+
+                n5_count = self.trie_n5.pattern_count if hasattr(self.trie_n5, 'pattern_count') else 0
+            except Exception:
+                pass  # N5 failure is non-fatal
+
         safe_weights.safe_default_weights(
             n3_pattern_count=n3_count,
             n4_pattern_count=n4_count,
             n2_avg_obs=n2_avg_obs,
+            n5_pattern_count=n5_count,
         )
 
-        # Compute weighted confidence
+        # Compute weighted confidence (N5 now included via weight profile)
         weighted_conf = safe_weights.compute_weighted_confidence(
             n1_confidence=n1_conf,
             n2_confidence=n2_conf,
             n3_confidence=n3_conf,
             n4_confidence=n4_conf,
+            n5_confidence=n5_conf,
         )
-
-        # v0.48.0 (FASE 2B): N5 — BTC Context Level (1m only).
-        # N5 blends BTC-context-aware confidence at 5-10% weight into the
-        # final confidence. Only active when self.trie_n5 exists (1m TF).
-        n5_conf = 0.0
-        n5_match = None
-        if self.trie_n5 is not None and self.sax_n5 is not None and recent_candles is not None:
-            # Encode with N5's SAX encoder
-            try:
-                n5_syms = self._encode(self.sax_n5, recent_candles)
-                n5_syms = n5_syms[-self.pl_n5:] if len(n5_syms) >= self.pl_n5 else n5_syms
-
-                # Get BTC context and route to the right sub-trie
-                btc_context = self._get_btc_context(btc_recent_candles)
-                self.trie_n5.set_current_regime(btc_context)
-
-                # Match
-                n5_match = self.matcher_n5.best_match(self.trie_n5, n5_syms)
-                n5_conf = n5_match.node.metadata.confidence if n5_match.node else 0.0
-
-                # Apply time decay
-                n5_conf = apply_time_decay(
-                    n5_conf, n5_match.node.metadata.last_seen_timestamp
-                ) if n5_match.node and n5_conf > 0 else n5_conf
-
-                # Blend: N5 gets 7.5% weight (low — it's a context signal, not primary)
-                n5_weight = 0.075
-                n5_count = self.trie_n5.pattern_count if hasattr(self.trie_n5, 'pattern_count') else 0
-                if n5_count < 10:
-                    # Too sparse to trust — reduce weight
-                    n5_weight = n5_weight * (n5_count / 10.0)
-                weighted_conf = weighted_conf * (1.0 - n5_weight) + n5_conf * n5_weight
-            except Exception:
-                pass  # N5 failure is non-fatal
 
         search_time = (time.perf_counter() - start_time) * 1000.0
 
@@ -1125,6 +1125,7 @@ class PPMT:
             n2_confidence=n2_conf,
             n3_confidence=n3_conf,
             n4_confidence=n4_conf,
+            n5_confidence=n5_conf,
             weighted_confidence=weighted_conf,
             sax_symbols=current_symbols,
             search_time_ms=search_time,
@@ -1231,13 +1232,16 @@ class PPMT:
         # v0.41.0 (FASE 3, Tarea 3.1): Apply safe default weights for
         # immature local tries. If N3 has < 20 patterns or N4 has < 10,
         # redistribute their weight to N1/N2 which have cross-asset data.
+        # v0.52.0: Use timeframe-aware weights so 1m gets micro-structure-
+        # first redistribution.
         n3_count = self.trie_n3.pattern_count
         n4_count = self.trie_n4.pattern_count if hasattr(self.trie_n4, 'pattern_count') else 0
-        safe_weights = AdaptiveWeights.from_profile(self.weights.profile)
+        safe_weights = AdaptiveWeights.from_profile(self.weights.profile, timeframe=self.timeframe)
         safe_weights.n1_universal = self.weights.n1_universal
         safe_weights.n2_asset_class = self.weights.n2_asset_class
         safe_weights.n3_per_asset = self.weights.n3_per_asset
         safe_weights.n4_per_asset_regime = self.weights.n4_per_asset_regime
+        safe_weights.n5_btc_context = self.weights.n5_btc_context
         safe_weights.safe_default_weights(n3_pattern_count=n3_count, n4_pattern_count=n4_count)
 
         # Compute weighted confidence

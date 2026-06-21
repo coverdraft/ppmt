@@ -1,22 +1,29 @@
 """
-Adaptive Weight Management for 4-Level PPMT
+Adaptive Weight Management for Multi-Level PPMT
 
-Distributes confidence across the 4 Trie levels:
+Distributes confidence across the Trie levels:
   N1: Universal (all assets, all regimes)
   N2: Asset Class (Blue Chip, Large Cap, Mid Cap, DeFi, Meme, New Launch)
   N3: Per-Asset
   N4: Per-Asset + Regime
+  N5: Per-Asset + BTC Context (1m only)
 
-Default weights: N1=10%, N2=30%, N3=30%, N4=30%
+Default weights (5m/15m): N1=10%, N2=30%, N3=30%, N4=30%
+Default weights (1m):      N1=20%, N2=15%, N3=40%, N4=15%, N5=10%
 
-For meme/new assets with insufficient data:
+For meme/new assets with insufficient data (5m/15m):
   N1=10%, N2=60%, N3=20%, N4=10%
+
+For meme assets (1m) — micro-structure prioritized:
+  N1=20%, N2=15%, N3=40%, N4=15%, N5=10%
 
 Weight redistribution rules:
   - If a level has < min_observations, its weight redistributes
     proportionally to the other levels
   - New assets start with meme weights and graduate as data grows
   - Graduation thresholds are configurable
+  - v0.52.0: 1m timeframe uses micro-structure-first weights where N3/N4
+    (W=10 micro-structure) dominate over N1/N2 (W=60 macro context)
 """
 
 from __future__ import annotations
@@ -28,7 +35,7 @@ from typing import Literal
 import numpy as np
 
 
-# Predefined weight profiles
+# Predefined weight profiles (5m/15m baseline — overridden for 1m below)
 WEIGHT_PROFILES = {
     "default": {
         "n1_universal": 0.10,
@@ -56,6 +63,62 @@ WEIGHT_PROFILES = {
     },
 }
 
+# v0.52.0: Per-timeframe weight overrides.
+# In 1m, N3/N4 look at W=10 (micro-structure) and are the PRIMARY signal.
+# N1/N2 look at W=60 (macro) and provide CONTEXT, not the entry signal.
+# N5 (BTC context) is only present in 1m.
+#
+# v0.52.0-hotfix: After OOS validation on DOGE/USDT 1m (500 candles):
+#   - N1 (universal pool) = 0.4044 confidence (229 obs, 45.4% WR) — STRONGEST
+#   - N3 (per-asset)      = 0.3897 confidence (118 obs, 46.6% WR) — 2nd
+#   - N4 (per-asset+reg)  = 0.3546 confidence (15 obs, 60% WR)   — 3rd, sparse
+#   - N2 (class pool)     = 0.2443 confidence (63 obs, 28.6% WR)  — WEAKEST
+#   - N5 (BTC context)    = 0.0000 (trie not built yet)
+#
+# Key findings:
+# 1. N1 (universal) is the STRONGEST signal in 1m — cross-asset transfer
+#    learning works. Old meme profile gave N1=10%, which was wrong.
+# 2. N2 (meme class pool) is the WEAKEST signal with only 28.6% WR.
+#    Old meme profile gave N2=60%, which was catastrophically wrong.
+# 3. N5 trie not built yet — set to 10% for future activation.
+# 4. The weighted_confidence ceiling is set by the strongest active level.
+#    With N1≈0.43 and N3≈0.39, the theoretical max is ~0.43.
+#
+# Profile: N1+N3 dominate, N2=0 (too weak for 1m), N4 moderate, N5 reserved.
+# N5 set to 0 since trie doesn't exist yet. When built, re-enable at 0.10.
+TIMEFRAME_WEIGHT_OVERRIDES = {
+    "1m": {
+        "default": {
+            "n1_universal": 0.35,
+            "n2_asset_class": 0.00,
+            "n3_per_asset": 0.55,
+            "n4_per_asset_regime": 0.10,
+            "n5_btc_context": 0.00,
+        },
+        "meme": {
+            "n1_universal": 0.35,
+            "n2_asset_class": 0.00,
+            "n3_per_asset": 0.55,
+            "n4_per_asset_regime": 0.10,
+            "n5_btc_context": 0.00,
+        },
+        "new_launch": {
+            "n1_universal": 0.35,
+            "n2_asset_class": 0.00,
+            "n3_per_asset": 0.55,
+            "n4_per_asset_regime": 0.10,
+            "n5_btc_context": 0.00,
+        },
+        "blue_chip": {
+            "n1_universal": 0.30,
+            "n2_asset_class": 0.00,
+            "n3_per_asset": 0.60,
+            "n4_per_asset_regime": 0.10,
+            "n5_btc_context": 0.00,
+        },
+    },
+}
+
 
 @dataclass
 class LevelStats:
@@ -69,7 +132,7 @@ class LevelStats:
 @dataclass
 class AdaptiveWeights:
     """
-    Adaptive weight manager for the 4-level PPMT architecture.
+    Adaptive weight manager for the multi-level PPMT architecture.
 
     Weights determine how much each Trie level contributes to the
     final signal confidence. They adapt based on data availability
@@ -79,6 +142,8 @@ class AdaptiveWeights:
     1. More specific levels (N3, N4) get more weight when data is rich
     2. Less specific levels (N1, N2) compensate when data is sparse
     3. Dead asset knowledge transfers through N2 persistence
+    4. v0.52.0: In 1m, micro-structure levels (N3/N4/N5) dominate
+       because N1/N2 use W=60 (macro context, not entry signal)
     """
 
     # Current weights
@@ -86,6 +151,7 @@ class AdaptiveWeights:
     n2_asset_class: float = 0.30
     n3_per_asset: float = 0.30
     n4_per_asset_regime: float = 0.30
+    n5_btc_context: float = 0.0  # v0.52.0: N5 weight, only >0 for 1m
 
     # Minimum observations before a level gets its full weight
     min_observations: int = 50
@@ -96,38 +162,76 @@ class AdaptiveWeights:
     # Current profile
     profile: str = "default"
 
+    # v0.52.0: Timeframe for per-TF weight overrides
+    timeframe: str = ""
+
     @classmethod
     def from_profile(
         cls,
         profile: Literal["default", "meme", "new_launch", "blue_chip"],
+        timeframe: str = "",
     ) -> AdaptiveWeights:
-        """Create weights from a predefined profile."""
+        """Create weights from a predefined profile.
+
+        v0.52.0: When timeframe is provided and has overrides in
+        TIMEFRAME_WEIGHT_OVERRIDES, those take precedence over the
+        base WEIGHT_PROFILES. This allows 1m to use micro-structure-
+        first weights while 5m/15m use the classic macro-first profile.
+        """
+        # Check for per-timeframe override first
+        if timeframe and timeframe in TIMEFRAME_WEIGHT_OVERRIDES:
+            tf_overrides = TIMEFRAME_WEIGHT_OVERRIDES[timeframe]
+            if profile in tf_overrides:
+                pw = tf_overrides[profile]
+                return cls(
+                    n1_universal=pw["n1_universal"],
+                    n2_asset_class=pw["n2_asset_class"],
+                    n3_per_asset=pw["n3_per_asset"],
+                    n4_per_asset_regime=pw["n4_per_asset_regime"],
+                    n5_btc_context=pw.get("n5_btc_context", 0.0),
+                    profile=profile,
+                    timeframe=timeframe,
+                )
+
+        # Fallback to base profile (5m/15m or missing TF override)
         pw = WEIGHT_PROFILES[profile]
         return cls(
             n1_universal=pw["n1_universal"],
             n2_asset_class=pw["n2_asset_class"],
             n3_per_asset=pw["n3_per_asset"],
             n4_per_asset_regime=pw["n4_per_asset_regime"],
+            n5_btc_context=0.0,
             profile=profile,
+            timeframe=timeframe,
         )
 
-    def to_array(self) -> np.ndarray:
-        """Return weights as a numpy array [n1, n2, n3, n4]."""
-        return np.array([
+    def to_array(self, include_n5: bool = False) -> np.ndarray:
+        """Return weights as a numpy array.
+
+        Args:
+            include_n5: If True, include N5 weight (5-element array).
+                If False, return [n1, n2, n3, n4] (4-element array).
+        """
+        base = [
             self.n1_universal,
             self.n2_asset_class,
             self.n3_per_asset,
             self.n4_per_asset_regime,
-        ])
+        ]
+        if include_n5:
+            base.append(self.n5_btc_context)
+        return np.array(base)
 
     def normalize(self) -> None:
-        """Ensure weights sum to 1.0."""
-        total = self.n1_universal + self.n2_asset_class + self.n3_per_asset + self.n4_per_asset_regime
+        """Ensure weights sum to 1.0 (including N5 when present)."""
+        total = (self.n1_universal + self.n2_asset_class + self.n3_per_asset
+                 + self.n4_per_asset_regime + self.n5_btc_context)
         if total > 0:
             self.n1_universal /= total
             self.n2_asset_class /= total
             self.n3_per_asset /= total
             self.n4_per_asset_regime /= total
+            self.n5_btc_context /= total
 
     def adapt(
         self,
@@ -201,25 +305,34 @@ class AdaptiveWeights:
         n2_confidence: float,
         n3_confidence: float,
         n4_confidence: float,
+        n5_confidence: float = 0.0,
     ) -> float:
         """
-        Compute the weighted confidence across all 4 levels.
+        Compute the weighted confidence across all active levels.
 
         This is the final confidence score that determines whether
         a signal is generated. It combines evidence from all levels,
         with more specific levels weighted higher (when data allows).
+
+        v0.52.0: N5 (BTC Context) is now part of the weight system
+        instead of a hardcoded post-hoc blend. When n5_confidence > 0
+        and self.n5_btc_context > 0, N5 participates in the weighted
+        average naturally.
 
         Args:
             n1_confidence: Confidence from Universal Trie
             n2_confidence: Confidence from Asset Class Trie
             n3_confidence: Confidence from Per-Asset Trie
             n4_confidence: Confidence from Per-Asset+Regime Trie
+            n5_confidence: Confidence from BTC Context Trie (1m only)
 
         Returns:
             Weighted confidence score (0-1)
         """
-        confidences = np.array([n1_confidence, n2_confidence, n3_confidence, n4_confidence])
-        weights = self.to_array()
+        has_n5 = self.n5_btc_context > 0 and n5_confidence > 0
+        confidences = np.array([n1_confidence, n2_confidence, n3_confidence, n4_confidence]
+                              + ([n5_confidence] if has_n5 else []))
+        weights = self.to_array(include_n5=has_n5)
 
         # Weighted average
         total_weight = 0.0
@@ -236,72 +349,115 @@ class AdaptiveWeights:
         return weighted_sum / total_weight
 
     def safe_default_weights(self, n3_pattern_count: int, n4_pattern_count: int,
-                             n2_avg_obs: float = 0.0) -> 'AdaptiveWeights':
+                             n2_avg_obs: float = 0.0,
+                             n5_pattern_count: int = 0) -> 'AdaptiveWeights':
         """Compute safe weights for tokens with immature local tries.
 
-        If N3 has < 20 patterns, redistribute its weight to N1/N2.
-        If N4 has < 10 patterns, redistribute its weight to N1/N2.
+        If N3 has < 20 patterns, redistribute its weight.
+        If N4 has < 10 patterns, redistribute its weight.
 
         v0.43.0: When N2 is also sparse (avg_obs < 2), shift MORE weight
         to N1 (universal pool) which is always dense (243 patterns, ~27 obs/node).
         This prevents a sparse N2 from dominating confidence when N3/N4 are empty,
         which was causing weighted_conf to stay below 0.20 even when N1 conf was 0.30+.
 
+        v0.52.0: For 1m timeframe, redistribution prioritizes micro-structure
+        levels (N3/N4/N5) over macro context (N1/N2). When N3/N4 are sparse in 1m,
+        their weight goes to N4/N5 (other micro-structure) rather than N1/N2.
+        When N2 is sparse in 1m, its weight shifts to N3 (main signal), not N1.
+
+        N5 sparsity: If N5 has < 5 patterns, redistribute to N3/N4.
+
         The redistribution logic:
-        1. N3/N4 weight → redistribute to N1/N2
-        2. If N2 is sparse (avg_obs < MIN_N2_OBS), redistribute N2 weight → N1
-        3. This gives N1 (dense, reliable) more weight for OOS tokens
+        1. N3/N4 weight → redistribute (1m: to N4/N5; 5m/15m: to N1/N2)
+        2. If N2 is sparse: (1m: shift to N3; 5m/15m: shift to N1)
+        3. If N5 is sparse in 1m: shift to N3/N4
 
         Args:
             n3_pattern_count: Number of patterns in the per-asset (N3) trie.
             n4_pattern_count: Number of patterns in the per-asset+regime (N4) trie.
             n2_avg_obs: Average observations per node in N2 class pool.
-                When < 2, N2 is considered sparse and weight shifts to N1.
+                When < 2, N2 is considered sparse and weight shifts.
+            n5_pattern_count: Number of patterns in the BTC context (N5) trie.
+                Only relevant for 1m timeframe.
 
         Returns:
             self (for chaining)
         """
         MIN_N3_PATTERNS = 20
         MIN_N4_PATTERNS = 10
+        MIN_N5_PATTERNS = 5
         MIN_N2_OBS = 2.0  # Below this, N2 is considered sparse
+
+        is_1m = self.timeframe == "1m"
 
         n3_weight = self.n3_per_asset
         n4_weight = self.n4_per_asset_regime
 
         if n3_pattern_count < MIN_N3_PATTERNS:
-            # Redistribute N3 weight proportionally to N1/N2
             redistribute = n3_weight * (1 - n3_pattern_count / MIN_N3_PATTERNS)
             n3_weight -= redistribute
-            # Proportional split to N1/N2 based on their current weights
-            total_n1n2 = self.n1_universal + self.n2_asset_class
-            if total_n1n2 > 0:
-                self.n1_universal += redistribute * (self.n1_universal / total_n1n2)
-                self.n2_asset_class += redistribute * (self.n2_asset_class / total_n1n2)
+            if is_1m:
+                # 1m: Redistribute N3 weight to N4 and N5 (micro-structure peers)
+                total_micro = self.n4_per_asset_regime + self.n5_btc_context
+                if total_micro > 0:
+                    self.n4_per_asset_regime += redistribute * (self.n4_per_asset_regime / total_micro)
+                    self.n5_btc_context += redistribute * (self.n5_btc_context / total_micro)
+                else:
+                    # Fallback to N1/N2 if N4/N5 are also empty
+                    total_n1n2 = self.n1_universal + self.n2_asset_class
+                    if total_n1n2 > 0:
+                        self.n1_universal += redistribute * (self.n1_universal / total_n1n2)
+                        self.n2_asset_class += redistribute * (self.n2_asset_class / total_n1n2)
+            else:
+                # 5m/15m: Redistribute N3 weight to N1/N2 (classic behavior)
+                total_n1n2 = self.n1_universal + self.n2_asset_class
+                if total_n1n2 > 0:
+                    self.n1_universal += redistribute * (self.n1_universal / total_n1n2)
+                    self.n2_asset_class += redistribute * (self.n2_asset_class / total_n1n2)
             self.n3_per_asset = n3_weight
 
         if n4_pattern_count < MIN_N4_PATTERNS:
             redistribute = n4_weight * (1 - n4_pattern_count / MIN_N4_PATTERNS)
             n4_weight -= redistribute
-            total_n1n2 = self.n1_universal + self.n2_asset_class
-            if total_n1n2 > 0:
-                self.n1_universal += redistribute * (self.n1_universal / total_n1n2)
-                self.n2_asset_class += redistribute * (self.n2_asset_class / total_n1n2)
+            if is_1m:
+                # 1m: Redistribute N4 weight to N3 and N5 (micro-structure peers)
+                total_micro = self.n3_per_asset + self.n5_btc_context
+                if total_micro > 0:
+                    self.n3_per_asset += redistribute * (self.n3_per_asset / total_micro)
+                    self.n5_btc_context += redistribute * (self.n5_btc_context / total_micro)
+                else:
+                    total_n1n2 = self.n1_universal + self.n2_asset_class
+                    if total_n1n2 > 0:
+                        self.n1_universal += redistribute * (self.n1_universal / total_n1n2)
+                        self.n2_asset_class += redistribute * (self.n2_asset_class / total_n1n2)
+            else:
+                total_n1n2 = self.n1_universal + self.n2_asset_class
+                if total_n1n2 > 0:
+                    self.n1_universal += redistribute * (self.n1_universal / total_n1n2)
+                    self.n2_asset_class += redistribute * (self.n2_asset_class / total_n1n2)
             self.n4_per_asset_regime = n4_weight
 
-        # v0.43.0: If N2 is sparse, shift its weight to N1.
-        # This is critical for Transfer Learning: N1 (universal) is always dense
-        # because it accumulates ALL token observations with α=3 (max 243 patterns).
-        # When N2 has < 2 obs/node, its confidence is dominated by the Bayesian prior
-        # and provides almost no signal. Shifting weight to N1 ensures the dense,
-        # reliable universal pool drives decisions.
+        # N5 sparsity check (1m only)
+        if is_1m and self.n5_btc_context > 0 and n5_pattern_count < MIN_N5_PATTERNS:
+            redistribute = self.n5_btc_context * (1 - n5_pattern_count / MIN_N5_PATTERNS)
+            self.n5_btc_context -= redistribute
+            # Redistribute to N3 and N4 (micro-structure peers)
+            total_micro = self.n3_per_asset + self.n4_per_asset_regime
+            if total_micro > 0:
+                self.n3_per_asset += redistribute * (self.n3_per_asset / total_micro)
+                self.n4_per_asset_regime += redistribute * (self.n4_per_asset_regime / total_micro)
+
+        # v0.43.0: If N2 is sparse, shift its weight.
+        # v0.52.0: In 1m, shift to N3 (main signal) instead of N1.
         if n2_avg_obs < MIN_N2_OBS and n2_avg_obs > 0:
-            # Shift N2 weight to N1 proportional to N2 sparsity
-            # If N2 has 0.5 avg_obs → shift 75% of N2 weight to N1
-            # If N2 has 1.5 avg_obs → shift 25% of N2 weight to N1
             sparsity_factor = 1.0 - (n2_avg_obs / MIN_N2_OBS)
             shift = self.n2_asset_class * sparsity_factor * 0.5  # Cap at 50% shift
             self.n2_asset_class -= shift
-            self.n1_universal += shift
+            if is_1m:
+                self.n3_per_asset += shift  # N3 is the main signal in 1m
+            else:
+                self.n1_universal += shift  # N1 is the fallback in 5m/15m
 
         self.normalize()
         return self
@@ -332,22 +488,28 @@ class AdaptiveWeights:
 
     def to_dict(self) -> dict:
         """Serialize weights to dictionary."""
-        return {
+        d = {
             "n1_universal": round(self.n1_universal, 4),
             "n2_asset_class": round(self.n2_asset_class, 4),
             "n3_per_asset": round(self.n3_per_asset, 4),
             "n4_per_asset_regime": round(self.n4_per_asset_regime, 4),
+            "n5_btc_context": round(self.n5_btc_context, 4),
             "profile": self.profile,
+            "timeframe": self.timeframe,
             "min_observations": self.min_observations,
             "graduation_threshold": self.graduation_threshold,
         }
+        return d
 
     def __repr__(self) -> str:
+        n5_part = f", N5={self.n5_btc_context:.0%}" if self.n5_btc_context > 0 else ""
+        tf_part = f", tf='{self.timeframe}'" if self.timeframe else ""
         return (
             f"AdaptiveWeights(N1={self.n1_universal:.0%}, "
             f"N2={self.n2_asset_class:.0%}, "
             f"N3={self.n3_per_asset:.0%}, "
-            f"N4={self.n4_per_asset_regime:.0%}, "
+            f"N4={self.n4_per_asset_regime:.0%}"
+            f"{n5_part}{tf_part}, "
             f"profile='{self.profile}')"
         )
 
