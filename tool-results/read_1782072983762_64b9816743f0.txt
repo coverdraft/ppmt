@@ -1,0 +1,1506 @@
+     1→"""
+     2→PPMT Engine - 4-Level Progressive Pattern Matching
+     3→
+     4→The main engine that orchestrates:
+     5→  1. SAX symbolization of incoming OHLCV data
+     6→  2. Parallel search across 4 Trie levels
+     7→  3. Adaptive weight-based confidence computation
+     8→  4. Signal generation from Block Lifecycle Metadata
+     9→
+    10→Architecture:
+    11→  ┌─────────────────────────────────┐
+    12→  │         OHLCV Data              │
+    13→  └────────────┬────────────────────┘
+    14→               │
+    15→        ┌──────▼──────┐
+    16→        │  SAX Encode  │
+    17→        └──────┬──────┘
+    18→               │
+    19→    ┌──────────┼──────────────────────┐
+    20→    │          │                      │
+    21→ ┌──▼──┐  ┌───▼───┐  ┌────▼────┐  ┌──▼───┐
+    22→ │ N1  │  │  N2   │  │   N3    │  │  N4  │
+    23→ │10%  │  │  30%  │  │  30%    │  │ 30%  │
+    24→ └──┬──┘  └───┬───┘  └────┬────┘  └──┬───┘
+    25→    │         │           │           │
+    26→    └─────────┼───────────┼───────────┘
+    27→              │           │
+    28→        ┌─────▼───────────▼──────┐
+    29→        │  Adaptive Weight Merge  │
+    30→        └───────────┬────────────┘
+    31→                    │
+    32→           ┌────────▼────────┐
+    33→           │ Signal Generator │
+    34→           └────────┬────────┘
+    35→                    │
+    36→           ┌────────▼────────┐
+    37→           │  Trading Signal  │
+    38→           └─────────────────┘
+    39→"""
+    40→
+    41→from __future__ import annotations
+    42→
+    43→import logging
+    44→import time
+    45→from dataclasses import dataclass, field
+    46→from typing import Optional
+    47→
+    48→import numpy as np
+    49→import pandas as pd
+    50→
+    51→from ppmt.core.sax import SAXEncoder, SAXDualEncoder, get_alpha_for_level, get_dual_alpha_for_level, LEVEL_WINDOW_CONFIG, LEVEL_PATTERN_CONFIG, LEVEL_DUAL_ALPHA_TF_OVERRIDES
+    52→from ppmt.core.trie import PPMTTrie, TrieNode, RegimePartitionedTrie
+    53→from ppmt.core.matcher import FuzzyMatcher, MatchResult
+    54→from ppmt.core.metadata import BlockLifecycleMetadata, compute_outcome_won, compute_outcome_directional
+    55→from ppmt.core.regime import RegimeDetector
+    56→from ppmt.engine.weights import AdaptiveWeights, LevelStats, WEIGHT_PROFILES
+    57→from ppmt.engine.signal import SignalGenerator, Signal, SignalType
+    58→from ppmt.data.storage import UNIVERSAL_POOL_KEY, class_pool_key
+    59→
+    60→logger = logging.getLogger(__name__)
+    61→
+    62→
+    63→@dataclass
+    64→class PPMTResult:
+    65→    """Complete result from a PPMT pattern matching cycle."""
+    66→
+    67→    signal: Signal
+    68→    """The generated trading signal."""
+    69→
+    70→    n1_match: Optional[MatchResult] = None
+    71→    n2_match: Optional[MatchResult] = None
+    72→    n3_match: Optional[MatchResult] = None
+    73→    n4_match: Optional[MatchResult] = None
+    74→
+    75→    n1_confidence: float = 0.0
+    76→    n2_confidence: float = 0.0
+    77→    n3_confidence: float = 0.0
+    78→    n4_confidence: float = 0.0
+    79→    n5_confidence: float = 0.0  # v0.52.0: BTC Context confidence (1m only)
+    80→
+    81→    weighted_confidence: float = 0.0
+    82→    sax_symbols: list[str] = field(default_factory=list)
+    83→
+    84→    search_time_ms: float = 0.0
+    85→    """Time spent on pattern matching in milliseconds."""
+    86→
+    87→
+    88→class PPMT:
+    89→    """
+    90→    Progressive Pattern Matching Trie Engine.
+    91→
+    92→    The main engine that coordinates 4 Trie levels with adaptive weights
+    93→    and generates autonomous trading signals from Block Lifecycle Metadata.
+    94→
+    95→    Usage:
+    96→        engine = PPMT(symbol="BTC/USDT", asset_class="blue_chip")
+    97→
+    98→        # Build from historical data
+    99→        engine.build(ohlcv_df)
+   100→
+   101→        # Real-time pattern matching
+   102→        result = engine.match(current_sax_symbols, current_price)
+   103→        if result.signal.is_entry:
+   104→            # Execute entry with result.signal.sl_price, tp_price
+   105→            pass
+   106→
+   107→    The engine is designed to run locally with all data stored in SQLite.
+   108→    It requires only an external Capital Risk Manager to decide position sizing.
+   109→    """
+   110→
+   111→    def __init__(
+   112→        self,
+   113→        symbol: str,
+   114→        asset_class: str = "default",
+   115→        sax_alphabet_size: int = 8,
+   116→        sax_window_size: int = 10,
+   117→        sax_strategy: str = "ohlcv",
+   118→        fuzzy_threshold: float = 0.85,
+   119→        min_confidence: float = 0.60,
+   120→        min_risk_reward: float = 1.5,
+   121→        weight_profile: Optional[str] = None,
+   122→        dual_sax: bool = True,
+   123→        timeframe: Optional[str] = None,
+   124→    ):
+   125→        self.symbol = symbol
+   126→        self.asset_class = asset_class
+   127→
+   128→        # v0.42.0: When timeframe is provided, override sax_alphabet_size
+   129→        # and sax_window_size from TIMEFRAME_ALPHA_DEFAULTS if the caller
+   130→        # didn't explicitly set them (i.e., they're still at defaults).
+   131→        # This ensures the engine uses the correct W for each timeframe:
+   132→        #   1m → W=45, α=3
+   133→        #   5m → W=18, α=3
+   134→        #   etc.
+   135→        self.timeframe = timeframe
+   136→        if timeframe is not None:
+   137→            from ppmt.core.profiles import TIMEFRAME_ALPHA_DEFAULTS
+   138→            tf_config = TIMEFRAME_ALPHA_DEFAULTS.get(timeframe)
+   139→            if tf_config is not None:
+   140→                # Always override when timeframe is set — the caller should
+   141→                # pass explicit sax_alphabet_size/sax_window_size if they want
+   142→                # to override the timeframe-based defaults.
+   143→                sax_alphabet_size = tf_config["sax_alphabet_size"]
+   144→                sax_window_size = tf_config["sax_window_size"]
+   145→                logger.info(
+   146→                    f"Timeframe {timeframe}: α={sax_alphabet_size}, W={sax_window_size}"
+   147→                )
+   148→
+   149→        # v0.48.0 (FASE 2A): Per-level window size and pattern length.
+   150→        #
+   151→        # Each level gets its own window_size from LEVEL_WINDOW_CONFIG (by timeframe)
+   152→        # and its own pattern_length from LEVEL_PATTERN_CONFIG.
+   153→        # This fixes the "N3 impossible to fill" bug on low timeframes:
+   154→        #   1m N1 W=60 P=5 → 300 candles per pattern, N3 W=20 P=4 → 80 candles
+   155→        #   5m N1 W=24 P=5 → 120 candles, N3 W=10 P=4 → 40 candles
+   156→        # Fallback: if timeframe is None or not in config, use sax_window_size for all.
+   157→        _tf_window_config = LEVEL_WINDOW_CONFIG.get(timeframe) if timeframe else None
+   158→        if _tf_window_config is None:
+   159→            _tf_window_config = {
+   160→                "n1": sax_window_size,
+   161→                "n2": sax_window_size,
+   162→                "n3": sax_window_size,
+   163→                "n4": sax_window_size,
+   164→            }
+   165→        self.pl_n1 = LEVEL_PATTERN_CONFIG["n1"]
+   166→        self.pl_n2 = LEVEL_PATTERN_CONFIG["n2"]
+   167→        self.pl_n3 = LEVEL_PATTERN_CONFIG["n3"]
+   168→        self.pl_n4 = LEVEL_PATTERN_CONFIG["n4"]
+   169→        self.pl_n5 = LEVEL_PATTERN_CONFIG["n5"]  # v0.48.0 (FASE 2B): N5 BTC context
+   170→        # Backwards compat: self._pattern_length = max(pl) for callers that
+   171→        # use a single value (e.g. buffer sizing in match_raw).
+   172→        self._pattern_length = max(self.pl_n1, self.pl_n2, self.pl_n3, self.pl_n4, self.pl_n5)
+   173→
+   174→        # v0.43.0: STRATIFIED SAX Dual — N1 is PRICE-ONLY.
+   175→        #
+   176→        # The key mathematical insight: volume is noise at the universal level.
+   177→        # When N1 used SAXDualEncoder (α_price=3, α_vol=2), the effective
+   178→        # alphabet was 3×2=6 → 6^5=7,776 possible patterns. With ~11,000 obs,
+   179→        # each node had ~1.4 obs → Bayesian prior dominated, confidence ≤0.19.
+   180→        #
+   181→        # By making N1 price-only (α=3 → max 243 patterns), each node gets
+   182→        # ~45 obs and confidence > 0.6 becomes achievable.
+   183→        #
+   184→        # N2/N3/N4 continue using SAXDualEncoder because volume becomes useful
+   185→        # when we know the asset class or specific token.
+   186→        self.dual_sax = dual_sax
+   187→
+   188→        # v0.43.0: Per-level dual alpha configuration.
+   189→        # Each level gets (price_alpha, volume_alpha) from LEVEL_DUAL_ALPHA_CONFIG.
+   190→        # N1 has volume=0 → uses plain SAXEncoder (price only).
+   191→        #
+   192→        # IMPORTANT: Do NOT pass sax_alphabet_size as calibrated_alpha here.
+   193→        # The TIMEFRAME_ALPHA_DEFAULTS sets sax_alphabet_size=3 for 1m/5m,
+   194→        # but that was meant for a SINGLE encoder model. With stratified SAX,
+   195→        # each level has its own FIXED alpha from LEVEL_DUAL_ALPHA_CONFIG:
+   196→        #   N1: price=3 (no volume)
+   197→        #   N2: price=3/4, vol=2 (depends on asset class)
+   198→        #   N3: price=4, vol=3
+   199→        #   N4: price=4, vol=3
+   200→        # Only pass calibrated_alpha when the user explicitly set it AND
+   201→        # it differs from the timeframe default (i.e., manual calibration).
+   202→        n1_dual = get_dual_alpha_for_level("n1", asset_class, timeframe=timeframe)
+   203→        n2_dual = get_dual_alpha_for_level("n2", asset_class, timeframe=timeframe)
+   204→        n3_dual = get_dual_alpha_for_level("n3", asset_class, timeframe=timeframe)
+   205→        n4_dual = get_dual_alpha_for_level("n4", asset_class, timeframe=timeframe)
+   206→
+   207→        # v0.48.0 (FASE 2A): Each encoder uses its own window_size.
+   208→        _w_n1 = _tf_window_config["n1"]
+   209→        _w_n2 = _tf_window_config["n2"]
+   210→        _w_n3 = _tf_window_config["n3"]
+   211→        _w_n4 = _tf_window_config["n4"]
+   212→        _w_n5 = _tf_window_config.get("n5")  # v0.48.0 (FASE 2B): N5 only for 1m
+   213→        logger.info(
+   214→            f"Per-level windows: N1={_w_n1}, N2={_w_n2}, N3={_w_n3}, N4={_w_n4}, N5={_w_n5} | "
+   215→            f"Pattern lengths: N1={self.pl_n1}, N2={self.pl_n2}, N3={self.pl_n3}, N4={self.pl_n4}, N5={self.pl_n5}"
+   216→        )
+   217→        logger.info(
+   218→            f"Per-level dual-alpha: N1={n1_dual}, N2={n2_dual}, N3={n3_dual}, N4={n4_dual} | "
+   219→            f"TF={timeframe}"
+   220→        )
+   221→
+   222→        # N1: PRICE-ONLY — uses SAXEncoder (no volume dimension).
+   223→        # This is the critical fix: N1 max 243 patterns → ~45 obs/node → conf > 0.6.
+   224→        self.sax_n1 = SAXEncoder(
+   225→            alphabet_size=n1_dual["price"],
+   226→            window_size=_w_n1,
+   227→            strategy=sax_strategy,
+   228→        )
+   229→
+   230→        if dual_sax:
+   231→            # N2/N3/N4: SAXDualEncoder with per-level (price, volume) alphas.
+   232→            # v0.43.1: N2 with volume=0 uses SAXEncoder (price-only), same as N1.
+   233→            # This prevents combinatorial explosion in sparse pools like meme/new_launch.
+   234→            if n2_dual["volume"] == 0:
+   235→                self.sax_n2 = SAXEncoder(
+   236→                    alphabet_size=n2_dual["price"],
+   237→                    window_size=_w_n2,
+   238→                    strategy=sax_strategy,
+   239→                )
+   240→            else:
+   241→                self.sax_n2 = SAXDualEncoder(
+   242→                    price_alphabet_size=n2_dual["price"],
+   243→                    volume_alphabet_size=n2_dual["volume"],
+   244→                    window_size=_w_n2,
+   245→                    price_strategy=sax_strategy,
+   246→                )
+   247→            # v0.55.0 (TAREA 16): For 1m, N3/N4 use body_anatomy strategy
+   248→            # (body_score = (close-open)/(high-low)) which detects wick rejections.
+   249→            # Combined with volume=2 for 1m, this gives richer inputs.
+   250→            _n3_price_strategy = "body_anatomy" if timeframe == "1m" else sax_strategy
+   251→            _n4_price_strategy = "body_anatomy" if timeframe == "1m" else sax_strategy
+   252→
+   253→            if n3_dual["volume"] == 0:
+   254→                self.sax_n3 = SAXEncoder(
+   255→                    alphabet_size=n3_dual["price"],
+   256→                    window_size=_w_n3,
+   257→                    strategy=_n3_price_strategy,
+   258→                )
+   259→            else:
+   260→                self.sax_n3 = SAXDualEncoder(
+   261→                    price_alphabet_size=n3_dual["price"],
+   262→                    volume_alphabet_size=n3_dual["volume"],
+   263→                    window_size=_w_n3,
+   264→                    price_strategy=_n3_price_strategy,
+   265→                )
+   266→            if n4_dual["volume"] == 0:
+   267→                self.sax_n4 = SAXEncoder(
+   268→                    alphabet_size=n4_dual["price"],
+   269→                    window_size=_w_n4,
+   270→                    strategy=_n4_price_strategy,
+   271→                )
+   272→            else:
+   273→                self.sax_n4 = SAXDualEncoder(
+   274→                    price_alphabet_size=n4_dual["price"],
+   275→                    volume_alphabet_size=n4_dual["volume"],
+   276→                    window_size=_w_n4,
+   277→                    price_strategy=_n4_price_strategy,
+   278→                )
+   279→        else:
+   280→            # Legacy single-composite encoding
+   281→            n2_alpha = get_alpha_for_level("n2", asset_class)
+   282→            n3_alpha = get_alpha_for_level("n3", asset_class, calibrated_alpha=sax_alphabet_size)
+   283→            n4_alpha = get_alpha_for_level("n4", asset_class, calibrated_alpha=sax_alphabet_size)
+   284→            self.sax_n2 = SAXEncoder(
+   285→                alphabet_size=n2_alpha,
+   286→                window_size=_w_n2,
+   287→                strategy=sax_strategy,
+   288→            )
+   289→            self.sax_n3 = SAXEncoder(
+   290→                alphabet_size=n3_alpha,
+   291→                window_size=_w_n3,
+   292→                strategy=sax_strategy,
+   293→            )
+   294→            self.sax_n4 = SAXEncoder(
+   295→                alphabet_size=n4_alpha,
+   296→                window_size=_w_n4,
+   297→                strategy=sax_strategy,
+   298→            )
+   299→
+   300→        # v0.48.0 (FASE 2B): N5 — BTC Context Level (1m only).
+   301→        # N5 uses same encoding as N3 (including volume and body_anatomy for 1m).
+   302→        # Partitions by BTC context (bull/bear/neutral) instead of regime.
+   303→        # Only created for timeframe="1m".
+   304→        self.sax_n5 = None
+   305→        _n5_dual = get_dual_alpha_for_level("n5", asset_class, timeframe=timeframe)
+   306→        _n5_price_strategy = "body_anatomy" if timeframe == "1m" else sax_strategy
+   307→
+   308→        if _w_n5 is not None and dual_sax:
+   309→            if _n5_dual["volume"] == 0:
+   310→                self.sax_n5 = SAXEncoder(
+   311→                    alphabet_size=_n5_dual["price"],
+   312→                    window_size=_w_n5,
+   313→                    strategy=_n5_price_strategy,
+   314→                )
+   315→            else:
+   316→                self.sax_n5 = SAXDualEncoder(
+   317→                    price_alphabet_size=_n5_dual["price"],
+   318→                    volume_alphabet_size=_n5_dual["volume"],
+   319→                    window_size=_w_n5,
+   320→                    price_strategy=_n5_price_strategy,
+   321→                )
+   322→        elif _w_n5 is not None:
+   323→            self.sax_n5 = SAXEncoder(
+   324→                alphabet_size=_n5_dual["price"],
+   325→                window_size=_w_n5,
+   326→                strategy=_n5_price_strategy,
+   327→            )
+   328→
+   329→        # Backwards compatibility: self.sax = N3's encoder
+   330→        self.sax = self.sax_n3
+   331→
+   332→        # Fuzzy matchers — one per level, each using its level's SAX encoder
+   333→        # for alphabet-aware distance computation (symbol_distance, breakpoints).
+   334→        self.matcher_n1 = FuzzyMatcher(
+   335→            sax_encoder=self.sax_n1,
+   336→            threshold=fuzzy_threshold,
+   337→        )
+   338→        self.matcher_n2 = FuzzyMatcher(
+   339→            sax_encoder=self.sax_n2,
+   340→            threshold=fuzzy_threshold,
+   341→        )
+   342→        self.matcher_n3 = FuzzyMatcher(
+   343→            sax_encoder=self.sax_n3,
+   344→            threshold=fuzzy_threshold,
+   345→        )
+   346→        self.matcher_n4 = FuzzyMatcher(
+   347→            sax_encoder=self.sax_n4,
+   348→            threshold=fuzzy_threshold,
+   349→        )
+   350→        # v0.48.0 (FASE 2B): N5 matcher (1m only)
+   351→        self.matcher_n5 = None
+   352→        if self.sax_n5 is not None:
+   353→            self.matcher_n5 = FuzzyMatcher(
+   354→                sax_encoder=self.sax_n5,
+   355→                threshold=fuzzy_threshold,
+   356→            )
+   357→
+   358→        # Backwards compatibility: self.matcher = N3's matcher
+   359→        self.matcher = self.matcher_n3
+   360→
+   361→        # Signal generator
+   362→        self.signal_generator = SignalGenerator(
+   363→            min_confidence=min_confidence,
+   364→            min_risk_reward=min_risk_reward,
+   365→        )
+   366→
+   367→        # 4-Level Tries
+   368→        # v0.40.2 FIX-1: N4 is now a RegimePartitionedTrie — internally
+   369→        # maintains 4 sub-tries (one per regime). This breaks the
+   370→        # N1==N2==N3==N4 structural identity that CAPA 1 audit #3 found
+   371→        # was making the 4-level architecture purely decorative.
+   372→        # N1 (universal), N2 (asset_class), N3 (per_asset) stay as plain
+   373→        # PPMTTrie — they remain structurally identical in single-symbol
+   374→        # operation, but their *role* is differentiated when tries are
+   375→        # shared across PPMT instances via set_tries() (e.g., PaperTrader
+   376→        # loads N1 from a global pool, N2 from an asset_class pool, N3
+   377→        # from the per-symbol storage).
+   378→        self.trie_n1 = PPMTTrie(name=f"universal")
+   379→        self.trie_n2 = PPMTTrie(name=f"asset_class:{asset_class}")
+   380→        self.trie_n3 = PPMTTrie(name=f"per_asset:{symbol}")
+   381→        self.trie_n4 = RegimePartitionedTrie(name=f"per_asset_regime:{symbol}")
+   382→        # v0.48.0 (FASE 2B): N5 — BTC Context Partitioned Trie (1m only).
+   383→        # Partitions by BTC context (btc_bull, btc_bear, btc_neutral).
+   384→        # Only created when timeframe is "1m".
+   385→        self.trie_n5 = None
+   386→        if timeframe == "1m":
+   387→            self.trie_n5 = RegimePartitionedTrie(
+   388→                name=f"per_asset_btc_ctx:{symbol}",
+   389→                regimes=["btc_bull", "btc_bear", "btc_neutral"],
+   390→            )
+   391→
+   392→        # Adaptive weights (v0.52.0: pass timeframe for per-TF weight overrides)
+   393→        if weight_profile:
+   394→            self.weights = AdaptiveWeights.from_profile(weight_profile, timeframe=timeframe)
+   395→        else:
+   396→            self.weights = AdaptiveWeights.from_profile(
+   397→                self._infer_weight_profile(asset_class), timeframe=timeframe
+   398→            )
+   399→
+   400→        # Incremental SAX buffer
+   401→        self._sax_buffer: list[float] = []
+   402→
+   403→        # Current regime
+   404→        self._current_regime: Optional[str] = None
+   405→
+   406→        # v0.38.8: RegimeDetector instance (used for detect_simple during
+   407→        # trie build). Auto-calibrated for crypto (vol=0.15, trend=0.001).
+   408→        # The detect_simple method uses RegimeThresholds.simple_vol_cutoff
+   409→        # (0.08) and simple_move_cutoff (0.02) — preserved verbatim from
+   410→        # the previous _detect_simple_regime static method.
+   411→        self.regime_detector = RegimeDetector()
+   412→
+   413→        # v0.40.3 FIX-1B: Optional storage reference for cross-asset pool
+   414→        # contribution. When set via `attach_storage()`, every observation
+   415→        # inserted during build() is also pushed to:
+   416→        #   - universal N1 pool (storage key __UNIVERSAL__, level 'n1')
+   417→        #   - class-shared N2 pool (storage key __CLASS_<asset_class>__, level 'n2')
+   418→        # This realizes the original V3 design (PPMT_Technical_Document_V3.pdf
+   419→        # §3.1-3.4) where N1 is a cross-asset safety net and N2 is the
+   420→        # same-class competitive-advantage pool.
+   421→        self._storage = None
+   422→        # In-memory accumulation buffers — flushed to storage at the end of
+   423→        # build() to amortize the cost of storage round-trips.
+   424→        self._n1_buffer = PPMTTrie(name="universal_buffer")
+   425→        self._n2_buffer = PPMTTrie(name=f"class_buffer:{asset_class}")
+   426→
+   427→        # Statistics
+   428→        self._total_patterns_built = 0
+   429→
+   430→    def attach_storage(self, storage) -> None:
+   431→        """
+   432→        v0.40.3 FIX-1B: Attach a PPMTStorage instance for cross-asset pool
+   433→        contribution. When attached, `build()` will push each observation
+   434→        to the universal N1 pool and the class-shared N2 pool in addition
+   435→        to the per-symbol N3 and per-symbol+regime N4. This is what makes
+   436→        N1 truly universal (5M+ patterns from all assets, per V3 design)
+   437→        and N2 truly class-shared (BTC ↔ ETH for blue_chip, etc.).
+   438→
+   439→        Without attachment, the engine operates in single-symbol mode
+   440→        (v0.40.2 behavior): N1/N2 are structurally identical to N3, and
+   441→        the cross-asset advantage does not materialize.
+   442→        """
+   443→        self._storage = storage
+   444→        # (Re)initialize buffers in case attach_storage is called between builds
+   445→        self._n1_buffer = PPMTTrie(name="universal_buffer")
+   446→        self._n2_buffer = PPMTTrie(name=f"class_buffer:{self.asset_class}")
+   447→
+   448→    def ensure_shared_pools(self, storage) -> dict:
+   449→        """
+   450→        v0.41.0 FIX-1B: Check if N1 and N2 shared pools exist and have data.
+   451→
+   452→        Call this after ``attach_storage(storage)`` and ``build()`` to verify
+   453→        that the cross-asset pools were actually populated.  Returns a dict
+   454→        with pool status that callers can log or act on.
+   455→
+   456→        Returns:
+   457→            Dict with keys ``n1_universal`` and ``n2_class``, each containing
+   458→            ``exists`` (bool) and ``pattern_count`` (int).
+   459→        """
+   460→        status = {
+   461→            "n1_universal": {"exists": False, "pattern_count": 0},
+   462→            "n2_class": {"exists": False, "pattern_count": 0},
+   463→        }
+   464→        try:
+   465→            n1 = storage.load_trie(UNIVERSAL_POOL_KEY, "n1", timeframe=self.timeframe or "")
+   466→            if n1 is not None:
+   467→                status["n1_universal"] = {
+   468→                    "exists": True,
+   469→                    "pattern_count": n1.pattern_count,
+   470→                }
+   471→        except Exception as e:
+   472→            logger.warning(f"ensure_shared_pools: N1 check failed: {e}")
+   473→
+   474→        try:
+   475→            n2_key = class_pool_key(self.asset_class)
+   476→            n2 = storage.load_trie(n2_key, "n2", timeframe=self.timeframe or "")
+   477→            if n2 is not None:
+   478→                status["n2_class"] = {
+   479→                    "exists": True,
+   480→                    "pattern_count": n2.pattern_count,
+   481→                }
+   482→        except Exception as e:
+   483→            logger.warning(f"ensure_shared_pools: N2 check failed: {e}")
+   484→
+   485→        if not status["n1_universal"]["exists"]:
+   486→            logger.warning("ensure_shared_pools: N1 universal pool is MISSING")
+   487→        if not status["n2_class"]["exists"]:
+   488→            logger.warning(
+   489→                f"ensure_shared_pools: N2 class pool for {self.asset_class} is MISSING"
+   490→            )
+   491→
+   492→        return status
+   493→
+   494→    @staticmethod
+   495→    def _infer_weight_profile(asset_class: str) -> str:
+   496→        """Infer the weight profile from asset class."""
+   497→        profile_map = {
+   498→            "blue_chip": "blue_chip",
+   499→            "large_cap": "default",
+   500→            "mid_cap": "default",
+   501→            "defi": "default",
+   502→            "meme": "meme",
+   503→            "new_launch": "new_launch",
+   504→        }
+   505→        return profile_map.get(asset_class, "default")
+   506→
+   507→    @staticmethod
+   508→    def _detect_simple_regime(window_df: pd.DataFrame) -> str:
+   509→        """
+   510→        Detect simple market regime from a window of OHLCV data.
+   511→
+   512→        v0.38.8: DEPRECATED — delegates to RegimeDetector.detect_simple().
+   513→        Kept as a thin static wrapper for backwards compatibility with
+   514→        any external callers. The thresholds (0.08 vol, 0.02 move) now
+   515→        live in RegimeThresholds (core/thresholds.py) and are preserved
+   516→        verbatim, so behaviour is identical to v0.38.7.
+   517→
+   518→        New code should use:
+   519→            engine.regime_detector.detect_simple(window_df)
+   520→        instead of:
+   521→            PPMT._detect_simple_regime(window_df)
+   522→
+   523→        Classification:
+   524→        - trending_up:   move > 0.02 (2%+ up)
+   525→        - trending_down: move < -0.02 (2%+ down)
+   526→        - volatile:      range/entry > 0.08 (8%+ range)
+   527→        - ranging:       none of the above
+   528→        """
+   529→        return RegimeDetector().detect_simple(window_df)
+   530→
+   531→    def set_tries(
+   532→        self,
+   533→        trie_n1: PPMTTrie,
+   534→        trie_n2: PPMTTrie,
+   535→        trie_n3: PPMTTrie,
+   536→        trie_n4: PPMTTrie,
+   537→    ) -> None:
+   538→        """
+   539→        Inject pre-built Tries into the engine.
+   540→
+   541→        Used by PaperTrader to load serialized Tries from storage
+   542→        instead of building new ones from scratch.
+   543→
+   544→        Args:
+   545→            trie_n1: Universal Trie
+   546→            trie_n2: Asset Class Trie
+   547→            trie_n3: Per-Asset Trie
+   548→            trie_n4: Per-Asset+Regime Trie
+   549→        """
+   550→        self.trie_n1 = trie_n1
+   551→        self.trie_n2 = trie_n2
+   552→        self.trie_n3 = trie_n3
+   553→        self.trie_n4 = trie_n4
+   554→
+   555→    def set_regime(self, regime: str) -> None:
+   556→        """Set the current market regime for N4 Trie selection.
+   557→
+   558→        v0.40.2 FIX-1: N4 is now a RegimePartitionedTrie. Setting the
+   559→        regime routes ALL subsequent N4 search/match operations to the
+   560→        sub-trie for that regime. This is what makes N4 actually carry
+   561→        regime-specific information (vs. before, when N4 was a plain
+   562→        PPMTTrie with the same data as N1/N2/N3).
+   563→        """
+   564→        self._current_regime = regime
+   565→        # Propagate to N4's wrapper so search/match go to the right sub-trie
+   566→        if isinstance(self.trie_n4, RegimePartitionedTrie):
+   567→            self.trie_n4.set_current_regime(regime)
+   568→
+   569→    def _get_btc_context(self, btc_recent_candles: Optional[pd.DataFrame] = None) -> str:
+   570→        """v0.48.0 (FASE 2B): Classify recent BTC price action into 3 states.
+   571→
+   572→        Computes the simple slope of the last 20 BTC close prices and
+   573→        classifies as:
+   574→          - "btc_bull": slope > 0.0005 (BTC is trending up)
+   575→          - "btc_bear": slope < -0.0005 (BTC is trending down)
+   576→          - "btc_neutral": otherwise (BTC is ranging)
+   577→
+   578→        The 0.0005 threshold is calibrated for 1m candles: BTC typically
+   579→        moves ~0.05% per minute, so 5x that in slope indicates a clear
+   580→        directional move over 20 candles.
+   581→
+   582→        Args:
+   583→            btc_recent_candles: DataFrame with 'close' column (at least 20 rows).
+   584→                If None or too short, returns "btc_neutral".
+   585→
+   586→        Returns:
+   587→            One of: "btc_bull", "btc_bear", "btc_neutral"
+   588→        """
+   589→        if btc_recent_candles is None or len(btc_recent_candles) < 20:
+   590→            return "btc_neutral"
+   591→
+   592→        closes = btc_recent_candles["close"].values[-20:]
+   593→        if len(closes) < 20 or closes[0] == 0:
+   594→            return "btc_neutral"
+   595→
+   596→        # Simple linear slope: (last - first) / (first * N)
+   597→        # Normalized by entry price so it's comparable across price levels
+   598→        slope = (closes[-1] - closes[0]) / (closes[0] * len(closes))
+   599→
+   600→        if slope > 0.0005:
+   601→            return "btc_bull"
+   602→        elif slope < -0.0005:
+   603→            return "btc_bear"
+   604→        else:
+   605→            return "btc_neutral"
+   606→
+   607→    def _encode(self, encoder, df: pd.DataFrame) -> list[str | tuple[str, str]]:
+   608→        """Encode OHLCV data and return symbols directly.
+   609→
+   610→        v0.43.0: N1 encoder is SAXEncoder → returns list[str].
+   611→        N2/N3/N4 encoders are SAXDualEncoder → returns list[tuple[str, str]].
+   612→        The Trie handles both key types natively.
+   613→        """
+   614→        return encoder.encode(df)
+   615→
+   616→    def encode_all_levels(self, df: pd.DataFrame) -> dict[str, list]:
+   617→        """Encode OHLCV data with ALL per-level encoders.
+   618→
+   619→        v0.43.0: Returns dict with keys 'n1', 'n2', 'n3', 'n4' containing
+   620→        the per-level symbol sequences. N1 is list[str], N2/N3/N4 are
+   621→        list[tuple[str, str]] when dual_sax=True.
+   622→
+   623→        v0.48.0 (FASE 2A): Each level uses its own window_size, so the
+   624→        returned lists may have DIFFERENT lengths. N1 with W=60 produces
+   625→        fewer symbols than N3 with W=20 for the same data.
+   626→
+   627→        This is the public API for OOS replay and real-time encoding.
+   628→        """
+   629→        return {
+   630→            "n1": self._encode(self.sax_n1, df),
+   631→            "n2": self._encode(self.sax_n2, df),
+   632→            "n3": self._encode(self.sax_n3, df),
+   633→            "n4": self._encode(self.sax_n4, df),
+   634→        }
+   635→
+   636→    def encode_pattern_per_level(self, df: pd.DataFrame, pattern_length: int = None) -> dict[str, list]:
+   637→        """Encode OHLCV data and return the LAST pattern_length symbols per level.
+   638→
+   639→        v0.47.0: Used by the learning loop to capture the exact per-level
+   640→        pattern at the moment of entry. Each level may produce different
+   641→        symbol types (strings for N1/N2, tuples for N3/N4), so we return
+   642→        the last `pattern_length` symbols from each level's full encoding.
+   643→
+   644→        v0.48.0 (FASE 2A): Uses per-level pattern_length (self.pl_n1 etc.)
+   645→        instead of a single global pattern_length. This means N1/N2 return
+   646→        the last 5 symbols, while N3/N4 return the last 4.
+   647→
+   648→        Args:
+   649→            df: DataFrame with OHLCV columns (at least max(window_size * pattern_length) rows)
+   650→            pattern_length: DEPRECATED — ignored, per-level lengths are used instead.
+   651→                Kept for API backwards compatibility.
+   652→
+   653→        Returns:
+   654→            Dict with keys 'n1', 'n2', 'n3', 'n4' containing the last
+   655→            pl_* symbols from each level's encoding.
+   656→        """
+   657→        full = self.encode_all_levels(df)
+   658→        return {
+   659→            "n1": full["n1"][-self.pl_n1:] if len(full["n1"]) >= self.pl_n1 else full["n1"],
+   660→            "n2": full["n2"][-self.pl_n2:] if len(full["n2"]) >= self.pl_n2 else full["n2"],
+   661→            "n3": full["n3"][-self.pl_n3:] if len(full["n3"]) >= self.pl_n3 else full["n3"],
+   662→            "n4": full["n4"][-self.pl_n4:] if len(full["n4"]) >= self.pl_n4 else full["n4"],
+   663→        }
+   664→
+   665→    def build(self, df: pd.DataFrame, pattern_length: int = 5) -> int:
+   666→        """
+   667→        Build the 4-level Trie from historical OHLCV data.
+   668→
+   669→        Processes the DataFrame into SAX symbols, then creates
+   670→        overlapping pattern sequences and inserts them into all
+   671→        4 Trie levels with Block Lifecycle Metadata.
+   672→
+   673→        v0.48.0 (FASE 2A): Each level uses its own window_size and
+   674→        pattern_length (self.pl_n1 etc.), so levels are built independently.
+   675→        Metadata (move_pct, won, drawdown, regime) is computed per-level
+   676→        based on each level's own candle-to-symbol mapping.
+   677→
+   678→        Args:
+   679→            df: OHLCV DataFrame with columns: open, high, low, close, volume
+   680→            pattern_length: DEPRECATED — per-level lengths from LEVEL_PATTERN_CONFIG
+   681→                are used instead. Kept for API backwards compatibility.
+   682→
+   683→        Returns:
+   684→            Number of patterns inserted (sum across all levels)
+   685→        """
+   686→        # Encode with each level's SAX encoder.
+   687→        # v0.48.0 (FASE 2A): Each level has its own window_size, so symbol
+   688→        # lists may have DIFFERENT lengths. We build each level independently.
+   689→        symbols_n1 = self._encode(self.sax_n1, df)
+   690→        symbols_n2 = self._encode(self.sax_n2, df)
+   691→        symbols_n3 = self._encode(self.sax_n3, df)
+   692→        symbols_n4 = self._encode(self.sax_n4, df)
+   693→
+   694→        # Build each level independently with its own pattern_length
+   695→        count = 0
+   696→        level_configs = [
+   697→            ("n1", symbols_n1, self.pl_n1, self.sax_n1.window_size),
+   698→            ("n2", symbols_n2, self.pl_n2, self.sax_n2.window_size),
+   699→            ("n3", symbols_n3, self.pl_n3, self.sax_n3.window_size),
+   700→            ("n4", symbols_n4, self.pl_n4, self.sax_n4.window_size),
+   701→        ]
+   702→
+   703→        for level_name, symbols, pl, w_size in level_configs:
+   704→            if len(symbols) < pl:
+   705→                logger.warning(
+   706→                    f"build(): {level_name} has {len(symbols)} symbols, "
+   707→                    f"need >= {pl} (pattern_length). Skipping."
+   708→                )
+   709→                continue
+   710→
+   711→            for i in range(len(symbols) - pl):
+   712→                pattern = symbols[i:i + pl]
+   713→
+   714→                # Next symbol for continuation
+   715→                next_sym = symbols[i + pl] if i + pl < len(symbols) else None
+   716→
+   717→                # Next 3 symbols for forward sequences
+   718→                next_3 = tuple(symbols[i + pl : i + pl + 3]) if i + pl + 3 <= len(symbols) else None
+   719→
+   720→                # Map symbol index to candle range
+   721→                start_candle = i * w_size
+   722→                end_candle = (i + pl) * w_size
+   723→
+   724→                if end_candle > len(df):
+   725→                    break
+   726→
+   727→                window_df = df.iloc[start_candle:end_candle]
+   728→
+   729→                # Compute metadata from actual prices
+   730→                entry_price = window_df["close"].iloc[0]
+   731→                exit_price = window_df["close"].iloc[-1]
+   732→                move_pct = ((exit_price - entry_price) / entry_price) * 100.0
+   733→
+   734→                high = window_df["high"].max()
+   735→                low = window_df["low"].min()
+   736→                drawdown_pct = ((low - entry_price) / entry_price) * 100.0
+   737→                favorable_pct = ((high - entry_price) / entry_price) * 100.0
+   738→
+   739→                duration = len(window_df)
+   740→
+   741→                # Compute won from post-pattern candles
+   742→                # v0.54.0 (TAREA 15): Use DIRECTIONAL outcome — measure REAL
+   743→                # price movement after the pattern instead of simulating
+   744→                # first-touch SL/TP with artificial 0.15% thresholds.
+   745→                #
+   746→                # TAREA 14 AUDIT FINDING: The old SL/TP=0.15% simulation
+   747→                # measured micro-structure noise, not predictive power.
+   748→                # Pattern "cbc" had expected_move_pct=+0.35% (real signal)
+   749→                # but win_rate=41% because SL=0.15% triggered on noise first.
+   750→                # The fix: ask "Did the price move in the predicted direction?"
+   751→                # instead of "Did TP=0.15% hit before SL=0.15%?"
+   752→                #
+   753→                # compute_outcome_directional() uses the last close of the
+   754→                # post-pattern window vs entry_price to determine direction.
+   755→                # No artificial thresholds, no SL/TP, no first-touch noise.
+   756→                # This measures TRUE predictive power of the pattern.
+   757→
+   758→                # Post-pattern window for directional outcome
+   759→                post_pattern_window_size = pl * w_size
+   760→                post_pattern_start = end_candle
+   761→                post_pattern_end = min(end_candle + post_pattern_window_size, len(df))
+   762→                post_pattern_df = df.iloc[post_pattern_start:post_pattern_end]
+   763→                entry_price_for_outcome = window_df["close"].iloc[-1]
+   764→
+   765→                won = compute_outcome_directional(
+   766→                    post_pattern_df=post_pattern_df,
+   767→                    entry_price=entry_price_for_outcome,
+   768→                    move_pct=move_pct,
+   769→                )
+   770→
+   771→                # Detect regime
+   772→                regime = self.regime_detector.detect_simple(window_df, timeframe=self.timeframe)
+   773→
+   774→                # Insert into appropriate trie
+   775→                if level_name == "n1":
+   776→                    if self._storage is not None:
+   777→                        self._n1_buffer.insert_with_observations(
+   778→                            symbols=pattern, move_pct=move_pct,
+   779→                            drawdown_pct=drawdown_pct, favorable_pct=favorable_pct,
+   780→                            duration=duration, won=won, next_symbol=next_sym,
+   781→                            regime=regime, next_3_symbols=next_3,
+   782→                        )
+   783→                    else:
+   784→                        self.trie_n1.insert_with_observations(
+   785→                            symbols=pattern, move_pct=move_pct,
+   786→                            drawdown_pct=drawdown_pct, favorable_pct=favorable_pct,
+   787→                            duration=duration, won=won, next_symbol=next_sym,
+   788→                            regime=regime, next_3_symbols=next_3,
+   789→                        )
+   790→                elif level_name == "n2":
+   791→                    if self._storage is not None:
+   792→                        self._n2_buffer.insert_with_observations(
+   793→                            symbols=pattern, move_pct=move_pct,
+   794→                            drawdown_pct=drawdown_pct, favorable_pct=favorable_pct,
+   795→                            duration=duration, won=won, next_symbol=next_sym,
+   796→                            regime=regime, next_3_symbols=next_3,
+   797→                        )
+   798→                    else:
+   799→                        self.trie_n2.insert_with_observations(
+   800→                            symbols=pattern, move_pct=move_pct,
+   801→                            drawdown_pct=drawdown_pct, favorable_pct=favorable_pct,
+   802→                            duration=duration, won=won, next_symbol=next_sym,
+   803→                            regime=regime, next_3_symbols=next_3,
+   804→                        )
+   805→                elif level_name == "n3":
+   806→                    self.trie_n3.insert_with_observations(
+   807→                        symbols=pattern, move_pct=move_pct,
+   808→                        drawdown_pct=drawdown_pct, favorable_pct=favorable_pct,
+   809→                        duration=duration, won=won, next_symbol=next_sym,
+   810→                        regime=regime, next_3_symbols=next_3,
+   811→                    )
+   812→                elif level_name == "n4":
+   813→                    self.trie_n4.insert_with_observations(
+   814→                        symbols=pattern, move_pct=move_pct,
+   815→                        drawdown_pct=drawdown_pct, favorable_pct=favorable_pct,
+   816→                        duration=duration, won=won, next_symbol=next_sym,
+   817→                        regime=regime, next_3_symbols=next_3,
+   818→                    )
+   819→
+   820→                count += 1
+   821→
+   822→        self._total_patterns_built += count
+   823→
+   824→        # v0.40.3 FIX-1B: When storage is attached, flush the in-memory N1/N2
+   825→        # buffers to the cross-asset shared pools (one storage round-trip per
+   826→        # pool, not per observation). Also persist N3 (per-symbol) and N4
+   827→        # (per-symbol+regime) so other PPMT instances can load them via
+   828→        # load_all_tries(symbol, asset_class).
+   829→        if self._storage is not None and count > 0:
+   830→            # Load existing pools, merge buffers, save back.
+   831→            def _top_regime(regime_dist) -> Optional[str]:
+   832→                """Return the most common regime from a dict-like, or None."""
+   833→                if not regime_dist:
+   834→                    return None
+   835→                # regime_dist may be a Counter or a plain dict
+   836→                if hasattr(regime_dist, "most_common"):
+   837→                    return regime_dist.most_common(1)[0][0]
+   838→                # plain dict: sort by value
+   839→                return max(regime_dist.items(), key=lambda x: x[1])[0]
+   840→
+   841→            # N1 universal pool
+   842→            existing_n1 = self._storage.load_trie(UNIVERSAL_POOL_KEY, "n1", timeframe=self.timeframe or "")
+   843→            if existing_n1 is None:
+   844→                merged_n1 = self._n1_buffer
+   845→            else:
+   846→                # Merge: walk our buffer's patterns and insert into existing.
+   847→                # CRITICAL FIX: Insert historical_count observations (not just 1)
+   848→                # to preserve the observation frequency from the buffer.
+   849→                # Without this, a pattern observed 50 times in the buffer
+   850→                # only contributes 1 observation to the pool, destroying
+   851→                # Bayesian confidence.
+   852→                merged_n1 = existing_n1
+   853→                for pat, node in self._n1_buffer.get_all_patterns(min_count=1):
+   854→                    meta = node.metadata
+   855→                    n_obs = meta.historical_count
+   856→                    n_wins = int(meta.win_rate * n_obs)
+   857→                    for obs_i in range(n_obs):
+   858→                        merged_n1.insert_with_observations(
+   859→                            symbols=list(pat),
+   860→                            move_pct=meta.expected_move_pct,
+   861→                            drawdown_pct=meta.max_drawdown_pct,
+   862→                            favorable_pct=meta.max_favorable_pct,
+   863→                            duration=int(meta.avg_duration),
+   864→                            won=obs_i < n_wins,  # Distribute wins first
+   865→                            next_symbol=None,
+   866→                            regime=_top_regime(meta.regime_distribution),
+   867→                        )
+   868→            self._storage.save_trie(UNIVERSAL_POOL_KEY, "n1", merged_n1, timeframe=self.timeframe or "")
+   869→
+   870→            # N2 class-shared pool
+   871→            pool_key = class_pool_key(self.asset_class)
+   872→            existing_n2 = self._storage.load_trie(pool_key, "n2", timeframe=self.timeframe or "")
+   873→            if existing_n2 is None:
+   874→                merged_n2 = self._n2_buffer
+   875→            else:
+   876→                # CRITICAL FIX: Same as N1 — preserve observation counts
+   877→                merged_n2 = existing_n2
+   878→                for pat, node in self._n2_buffer.get_all_patterns(min_count=1):
+   879→                    meta = node.metadata
+   880→                    n_obs = meta.historical_count
+   881→                    n_wins = int(meta.win_rate * n_obs)
+   882→                    for obs_i in range(n_obs):
+   883→                        merged_n2.insert_with_observations(
+   884→                            symbols=list(pat),
+   885→                            move_pct=meta.expected_move_pct,
+   886→                            drawdown_pct=meta.max_drawdown_pct,
+   887→                            favorable_pct=meta.max_favorable_pct,
+   888→                            duration=int(meta.avg_duration),
+   889→                            won=obs_i < n_wins,
+   890→                            next_symbol=None,
+   891→                            regime=_top_regime(meta.regime_distribution),
+   892→                        )
+   893→            self._storage.save_trie(pool_key, "n2", merged_n2, timeframe=self.timeframe or "")
+   894→
+   895→            # N3 (per-symbol) — persist local trie
+   896→            self._storage.save_trie(self.symbol, "n3", self.trie_n3, timeframe=self.timeframe or "")
+   897→            # N4 (per-symbol + regime) — persist RegimePartitionedTrie
+   898→            self._storage.save_trie(self.symbol, "n4", self.trie_n4, timeframe=self.timeframe or "")
+   899→
+   900→            # Reset buffers for next build() call
+   901→            self._n1_buffer = PPMTTrie(name="universal_buffer")
+   902→            self._n2_buffer = PPMTTrie(name=f"class_buffer:{self.asset_class}")
+   903→
+   904→            # v0.41.0 FIX-1B: Verify pools were actually saved to storage.
+   905→            # This catches silent save failures that would otherwise go
+   906→            # undetected until N1/N2 load as None in paper_trader/realtime.
+   907→            try:
+   908→                saved_n1 = self._storage.load_trie(UNIVERSAL_POOL_KEY, "n1", timeframe=self.timeframe or "")
+   909→                if saved_n1 is not None and saved_n1.pattern_count > 0:
+   910→                    logger.info(
+   911→                        f"N1 universal pool verified: {saved_n1.pattern_count} patterns"
+   912→                    )
+   913→                else:
+   914→                    logger.warning(
+   915→                        "N1 universal pool save verification FAILED — "
+   916→                        "pool is empty or missing after build!"
+   917→                    )
+   918→
+   919→                n2_key = class_pool_key(self.asset_class)
+   920→                saved_n2 = self._storage.load_trie(n2_key, "n2", timeframe=self.timeframe or "")
+   921→                if saved_n2 is not None and saved_n2.pattern_count > 0:
+   922→                    logger.info(
+   923→                        f"N2 class pool ({self.asset_class}) verified: "
+   924→                        f"{saved_n2.pattern_count} patterns"
+   925→                    )
+   926→                else:
+   927→                    logger.warning(
+   928→                        f"N2 class pool ({self.asset_class}) save verification FAILED — "
+   929→                        f"pool is empty or missing after build!"
+   930→                    )
+   931→            except Exception as e:
+   932→                logger.warning(f"Pool verification error (non-fatal): {e}")
+   933→
+   934→        return count
+   935→
+   936→    def match_raw(
+   937→        self,
+   938→        current_symbols: list[str],
+   939→        current_price: float = 0.0,
+   940→        current_symbols_n1: Optional[list[str]] = None,
+   941→        current_symbols_n2: Optional[list[str]] = None,
+   942→        current_symbols_n3: Optional[list[str]] = None,
+   943→        current_symbols_n4: Optional[list[str]] = None,
+   944→        recent_candles: Optional[pd.DataFrame] = None,
+   945→        btc_recent_candles: Optional[pd.DataFrame] = None,
+   946→    ) -> PPMTResult:
+   947→        """
+   948→        Raw 4-level match without signal generation.
+   949→
+   950→        Used by PaperTrader to compute weighted confidence across all
+   951→        4 trie levels. Returns match results with confidence values
+   952→        but does NOT generate a trading signal (that's done by the
+   953→        PaperTrader's own entry logic).
+   954→
+   955→        v0.47.0: When `recent_candles` (DataFrame with OHLCV columns) is
+   956→        provided, each level's SAX encoder re-encodes the data independently.
+   957→        This fixes the string/tuple mismatch: N3/N4 use SAXDualEncoder which
+   958→        produces tuples like ('a','x'), but realtime.py was passing plain
+   959→        strings from pattern_buffer. With recent_candles, the encoders produce
+   960→        the correct symbol type for each level automatically.
+   961→
+   962→        When recent_candles is None, falls back to current_symbols for all
+   963→        levels (backwards compatibility for old tests).
+   964→
+   965→        Args:
+   966→            current_symbols: Current SAX symbol sequence (backwards compat)
+   967→            current_price: Current market price (unused, for compatibility)
+   968→            current_symbols_n1: N1-encoded symbols (if None, uses current_symbols)
+   969→            current_symbols_n2: N2-encoded symbols (if None, uses current_symbols)
+   970→            current_symbols_n3: N3-encoded symbols (if None, uses current_symbols)
+   971→            current_symbols_n4: N4-encoded symbols (if None, uses current_symbols)
+   972→            recent_candles: DataFrame with OHLCV columns. When provided, each
+   973→                level's encoder re-encodes the data, producing the correct
+   974→                symbol type (strings for N1/N2, tuples for N3/N4).
+   975→
+   976→        Returns:
+   977→            PPMTResult with match details and weighted confidence
+   978→        """
+   979→        start_time = time.perf_counter()
+   980→
+   981→        # v0.47.0: When recent_candles is provided, encode with each level's
+   982→        # encoder to get the correct symbol types. This fixes the bug where
+   983→        # N3/N4 (SAXDualEncoder) expect tuples but received strings.
+   984→        # v0.47.1: Check against window_size * pattern_length (not just window_size)
+   985→        # so we get enough symbols for a meaningful match.
+   986→        # v0.48.0 (FASE 2A): Use per-level min_rows since each level has its
+   987→        # own window_size and pattern_length.
+   988→        _min_rows = min(
+   989→            self.sax_n1.window_size * self.pl_n1,
+   990→            self.sax_n2.window_size * self.pl_n2,
+   991→            self.sax_n3.window_size * self.pl_n3,
+   992→            self.sax_n4.window_size * self.pl_n4,
+   993→        )
+   994→        if recent_candles is not None and len(recent_candles) >= _min_rows:
+   995→            try:
+   996→                encoded = self.encode_all_levels(recent_candles)
+   997→                # v0.48.0 (FASE 2A): Truncate each level to its own pattern_length.
+   998→                # N1/N2 use pl=5, N3/N4 use pl=4. The trie stores patterns of
+   999→                # length pl_*, so we must match that exact length for search.
+  1000→                syms_n1 = encoded["n1"][-self.pl_n1:] if len(encoded["n1"]) >= self.pl_n1 else encoded["n1"]
+  1001→                syms_n2 = encoded["n2"][-self.pl_n2:] if len(encoded["n2"]) >= self.pl_n2 else encoded["n2"]
+  1002→                syms_n3 = encoded["n3"][-self.pl_n3:] if len(encoded["n3"]) >= self.pl_n3 else encoded["n3"]
+  1003→                syms_n4 = encoded["n4"][-self.pl_n4:] if len(encoded["n4"]) >= self.pl_n4 else encoded["n4"]
+  1004→            except Exception:
+  1005→                # Fallback to current_symbols if encoding fails
+  1006→                syms_n1 = current_symbols_n1 if current_symbols_n1 is not None else current_symbols
+  1007→                syms_n2 = current_symbols_n2 if current_symbols_n2 is not None else current_symbols
+  1008→                syms_n3 = current_symbols_n3 if current_symbols_n3 is not None else current_symbols
+  1009→                syms_n4 = current_symbols_n4 if current_symbols_n4 is not None else current_symbols
+  1010→        else:
+  1011→            # FASE 1 Tarea 1.1: Use per-level matchers with per-level symbols.
+  1012→            # Each matcher knows its level's alphabet size for fuzzy distance.
+  1013→            syms_n1 = current_symbols_n1 if current_symbols_n1 is not None else current_symbols
+  1014→            syms_n2 = current_symbols_n2 if current_symbols_n2 is not None else current_symbols
+  1015→            syms_n3 = current_symbols_n3 if current_symbols_n3 is not None else current_symbols
+  1016→            syms_n4 = current_symbols_n4 if current_symbols_n4 is not None else current_symbols
+  1017→
+  1018→        # Search all 4 levels with per-level matchers
+  1019→        n1_match = self.matcher_n1.best_match(self.trie_n1, syms_n1)
+  1020→        n2_match = self.matcher_n2.best_match(self.trie_n2, syms_n2)
+  1021→        n3_match = self.matcher_n3.best_match(self.trie_n3, syms_n3)
+  1022→        n4_match = self.matcher_n4.best_match(self.trie_n4, syms_n4)
+  1023→
+  1024→        # Get confidence from each level (match_raw)
+  1025→        n1_conf = n1_match.node.metadata.confidence if n1_match.node else 0.0
+  1026→        n2_conf = n2_match.node.metadata.confidence if n2_match.node else 0.0
+  1027→        n3_conf = n3_match.node.metadata.confidence if n3_match.node else 0.0
+  1028→        n4_conf = n4_match.node.metadata.confidence if n4_match.node else 0.0
+  1029→
+  1030→        # v0.41.0 (FASE 2, Tarea 2.4): Apply time decay to each level's
+  1031→        # confidence using the node's last_seen_timestamp. Patterns that
+  1032→        # haven't been observed recently get reduced confidence.
+  1033→        from ppmt.engine.weights import apply_time_decay
+  1034→        n1_conf = apply_time_decay(
+  1035→            n1_conf, n1_match.node.metadata.last_seen_timestamp
+  1036→        ) if n1_match.node and n1_conf > 0 else n1_conf
+  1037→        n2_conf = apply_time_decay(
+  1038→            n2_conf, n2_match.node.metadata.last_seen_timestamp
+  1039→        ) if n2_match.node and n2_conf > 0 else n2_conf
+  1040→        n3_conf = apply_time_decay(
+  1041→            n3_conf, n3_match.node.metadata.last_seen_timestamp
+  1042→        ) if n3_match.node and n3_conf > 0 else n3_conf
+  1043→        n4_conf = apply_time_decay(
+  1044→            n4_conf, n4_match.node.metadata.last_seen_timestamp
+  1045→        ) if n4_match.node and n4_conf > 0 else n4_conf
+  1046→
+  1047→        # v0.41.0 (FASE 3, Tarea 3.1): Apply safe default weights for
+  1048→        # immature local tries. If N3 has < 20 patterns or N4 has < 10,
+  1049→        # redistribute their weight to N1/N2 which have cross-asset data.
+  1050→        # This prevents unreliable N3/N4 from dominating confidence.
+  1051→        # v0.43.0: Also pass N2 avg obs density so sparse N2 pools shift
+  1052→        # weight to the dense N1 universal pool.
+  1053→        n3_count = self.trie_n3.pattern_count
+  1054→        n4_count = self.trie_n4.pattern_count if hasattr(self.trie_n4, 'pattern_count') else 0
+  1055→
+  1056→        # Compute N2 average obs/node for density-aware weight redistribution
+  1057→        n2_avg_obs = 0.0
+  1058→        if self.trie_n2.pattern_count > 0:
+  1059→            # Compute avg obs/node from actual trie data (historical_count)
+  1060→            total_obs = 0
+  1061→            node_count = 0
+  1062→            for _pat, node in self.trie_n2.get_all_patterns(min_count=1):
+  1063→                total_obs += node.metadata.historical_count
+  1064→                node_count += 1
+  1065→            if node_count > 0:
+  1066→                n2_avg_obs = total_obs / node_count
+  1067→
+  1068→        # v0.52.0: Build safe_weights with timeframe awareness so N5 weight
+  1069→        # is included for 1m and safe_default_weights uses micro-structure-
+  1070→        # first redistribution.
+  1071→        safe_weights = AdaptiveWeights.from_profile(self.weights.profile, timeframe=self.timeframe)
+  1072→        safe_weights.n1_universal = self.weights.n1_universal
+  1073→        safe_weights.n2_asset_class = self.weights.n2_asset_class
+  1074→        safe_weights.n3_per_asset = self.weights.n3_per_asset
+  1075→        safe_weights.n4_per_asset_regime = self.weights.n4_per_asset_regime
+  1076→        safe_weights.n5_btc_context = self.weights.n5_btc_context
+  1077→
+  1078→        # v0.48.0 (FASE 2B): N5 — BTC Context Level (1m only).
+  1079→        # v0.52.0: N5 is now part of the weight system. Match N5 first so
+  1080→        # we can pass n5_confidence to compute_weighted_confidence() and
+  1081→        # let the weight profile handle N5 allocation naturally.
+  1082→        n5_conf = 0.0
+  1083→        n5_match = None
+  1084→        n5_count = 0
+  1085→        if self.trie_n5 is not None and self.sax_n5 is not None and recent_candles is not None:
+  1086→            try:
+  1087→                n5_syms = self._encode(self.sax_n5, recent_candles)
+  1088→                n5_syms = n5_syms[-self.pl_n5:] if len(n5_syms) >= self.pl_n5 else n5_syms
+  1089→
+  1090→                btc_context = self._get_btc_context(btc_recent_candles)
+  1091→                self.trie_n5.set_current_regime(btc_context)
+  1092→
+  1093→                n5_match = self.matcher_n5.best_match(self.trie_n5, n5_syms)
+  1094→                n5_conf = n5_match.node.metadata.confidence if n5_match.node else 0.0
+  1095→
+  1096→                n5_conf = apply_time_decay(
+  1097→                    n5_conf, n5_match.node.metadata.last_seen_timestamp
+  1098→                ) if n5_match.node and n5_conf > 0 else n5_conf
+  1099→
+  1100→                n5_count = self.trie_n5.pattern_count if hasattr(self.trie_n5, 'pattern_count') else 0
+  1101→            except Exception:
+  1102→                pass  # N5 failure is non-fatal
+  1103→
+  1104→        safe_weights.safe_default_weights(
+  1105→            n3_pattern_count=n3_count,
+  1106→            n4_pattern_count=n4_count,
+  1107→            n2_avg_obs=n2_avg_obs,
+  1108→            n5_pattern_count=n5_count,
+  1109→        )
+  1110→
+  1111→        # Compute weighted confidence (N5 now included via weight profile)
+  1112→        weighted_conf = safe_weights.compute_weighted_confidence(
+  1113→            n1_confidence=n1_conf,
+  1114→            n2_confidence=n2_conf,
+  1115→            n3_confidence=n3_conf,
+  1116→            n4_confidence=n4_conf,
+  1117→            n5_confidence=n5_conf,
+  1118→        )
+  1119→
+  1120→        search_time = (time.perf_counter() - start_time) * 1000.0
+  1121→
+  1122→        return PPMTResult(
+  1123→            signal=Signal(signal_type=SignalType.NO_SIGNAL, symbol=self.symbol),
+  1124→            n1_match=n1_match,
+  1125→            n2_match=n2_match,
+  1126→            n3_match=n3_match,
+  1127→            n4_match=n4_match,
+  1128→            n1_confidence=n1_conf,
+  1129→            n2_confidence=n2_conf,
+  1130→            n3_confidence=n3_conf,
+  1131→            n4_confidence=n4_conf,
+  1132→            n5_confidence=n5_conf,
+  1133→            weighted_confidence=weighted_conf,
+  1134→            sax_symbols=current_symbols,
+  1135→            search_time_ms=search_time,
+  1136→        )
+  1137→
+  1138→    def match(
+  1139→        self,
+  1140→        current_symbols: list[str],
+  1141→        current_price: float,
+  1142→        is_in_position: bool = False,
+  1143→        entry_price: Optional[float] = None,
+  1144→        current_symbols_n1: Optional[list[str]] = None,
+  1145→        current_symbols_n2: Optional[list[str]] = None,
+  1146→        current_symbols_n3: Optional[list[str]] = None,
+  1147→        current_symbols_n4: Optional[list[str]] = None,
+  1148→        recent_candles: Optional[pd.DataFrame] = None,
+  1149→    ) -> PPMTResult:
+  1150→        """
+  1151→        Match current SAX sequence against all 4 Trie levels.
+  1152→
+  1153→        Performs parallel search across N1-N4, computes adaptive
+  1154→        weighted confidence, and generates a trading signal.
+  1155→
+  1156→        This is the main real-time method called on each new candle.
+  1157→
+  1158→        v0.47.0: When `recent_candles` is provided, each level's encoder
+  1159→        re-encodes the data independently, fixing the string/tuple mismatch.
+  1160→
+  1161→        Args:
+  1162→            current_symbols: Current SAX symbol sequence (backwards compat)
+  1163→            current_price: Current market price
+  1164→            is_in_position: Whether we already have an open position
+  1165→            entry_price: Entry price of current position (if any)
+  1166→            current_symbols_n1: N1-encoded symbols (if None, uses current_symbols)
+  1167→            current_symbols_n2: N2-encoded symbols (if None, uses current_symbols)
+  1168→            current_symbols_n3: N3-encoded symbols (if None, uses current_symbols)
+  1169→            current_symbols_n4: N4-encoded symbols (if None, uses current_symbols)
+  1170→            recent_candles: DataFrame with OHLCV columns. When provided, each
+  1171→                level's encoder re-encodes the data, producing the correct
+  1172→                symbol type (strings for N1/N2, tuples for N3/N4).
+  1173→
+  1174→        Returns:
+  1175→            PPMTResult with signal and matching details
+  1176→        """
+  1177→        start_time = time.perf_counter()
+  1178→
+  1179→        # v0.47.0: When recent_candles is provided, encode with each level's
+  1180→        # encoder to get the correct symbol types.
+  1181→        # v0.48.0 (FASE 2A): Per-level min_rows and per-level truncation.
+  1182→        _min_rows = min(
+  1183→            self.sax_n1.window_size * self.pl_n1,
+  1184→            self.sax_n2.window_size * self.pl_n2,
+  1185→            self.sax_n3.window_size * self.pl_n3,
+  1186→            self.sax_n4.window_size * self.pl_n4,
+  1187→        )
+  1188→        if recent_candles is not None and len(recent_candles) >= _min_rows:
+  1189→            try:
+  1190→                encoded = self.encode_all_levels(recent_candles)
+  1191→                # v0.48.0 (FASE 2A): Truncate each level to its own pattern_length.
+  1192→                syms_n1 = encoded["n1"][-self.pl_n1:] if len(encoded["n1"]) >= self.pl_n1 else encoded["n1"]
+  1193→                syms_n2 = encoded["n2"][-self.pl_n2:] if len(encoded["n2"]) >= self.pl_n2 else encoded["n2"]
+  1194→                syms_n3 = encoded["n3"][-self.pl_n3:] if len(encoded["n3"]) >= self.pl_n3 else encoded["n3"]
+  1195→                syms_n4 = encoded["n4"][-self.pl_n4:] if len(encoded["n4"]) >= self.pl_n4 else encoded["n4"]
+  1196→            except Exception:
+  1197→                syms_n1 = current_symbols_n1 if current_symbols_n1 is not None else current_symbols
+  1198→                syms_n2 = current_symbols_n2 if current_symbols_n2 is not None else current_symbols
+  1199→                syms_n3 = current_symbols_n3 if current_symbols_n3 is not None else current_symbols
+  1200→                syms_n4 = current_symbols_n4 if current_symbols_n4 is not None else current_symbols
+  1201→        else:
+  1202→            # FASE 1 Tarea 1.1: Use per-level matchers with per-level symbols.
+  1203→            syms_n1 = current_symbols_n1 if current_symbols_n1 is not None else current_symbols
+  1204→            syms_n2 = current_symbols_n2 if current_symbols_n2 is not None else current_symbols
+  1205→            syms_n3 = current_symbols_n3 if current_symbols_n3 is not None else current_symbols
+  1206→            syms_n4 = current_symbols_n4 if current_symbols_n4 is not None else current_symbols
+  1207→
+  1208→        # Search all 4 levels with per-level matchers
+  1209→        n1_match = self.matcher_n1.best_match(self.trie_n1, syms_n1)
+  1210→        n2_match = self.matcher_n2.best_match(self.trie_n2, syms_n2)
+  1211→        n3_match = self.matcher_n3.best_match(self.trie_n3, syms_n3)
+  1212→        n4_match = self.matcher_n4.best_match(self.trie_n4, syms_n4)
+  1213→
+  1214→        # Get confidence from each level (match)
+  1215→        n1_conf = n1_match.node.metadata.confidence if n1_match.node else 0.0
+  1216→        n2_conf = n2_match.node.metadata.confidence if n2_match.node else 0.0
+  1217→        n3_conf = n3_match.node.metadata.confidence if n3_match.node else 0.0
+  1218→        n4_conf = n4_match.node.metadata.confidence if n4_match.node else 0.0
+  1219→
+  1220→        # v0.41.0 (FASE 2, Tarea 2.4): Apply time decay to each level's
+  1221→        # confidence using the node's last_seen_timestamp.
+  1222→        from ppmt.engine.weights import apply_time_decay
+  1223→        n1_conf = apply_time_decay(
+  1224→            n1_conf, n1_match.node.metadata.last_seen_timestamp
+  1225→        ) if n1_match.node and n1_conf > 0 else n1_conf
+  1226→        n2_conf = apply_time_decay(
+  1227→            n2_conf, n2_match.node.metadata.last_seen_timestamp
+  1228→        ) if n2_match.node and n2_conf > 0 else n2_conf
+  1229→        n3_conf = apply_time_decay(
+  1230→            n3_conf, n3_match.node.metadata.last_seen_timestamp
+  1231→        ) if n3_match.node and n3_conf > 0 else n3_conf
+  1232→        n4_conf = apply_time_decay(
+  1233→            n4_conf, n4_match.node.metadata.last_seen_timestamp
+  1234→        ) if n4_match.node and n4_conf > 0 else n4_conf
+  1235→
+  1236→        # v0.41.0 (FASE 3, Tarea 3.1): Apply safe default weights for
+  1237→        # immature local tries. If N3 has < 20 patterns or N4 has < 10,
+  1238→        # redistribute their weight to N1/N2 which have cross-asset data.
+  1239→        # v0.52.0: Use timeframe-aware weights so 1m gets micro-structure-
+  1240→        # first redistribution.
+  1241→        n3_count = self.trie_n3.pattern_count
+  1242→        n4_count = self.trie_n4.pattern_count if hasattr(self.trie_n4, 'pattern_count') else 0
+  1243→        safe_weights = AdaptiveWeights.from_profile(self.weights.profile, timeframe=self.timeframe)
+  1244→        safe_weights.n1_universal = self.weights.n1_universal
+  1245→        safe_weights.n2_asset_class = self.weights.n2_asset_class
+  1246→        safe_weights.n3_per_asset = self.weights.n3_per_asset
+  1247→        safe_weights.n4_per_asset_regime = self.weights.n4_per_asset_regime
+  1248→        safe_weights.n5_btc_context = self.weights.n5_btc_context
+  1249→        safe_weights.safe_default_weights(n3_pattern_count=n3_count, n4_pattern_count=n4_count)
+  1250→
+  1251→        # Compute weighted confidence
+  1252→        weighted_conf = safe_weights.compute_weighted_confidence(
+  1253→            n1_confidence=n1_conf,
+  1254→            n2_confidence=n2_conf,
+  1255→            n3_confidence=n3_conf,
+  1256→            n4_confidence=n4_conf,
+  1257→        )
+  1258→
+  1259→        # Determine best matching level
+  1260→        best_level = "n1"
+  1261→        best_conf = n1_conf
+  1262→        best_match = n1_match
+  1263→
+  1264→        for level_name, conf, match in [
+  1265→            ("n2", n2_conf, n2_match),
+  1266→            ("n3", n3_conf, n3_match),
+  1267→            ("n4", n4_conf, n4_match),
+  1268→        ]:
+  1269→            if conf > best_conf:
+  1270→                best_conf = conf
+  1271→                best_level = level_name
+  1272→                best_match = match
+  1273→
+  1274→        # Generate signal
+  1275→        signal: Signal
+  1276→
+  1277→        if is_in_position and entry_price is not None:
+  1278→            # Check continuation using ALL trie levels (not just n3)
+  1279→            # v0.6.5: Fuzzy Pattern Break — graduated continuation across levels
+  1280→            pnl_pct = ((current_price - entry_price) / entry_price) * 100.0
+  1281→
+  1282→            last_sym_n1 = syms_n1[-1] if syms_n1 else ""
+  1283→            last_sym_n2 = syms_n2[-1] if syms_n2 else ""
+  1284→            last_sym_n3 = syms_n3[-1] if syms_n3 else ""
+  1285→            last_sym_n4 = syms_n4[-1] if syms_n4 else ""
+  1286→
+  1287→            # Check continuation at all 4 levels, pick best break score
+  1288→            # FASE 1 Tarea 1.1: use per-level matchers for distance computation
+  1289→            cont_results = [
+  1290→                self.matcher_n1.check_continuation(
+  1291→                    self.trie_n1, syms_n1[:-1], last_sym_n1
+  1292→                ),
+  1293→                self.matcher_n2.check_continuation(
+  1294→                    self.trie_n2, syms_n2[:-1], last_sym_n2
+  1295→                ),
+  1296→                self.matcher_n3.check_continuation(
+  1297→                    self.trie_n3, syms_n3[:-1], last_sym_n3
+  1298→                ),
+  1299→                self.matcher_n4.check_continuation(
+  1300→                    self.trie_n4, syms_n4[:-1], last_sym_n4
+  1301→                ),
+  1302→            ]
+  1303→
+  1304→            # Select the continuation result with the highest pattern_break_score
+  1305→            best_cont = max(cont_results, key=lambda c: c.pattern_break_score)
+  1306→
+  1307→            signal = self.signal_generator.generate_continuation_signal(
+  1308→                continuation_result=best_cont,
+  1309→                current_price=current_price,
+  1310→                entry_price=entry_price,
+  1311→                current_pnl_pct=pnl_pct,
+  1312→                symbol=self.symbol,
+  1313→            )
+  1314→        else:
+  1315→            # Look for entry signal
+  1316→            signal = self.signal_generator.generate_entry_signal(
+  1317→                match_result=best_match,
+  1318→                symbol=self.symbol,
+  1319→                current_price=current_price,
+  1320→                confidence=weighted_conf,
+  1321→                trie_level=best_level,
+  1322→            ) or Signal(signal_type=SignalType.NO_SIGNAL, symbol=self.symbol)
+  1323→
+  1324→        search_time = (time.perf_counter() - start_time) * 1000.0
+  1325→
+  1326→        return PPMTResult(
+  1327→            signal=signal,
+  1328→            n1_match=n1_match,
+  1329→            n2_match=n2_match,
+  1330→            n3_match=n3_match,
+  1331→            n4_match=n4_match,
+  1332→            n1_confidence=n1_conf,
+  1333→            n2_confidence=n2_conf,
+  1334→            n3_confidence=n3_conf,
+  1335→            n4_confidence=n4_conf,
+  1336→            weighted_confidence=weighted_conf,
+  1337→            sax_symbols=current_symbols,
+  1338→            search_time_ms=search_time,
+  1339→        )
+  1340→
+  1341→    def process_new_candle(
+  1342→        self,
+  1343→        candle_df: pd.DataFrame,
+  1344→        current_price: float,
+  1345→        is_in_position: bool = False,
+  1346→        entry_price: Optional[float] = None,
+  1347→        paa_mean: Optional[float] = None,
+  1348→        paa_std: Optional[float] = None,
+  1349→    ) -> Optional[PPMTResult]:
+  1350→        """
+  1351→        Process a single new candle through the SAX pipeline.
+  1352→
+  1353→        Incrementally encodes the candle into SAX symbols and
+  1354→        triggers pattern matching when a new symbol is produced.
+  1355→
+  1356→        This is the primary method for real-time operation.
+  1357→
+  1358→        v0.19.1: Fully implemented using StreamingPatternBuffer.
+  1359→        The streaming buffer maintains a sliding window of SAX symbols
+  1360→        and automatically provides the current pattern for matching.
+  1361→
+  1362→        Args:
+  1363→            candle_df: Single-row DataFrame with OHLCV data
+  1364→            current_price: Current price (usually close)
+  1365→            is_in_position: Whether we have an open position
+  1366→            entry_price: Entry price of current position
+  1367→            paa_mean: Training PAA mean for consistent incremental encoding
+  1368→            paa_std: Training PAA std for consistent incremental encoding
+  1369→
+  1370→        Returns:
+  1371→            PPMTResult if a new SAX symbol was produced, None otherwise
+  1372→        """
+  1373→        from ppmt.engine.buffer import StreamingPatternBuffer
+  1374→
+  1375→        # FASE 1 Tarea 1.1: Initialize 4 streaming buffers (one per level)
+  1376→        # Each buffer tracks its own SAX symbol stream for its level's encoder.
+  1377→        if not hasattr(self, '_streaming_buffer') or self._streaming_buffer is None:
+  1378→            self._streaming_buffer = StreamingPatternBuffer(
+  1379→                pattern_length=5,  # default, should match build() pattern_length
+  1380→                max_buffer_length=0,  # auto
+  1381→            )
+  1382→        if not hasattr(self, '_streaming_buffer_n1') or self._streaming_buffer_n1 is None:
+  1383→            self._streaming_buffer_n1 = StreamingPatternBuffer(
+  1384→                pattern_length=5, max_buffer_length=0,
+  1385→            )
+  1386→        if not hasattr(self, '_streaming_buffer_n2') or self._streaming_buffer_n2 is None:
+  1387→            self._streaming_buffer_n2 = StreamingPatternBuffer(
+  1388→                pattern_length=5, max_buffer_length=0,
+  1389→            )
+  1390→        if not hasattr(self, '_streaming_buffer_n4') or self._streaming_buffer_n4 is None:
+  1391→            self._streaming_buffer_n4 = StreamingPatternBuffer(
+  1392→                pattern_length=5, max_buffer_length=0,
+  1393→            )
+  1394→
+  1395→        buf = self._streaming_buffer  # N3 buffer (primary, backwards compat)
+  1396→        buf_n1 = self._streaming_buffer_n1
+  1397→        buf_n2 = self._streaming_buffer_n2
+  1398→        buf_n4 = self._streaming_buffer_n4
+  1399→
+  1400→        # Incremental SAX encoding — one per level
+  1401→        new_symbols_n3, updated_sax_buffer_n3 = self.sax_n3.encode_incremental(
+  1402→            candle_df, buf.sax_buffer,
+  1403→            paa_mean=paa_mean, paa_std=paa_std,
+  1404→        )
+  1405→        new_symbols_n1, updated_sax_buffer_n1 = self.sax_n1.encode_incremental(
+  1406→            candle_df, buf_n1.sax_buffer,
+  1407→            paa_mean=paa_mean, paa_std=paa_std,
+  1408→        )
+  1409→        new_symbols_n2, updated_sax_buffer_n2 = self.sax_n2.encode_incremental(
+  1410→            candle_df, buf_n2.sax_buffer,
+  1411→            paa_mean=paa_mean, paa_std=paa_std,
+  1412→        )
+  1413→        new_symbols_n4, updated_sax_buffer_n4 = self.sax_n4.encode_incremental(
+  1414→            candle_df, buf_n4.sax_buffer,
+  1415→            paa_mean=paa_mean, paa_std=paa_std,
+  1416→        )
+  1417→
+  1418→        # Update streaming buffers with new symbols
+  1419→        matchable_n3 = buf.update(new_symbols_n3, updated_sax_buffer_n3)
+  1420→        buf_n1.update(new_symbols_n1, updated_sax_buffer_n1)
+  1421→        buf_n2.update(new_symbols_n2, updated_sax_buffer_n2)
+  1422→        buf_n4.update(new_symbols_n4, updated_sax_buffer_n4)
+  1423→
+  1424→        if not matchable_n3 or not buf.has_pattern():
+  1425→            return None
+  1426→
+  1427→        # Get current patterns for matching (per-level)
+  1428→        current_pattern_n3 = buf.get_pattern()
+  1429→        current_pattern_n1 = buf_n1.get_pattern()
+  1430→        current_pattern_n2 = buf_n2.get_pattern()
+  1431→        current_pattern_n4 = buf_n4.get_pattern()
+  1432→
+  1433→        # Run 4-level match with per-level symbols
+  1434→        result = self.match(
+  1435→            current_symbols=current_pattern_n3,
+  1436→            current_price=current_price,
+  1437→            is_in_position=is_in_position,
+  1438→            entry_price=entry_price,
+  1439→            current_symbols_n1=current_pattern_n1 or None,
+  1440→            current_symbols_n2=current_pattern_n2 or None,
+  1441→            current_symbols_n3=current_pattern_n3,
+  1442→            current_symbols_n4=current_pattern_n4 or None,
+  1443→        )
+  1444→
+  1445→        # Record match/break in buffer
+  1446→        if result.signal.signal_type != SignalType.NO_SIGNAL:
+  1447→            buf.record_match(
+  1448→                confidence=result.weighted_confidence,
+  1449→                matched_pattern=current_pattern_n3,
+  1450→            )
+  1451→
+  1452→        return result
+  1453→
+  1454→    def adapt_weights(self) -> None:
+  1455→        """
+  1456→        Adapt weights based on current data availability.
+  1457→
+  1458→        Should be called periodically (e.g., every 100 new candles)
+  1459→        to ensure weights reflect the current state of each Trie level.
+  1460→        """
+  1461→        stats = {}
+  1462→        for key, trie in [
+  1463→            ("n1", self.trie_n1),
+  1464→            ("n2", self.trie_n2),
+  1465→            ("n3", self.trie_n3),
+  1466→            ("n4", self.trie_n4),
+  1467→        ]:
+  1468→            patterns = trie.get_all_patterns(min_count=1)
+  1469→            if patterns:
+  1470→                avg_count = np.mean([
+  1471→                    node.metadata.historical_count for _, node in patterns
+  1472→                ])
+  1473→                avg_wr = np.mean([
+  1474→                    node.metadata.win_rate for _, node in patterns
+  1475→                ])
+  1476→                avg_conf = np.mean([
+  1477→                    node.metadata.confidence for _, node in patterns
+  1478→                ])
+  1479→            else:
+  1480→                avg_count = 0.0
+  1481→                avg_wr = 0.0
+  1482→                avg_conf = 0.0
+  1483→
+  1484→            stats[key] = LevelStats(
+  1485→                pattern_count=trie.pattern_count,
+  1486→                avg_historical_count=avg_count,
+  1487→                avg_win_rate=avg_wr,
+  1488→                avg_confidence=avg_conf,
+  1489→            )
+  1490→
+  1491→        self.weights.adapt(stats)
+  1492→
+  1493→    def get_stats(self) -> dict:
+  1494→        """Get engine statistics."""
+  1495→        return {
+  1496→            "symbol": self.symbol,
+  1497→            "asset_class": self.asset_class,
+  1498→            "weights": self.weights.to_dict(),
+  1499→            "trie_n1": str(self.trie_n1),
+  1500→            "trie_n2": str(self.trie_n2),
+  1501→            "trie_n3": str(self.trie_n3),
+  1502→            "trie_n4": str(self.trie_n4),
+  1503→            "total_patterns_built": self._total_patterns_built,
+  1504→            "current_regime": self._current_regime,
+  1505→        }
+  1506→

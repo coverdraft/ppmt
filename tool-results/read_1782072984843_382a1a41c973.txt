@@ -1,0 +1,2002 @@
+     1→"""
+     2→Real-Time Trading Engine - Live & Replay Mode
+     3→
+     4→Streams candles through the PPMT pipeline one at a time, enabling:
+     5→
+     6→  1. **Replay Mode**: Step through historical data as if it were live
+     7→     (for testing the real-time pipeline without an exchange connection)
+     8→  2. **Live Mode**: Connect to an exchange via ccxt and process candles
+     9→     in real-time with the full PPMT pipeline
+    10→
+    11→The real-time engine differs from PaperTrader in a fundamental way:
+    12→  - PaperTrader: Batch processing — encodes ALL data first, then iterates
+    13→  - RealtimeTrader: Streaming — encodes each candle incrementally,
+    14→    producing SAX symbols on-the-fly as windows complete
+    15→
+    16→This is essential for production because:
+    17→  - In live trading, future data doesn't exist yet
+    18→  - Incremental SAX encoding ensures no look-ahead bias
+    19→  - The streaming pattern buffer maintains the current pattern context
+    20→
+    21→Usage (Replay):
+    22→    from ppmt.engine.realtime import RealtimeTrader, ReplayConfig
+    23→
+    24→    config = ReplayConfig(symbol="BTC/USDT", speed=1.0)
+    25→    trader = RealtimeTrader(config=config)
+    26→    result = trader.run_replay()
+    27→
+    28→Usage (Live - requires ccxt):
+    29→    from ppmt.engine.realtime import RealtimeTrader, LiveConfig
+    30→
+    31→    config = LiveConfig(symbol="BTC/USDT", exchange="binance")
+    32→    trader = RealtimeTrader(config=config)
+    33→    await trader.run_live()
+    34→"""
+    35→
+    36→from __future__ import annotations
+    37→
+    38→import time
+    39→import asyncio
+    40→import os
+    41→from dataclasses import dataclass, field
+    42→from typing import Optional, Callable
+    43→from enum import Enum
+    44→
+    45→from rich.console import Console
+    46→from rich.live import Live
+    47→from rich.panel import Panel
+    48→from rich.text import Text
+    49→from rich.table import Table
+    50→from rich.markup import escape as _rich_escape
+    51→
+    52→import numpy as np
+    53→import pandas as pd
+    54→
+    55→from ppmt.data.storage import PPMTStorage, UNIVERSAL_POOL_KEY, class_pool_key
+    56→from ppmt.data.classifier import AssetClassifier
+    57→from ppmt.core.trie import PPMTTrie
+    58→from ppmt.core.sax import SAXEncoder
+    59→from ppmt.core.regime import RegimeDetector, RegimeInfo
+    60→from ppmt.core.profiles import TokenProfile, TIMEFRAME_ALPHA_DEFAULTS, TradingCalibrationEngine
+    61→from ppmt.core.matcher import FuzzyMatcher
+    62→from ppmt.core.thresholds import SignalThresholds
+    63→from ppmt.engine.prediction import PredictionEngine
+    64→from ppmt.engine.signal import SignalType, Signal
+    65→from ppmt.core.metadata import BlockLifecycleMetadata
+    66→from ppmt.risk.manager import RiskManager, RiskConfig
+    67→from ppmt.risk.money_manager import MoneyManager, MoneyManagerConfig
+    68→from ppmt.risk.position_sizing import AdvancedPositionSizer
+    69→from ppmt.engine.buffer import StreamingPatternBuffer
+    70→from ppmt.engine.divergence_monitor import PatternDivergenceMonitor
+    71→from ppmt.engine.btc_filter import BTCContextFilter
+    72→
+    73→# v0.15.0: TerminalState integration for live dashboard
+    74→try:
+    75→    from ppmt.terminal.state import get_terminal_state
+    76→    _terminal_state = get_terminal_state()
+    77→except ImportError:
+    78→    _terminal_state = None
+    79→
+    80→
+    81→console = Console()
+    82→
+    83→# v0.49.0 (FASE 3): Shared BTC Price Cache for N5 context.
+    84→# Populated when BTC/USDT candles arrive, consumed by altcoins
+    85→# to feed match_raw(btc_recent_candles=...) for N5 trie matching.
+    86→_BTC_PRICE_CACHE: dict = {"closes": [], "last_update_ts": 0}
+    87→
+    88→
+    89→# ============================================================
+    90→# v0.34.0: TF-aware recalibration interval
+    91→# ============================================================
+    92→# 15m es la referencia (2000 velas ≈ 21 días).
+    93→# TFs más altos → menos recalibraciones (más espaciadas).
+    94→# TFs más bajos → usar el base (no tiene sentido recalibrar cada 200 velas).
+    95→# Techo de 50k para TFs muy altos (4h, 1d) — mantiene Living Trie vivo
+    96→# sin forzar recalibraciones absurdas (526 años para 1d).
+    97→_RECALIBRATION_CEILING = 50_000
+    98→_RECALIBRATION_BASE = 2_000
+    99→_RECALIBRATION_REF_TF_MIN = 15
+   100→
+   101→_TF_TO_MINUTES = {
+   102→    "1m": 1, "3m": 3, "5m": 5, "10m": 10, "15m": 15, "30m": 30,
+   103→    "1h": 60, "2h": 120, "4h": 240, "6h": 360, "8h": 480, "12h": 720,
+   104→    "1d": 1440, "3d": 4320, "1w": 10080, "1M": 43200,
+   105→}
+   106→
+   107→
+   108→def _tf_to_minutes(tf: str) -> int:
+   109→    """Convierte '15m' -> 15, '1h' -> 60, '1d' -> 1440. Default 15."""
+   110→    return _TF_TO_MINUTES.get(tf, 15)
+   111→
+   112→
+   113→def get_recalibration_interval(tf_minutes: int) -> int:
+   114→    """Calcula el intervalo de recalibración óptimo según el TF.
+   115→
+   116→    Tabla:
+   117→      1m  → 2,000  (33h)
+   118→      5m  → 2,000  (7d)
+   119→      15m → 2,000  (21d)  ← referencia
+   120→      1h  → 8,000  (333d)
+   121→      4h  → 32,000 (1333d)
+   122→      1d  → 50,000 (526d, capped)
+   123→    """
+   124→    if tf_minutes <= 0:
+   125→        return _RECALIBRATION_BASE
+   126→    factor = max(1.0, tf_minutes / _RECALIBRATION_REF_TF_MIN)
+   127→    interval = int(_RECALIBRATION_BASE * factor)
+   128→    return min(interval, _RECALIBRATION_CEILING)
+   129→
+   130→
+   131→class TraderMode(Enum):
+   132→    """Trading mode."""
+   133→    REPLAY = "replay"   # Replay historical data
+   134→    LIVE = "live"       # Connect to exchange
+   135→    PAPER = "paper"     # Paper trading (no real execution)
+   136→
+   137→
+   138→class PositionState(Enum):
+   139→    """Current position state."""
+   140→    FLAT = "FLAT"
+   141→    LONG = "LONG"
+   142→    SHORT = "SHORT"
+   143→
+   144→
+   145→@dataclass
+   146→class ReplayConfig:
+   147→    """Configuration for replay mode."""
+   148→    symbol: str = "BTC/USDT"
+   149→    timeframe: str = "1h"
+   150→    initial_capital: float = 10_000.0
+   151→    speed: float = 1.0
+   152→    """Playback speed multiplier. 1.0 = real-time, 10.0 = 10x speed,
+   153→    0.0 = maximum speed (no delays)."""
+   154→    pattern_length: int = 5
+   155→    sax_alphabet_size: int = 0
+   156→    """SAX alphabet size. 0 = auto from TokenProfile (timeframe-adaptive)."""
+   157→    sax_window_size: int = 0
+   158→    """SAX window size. 0 = auto from TokenProfile (timeframe-adaptive)."""
+   159→    sax_strategy: str = "ohlcv"
+   160→    min_confidence: float = 0.08
+   161→    """Minimum signal confidence. v0.21.0: Lowered from 0.20 to 0.08 because
+   162→    Bayesian shrinkage with low historical_count produces confidences in
+   163→    the 0.08-0.22 range. Use --min-confidence to override."""
+   164→    start_offset: int = 200
+   165→    """Number of initial candles to skip (warm-up)."""
+   166→    catastrophic_loss_pct: float = 0.0
+   167→    """Catastrophic loss threshold. 0.0 = use TokenProfile value."""
+   168→    regime_aware: bool = True
+   169→    living_trie: bool = True
+   170→    """Whether to update the Trie with observations during replay."""
+   171→    use_token_profile: bool = True
+   172→    """v0.11.0: Use TokenProfile for automatic parameter selection."""
+   173→    auto_calibrate: bool = True
+   174→    """v0.11.0: Auto-calibrate SAX α/W using TradingCalibrationEngine."""
+   175→    recalibration_interval: int = 0
+   176→    """v0.11.0: Re-calibrate every N candles. 0 = no recalibration."""
+   177→    use_multi_level: bool = True
+   178→    """v0.11.0: Enable 4-level matching (N1+N2+N3+N4)."""
+   179→    verbose: bool = True
+   180→    on_signal: Optional[Callable] = None
+   181→    """Callback fired when a signal is generated. Receives (signal, prediction)."""
+   182→    on_trade: Optional[Callable] = None
+   183→    """Callback fired when a trade is closed. Receives the trade dict."""
+   184→    on_candle: Optional[Callable] = None
+   185→    """Callback fired for each processed candle. Receives (candle_idx, price)."""
+   186→    on_position: Optional[Callable] = None
+   187→    """v0.39.0: Callback fired when a position opens OR closes.
+   188→    Receives a dict with: {action: 'open'|'close', symbol, direction,
+   189→    entry_price, entry_time, sl_price, tp_price, size, confidence,
+   190→    exit_price (only on close), exit_time (only on close),
+   191→    pnl_pct (only on close), exit_reason (only on close)}.
+   192→    Used by the dashboard server to update _multi_sessions[node_id]
+   193→    so /api/multi-status can report the open position to the chart
+   194→    for entry/exit price-line overlay."""
+   195→    # v0.32.3: Validation mode — relaxes strict v0.25.0 signal filters so the
+   196→    # backtest can produce enough trades to reach the 5-trade MC threshold.
+   197→    # Live trading keeps strict filters (safety first); validation needs a
+   198→    # fairer assessment of whether the system has ANY edge on this token.
+   199→    # When True:
+   200→    #   - base probability threshold: 0.30 (was 0.35)
+   201→    #   - ranging regime threshold:   0.40 (was 0.55) — Bayesian shrinkage keeps
+   202→    #     probabilities near 0.5, so 0.55 rejects almost everything in ranging
+   203→    #   - volatile regime threshold:  0.45 (was 0.60)
+   204→    #   - counter-trend threshold:    0.45 (was 0.60)
+   205→    validation_mode: bool = False
+   206→    """v0.32.3: When True, relaxes strict signal filters for fair validation."""
+   207→
+   208→
+   209→@dataclass
+   210→class LiveConfig:
+   211→    """Configuration for live mode (requires ccxt).
+   212→
+   213→    v0.20.0: Added leverage, auto_mode, money management fields.
+   214→    """
+   215→    symbol: str = "BTC/USDT"
+   216→    timeframe: str = "1h"
+   217→    initial_capital: float = 10_000.0
+   218→    exchange: str = "mexc"
+   219→    api_key: str = ""
+   220→    api_secret: str = ""
+   221→    pattern_length: int = 5
+   222→    sax_alphabet_size: int = 0
+   223→    """SAX alphabet size. 0 = auto from TokenProfile."""
+   224→    sax_window_size: int = 0
+   225→    """SAX window size. 0 = auto from TokenProfile."""
+   226→    sax_strategy: str = "ohlcv"
+   227→    min_confidence: float = 0.08
+   228→    """Minimum signal confidence. v0.21.0: Lowered from 0.20 to 0.08 because
+   229→    Bayesian shrinkage with low historical_count produces confidences in
+   230→    the 0.08-0.22 range. Use --min-confidence to override."""
+   231→    catastrophic_loss_pct: float = 0.0
+   232→    """Catastrophic loss threshold. 0.0 = use TokenProfile value."""
+   233→    regime_aware: bool = True
+   234→    use_token_profile: bool = True
+   235→    """v0.11.0: Use TokenProfile for automatic parameter selection."""
+   236→    auto_calibrate: bool = True
+   237→    """v0.11.0: Auto-calibrate SAX α/W using TradingCalibrationEngine."""
+   238→    recalibration_interval: int = 0
+   239→    """v0.11.0/v0.36.1: Re-calibrate every N candles in live mode. 0 = auto
+   240→    (TF-aware: 2000 for ≤15m, scaled up for higher TFs, capped at 50k).
+   241→    See :func:`get_recalibration_interval`."""
+   242→    use_multi_level: bool = True
+   243→    """v0.11.0: Enable 4-level matching."""
+   244→    living_trie: bool = True
+   245→    """v0.11.0: Enable Living Trie updates in live mode."""
+   246→    testnet: bool = False
+   247→    """Use exchange testnet (for order execution only, NOT for market data)."""
+   248→    dry_run: bool = True
+   249→    """If True, process signals but don't actually execute orders."""
+   250→
+   251→    # v0.20.0: Money Management & Portfolio Controls
+   252→    leverage: int = 1
+   253→    """Exchange leverage multiplier (1=spot, 2-125=futures). Applied via ccxt."""
+   254→    auto_mode: bool = True
+   255→    """If True, signals execute automatically. If False, signals are displayed only (manual confirmation)."""
+   256→    max_open_positions: int = 5
+   257→    """Max simultaneous open positions."""
+   258→    max_portfolio_exposure_pct: float = 0.80
+   259→    """Max total portfolio exposure (0.80 = 80% of capital at risk)."""
+   260→    max_single_position_pct: float = 0.25
+   261→    """Max single position as fraction of portfolio (0.25 = 25%)."""
+   262→    max_correlated_positions: int = 2
+   263→    """Max positions in same asset class."""
+   264→    kill_switch_pct: float = 0.95
+   265→    """If exposure exceeds this fraction, auto-close all positions."""
+   266→    daily_loss_limit_pct: float = 0.05
+   267→    """Max daily loss as fraction of capital. 0.05 = 5%."""
+   268→    max_drawdown_pct: float = 0.15
+   269→    """Max drawdown from peak before circuit breaker. 0.15 = 15%."""
+   270→    use_kelly_sizing: bool = True
+   271→    """Use Kelly Criterion + AdvancedPositionSizer instead of basic RiskManager sizing."""
+   272→    kelly_fraction: float = 0.25
+   273→    """Fraction of Kelly to use (0.25 = Quarter-Kelly, conservative)."""
+   274→    trie_persist_interval: int = 100
+   275→    """Save Living Trie to DB every N candles. 0 = only on shutdown."""
+   276→    use_websocket: bool = False
+   277→    """v0.38.6: Use WebSocket feed (True) or REST polling (False).
+   278→    Default False because Binance WS limits to 5 connections per IP per 5min,
+   279→    so launching 20+ parallel tokens via Start All gets most handshakes rejected.
+   280→    REST polling via ccxt uses ephemeral connections and handles rate limits
+   281→    automatically, making it reliable for multi-token paper trading."""
+   282→    on_signal: Optional[Callable] = None
+   283→    """v0.39.0: Same as ReplayConfig.on_signal — fired when a signal generates."""
+   284→    on_trade: Optional[Callable] = None
+   285→    """v0.39.0: Same as ReplayConfig.on_trade — fired when a trade closes."""
+   286→    on_candle: Optional[Callable] = None
+   287→    """v0.39.0: Same as ReplayConfig.on_candle — fired for each candle."""
+   288→    on_position: Optional[Callable] = None
+   289→    """v0.39.0: Fired when a position opens OR closes in live mode.
+   290→    Payload: {action, symbol, direction, entry_price, entry_time, sl_price,
+   291→    tp_price, size, confidence, exit_price?, exit_time?, pnl_pct?, exit_reason?}.
+   292→    The dashboard server hooks this to update _multi_sessions[node_id]
+   293→    so /api/multi-status can report the open position for chart overlay."""
+   294→
+   295→
+   296→@dataclass
+   297→class RealtimeTrade:
+   298→    """Record of a single real-time trade."""
+   299→    trade_id: int = 0
+   300→    symbol: str = ""
+   301→    direction: str = ""
+   302→    entry_price: float = 0.0
+   303→    exit_price: float = 0.0
+   304→    entry_time: str = ""
+   305→    exit_time: str = ""
+   306→    size: float = 0.0
+   307→    pnl: float = 0.0
+   308→    pnl_pct: float = 0.0
+   309→    confidence: float = 0.0
+   310→    exit_reason: str = ""
+   311→    regime: str = ""
+   312→    matched_pattern: list[str] = field(default_factory=list)
+   313→
+   314→
+   315→@dataclass
+   316→class RealtimeResult:
+   317→    """Result of a real-time trading session."""
+   318→    mode: str = ""
+   319→    symbol: str = ""
+   320→    timeframe: str = ""
+   321→    initial_capital: float = 10_000.0
+   322→    final_capital: float = 10_000.0
+   323→    total_trades: int = 0
+   324→    winning_trades: int = 0
+   325→    losing_trades: int = 0
+   326→    win_rate: float = 0.0
+   327→    total_pnl: float = 0.0
+   328→    total_pnl_pct: float = 0.0
+   329→    max_drawdown: float = 0.0
+   330→    trades: list[RealtimeTrade] = field(default_factory=list)
+   331→    equity_curve: list[float] = field(default_factory=list)
+   332→    capital_history: list[float] = field(default_factory=list)
+   333→    candles_processed: int = 0
+   334→    sax_symbols_produced: int = 0
+   335→    signals_generated: int = 0
+   336→    duration_seconds: float = 0.0
+   337→
+   338→
+   339→# v0.40.33: Direct HTTP polling using requests+asyncio.to_thread.
+   340→# v0.40.32 used aiohttp but it timed out silently on some networks
+   341→# (asyncio.TimeoutError has empty str repr → "Failed to connect: ").
+   342→# requests uses the same network stack as the working /api/market/price
+   343→# endpoint (ccxt sync + requests), so behavior is now consistent.
+   344→class _DirectPollExchange:
+   345→    """Lightweight exchange wrapper using requests + asyncio.to_thread.
+   346→
+   347→    Implements only the methods the engine actually uses:
+   348→    - fetch_ticker(symbol) -> {last, close, ...}
+   349→    - fetch_ohlcv(symbol, timeframe, limit) -> [[ts, o, h, l, c, v], ...]
+   350→    - close() -> no-op (requests creates a new session per call, no cleanup needed)
+   351→
+   352→    Supports: mexc, binance, bybit (spot). All HTTP calls go through the
+   353→    `requests` library wrapped in asyncio.to_thread, so we get the same
+   354→    network behavior as sync ccxt calls (which work on the user's Mac).
+   355→    """
+   356→
+   357→    _BASE_URLS = {
+   358→        "mexc": "https://api.mexc.com",
+   359→        "binance": "https://api.binance.com",
+   360→        "bybit": "https://api.bybit.com",
+   361→    }
+   362→
+   363→    _TIMEFRAME_MAP = {
+   364→        # CCXT-style -> exchange-native
+   365→        "mexc": {
+   366→            "1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m",
+   367→            "1h": "1H", "4h": "4H", "1d": "1D",
+   368→        },
+   369→        "binance": {
+   370→            "1m": "1m", "5m": "5m", "15m": "15m", "30m": "30m",
+   371→            "1h": "1h", "4h": "4h", "1d": "1d",
+   372→        },
+   373→        "bybit": {
+   374→            "1m": "1", "5m": "5", "15m": "15", "30m": "30",
+   375→            "1h": "60", "4h": "240", "1d": "D",
+   376→        },
+   377→    }
+   378→
+   379→    def __init__(self, exchange_name: str, api_key: str = None, api_secret: str = None):
+   380→        import requests  # noqa: F401 — sanity check that requests is installed
+   381→        self.exchange_name = exchange_name.lower()
+   382→        self.api_key = api_key
+   383→        self.api_secret = api_secret
+   384→        self.base_url = self._BASE_URLS.get(self.exchange_name)
+   385→        if not self.base_url:
+   386→            raise ValueError(f"_DirectPollExchange: unsupported exchange '{exchange_name}'")
+   387→        # ccxt-compat fields
+   388→        self.markets = {}
+   389→        self.markets_by_id = {}
+   390→        # Shared requests session for connection pooling
+   391→        self._session = requests.Session()
+   392→        self._session.headers.update({"User-Agent": "ppmt/0.40.33"})
+   393→
+   394→    def _sync_fetch_ticker(self, symbol: str) -> dict:
+   395→        """Sync impl — runs in thread via to_thread."""
+   396→        symbol_id = symbol.replace("/", "").upper()
+   397→        if self.exchange_name in ("mexc", "binance"):
+   398→            url = f"{self.base_url}/api/v3/ticker/price"
+   399→            params = {"symbol": symbol_id}
+   400→        elif self.exchange_name == "bybit":
+   401→            url = f"{self.base_url}/v5/market/tickers"
+   402→            params = {"category": "spot", "symbol": symbol_id}
+   403→        else:
+   404→            raise ValueError(f"fetch_ticker not implemented for {self.exchange_name}")
+   405→        resp = self._session.get(url, params=params, timeout=15)
+   406→        if resp.status_code != 200:
+   407→            raise RuntimeError(f"{self.exchange_name} fetch_ticker HTTP {resp.status_code}: {resp.text[:300]}")
+   408→        data = resp.json()
+   409→        if self.exchange_name in ("mexc", "binance"):
+   410→            price = float(data.get("price", 0))
+   411→            return {"symbol": symbol, "last": price, "close": price, "info": data}
+   412→        elif self.exchange_name == "bybit":
+   413→            tickers = data.get("result", {}).get("list", [])
+   414→            if not tickers:
+   415→                raise RuntimeError(f"bybit fetch_ticker: no data for {symbol}")
+   416→            price = float(tickers[0].get("lastPrice", 0))
+   417→            return {"symbol": symbol, "last": price, "close": price, "info": data}
+   418→
+   419→    async def fetch_ticker(self, symbol: str) -> dict:
+   420→        """Async wrapper around sync impl via asyncio.to_thread."""
+   421→        import asyncio
+   422→        return await asyncio.to_thread(self._sync_fetch_ticker, symbol)
+   423→
+   424→    def _sync_fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100) -> list:
+   425→        """Sync impl — runs in thread via to_thread."""
+   426→        symbol_id = symbol.replace("/", "").upper()
+   427→        tf_native = self._TIMEFRAME_MAP.get(self.exchange_name, {}).get(timeframe, timeframe)
+   428→        if self.exchange_name in ("mexc", "binance"):
+   429→            url = f"{self.base_url}/api/v3/klines"
+   430→            params = {"symbol": symbol_id, "interval": tf_native, "limit": limit}
+   431→        elif self.exchange_name == "bybit":
+   432→            url = f"{self.base_url}/v5/market/kline"
+   433→            params = {"category": "spot", "symbol": symbol_id, "interval": tf_native, "limit": limit}
+   434→        else:
+   435→            raise ValueError(f"fetch_ohlcv not implemented for {self.exchange_name}")
+   436→        resp = self._session.get(url, params=params, timeout=15)
+   437→        if resp.status_code != 200:
+   438→            raise RuntimeError(f"{self.exchange_name} fetch_ohlcv HTTP {resp.status_code}: {resp.text[:300]}")
+   439→        data = resp.json()
+   440→        if self.exchange_name in ("mexc", "binance"):
+   441→            # [[ts, o, h, l, c, v, ...], ...]
+   442→            return [[int(c[0]), float(c[1]), float(c[2]), float(c[3]), float(c[4]), float(c[5])] for c in data]
+   443→        elif self.exchange_name == "bybit":
+   444→            klines = data.get("result", {}).get("list", [])
+   445→            # Bybit returns newest-first, reverse to oldest-first
+   446→            klines = list(reversed(klines))
+   447→            return [[int(c[0]), float(c[1]), float(c[2]), float(c[3]), float(c[4]), float(c[5])] for c in klines]
+   448→
+   449→    async def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int = 100) -> list:
+   450→        """Async wrapper around sync impl via asyncio.to_thread."""
+   451→        import asyncio
+   452→        return await asyncio.to_thread(self._sync_fetch_ohlcv, symbol, timeframe, limit)
+   453→
+   454→    async def close(self):
+   455→        # No-op — requests.Session closes itself on GC. Kept for API compat
+   456→        # with the engine's `await poll_exchange.close()` calls.
+   457→        try:
+   458→            self._session.close()
+   459→        except Exception:
+   460→            pass
+   461→
+   462→
+   463→
+   464→
+   465→
+   466→class RealtimeTrader:
+   467→    """
+   468→    Real-Time Trading Engine with incremental SAX encoding.
+   469→
+   470→    Unlike PaperTrader which batch-processes all data, RealtimeTrader
+   471→    processes candles one at a time through the incremental SAX pipeline,
+   472→    maintaining a streaming pattern buffer and generating signals only
+   473→    when new SAX symbols are produced (every window_size candles).
+   474→
+   475→    This mirrors production behavior where future data is unavailable.
+   476→
+   477→    v0.11.0: Now fully integrated with TokenProfile, TradingCalibrationEngine,
+   478→    FuzzyMatcher, 4-level matching, Living Trie, and prediction-aware SL/TP.
+   479→    """
+   480→
+   481→    def __init__(self, config=None, state_callback=None):
+   482→        """
+   483→        Args:
+   484→            config: ReplayConfig or LiveConfig. Defaults to ReplayConfig().
+   485→            state_callback: Optional callable that receives keyword args mirroring
+   486→                TerminalState.update_sync(). When provided, every state update is
+   487→                also forwarded to this callback — used by the multi-token launcher
+   488→                in server.py to keep per-session state in sync (last_price, pnl_pct,
+   489→                signals, trades, candles_processed, status).
+   490→                v0.36.2.
+   491→        """
+   492→        self.config = config or ReplayConfig()
+   493→        self._state_callback = state_callback
+   494→        # v0.38.3 FIX: Removed hardcoded RiskConfig that OVERRIDED the relaxed
+   495→        # defaults in risk/manager.py (min_quality_score=0.03, min_risk_reward=0.5
+   496→        # set in v0.38.1). The hardcoded values (min_quality_score=0.10,
+   497→        # min_risk_reward=1.0) were rejecting 95%+ of signals in backtest →
+   498→        # INSUFFICIENT_DATA verdicts. Now uses RiskConfig() defaults which match
+   499→        # the v0.38.1 relaxed values.
+   500→        # Note: run_live() uses MoneyManager which builds its own RiskConfig from
+   501→        # MoneyManagerConfig, so this is mainly for run_replay() backtest path.
+   502→        self.risk_config = RiskConfig()
+   503→
+   504→    def _update_terminal_state(self, **kwargs) -> None:
+   505→        """Push state update to TerminalState for dashboard consumption.
+   506→
+   507→        Safe to call from synchronous code — uses update_sync().
+   508→        No-op if terminal module is not available.
+   509→
+   510→        v0.36.2: Also forwards the same kwargs to the per-session state_callback
+   511→        (if provided) so multi-token sessions can track their own state.
+   512→
+   513→        v0.39.1 FIX (Bug #7 cross-contamination of prices/signals between
+   514→        parallel sessions): when a state_callback is provided (multi-token
+   515→        mode via /api/multi-start), we SKIP the global _terminal_state
+   516→        singleton entirely. Previously all 22 parallel traders wrote to
+   517→        the SAME singleton, so ZIL's current_price was overwritten 50ms
+   518→        later by MANA's, then by SUSHI's, etc. The dashboard showed the
+   519→        last writer's price for whatever symbol was selected — leading
+   520→        to the "ZIL shows 0.0032 / 0.0116 / 0.2262" cross-contamination
+   521→        the user reported.
+   522→        Now: in multi-token mode the dashboard reads per-session state
+   523→        via /api/multi-status (which queries _multi_sessions directly),
+   524→        and the global singleton is left alone so it doesn't get
+   525→        polluted. In single-token mode (no state_callback) the singleton
+   526→        is still used as before.
+   527→        """
+   528→        # v0.39.1: In multi-token mode, skip the global singleton.
+   529→        if self._state_callback is None:
+   530→            # Single-token mode — update the global singleton as before.
+   531→            if _terminal_state is not None:
+   532→                try:
+   533→                    _terminal_state.update_sync(**kwargs)
+   534→                except Exception:
+   535→                    pass  # Never let dashboard updates crash the engine
+   536→            return
+   537→
+   538→        # Multi-token mode — only forward to per-session callback.
+   539→        try:
+   540→            self._state_callback(**kwargs)
+   541→        except Exception:
+   542→            pass  # Never let callback errors crash the engine
+   543→
+   544→    def _setup_token_profile(self, cfg, info, storage, df=None):
+   545→        """
+   546→        v0.11.0: Initialize TokenProfile with auto-calibration and persistence.
+   547→
+   548→        Shared between run_replay() and run_live(). Returns:
+   549→            (token_profile, cfg_with_updated_params)
+   550→        """
+   551→        token_profile = None
+   552→
+   553→        if getattr(cfg, 'use_token_profile', False):
+   554→            # Try to load previously saved profile
+   555→            saved_profile_dict = storage.load_token_profile(cfg.symbol, cfg.timeframe)
+   556→            if saved_profile_dict is not None:
+   557→                try:
+   558→                    token_profile = TokenProfile.from_dict(saved_profile_dict)
+   559→                    console.print(f"[bold green]TokenProfile restored from storage:[/bold green] "
+   560→                                  f"alpha={token_profile.sax_alphabet_size}, "
+   561→                                  f"window={token_profile.sax_window_size}, "
+   562→                                  f"calibrated={token_profile.calibration_date}")
+   563→                except Exception:
+   564→                    token_profile = None
+   565→
+   566→            if token_profile is None:
+   567→                token_profile = TokenProfile.from_timeframe(
+   568→                    symbol=cfg.symbol,
+   569→                    asset_class=info.asset_class,
+   570→                    timeframe=cfg.timeframe,
+   571→                )
+   572→
+   573→            # Override SAX params from profile (unless explicitly set)
+   574→            if cfg.sax_alphabet_size == 0:
+   575→                cfg.sax_alphabet_size = token_profile.sax_alphabet_size
+   576→            if cfg.sax_window_size == 0:
+   577→                cfg.sax_window_size = token_profile.sax_window_size
+   578→            if cfg.catastrophic_loss_pct == 0.0:
+   579→                cfg.catastrophic_loss_pct = token_profile.catastrophic_loss_pct * 100.0
+   580→
+   581→            console.print(f"[bold green]TokenProfile loaded:[/bold green] "
+   582→                          f"alpha={token_profile.sax_alphabet_size}, "
+   583→                          f"window={token_profile.sax_window_size}, "
+   584→                          f"cat_loss={token_profile.catastrophic_loss_pct:.0%}, "
+   585→                          f"short_allowed={token_profile.short_allowed}")
+   586→
+   587→            # Auto-calibrate if not already calibrated
+   588→            profile_already_calibrated = (
+   589→                token_profile.calibration_date != ""
+   590→                and token_profile.calibration_metric > 0
+   591→            )
+   592→            if profile_already_calibrated:
+   593→                console.print(f"[green]Profile already calibrated on "
+   594→                              f"{token_profile.calibration_date} — "
+   595→                              f"skipping calibration[/green]")
+   596→            elif getattr(cfg, 'auto_calibrate', False) and df is not None and len(df) >= 1000:
+   597→                console.print(f"[bold cyan]Auto-calibrating α/W...[/bold cyan] "
+   598→                              f"({len(df)} candles)")
+   599→                try:
+   600→                    calibrator = TradingCalibrationEngine(
+   601→                        train_ratio=0.70,
+   602→                        pattern_length=cfg.pattern_length,
+   603→                        timeframe=cfg.timeframe,
+   604→                    )
+   605→                    cal_profile, cal_results = calibrator.calibrate(
+   606→                        df, symbol=cfg.symbol, verbose=False
+   607→                    )
+   608→                    cal_alpha = cal_profile.sax_alphabet_size
+   609→                    cal_window = cal_profile.sax_window_size
+   610→
+   611→                    cal_best = [r for r in cal_results
+   612→                                if r.alphabet_size == cal_alpha
+   613→                                and r.window_size == cal_window]
+   614→                    cal_best_result = cal_best[0] if cal_best else None
+   615→
+   616→                    if cal_alpha != cfg.sax_alphabet_size or cal_window != cfg.sax_window_size:
+   617→                        old_alpha, old_window = cfg.sax_alphabet_size, cfg.sax_window_size
+   618→                        cfg.sax_alphabet_size = cal_alpha
+   619→                        cfg.sax_window_size = cal_window
+   620→
+   621→                        grid = {
+   622→                            f"a{r.alphabet_size}_w{r.window_size}": {
+   623→                                "trading_metric": round(r.trading_metric, 4),
+   624→                                "total_pnl_pct": round(r.total_pnl_pct, 2),
+   625→                                "win_rate": round(r.win_rate, 4),
+   626→                                "total_trades": r.total_trades,
+   627→                            }
+   628→                            for r in cal_results
+   629→                        }
+   630→                        token_profile.update_from_calibration(
+   631→                            best_alpha=cal_alpha,
+   632→                            best_window=cal_window,
+   633→                            metric=cal_best_result.trading_metric if cal_best_result else 0.0,
+   634→                            grid=grid,
+   635→                            n_samples=len(df),
+   636→                        )
+   637→                        console.print(f"[bold green]Calibrated:[/bold green] "
+   638→                                      f"α={old_alpha}→{cal_alpha}, W={old_window}→{cal_window} "
+   639→                                      f"(PnL={cal_best_result.total_pnl_pct:+.1f}%, "
+   640→                                      f"WR={cal_best_result.win_rate:.1%})")
+   641→                    else:
+   642→                        console.print(f"[green]Calibration confirms: "
+   643→                                      f"α={cal_alpha}/W={cal_window}[/green]")
+   644→                except Exception as e:
+   645→                    console.print(f"[yellow]Calibration failed: {e} — "
+   646→                                  f"using defaults[/yellow]")
+   647→
+   648→            # Save calibrated profile
+   649→            if token_profile is not None and token_profile.calibration_date:
+   650→                try:
+   651→                    storage.save_token_profile(cfg.symbol, cfg.timeframe, token_profile.to_dict())
+   652→                except Exception:
+   653→                    pass
+   654→        else:
+   655→            # Fallback: use timeframe defaults
+   656→            if cfg.sax_alphabet_size == 0 or cfg.sax_window_size == 0:
+   657→                tf_defaults = TIMEFRAME_ALPHA_DEFAULTS.get(
+   658→                    cfg.timeframe, TIMEFRAME_ALPHA_DEFAULTS["1h"]
+   659→                )
+   660→                if cfg.sax_alphabet_size == 0:
+   661→                    cfg.sax_alphabet_size = tf_defaults["sax_alphabet_size"]
+   662→                if cfg.sax_window_size == 0:
+   663→                    cfg.sax_window_size = tf_defaults["sax_window_size"]
+   664→            if cfg.catastrophic_loss_pct == 0.0:
+   665→                cfg.catastrophic_loss_pct = 8.0
+   666→
+   667→        return token_profile, cfg
+   668→
+   669→    def _compute_atr_pct(self, prices: np.ndarray, highs: np.ndarray,
+   670→                         lows: np.ndarray, period: int = 14) -> float:
+   671→        """Compute current ATR as percentage of price.
+   672→
+   673→        v0.20.0: Fixed to use Wilder's smoothing (same as paper_trader.py).
+   674→        Previously used simple moving average which gave inconsistent ATR values
+   675→        compared to the backtest engine.
+   676→        """
+   677→        if len(prices) < period + 1:
+   678→            return 2.0  # Default
+   679→
+   680→        close = prices
+   681→        high = highs
+   682→        low = lows
+   683→
+   684→        prev_close = np.roll(close, 1)
+   685→        prev_close[0] = close[0]
+   686→        tr = np.maximum(
+   687→            high - low,
+   688→            np.maximum(
+   689→                np.abs(high - prev_close),
+   690→                np.abs(low - prev_close)
+   691→            )
+   692→        )
+   693→
+   694→        # v0.20.0: Wilder's smoothing (exponential moving average)
+   695→        # This matches paper_trader.py compute_atr_pct()
+   696→        if len(tr) >= period:
+   697→            atr_val = np.mean(tr[:period])
+   698→            for i in range(period, len(tr)):
+   699→                atr_val = (atr_val * (period - 1) + tr[i]) / period
+   700→        else:
+   701→            atr_val = np.mean(tr)
+   702→
+   703→        last_price = prices[-1] if prices[-1] > 0 else 1.0
+   704→        return (atr_val / last_price * 100) if last_price > 0 else 2.0
+   705→
+   706→    def run_replay(self) -> RealtimeResult:
+   707→        """
+   708→        Run replay mode: step through historical data as if it were live.
+   709→
+   710→        Each candle is processed through the incremental SAX encoder.
+   711→        When a new SAX symbol is produced (every window_size candles),
+   712→        the pattern buffer is updated and a prediction is generated.
+   713→
+   714→        v0.11.0: Now uses TokenProfile, auto-calibration, FuzzyMatcher,
+   715→        4-level matching, Living Trie, and prediction-aware SL/TP.
+   716→
+   717→        Returns:
+   718→            RealtimeResult with trading statistics
+   719→        """
+   720→        if not isinstance(self.config, ReplayConfig):
+   721→            raise ValueError("run_replay() requires ReplayConfig")
+   722→
+   723→        cfg = self.config
+   724→        start_time = time.time()
+   725→        storage = PPMTStorage()
+   726→
+   727→        # Load data
+   728→        df = storage.load_ohlcv(cfg.symbol, cfg.timeframe)
+   729→        if df.empty:
+   730→            console.print(f"[red]No data for {cfg.symbol}. Run 'ppmt ingest' first.[/red]")
+   731→            return RealtimeResult(mode="replay", symbol=cfg.symbol, timeframe=cfg.timeframe)
+   732→
+   733→        # Classify asset
+   734→        classifier = AssetClassifier()
+   735→        info = classifier.classify(cfg.symbol)
+   736→
+   737→        # v0.11.0: TokenProfile + auto-calibration + persistence
+   738→        token_profile, cfg = self._setup_token_profile(cfg, info, storage, df)
+   739→
+   740→        # Load or build tries (v0.11.0: all 4 levels)
+   741→        # v0.40.4 FIX-1D: pass asset_class so N1/N2 load from cross-asset pools.
+   742→        from ppmt.engine.ppmt import PPMT
+   743→        all_tries = storage.load_all_tries(cfg.symbol, asset_class=info.asset_class)
+   744→        trie_n1 = all_tries["n1"]
+   745→        trie_n2 = all_tries["n2"]
+   746→        trie_n3 = all_tries["n3"]
+   747→        trie_n4 = all_tries["n4"]
+   748→
+   749→        has_multi_level = (
+   750→            getattr(cfg, 'use_multi_level', False)
+   751→            and trie_n1 is not None
+   752→            and trie_n2 is not None
+   753→            and trie_n4 is not None
+   754→        )
+   755→
+   756→        if trie_n3 is None:
+   757→            console.print(f"[yellow]No Trie for {cfg.symbol}. Building from data...[/yellow]")
+   758→            engine = PPMT(
+   759→                symbol=cfg.symbol,
+   760→                asset_class=info.asset_class,
+   761→                sax_alphabet_size=cfg.sax_alphabet_size,
+   762→                sax_window_size=cfg.sax_window_size,
+   763→                sax_strategy=cfg.sax_strategy,
+   764→                fuzzy_threshold=token_profile.fuzzy_threshold if token_profile else 0.80,
+   765→                weight_profile=info.weight_profile,
+   766→            )
+   767→            # FIX-1D: contribute to universal N1 + class N2 pools
+   768→            engine.attach_storage(storage)
+   769→            engine.build(df, pattern_length=cfg.pattern_length)
+   770→            # Reload N1/N2 from cross-asset pools (engine.trie_n1/2 are empty
+   771→            # in storage mode)
+   772→            # v0.41.0 FIX-1B: DO NOT fall back to engine.trie_n1/n2 — those
+   773→            # are empty in storage mode and would mask a missing shared pool.
+   774→            # Empty pools correctly get 0 confidence, allowing weight
+   775→            # redistribution to N2/N3 via AdaptiveWeights.
+   776→            all_tries = storage.load_all_tries(cfg.symbol, asset_class=info.asset_class)
+   777→            trie_n1 = all_tries.get("n1")
+   778→            trie_n2 = all_tries.get("n2")
+   779→            if trie_n1 is None:
+   780→                console.print("[yellow]WARNING: N1 universal pool is empty after build. Only N2/N3/N4 available.[/yellow]")
+   781→                trie_n1 = PPMTTrie(name="universal_empty")
+   782→            if trie_n2 is None:
+   783→                console.print(f"[yellow]WARNING: N2 class pool for {info.asset_class} is empty after build.[/yellow]")
+   784→                trie_n2 = PPMTTrie(name=f"class_empty:{info.asset_class}")
+   785→            trie_n3 = engine.trie_n3
+   786→            trie_n4 = engine.trie_n4
+   787→            has_multi_level = True
+   788→        else:
+   789→            console.print(f"[green]Loaded N3 Trie for {cfg.symbol} ({trie_n3.pattern_count} patterns)[/green]")
+   790→            # v0.41.0 FIX-1B: Replace None N1/N2 with empty tries instead of
+   791→            # silently dropping to single-level mode.
+   792→            if trie_n1 is None:
+   793→                console.print("[yellow]WARNING: N1 universal pool not found. Using empty trie.[/yellow]")
+   794→                trie_n1 = PPMTTrie(name="universal_empty")
+   795→            if trie_n2 is None:
+   796→                console.print(f"[yellow]WARNING: N2 class pool for {info.asset_class} not found. Using empty trie.[/yellow]")
+   797→                trie_n2 = PPMTTrie(name=f"class_empty:{info.asset_class}")
+   798→            if has_multi_level:
+   799→                console.print(f"[green]All 4 levels loaded: N1={trie_n1.pattern_count}, "
+   800→                              f"N2={trie_n2.pattern_count}, N3={trie_n3.pattern_count}, "
+   801→                              f"N4={trie_n4.pattern_count}[/green]")
+   802→            else:
+   803→                console.print(f"[yellow]N1/N2 loaded (possibly empty). N4 unavailable — running 3-level mode.[/yellow]")
+   804→
+   805→        trie = trie_n3
+   806→        trie.propagate_metadata()
+   807→        if has_multi_level:
+   808→            for t in [trie_n1, trie_n2, trie_n4]:
+   809→                t.propagate_metadata()
+   810→
+   811→        # v0.11.0: FuzzyMatcher
+   812→        fuzzy_threshold = token_profile.fuzzy_threshold if token_profile else 0.80
+   813→
+   814→        # Create SAX encoder
+   815→        sax_encoder = SAXEncoder(
+   816→            alphabet_size=cfg.sax_alphabet_size,
+   817→            window_size=cfg.sax_window_size,
+   818→            strategy=cfg.sax_strategy,
+   819→        )
+   820→
+   821→        # v0.21.0: Compute training PAA statistics for consistent incremental encoding
+   822→        # Without these stats, encode_incremental() falls back to per-window z-scoring
+   823→        # which always produces the middle symbol (e.g., 'c' with alpha=5), resulting
+   824→        # in zero pattern diversity and zero signal generation.
+   825→        _paa_mean = None
+   826→        _paa_std = None
+   827→        warmup_df = df.iloc[:cfg.start_offset]
+   828→        if len(warmup_df) >= cfg.sax_window_size * 2:
+   829→            try:
+   830→                _, _paa_mean, _paa_std = sax_encoder.encode_with_normalization(warmup_df)
+   831→                if _paa_std < 1e-10:
+   832→                    _paa_mean = None
+   833→                    _paa_std = None
+   834→                else:
+   835→                    console.print(f"  [green]Training PAA stats: mean={_paa_mean:.6f}, std={_paa_std:.6f}[/green]")
+   836→            except Exception as e:
+   837→                console.print(f"  [yellow]Warning: Could not compute PAA stats: {e}[/yellow]")
+   838→                _paa_mean = None
+   839→                _paa_std = None
+   840→
+   841→        # v0.11.0: FuzzyMatcher for pattern breaks
+   842→        fuzzy_matcher = FuzzyMatcher(
+   843→            sax_encoder=sax_encoder,
+   844→            threshold=fuzzy_threshold,
+   845→            max_edit_distance=2,
+   846→        )
+   847→
+   848→        # Create engines
+   849→        # FIX-14 (v0.40.10): pass trie_n4 as regime_trie for regime-aware lookup
+   850→        pred_engine = PredictionEngine(
+   851→            trie,
+   852→            prediction_depth=cfg.pattern_length,
+   853→            regime_trie=trie_n4 if (has_multi_level and trie_n4 is not None) else None,
+   854→        )
+   855→        risk_mgr = RiskManager(capital=cfg.initial_capital, config=self.risk_config)
+   856→
+   857→        # v0.11.0: PPMT engine for 4-level matching
+   858→        ppmt_engine = None
+   859→        if has_multi_level:
+   860→            ppmt_engine = PPMT(
+   861→                symbol=cfg.symbol,
+   862→                asset_class=info.asset_class,
+   863→                sax_alphabet_size=cfg.sax_alphabet_size,
+   864→                sax_window_size=cfg.sax_window_size,
+   865→                sax_strategy=cfg.sax_strategy,
+   866→                fuzzy_threshold=fuzzy_threshold,
+   867→                weight_profile=info.weight_profile,
+   868→            )
+   869→            ppmt_engine.set_tries(trie_n1, trie_n2, trie_n3, trie_n4)
+   870→            ppmt_engine.adapt_weights()
+   871→            console.print(f"  [bold cyan]4-level matching enabled[/bold cyan]: weights={ppmt_engine.weights}")
+   872→
+   873→        # Regime detector
+   874→        regime_detector = None
+   875→        current_regime = "ranging"
+   876→        regime_info = None
+   877→        if cfg.regime_aware:
+   878→            regime_detector = RegimeDetector(lookback=50, vol_threshold=0.6, trend_threshold=0.005)
+   879→
+   880→        # Timeframe to hours (for timing display)
+   881→        tf_hours = {
+   882→            "1m": 1/60, "5m": 5/60, "15m": 15/60,
+   883→            "1h": 1, "4h": 4, "1d": 24,
+   884→        }.get(cfg.timeframe, 1)
+   885→
+   886→        # State
+   887→        result = RealtimeResult(
+   888→            mode="replay",
+   889→            symbol=cfg.symbol,
+   890→            timeframe=cfg.timeframe,
+   891→            initial_capital=cfg.initial_capital,
+   892→            final_capital=cfg.initial_capital,
+   893→        )
+   894→        result.equity_curve = [cfg.initial_capital]
+   895→        result.capital_history = [cfg.initial_capital]
+   896→
+   897→        # Incremental SAX state
+   898→        sax_buffer = []          # Partial window buffer
+   899→        pattern_buffer = []      # Current SAX symbol pattern
+   900→        position_state = PositionState.FLAT
+   901→        current_position = None  # RealtimeTrade when in position
+   902→        trade_counter = 0
+   903→        peak_capital = cfg.initial_capital
+   904→        consecutive_breaks = 0
+   905→        last_losing_trade_idx = -999
+   906→
+   907→        # v0.46.0: Pattern Divergence Monitor & BTC Context Filter
+   908→        divergence_monitor = PatternDivergenceMonitor(divergence_threshold=0.667)
+   909→        btc_filter = BTCContextFilter()
+   910→
+   911→        # v0.47.0: Active learning — captures per-level patterns at entry
+   912→        # so outcomes can be written back to N1/N2/N3 tries on close.
+   913→        _active_learning = None  # dict with pattern_n1, pattern_n3, entry_price, direction, entry_ts
+   914→        _learning_n1_buffer = PPMTTrie(name="learning_n1_buffer")
+   915→        _learning_n2_buffer = PPMTTrie(name="learning_n2_buffer")
+   916→
+   917→        # ATR tracking (rolling window)
+   918→        atr_prices = []
+   919→        atr_highs = []
+   920→        atr_lows = []
+   921→
+   922→        # Pre-extract arrays
+   923→        df_close = df['close'].values.astype(float)
+   924→        df_high = df['high'].values.astype(float)
+   925→        df_low = df['low'].values.astype(float)
+   926→
+   927→        start_candle = cfg.start_offset
+   928→        if start_candle >= len(df):
+   929→            console.print(f"[red]Not enough data. Need {start_candle}, have {len(df)}.[/red]")
+   930→            return result
+   931→
+   932→        console.print(f"\n[bold cyan]Starting Replay: {cfg.symbol} ({cfg.timeframe})[/bold cyan]")
+   933→        console.print(f"  Capital: ${cfg.initial_capital:,.2f}")
+   934→        console.print(f"  Data: {len(df)} candles, starting from index {start_candle}")
+   935→        console.print(f"  Speed: {'MAX' if cfg.speed == 0 else f'{cfg.speed:.1f}x'}")
+   936→        console.print(f"  SAX: window={cfg.sax_window_size}, alphabet={cfg.sax_alphabet_size}")
+   937→        console.print(f"  Trie: {trie.pattern_count} patterns")
+   938→        console.print(f"  Min confidence: {cfg.min_confidence:.0%}")
+   939→        console.print(f"  Regime-aware: {'ON' if cfg.regime_aware else 'OFF'}")
+   940→        console.print()
+   941→
+   942→        # v0.15.0: Initialize TerminalState for dashboard
+   943→        self._update_terminal_state(
+   944→            is_running=True,
+   945→            mode="replay",
+   946→            started_at=time.time(),
+   947→            symbol=cfg.symbol,
+   948→            timeframe=cfg.timeframe,
+   949→            exchange="replay",
+   950→            portfolio_value=cfg.initial_capital,
+   951→            cash=cfg.initial_capital,
+   952→            candles_processed=0,
+   953→            websocket_status="replay",
+   954→        )
+   955→
+   956→        # Live display
+   957→        live_display = Live(console=console, refresh_per_second=4)
+   958→
+   959→        with live_display:
+   960→            for candle_idx in range(start_candle, len(df)):
+   961→                loop_start = time.time()
+   962→
+   963→                # Current candle data
+   964→                current_price = float(df_close[candle_idx])
+   965→                current_high = float(df_high[candle_idx])
+   966→                current_low = float(df_low[candle_idx])
+   967→                current_time = str(df.index[candle_idx]) if hasattr(df.index, 'strftime') else str(candle_idx)
+   968→
+   969→                # Update ATR tracking
+   970→                atr_prices.append(current_price)
+   971→                atr_highs.append(current_high)
+   972→                atr_lows.append(current_low)
+   973→                # Keep last 50 for ATR calculation
+   974→                if len(atr_prices) > 50:
+   975→                    atr_prices = atr_prices[-50:]
+   976→                    atr_highs = atr_highs[-50:]
+   977→                    atr_lows = atr_lows[-50:]
+   978→
+   979→                # Incremental SAX encoding: feed one candle at a time
+   980→                single_candle = df.iloc[candle_idx:candle_idx + 1]
+   981→                new_symbols, sax_buffer = sax_encoder.encode_incremental(
+   982→                    single_candle, sax_buffer,
+   983→                    paa_mean=_paa_mean, paa_std=_paa_std,  # v0.21.0: training stats
+   984→                )
+   985→
+   986→                if new_symbols:
+   987→                    # New SAX symbol(s) produced
+   988→                    for new_sym in new_symbols:
+   989→                        pattern_buffer.append(new_sym)
+   990→                        result.sax_symbols_produced += 1
+   991→
+   992→                        # Keep pattern buffer at max length
+   993→                        if len(pattern_buffer) > cfg.pattern_length * 2:
+   994→                            pattern_buffer = pattern_buffer[-(cfg.pattern_length * 2):]
+   995→
+   996→                    # Regime detection
+   997→                    if regime_detector is not None and len(atr_prices) >= 50:
+   998→                        regime_prices = np.array(atr_prices)
+   999→                        regime_info = regime_detector.detect_detailed(regime_prices)
+  1000→                        current_regime = regime_info.regime
+  1001→
+  1002→                    # v0.46.0: Update BTC context filter periodically
+  1003→                    # If this IS BTC, feed its prices directly.
+  1004→                    # For altcoins, BTC prices must come from a separate feed (future).
+  1005→                    if result.candles_processed % 100 == 0 and len(atr_prices) >= 50:
+  1006→                        if cfg.symbol == "BTC/USDT":
+  1007→                            btc_filter.update_btc_context(btc_prices=np.array(atr_prices))
+  1008→
+  1009→                    # === POSITION MANAGEMENT ===
+  1010→                    if position_state != PositionState.FLAT and current_position is not None:
+  1011→                        pos = risk_mgr._positions.get(cfg.symbol)
+  1012→                        if pos is None:
+  1013→                            position_state = PositionState.FLAT
+  1014→                            current_position = None
+  1015→
+  1016→                            # v0.40.34: Push position closure to state_callback
+  1017→
+  1018→                            try:
+  1019→
+  1020→                                self._update_terminal_state(open_position=None)
+  1021→
+  1022→                            except Exception:
+  1023→
+  1024→                                pass
+  1025→
+  1026→                            # v0.40.34: Push position closure to state_callback
+  1027→
+  1028→                            try:
+  1029→
+  1030→                                self._update_terminal_state(open_position=None)
+  1031→
+  1032→                            except Exception:
+  1033→
+  1034→                                pass
+  1035→
+  1036→                            # v0.40.34: Push position closure to state_callback
+  1037→
+  1038→                            try:
+  1039→
+  1040→                                self._update_terminal_state(open_position=None)
+  1041→
+  1042→                            except Exception:
+  1043→
+  1044→                                pass
+  1045→
+  1046→                            # v0.40.34: Push position closure to state_callback
+  1047→
+  1048→                            try:
+  1049→
+  1050→                                self._update_terminal_state(open_position=None)
+  1051→
+  1052→                            except Exception:
+  1053→
+  1054→                                pass
+  1055→                            continue
+  1056→
+  1057→                        # Catastrophic loss check
+  1058→                        catastrophic_close = False
+  1059→                        if cfg.catastrophic_loss_pct > 0:
+  1060→                            if pos.direction == "LONG":
+  1061→                                unrealized_loss = (pos.entry_price - current_price) / pos.entry_price * 100
+  1062→                            else:
+  1063→                                unrealized_loss = (current_price - pos.entry_price) / pos.entry_price * 100
+  1064→                            if unrealized_loss >= cfg.catastrophic_loss_pct:
+  1065→                                # v0.47.0: Insert trade outcome into tries (learning loop)
+  1066→                                _learning_insert_outcome(
+  1067→                                    _active_learning, current_position, current_price,
+  1068→                                    "catastrophic_stop", trie_n1, trie_n2, trie,
+  1069→                                    _learning_n1_buffer, _learning_n2_buffer,
+  1070→                                    regime=current_regime,
+  1071→                                )
+  1072→                                _active_learning = None
+  1073→                                self._close_trade(risk_mgr, current_position, current_price,
+  1074→                                                  current_time, "catastrophic_stop", result,
+  1075→                                                  source="backtest")
+  1076→                                catastrophic_close = True
+  1077→                                position_state = PositionState.FLAT
+  1078→                                current_position = None
+  1079→
+  1080→                                # v0.40.34: Push position closure to state_callback
+  1081→
+  1082→                                try:
+  1083→
+  1084→                                    self._update_terminal_state(open_position=None)
+  1085→
+  1086→                                except Exception:
+  1087→
+  1088→                                    pass
+  1089→                                consecutive_breaks = 0
+  1090→
+  1091→                        if catastrophic_close:
+  1092→                            continue
+  1093→
+  1094→                        # v0.46.0: Pattern Divergence Exit
+  1095→                        # Compare real SAX stream with expected_sequences from
+  1096→                        # the node that generated the entry signal.
+  1097→                        # v0.48.0 (FASE 2B FIX): Use N3-encoded tuples instead of
+  1098→                        # pattern_buffer strings. expected_sequences stores tuples,
+  1099→                        # so comparing strings vs tuples always showed "no divergence".
+  1100→                        if divergence_monitor.expected_sequence is not None:
+  1101→                            recent_symbols = None
+  1102→                            if ppmt_engine is not None:
+  1103→                                try:
+  1104→                                    _n3_needed = ppmt_engine.sax_n3.window_size * 3
+  1105→                                    if candle_idx >= _n3_needed:
+  1106→                                        _div_df = df.iloc[candle_idx - _n3_needed + 1:candle_idx + 1]
+  1107→                                        _n3_all = ppmt_engine._encode(ppmt_engine.sax_n3, _div_df)
+  1108→                                        recent_symbols = _n3_all[-3:] if len(_n3_all) >= 3 else None
+  1109→                                except Exception:
+  1110→                                    pass
+  1111→                            if recent_symbols is None and len(pattern_buffer) >= 3:
+  1112→                                recent_symbols = pattern_buffer[-3:]  # fallback: strings (old behavior)
+  1113→                            if recent_symbols is not None:
+  1114→                                div_result = divergence_monitor.check_divergence(recent_symbols)
+  1115→                            else:
+  1116→                                div_result = {'diverged': False}
+  1117→                            if div_result['diverged']:
+  1118→                                # v0.47.0: Insert trade outcome into tries (learning loop)
+  1119→                                _learning_insert_outcome(
+  1120→                                    _active_learning, current_position, current_price,
+  1121→                                    "pattern_broken", trie_n1, trie_n2, trie,
+  1122→                                    _learning_n1_buffer, _learning_n2_buffer,
+  1123→                                    regime=current_regime,
+  1124→                                )
+  1125→                                _active_learning = None
+  1126→                                self._close_trade(
+  1127→                                    risk_mgr, current_position, current_price,
+  1128→                                    current_time, "pattern_broken", result,
+  1129→                                    source="backtest",
+  1130→                                )
+  1131→                                position_state = PositionState.FLAT
+  1132→                                current_position = None
+  1133→                                consecutive_breaks = 0
+  1134→                                try:
+  1135→                                    self._update_terminal_state(open_position=None)
+  1136→                                except Exception:
+  1137→                                    pass
+  1138→                                continue
+  1139→
+  1140→                        # Trailing stop update
+  1141→                        if pos.tp_price is not None:
+  1142→                            entry = pos.entry_price
+  1143→                            if pos.direction == "LONG":
+  1144→                                unrealized_pct = (current_price - entry) / entry * 100
+  1145→                                tp_distance_pct = (pos.tp_price - entry) / entry * 100
+  1146→                            else:
+  1147→                                unrealized_pct = (entry - current_price) / entry * 100
+  1148→                                tp_distance_pct = (entry - pos.tp_price) / entry * 100
+  1149→
+  1150→                            if (not current_position.trailing_activated and
+  1151→                                    tp_distance_pct > 0 and unrealized_pct >= tp_distance_pct * 0.75):
+  1152→                                current_position.trailing_activated = True
+  1153→
+  1154→                            if current_position.trailing_activated:
+  1155→                                current_atr = self._compute_atr_pct(
+  1156→                                    np.array(atr_prices), np.array(atr_highs), np.array(atr_lows))
+  1157→                                trailing_distance = current_atr * 1.5
+  1158→                                if pos.direction == "LONG":
+  1159→                                    new_sl = max(pos.sl_price, current_price * (1 - trailing_distance / 100))
+  1160→                                else:
+  1161→                                    new_sl = min(pos.sl_price, current_price * (1 + trailing_distance / 100))
+  1162→                                pos.sl_price = new_sl
+  1163→
+  1164→                        # SL/TP check at SAX boundary
+  1165→                        sl_hit = risk_mgr.check_stop_loss(cfg.symbol, current_price)
+  1166→                        tp_hit = risk_mgr.check_take_profit(cfg.symbol, current_price)
+  1167→
+  1168→                        if sl_hit:
+  1169→                            exit_reason = "trailing_stop" if current_position.trailing_activated else "stop_loss"
+  1170→                            # v0.47.0: Insert trade outcome into tries (learning loop)
+  1171→                            _learning_insert_outcome(
+  1172→                                _active_learning, current_position, current_price,
+  1173→                                exit_reason, trie_n1, trie_n2, trie,
+  1174→                                _learning_n1_buffer, _learning_n2_buffer,
+  1175→                                regime=current_regime,
+  1176→                            )
+  1177→                            _active_learning = None
+  1178→                            self._close_trade(risk_mgr, current_position, current_price,
+  1179→                                              current_time, exit_reason, result,
+  1180→                                              source="backtest")
+  1181→                            position_state = PositionState.FLAT
+  1182→                            current_position = None
+  1183→                            consecutive_breaks = 0
+  1184→                            continue
+  1185→
+  1186→                        elif tp_hit:
+  1187→                            # v0.47.0: Insert trade outcome into tries (learning loop)
+  1188→                            _learning_insert_outcome(
+  1189→                                _active_learning, current_position, current_price,
+  1190→                                "take_profit", trie_n1, trie_n2, trie,
+  1191→                                _learning_n1_buffer, _learning_n2_buffer,
+  1192→                                regime=current_regime,
+  1193→                            )
+  1194→                            _active_learning = None
+  1195→                            self._close_trade(risk_mgr, current_position, current_price,
+  1196→                                              current_time, "take_profit", result,
+  1197→                                              source="backtest")
+  1198→                            position_state = PositionState.FLAT
+  1199→                            current_position = None
+  1200→                            consecutive_breaks = 0
+  1201→                            continue
+  1202→
+  1203→                    # === PATTERN MATCHING & SIGNAL GENERATION ===
+  1204→                    # Only generate signals if we have enough symbols and are FLAT
+  1205→                    if len(pattern_buffer) >= cfg.pattern_length:
+  1206→                        current_symbols = pattern_buffer[-cfg.pattern_length:]
+  1207→
+  1208→                        # Generate prediction
+  1209→                        # FIX-14 (v0.40.10): pass current_regime so PredictionEngine
+  1210→                        # routes lookups to the matching N4 sub-trie.
+  1211→                        prediction = pred_engine.predict(
+  1212→                            current_symbols=current_symbols,
+  1213→                            entry_price=current_price,
+  1214→                            timeframe_hours=tf_hours,
+  1215→                            symbol=cfg.symbol,
+  1216→                            current_regime=current_regime,
+  1217→                        )
+  1218→
+  1219→                        # Cooldown check (v0.24.0: increased from 1 to 3 symbols)
+  1220→                        # After a losing trade, wait 3 SAX symbols before re-entering
+  1221→                        # to avoid revenge trading and let the market settle.
+  1222→                        sym_idx = result.sax_symbols_produced
+  1223→                        cooldown_period = 3
+  1224→                        if (current_position is None and
+  1225→                                sym_idx - last_losing_trade_idx < cooldown_period and
+  1226→                                last_losing_trade_idx >= 0):
+  1227→                            continue
+  1228→
+  1229→                        if prediction.direction == "FLAT" or prediction.confidence <= 0:
+  1230→                            continue
+  1231→
+  1232→                        # v0.11.0: 4-level matching (same as PaperTrader)
+  1233→                        weighted_confidence = prediction.confidence
+  1234→                        best_trie_level = "n3"
+  1235→                        match_result = None
+  1236→
+  1237→                        if ppmt_engine is not None:
+  1238→                            # v0.47.0: Pass recent_candles DataFrame so each level's
+  1239→                            # encoder re-encodes with the correct symbol type.
+  1240→                            # This fixes the string/tuple mismatch where N3/N4
+  1241→                            # (SAXDualEncoder) expect tuples but received strings.
+  1242→                            _recent_df = None
+  1243→                            _w = cfg.sax_window_size
+  1244→                            _n_needed = _w * cfg.pattern_length
+  1245→                            if candle_idx >= _n_needed:
+  1246→                                _recent_df = df.iloc[candle_idx - _n_needed + 1:candle_idx + 1]
+  1247→                            ppmt_result = ppmt_engine.match_raw(
+  1248→                                current_symbols=current_symbols,
+  1249→                                current_price=current_price,
+  1250→                                recent_candles=_recent_df,
+  1251→                            )
+  1252→                            weighted_confidence = ppmt_result.weighted_confidence
+  1253→                            match_result = ppmt_result
+  1254→
+  1255→                            level_confs = {
+  1256→                                "n1": ppmt_result.n1_confidence,
+  1257→                                "n2": ppmt_result.n2_confidence,
+  1258→                                "n3": ppmt_result.n3_confidence,
+  1259→                                "n4": ppmt_result.n4_confidence,
+  1260→                            }
+  1261→                            best_trie_level = max(level_confs, key=level_confs.get)
+  1262→
+  1263→                            if weighted_confidence <= 0 and prediction.confidence > 0:
+  1264→                                weighted_confidence = prediction.confidence
+  1265→                                best_trie_level = "n3"
+  1266→
+  1267→                        # v0.46.0: BTC Context Filter
+  1268→                        # Adjust confidence based on BTC market regime.
+  1269→                        # Longs in BTC downtrend get penalized; shorts in BTC uptrend get penalized.
+  1270→                        if btc_filter._btc_regime is not None and weighted_confidence > 0:
+  1271→                            btc_result = btc_filter.filter_signal(
+  1272→                                prediction.direction, weighted_confidence,
+  1273→                            )
+  1274→                            if btc_result['rejected']:
+  1275→                                if result.candles_processed % 50 == 0:
+  1276→                                    console.print(
+  1277→                                        f"[dim][{cfg.symbol}] BTC filter rejected {prediction.direction}: "
+  1278→                                        f"btc_regime={btc_result['btc_regime']} conf={weighted_confidence:.2f}[/dim]"
+  1279→                                    )
+  1280→                                continue
+  1281→                            weighted_confidence = btc_result['adjusted_confidence']
+  1282→
+  1283→                        # Entry signal generation
+  1284→                        effective_min_conf = cfg.min_confidence
+  1285→
+  1286→                        # v0.11.0: TokenProfile SHORT gating
+  1287→                        if prediction.direction == "SHORT":
+  1288→                            if token_profile is not None and not token_profile.short_allowed:
+  1289→                                continue
+  1290→
+  1291→                            # v0.11.0: Regime-aware SHORT gating
+  1292→                            short_regime_mult = {
+  1293→                                "trending_down": 0.85,
+  1294→                                "ranging": 1.1,
+  1295→                                "trending_up": 1.5,
+  1296→                                "volatile": 1.8,
+  1297→                            }.get(current_regime, 1.2)
+  1298→                            effective_min_conf = max(effective_min_conf * short_regime_mult, 0.20)
+  1299→
+  1300→                            if token_profile is not None:
+  1301→                                effective_min_conf = max(
+  1302→                                    effective_min_conf * token_profile.short_confidence_multiplier,
+  1303→                                    effective_min_conf,
+  1304→                                )
+  1305→
+  1306→                        # v0.11.0: Regime-aware confidence adjustment
+  1307→                        if cfg.regime_aware and current_regime and prediction.confidence > 0:
+  1308→                            try:
+  1309→                                matched_node = trie.search(current_symbols)
+  1310→                                if matched_node and matched_node.metadata.regime_distribution:
+  1311→                                    regime_adjustment = matched_node.metadata.regime_match_score(current_regime)
+  1312→                                    if regime_adjustment > 0:
+  1313→                                        effective_min_conf = effective_min_conf / regime_adjustment
+  1314→                            except Exception:
+  1315→                                pass
+  1316→
+  1317→                        # v0.25.0: Aggressive signal quality filtering
+  1318→                        # Backtest analysis: 24 trades, 8W/16L, PF=0.53
+  1319→                        # Root cause: too many weak signals in ranging/volatile regimes.
+  1320→                        # Strategy: Only trade high-conviction setups in favorable regimes.
+  1321→                        # v0.32.3: validation_mode relaxes these thresholds so backtest
+  1322→                        # can produce enough trades for MC simulation.
+  1323→                        # v0.38.8: All thresholds now sourced from SignalThresholds
+  1324→                        # (core/thresholds.py). .paper() for validation_mode=True,
+  1325→                        # .real() for real-money. Values preserved verbatim from v0.38.7.
+  1326→                        _sig_thresholds = SignalThresholds.for_mode(
+  1327→                            getattr(cfg, 'validation_mode', False)
+  1328→                        )
+  1329→                        move_threshold = _sig_thresholds.move_threshold
+  1330→                        prob_threshold = _sig_thresholds.base_prob_gate  # final entry gate
+  1331→                        base_prob_gate = _sig_thresholds.base_prob_gate
+  1332→                        ranging_prob_gate = _sig_thresholds.ranging_prob_gate
+  1333→                        volatile_prob_gate = _sig_thresholds.volatile_prob_gate
+  1334→                        counter_trend_gate = _sig_thresholds.counter_trend_gate
+  1335→
+  1336→                        # Confidence boost: if overall_probability is strong and move is
+  1337→                        # significant, boost confidence up to min_confidence level
+  1338→                        boosted_confidence = weighted_confidence
+  1339→                        boost_prob_trigger = _sig_thresholds.boost_prob_trigger
+  1340→                        boost_move_trigger = _sig_thresholds.boost_move_trigger
+  1341→                        if (prediction.overall_probability >= boost_prob_trigger
+  1342→                                and abs(prediction.expected_total_move_pct) >= boost_move_trigger):
+  1343→                            # Strong pattern match — boost confidence by probability
+  1344→                            boosted_confidence = max(
+  1345→                                weighted_confidence,
+  1346→                                weighted_confidence * (1 + prediction.overall_probability),
+  1347→                            )
+  1348→
+  1349→                        # v0.25.0: Hard quality gate — reject weak signals
+  1350→                        # v0.38.3: Log the reason so user can see WHY signals don't fire.
+  1351→                        if prediction.overall_probability < base_prob_gate:
+  1352→                            if result.candles_processed % 20 == 0:
+  1353→                                console.print(
+  1354→                                    f"[dim][{cfg.symbol}] skip: prob={prediction.overall_probability:.2f} < {base_prob_gate} gate | regime={current_regime} | pattern={''.join(current_symbols)}[/dim]"
+  1355→                                )
+  1356→                            continue
+  1357→                        # v0.38.5: Hard move floor — must be <= move_threshold so a signal
+  1358→                        # that passes the floor also passes the final entry gate.
+  1359→                        # Paper trading: 0.05% (just above Binance spread).
+  1360→                        # Real money: 0.5% (only meaningful moves).
+  1361→                        _hard_move_floor = _sig_thresholds.hard_move_floor
+  1362→                        if abs(prediction.expected_total_move_pct) < _hard_move_floor:
+  1363→                            if result.candles_processed % 20 == 0:
+  1364→                                console.print(
+  1365→                                    f"[dim][{cfg.symbol}] skip: move={prediction.expected_total_move_pct:.2f}% < {_hard_move_floor}% | regime={current_regime} | pattern={''.join(current_symbols)}[/dim]"
+  1366→                                )
+  1367→                            continue
+  1368→
+  1369→                        # v0.25.0: Strict regime-aware signal filtering
+  1370→                        # KEY INSIGHT from trade analysis:
+  1371→                        #   - Ranging regime: 8 losses, 2 wins → AVOID
+  1372→                        #   - Volatile regime: mixed but catastrophic losses possible
+  1373→                        #   - Trending: best win rate, should be primary focus
+  1374→                        if current_regime == "ranging":
+  1375→                            # Ranging markets are choppy — skip unless very high confidence
+  1376→                            if prediction.overall_probability < ranging_prob_gate:
+  1377→                                if result.candles_processed % 20 == 0:
+  1378→                                    console.print(
+  1379→                                        f"[dim][{cfg.symbol}] skip: ranging prob={prediction.overall_probability:.2f} < {ranging_prob_gate}[/dim]"
+  1380→                                    )
+  1381→                                continue
+  1382→                            _ranging_move_floor = _sig_thresholds.ranging_move_floor
+  1383→                            if abs(prediction.expected_total_move_pct) < _ranging_move_floor:
+  1384→                                if result.candles_processed % 20 == 0:
+  1385→                                    console.print(
+  1386→                                        f"[dim][{cfg.symbol}] skip: ranging move={prediction.expected_total_move_pct:.2f}% < {_ranging_move_floor}%[/dim]"
+  1387→                                    )
+  1388→                                continue
+  1389→                        elif current_regime == "volatile":
+  1390→                            # In volatile markets, only trade with the strongest signals
+  1391→                            if prediction.overall_probability < volatile_prob_gate:
+  1392→                                if result.candles_processed % 20 == 0:
+  1393→                                    console.print(
+  1394→                                        f"[dim][{cfg.symbol}] skip: volatile prob={prediction.overall_probability:.2f} < {volatile_prob_gate}[/dim]"
+  1395→                                    )
+  1396→                                continue
+  1397→                            _volatile_move_floor = _sig_thresholds.volatile_move_floor
+  1398→                            if abs(prediction.expected_total_move_pct) < _volatile_move_floor:
+  1399→                                if result.candles_processed % 20 == 0:
+  1400→                                    console.print(
+  1401→                                        f"[dim][{cfg.symbol}] skip: volatile move={prediction.expected_total_move_pct:.2f}% < {_volatile_move_floor}%[/dim]"
+  1402→                                    )
+  1403→                                continue
+  1404→                        elif current_regime == "trending_down" and prediction.direction == "LONG":
+  1405→                            # Counter-trend LONG in downtrend — extremely risky
+  1406→                            if prediction.overall_probability < counter_trend_gate:
+  1407→                                if result.candles_processed % 20 == 0:
+  1408→                                    console.print(
+  1409→                                        f"[dim][{cfg.symbol}] skip: counter-trend LONG in downtrend prob={prediction.overall_probability:.2f} < {counter_trend_gate}[/dim]"
+  1410→                                    )
+  1411→                                continue
+  1412→                        elif current_regime == "trending_up" and prediction.direction == "SHORT":
+  1413→                            # Counter-trend SHORT in uptrend — extremely risky
+  1414→                            if prediction.overall_probability < counter_trend_gate:
+  1415→                                if result.candles_processed % 20 == 0:
+  1416→                                    console.print(
+  1417→                                        f"[dim][{cfg.symbol}] skip: counter-trend SHORT in uptrend prob={prediction.overall_probability:.2f} < {counter_trend_gate}[/dim]"
+  1418→                                    )
+  1419→                                continue
+  1420→
+  1421→                        if (position_state == PositionState.FLAT
+  1422→                                and prediction.direction != "FLAT"
+  1423→                                and boosted_confidence >= effective_min_conf
+  1424→                                and abs(prediction.expected_total_move_pct) > move_threshold
+  1425→                                and prediction.overall_probability > prob_threshold):
+  1426→
+  1427→                            result.signals_generated += 1
+  1428→
+  1429→                            # v0.25.0: Aggressive SL/TP with trend-following bias
+  1430→                            # Key insight: PF=0.53 means losses > gains. Need to:
+  1431→                            #   1. Use wider SL to avoid premature stops
+  1432→                            #   2. Use ambitious TP to let winners run
+  1433→                            #   3. Ensure R:R >= 2:1 minimum for every trade
+  1434→                            expected_move_abs = abs(prediction.expected_total_move_pct)
+  1435→
+  1436→                            # v0.25.0: Regime-adaptive SL/TP with minimum R:R enforcement
+  1437→                            if current_regime in ("trending_up", "trending_down"):
+  1438→                                sl_mult = 1.5   # Wider SL in trends to survive pullbacks
+  1439→                                tp_mult = 4.0   # Let profits run in trends
+  1440→                            elif current_regime == "ranging":
+  1441→                                sl_mult = 2.0   # Very wide SL in ranges (noise is extreme)
+  1442→                                tp_mult = 2.5   # Moderate TP in ranges
+  1443→                            else:  # volatile or unknown
+  1444→                                sl_mult = 1.8   # Wide SL in volatile (whipsaws)
+  1445→                                tp_mult = 3.0   # Good TP in volatile (big swings)
+  1446→
+  1447→                            sl_distance_pct = max(min(expected_move_abs * sl_mult, 5.0), 1.0)
+  1448→                            tp_distance_pct = expected_move_abs * tp_mult
+  1449→                            # v0.25.0: Enforce minimum 2:1 R:R ratio
+  1450→                            if tp_distance_pct < sl_distance_pct * 2.0:
+  1451→                                tp_distance_pct = sl_distance_pct * 2.0
+  1452→
+  1453→                            if prediction.direction == "LONG":
+  1454→                                sl_price = current_price * (1 - sl_distance_pct / 100)
+  1455→                                tp_price = current_price * (1 + tp_distance_pct / 100)
+  1456→                            else:
+  1457→                                sl_price = current_price * (1 + sl_distance_pct / 100)
+  1458→                                tp_price = current_price * (1 - tp_distance_pct / 100)
+  1459→
+  1460→                            risk_reward = tp_distance_pct / sl_distance_pct if sl_distance_pct > 0 else 0
+  1461→
+  1462→                            # v0.56.0 (TAREA 17): EV Gate — Expected Value filter.
+  1463→                            # The institutional test: does this signal have positive EV?
+  1464→                            # EV_Score = confidence × min(R:R, 3.0)
+  1465→                            # If EV_Score < 0.80, the signal lacks sufficient edge.
+  1466→                            # This catches high-confidence/low-R:R and low-confidence/high-R:R
+  1467→                            # signals that look promising but have negative expectancy.
+  1468→                            _ev_rr = min(risk_reward, 3.0) if risk_reward > 0 else 0.0
+  1469→                            _ev_score = boosted_confidence * _ev_rr
+  1470→                            _ev_gate_threshold = 0.80
+  1471→                            if _ev_score < _ev_gate_threshold:
+  1472→                                if result.candles_processed % 20 == 0:
+  1473→                                    console.print(
+  1474→                                        f"[dim][{cfg.symbol}] [EV GATE] REJECTED: "
+  1475→                                        f"conf={boosted_confidence:.3f}, R:R={risk_reward:.2f}, "
+  1476→                                        f"EV={_ev_score:.3f} (min {_ev_gate_threshold})[/dim]"
+  1477→                                    )
+  1478→                                continue
+  1479→                            if result.candles_processed % 50 == 0:
+  1480→                                console.print(
+  1481→                                    f"[dim][{cfg.symbol}] [EV GATE] PASSED: "
+  1482→                                    f"conf={boosted_confidence:.3f}, R:R={risk_reward:.2f}, "
+  1483→                                    f"EV={_ev_score:.3f}[/dim]"
+  1484→                                )
+  1485→
+  1486→                            # v0.11.0: Get actual historical_count from matched node
+  1487→                            actual_historical_count = 10
+  1488→                            matched_node_for_sizing = None
+  1489→                            try:
+  1490→                                matched_node_for_sizing = trie.search(current_symbols)
+  1491→                                if matched_node_for_sizing and matched_node_for_sizing.metadata.historical_count > 0:
+  1492→                                    actual_historical_count = matched_node_for_sizing.metadata.historical_count
+  1493→                            except Exception:
+  1494→                                pass
+  1495→
+  1496→                            # Create signal
+  1497→                            signal_type = (
+  1498→                                SignalType.ENTRY_LONG if prediction.direction == "LONG"
+  1499→                                else SignalType.ENTRY_SHORT
+  1500→                            )
+  1501→
+  1502→                            signal = Signal(
+  1503→                                signal_type=signal_type,
+  1504→                                confidence=boosted_confidence,  # v0.21.0: use boosted confidence
+  1505→                                symbol=cfg.symbol,
+  1506→                                entry_price=current_price,
+  1507→                                sl_price=sl_price,
+  1508→                                tp_price=tp_price,
+  1509→                                expected_move_pct=prediction.expected_total_move_pct,
+  1510→                                risk_reward_ratio=risk_reward,
+  1511→                                win_rate=prediction.overall_probability,
+  1512→                                historical_count=actual_historical_count,
+  1513→                                matched_pattern=current_symbols,
+  1514→                                trie_level=best_trie_level,
+  1515→                            )
+  1516→                            signal.quality_score = signal.compute_quality_score()
+  1517→                            signal.sizing_multiplier = signal.compute_sizing_multiplier()
+  1518→
+  1519→                            # Metadata sizing
+  1520→                            mock_meta = BlockLifecycleMetadata(
+  1521→                                win_rate=signal.win_rate,
+  1522→                                expected_move_pct=signal.expected_move_pct,
+  1523→                                max_drawdown_pct=-sl_distance_pct,
+  1524→                                historical_count=actual_historical_count,
+  1525→                            )
+  1526→                            signal.probability_of_success = mock_meta.probability_of_success
+  1527→                            signal.expected_profit_ahead = mock_meta.expected_profit_ahead
+  1528→                            signal.metadata_sizing_signal = mock_meta.sizing_signal
+  1529→
+  1530→                            # Apply regime multiplier
+  1531→                            if cfg.regime_aware and current_regime:
+  1532→                                regime_mults = {
+  1533→                                    "trending_up": 1.2,
+  1534→                                    "ranging": 1.0,
+  1535→                                    "trending_down": 0.6,
+  1536→                                    "volatile": 0.4,
+  1537→                                }
+  1538→                                regime_mult = regime_mults.get(current_regime, 1.0)
+  1539→                                signal.metadata_sizing_signal *= regime_mult
+  1540→                                signal.sizing_multiplier *= regime_mult
+  1541→
+  1542→                            # Fire callback
+  1543→                            if cfg.on_signal:
+  1544→                                try:
+  1545→                                    cfg.on_signal(signal, prediction)
+  1546→                                except Exception:
+  1547→                                    pass
+  1548→
+  1549→                            # Risk check
+  1550→                            can_open, reason = risk_mgr.can_open(signal, info.asset_class)
+  1551→                            if can_open:
+  1552→                                size = risk_mgr.calculate_position_size(signal)
+  1553→                                position = risk_mgr.open_position(signal, size)
+  1554→
+  1555→                                current_position = RealtimeTrade(
+  1556→                                    trade_id=trade_counter + 1,
+  1557→                                    symbol=cfg.symbol,
+  1558→                                    direction=signal.direction or "LONG",
+  1559→                                    entry_price=current_price,
+  1560→                                    entry_time=current_time,
+  1561→                                    size=size,
+  1562→                                    confidence=signal.confidence,
+  1563→                                    regime=current_regime,
+  1564→                                    matched_pattern=current_symbols,
+  1565→                                )
+  1566→                                # Store SL/TP and trailing flag on the position
+  1567→                                current_position.sl_price = sl_price  # type: ignore
+  1568→                                current_position.tp_price = tp_price  # type: ignore
+  1569→                                current_position.trailing_activated = False  # type: ignore
+  1570→
+  1571→                                position_state = PositionState.LONG if signal.direction == "LONG" else PositionState.SHORT
+  1572→                                trade_counter += 1
+  1573→
+  1574→                                # v0.46.0: Set expected sequence for divergence monitoring
+  1575→                                # v0.48.0 (FASE 2B FIX): Use _active_learning patterns (tuples)
+  1576→                                # instead of current_symbols (strings). N3 trie has tuple keys,
+  1577→                                # so trie.search(current_strings) never found nodes.
+  1578→                                try:
+  1579→                                    if _active_learning is not None and _active_learning.get("pattern_n3"):
+  1580→                                        matched_node = trie.search(_active_learning["pattern_n3"])
+  1581→                                    else:
+  1582→                                        matched_node = trie.search(current_symbols)
+  1583→                                    if matched_node and matched_node.metadata.expected_sequences:
+  1584→                                        divergence_monitor.set_expected(matched_node.metadata)
+  1585→                                except Exception:
+  1586→                                    pass
+  1587→
+  1588→                                # v0.47.0: Capture per-level patterns for learning loop.
+  1589→                                # When the position closes, the outcome (won/move_pct)
+  1590→                                # will be written back to N1/N2/N3 tries.
+  1591→                                if ppmt_engine is not None:
+  1592→                                    try:
+  1593→                                        _pl = cfg.pattern_length
+  1594→                                        _w = cfg.sax_window_size
+  1595→                                        _n_needed = _w * _pl
+  1596→                                        if candle_idx >= _n_needed:
+  1597→                                            _entry_df = df.iloc[candle_idx - _n_needed + 1:candle_idx + 1]
+  1598→                                            _entry_patterns = ppmt_engine.encode_pattern_per_level(
+  1599→                                                _entry_df, pattern_length=_pl
+  1600→                                            )
+  1601→                                            _active_learning = {
+  1602→                                                "pattern_n1": _entry_patterns["n1"],
+  1603→                                                "pattern_n2": _entry_patterns["n2"],
+  1604→                                                "pattern_n3": _entry_patterns["n3"],
+  1605→                                                "entry_price": current_price,
+  1606→                                                "direction": signal.direction or "LONG",
+  1607→                                                "entry_ts": candle_idx,
+  1608→                                                "regime": current_regime,
+  1609→                                            }
+  1610→                                    except Exception:
+  1611→                                        _active_learning = None
+  1612→
+  1613→                                # v0.15.0: Update TerminalState — position opened
+  1614→                                self._update_terminal_state(
+  1615→                                    signal={
+  1616→                                        "type": signal.signal_type.value,
+  1617→                                        "direction": signal.direction,
+  1618→                                        "confidence": signal.confidence,
+  1619→                                        "price": current_price,
+  1620→                                        "pattern": current_symbols,
+  1621→                                        "trie_level": best_trie_level,
+  1622→                                        "timestamp": time.time(),
+  1623→                                    },
+  1624→                                    positions=[{
+  1625→                                        "symbol": cfg.symbol,
+  1626→                                        "direction": signal.direction or "LONG",
+  1627→                                        "entry_price": current_price,
+  1628→                                        "sl": sl_price,
+  1629→                                        "tp": tp_price,
+  1630→                                        "size": size,
+  1631→                                        "confidence": signal.confidence,
+  1632→                                    }],
+  1633→                                )
+  1634→
+  1635→                # Record equity
+  1636→                if candle_idx % 10 == 0:
+  1637→                    unrealized = risk_mgr.capital
+  1638→                    result.equity_curve.append(unrealized)
+  1639→                    result.capital_history.append(unrealized)
+  1640→                    if risk_mgr.capital > peak_capital:
+  1641→                        peak_capital = risk_mgr.capital
+  1642→
+  1643→                    # v0.15.0: Push equity to TerminalState
+  1644→                    pnl_pct = (risk_mgr.capital - cfg.initial_capital) / cfg.initial_capital * 100
+  1645→                    self._update_terminal_state(
+  1646→                        current_price=current_price,
+  1647→                        portfolio_value=risk_mgr.capital,
+  1648→                        cash=risk_mgr.capital,
+  1649→                        total_pnl_pct=pnl_pct,
+  1650→                        equity_point={"value": risk_mgr.capital, "timestamp": time.time()},
+  1651→                        regime=current_regime,
+  1652→                    )
+  1653→
+  1654→                result.candles_processed += 1
+  1655→
+  1656→                # Update live display
+  1657→                if cfg.verbose and candle_idx % 50 == 0:
+  1658→                    position_str = f"[green]{position_state.value}[/green]" if position_state != PositionState.FLAT else "FLAT"
+  1659→                    pnl_pct = (risk_mgr.capital - cfg.initial_capital) / cfg.initial_capital * 100
+  1660→                    pnl_color = "green" if pnl_pct >= 0 else "red"
+  1661→                    pnl_sign = "+" if pnl_pct >= 0 else ""
+  1662→
+  1663→                    live_display.update(Panel(
+  1664→                        f"  Candle: {candle_idx}/{len(df)} | "
+  1665→                        f"Price: ${current_price:,.2f} | "
+  1666→                        f"Position: {position_str} | "
+  1667→                        f"P&L: [{pnl_color}]{pnl_sign}{pnl_pct:.2f}%[/{pnl_color}] | "
+  1668→                        f"SAX: {len(pattern_buffer)} symbols | "
+  1669→                        f"Regime: {current_regime}",
+  1670→                        title=f"PPMT Replay: {cfg.symbol}",
+  1671→                        border_style="cyan",
+  1672→                    ))
+  1673→
+  1674→                # Speed control
+  1675→                if cfg.speed > 0:
+  1676→                    candle_interval = tf_hours * 3600 / cfg.speed  # seconds per candle at this speed
+  1677→                    elapsed = time.time() - loop_start
+  1678→                    sleep_time = max(0, candle_interval - elapsed)
+  1679→                    if sleep_time > 0:
+  1680→                        time.sleep(sleep_time)
+  1681→
+  1682→                # Fire candle callback
+  1683→                if cfg.on_candle:
+  1684→                    try:
+  1685→                        cfg.on_candle(candle_idx, current_price)
+  1686→                    except Exception:
+  1687→                        pass
+  1688→
+  1689→        # Close any open position at end
+  1690→        if current_position is not None:
+  1691→            last_price = float(df["close"].iloc[-1])
+  1692→            self._close_trade(risk_mgr, current_position, last_price,
+  1693→                              "end_of_data", "end_of_data", result,
+  1694→                              source="backtest")
+  1695→
+  1696→        # Compute final statistics
+  1697→        duration = time.time() - start_time
+  1698→        result.duration_seconds = duration
+  1699→        result.final_capital = risk_mgr.capital
+  1700→        result.total_pnl = risk_mgr.capital - cfg.initial_capital
+  1701→        result.total_pnl_pct = result.total_pnl / cfg.initial_capital * 100
+  1702→
+  1703→        if result.total_trades > 0:
+  1704→            result.win_rate = result.winning_trades / result.total_trades
+  1705→            # Max drawdown
+  1706→            if result.equity_curve:
+  1707→                peak = result.equity_curve[0]
+  1708→                max_dd = 0.0
+  1709→                for eq in result.equity_curve:
+  1710→                    if eq > peak:
+  1711→                        peak = eq
+  1712→                    dd = (peak - eq) / peak
+  1713→                    if dd > max_dd:
+  1714→                        max_dd = dd
+  1715→                result.max_drawdown = max_dd
+  1716→
+  1717→        # v0.15.0: Final TerminalState update with complete results
+  1718→        self._update_terminal_state(
+  1719→            is_running=False,
+  1720→            portfolio_value=risk_mgr.capital,
+  1721→            cash=risk_mgr.capital,
+  1722→            total_pnl_pct=result.total_pnl_pct,
+  1723→            total_trades=result.total_trades,
+  1724→            winning_trades=result.winning_trades,
+  1725→            win_rate=result.win_rate,
+  1726→            max_drawdown=result.max_drawdown,
+  1727→            positions=[],
+  1728→            candles_processed=result.candles_processed,
+  1729→            sax_symbols_produced=result.sax_symbols_produced,
+  1730→        )
+  1731→
+  1732→        storage.close()
+  1733→        return result
+  1734→
+  1735→    def _close_trade(self, risk_mgr: RiskManager, trade: RealtimeTrade,
+  1736→                     exit_price: float, exit_time: str, exit_reason: str,
+  1737→                     result: RealtimeResult, source: str = "live") -> None:
+  1738→        """Close a trade and record the result.
+  1739→
+  1740→        v0.38.9: Added `source` parameter ('live' | 'backtest') so the storage
+  1741→        layer can deduplicate + filter trades by origin. `run_replay` passes
+  1742→        'backtest' (historical validation runs), `process_new_candle` and
+  1743→        `run_live` pass 'live' (real-time paper/live trading).
+  1744→        """
+  1745→        _, pnl = risk_mgr.close_position(trade.symbol, exit_price)
+  1746→        trade.exit_price = exit_price
+  1747→        trade.exit_time = str(exit_time)
+  1748→        trade.pnl = pnl
+  1749→
+  1750→        if trade.direction == "LONG":
+  1751→            trade.pnl_pct = (exit_price - trade.entry_price) / trade.entry_price * 100
+  1752→        else:
+  1753→            trade.pnl_pct = (trade.entry_price - exit_price) / trade.entry_price * 100
+  1754→
+  1755→        trade.exit_reason = exit_reason
+  1756→
+  1757→        if trade.pnl_pct > 0:
+  1758→            result.winning_trades += 1
+  1759→        else:
+  1760→            result.losing_trades += 1
+  1761→
+  1762→        result.total_trades += 1
+  1763→        result.trades.append(trade)
+  1764→
+  1765→        result.equity_curve.append(risk_mgr.capital)
+  1766→        result.capital_history.append(risk_mgr.capital)
+  1767→
+  1768→        # Fire trade callback
+  1769→        if hasattr(self.config, 'on_trade') and self.config.on_trade:
+  1770→            try:
+  1771→                self.config.on_trade({
+  1772→                    "trade_id": trade.trade_id,
+  1773→                    "direction": trade.direction,
+  1774→                    "entry_price": trade.entry_price,
+  1775→                    "exit_price": trade.exit_price,
+  1776→                    "pnl_pct": trade.pnl_pct,
+  1777→                    "exit_reason": trade.exit_reason,
+  1778→                    "regime": trade.regime,
+  1779→                })
+  1780→            except Exception:
+  1781→                pass
+  1782→
+  1783→        # v0.31.0: Save trade to persistent storage
+  1784→        # v0.38.9: Pass `source` so storage can deduplicate + filter
+  1785→        try:
+  1786→            trade_storage = PPMTStorage()
+  1787→            trade_storage.save_trade({
+  1788→                "symbol": trade.symbol,
+  1789→                "timeframe": getattr(self.config, 'timeframe', '1h'),
+  1790→                "direction": trade.direction,
+  1791→                "entry_price": trade.entry_price,
+  1792→                "exit_price": trade.exit_price,
+  1793→                "entry_time": trade.entry_time,
+  1794→                "exit_time": trade.exit_time,
+  1795→                "size": abs(pnl) / trade.pnl_pct * 100 if trade.pnl_pct != 0 else 0,
+  1796→                "pnl": pnl,
+  1797→                "pnl_pct": trade.pnl_pct,
+  1798→                "confidence": trade.confidence,
+  1799→                "exit_reason": exit_reason,
+  1800→                "regime": trade.regime,
+  1801→                "leverage": getattr(self.config, 'leverage', 1),
+  1802→                "matched_pattern": trade.matched_pattern,
+  1803→                "source": source,
+  1804→            })
+  1805→            trade_storage.close()
+  1806→        except Exception:
+  1807→            pass  # Never let storage crash the engine
+  1808→
+  1809→        # v0.15.0: Update TerminalState — trade closed
+  1810→        self._update_terminal_state(
+  1811→            signal={
+  1812→                "type": "TRADE_CLOSED",
+  1813→                "direction": trade.direction,
+  1814→                "entry_price": trade.entry_price,
+  1815→                "exit_price": exit_price,
+  1816→                "pnl_pct": trade.pnl_pct,
+  1817→                "exit_reason": exit_reason,
+  1818→                "timestamp": time.time(),
+  1819→            },
+  1820→            portfolio_value=risk_mgr.capital,
+  1821→            cash=risk_mgr.capital,
+  1822→            total_trades=result.total_trades,
+  1823→            winning_trades=result.winning_trades,
+  1824→            equity_point={"value": risk_mgr.capital, "timestamp": time.time()},
+  1825→            positions=[],  # Will be updated by next candle
+  1826→        )
+  1827→        # v0.39.0: Fire on_position callback with action='close' so the
+  1828→        # dashboard server can clear _multi_sessions[node_id]["open_position"]
+  1829→        # and the chart entry-price-line is removed.
+  1830→        if hasattr(self.config, 'on_position') and self.config.on_position:
+  1831→            try:
+  1832→                self.config.on_position({
+  1833→                    "action": "close",
+  1834→                    "symbol": trade.symbol,
+  1835→                    "direction": trade.direction,
+  1836→                    "entry_price": trade.entry_price,
+  1837→                    "entry_time": trade.entry_time,
+  1838→                    "exit_price": exit_price,
+  1839→                    "exit_time": str(exit_time),
+  1840→                    "pnl_pct": trade.pnl_pct,
+  1841→                    "exit_reason": exit_reason,
+  1842→                    "trade_id": trade.trade_id,
+  1843→                })
+  1844→            except Exception:
+  1845→                pass
+  1846→
+  1847→    async def process_new_candle(
+  1848→        self,
+  1849→        candle,
+  1850→        cfg,
+  1851→        sax_encoder,
+  1852→        pred_engine,
+  1853→        risk_mgr,
+  1854→        trie,
+  1855→        ppmt_engine,
+  1856→        fuzzy_matcher,
+  1857→        token_profile,
+  1858→        info,
+  1859→        result,
+  1860→        sax_buffer: list,
+  1861→        pattern_buffer: list,
+  1862→        position_state: PositionState,
+  1863→        current_position,
+  1864→        trade_counter: int,
+  1865→        regime_detector,
+  1866→        current_regime: str,
+  1867→        recent_prices: list,
+  1868→        recent_highs: list,
+  1869→        recent_lows: list,
+  1870→        peak_capital: float,
+  1871→        last_losing_trade_idx: int = -999,
+  1872→        exchange=None,
+  1873→        paa_mean: float = None,  # v0.21.0: training stats for consistent SAX
+  1874→        paa_std: float = None,
+  1875→        divergence_monitor=None,  # v0.46.0: Pattern Divergence Monitor
+  1876→        btc_filter=None,  # v0.46.0: BTC Context Filter
+  1877→    ) -> tuple:
+  1878→        """
+  1879→        Process a single closed candle through the full PPMT pipeline.
+  1880→
+  1881→        This is the core streaming pipeline:
+  1882→          Candle → SAX encode → Pattern buffer → Match → Signal → Risk → Position
+  1883→
+  1884→        Shared between run_replay(), run_live(), and external callers.
+  1885→        Returns updated state tuple for functional-style state management.
+  1886→
+  1887→        Args:
+  1888→            candle: Candle object from WebSocketFeed or replay
+  1889→            cfg: LiveConfig or ReplayConfig
+  1890→            sax_encoder: SAXEncoder instance
+  1891→            pred_engine: PredictionEngine instance
+  1892→            risk_mgr: RiskManager instance
+  1893→            trie: PPMTTrie (N3 level)
+  1894→            ppmt_engine: PPMT engine (4-level, or None)
+  1895→            fuzzy_matcher: FuzzyMatcher instance
+  1896→            token_profile: TokenProfile or None
+  1897→            info: AssetClassification
+  1898→            result: RealtimeResult to update
+  1899→            sax_buffer: Current SAX partial window buffer
+  1900→            pattern_buffer: Current SAX symbol pattern
+  1901→            position_state: Current PositionState
+  1902→            current_position: Current RealtimeTrade or None
+  1903→            trade_counter: Trade counter
+  1904→            regime_detector: RegimeDetector or None
+  1905→            current_regime: Current regime string
+  1906→            recent_prices: Rolling price list for ATR
+  1907→            recent_highs: Rolling high list
+  1908→            recent_lows: Rolling low list
+  1909→            peak_capital: Peak capital for drawdown
+  1910→            last_losing_trade_idx: Last losing trade symbol index
+  1911→            exchange: ccxt exchange for order execution (or None)
+  1912→
+  1913→        Returns:
+  1914→            (sax_buffer, pattern_buffer, position_state, current_position,
+  1915→             trade_counter, current_regime, peak_capital, last_losing_trade_idx)
+  1916→        """
+  1917→        current_price = candle.close
+  1918→        current_high = candle.high
+  1919→        current_low = candle.low
+  1920→        current_time = str(candle.timestamp)
+  1921→
+  1922→        # v0.49.0 (FASE 3 TAREA 7B): Feed global BTC price cache.
+  1923→        # When this candle belongs to BTC/USDT, we append the close
+  1924→        # to the shared cache so that altcoins running on the same
+  1925→        # timeframe can read BTC context for N5 matching.
+  1926→        if getattr(cfg, 'symbol', '') == "BTC/USDT":
+  1927→            _BTC_PRICE_CACHE["closes"].append(current_price)
+  1928→            _BTC_PRICE_CACHE["last_update_ts"] = time.time()
+  1929→            # Keep only the last 100 elements (N5 needs 20, 100 gives margin)
+  1930→            if len(_BTC_PRICE_CACHE["closes"]) > 100:
+  1931→                _BTC_PRICE_CACHE["closes"] = _BTC_PRICE_CACHE["closes"][-100:]
+  1932→
+  1933→        # Update ATR tracking
+  1934→        recent_prices.append(current_price)
+  1935→        recent_highs.append(current_high)
+  1936→        recent_lows.append(current_low)
+  1937→        # v0.47.1 FIX: Dynamic buffer size based on SAX encoding needs.
+  1938→        # Previously hard-coded to 50, which is insufficient for short timeframes:
+  1939→        #   5m (W=18, P=5) needs 90 candles → 50 caused _recent_df=None always
+  1940→        #   1m (W=45, P=5) needs 225 candles → 50 caused _recent_df=None always
+  1941→        # Now keeps at least W*P + 20 (margin for ATR/regime), capped at 500.
+  1942→        _min_buf = cfg.sax_window_size * cfg.pattern_length + 20
+  1943→        _max_buf = max(200, _min_buf, 500)
+  1944→        if len(recent_prices) > _max_buf:
+  1945→            del recent_prices[:-_max_buf]
+  1946→            del recent_highs[:-_max_buf]
+  1947→            del recent_lows[:-_max_buf]
+  1948→
+  1949→        # Incremental SAX encoding: feed one candle at a time
+  1950→        single_df = candle.to_dataframe_row()
+  1951→        new_symbols, sax_buffer = sax_encoder.encode_incremental(
+  1952→            single_df, sax_buffer,
+  1953→            paa_mean=paa_mean, paa_std=paa_std,  # v0.21.0: training stats
+  1954→        )
+  1955→
+  1956→        if new_symbols:
+  1957→            for new_sym in new_symbols:
+  1958→                pattern_buffer.append(new_sym)
+  1959→                result.sax_symbols_produced += 1
+  1960→                if len(pattern_buffer) > cfg.pattern_length * 2:
+  1961→                    del pattern_buffer[:len(pattern_buffer) - cfg.pattern_length * 2]
+  1962→
+  1963→            # Regime detection
+  1964→            if regime_detector is not None and len(recent_prices) >= 50:
+  1965→                regime_info = regime_detector.detect_detailed(np.array(recent_prices))
+  1966→                current_regime = regime_info.regime
+  1967→
+  1968→            # v0.46.0: Update BTC context filter periodically
+  1969→            if btc_filter is not None and result.candles_processed % 100 == 0 and len(recent_prices) >= 50:
+  1970→                if cfg.symbol == "BTC/USDT":
+  1971→                    btc_filter.update_btc_context(btc_prices=np.array(recent_prices))
+  1972→
+  1973→            # === POSITION MANAGEMENT ===
+  1974→            if position_state != PositionState.FLAT and current_position is not None:
+  1975→                pos = risk_mgr._positions.get(cfg.symbol)
+  1976→                if pos is not None:
+  1977→                    # Catastrophic loss check
+  1978→                    if cfg.catastrophic_loss_pct > 0:
+  1979→                        if pos.direction == "LONG":
+  1980→                            unrealized_loss = (pos.entry_price - current_price) / pos.entry_price * 100
+  1981→                        else:
+  1982→                            unrealized_loss = (current_price - pos.entry_price) / pos.entry_price * 100
+  1983→                        if unrealized_loss >= cfg.catastrophic_loss_pct:
+  1984→                            # v0.47.0: Insert trade outcome into tries (learning loop)
+  1985→                            _learning_insert_outcome(
+  1986→                                _active_learning, current_position, current_price,
+  1987→                                "catastrophic_stop", trie_n1, trie_n2, trie,
+  1988→                                _learning_n1_buffer, _learning_n2_buffer,
+  1989→                                regime=current_regime,
+  1990→                            )
+  1991→                            _active_learning = None
+  1992→                            self._close_trade(risk_mgr, current_position, current_price,
+  1993→                                              current_time, "catastrophic_stop", result)
+  1994→                            position_state = PositionState.FLAT
+  1995→                            current_position = None
+  1996→                            return (sax_buffer, pattern_buffer, position_state, current_position,
+  1997→                                    trade_counter, current_regime, peak_capital, last_losing_trade_idx)
+  1998→
+  1999→                    # v0.46.0: Pattern Divergence Exit (live mode)
+  2000→                    # v0.48.0 (FASE 2B FIX): Use N3-encoded tuples instead of
+
+[showing lines 1-2000 of 3833; use offset=2001 with limit to continue reading]
