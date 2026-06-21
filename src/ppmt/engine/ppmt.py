@@ -956,7 +956,11 @@ class PPMT:
         # v0.47.0: When recent_candles is provided, encode with each level's
         # encoder to get the correct symbol types. This fixes the bug where
         # N3/N4 (SAXDualEncoder) expect tuples but received strings.
-        if recent_candles is not None and len(recent_candles) >= self.sax_n1.window_size:
+        # v0.47.1: Check against window_size * pattern_length (not just window_size)
+        # so we get enough symbols for a meaningful match. With only window_size rows,
+        # we'd produce just 1 symbol → no pattern match possible.
+        _min_rows = self.sax_n1.window_size * getattr(self, '_pattern_length', 5)
+        if recent_candles is not None and len(recent_candles) >= _min_rows:
             try:
                 encoded = self.encode_all_levels(recent_candles)
                 syms_n1 = encoded["n1"]

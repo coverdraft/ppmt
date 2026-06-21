@@ -1872,10 +1872,17 @@ class RealtimeTrader:
         recent_prices.append(current_price)
         recent_highs.append(current_high)
         recent_lows.append(current_low)
-        if len(recent_prices) > 50:
-            del recent_prices[:-50]
-            del recent_highs[:-50]
-            del recent_lows[:-50]
+        # v0.47.1 FIX: Dynamic buffer size based on SAX encoding needs.
+        # Previously hard-coded to 50, which is insufficient for short timeframes:
+        #   5m (W=18, P=5) needs 90 candles → 50 caused _recent_df=None always
+        #   1m (W=45, P=5) needs 225 candles → 50 caused _recent_df=None always
+        # Now keeps at least W*P + 20 (margin for ATR/regime), capped at 500.
+        _min_buf = cfg.sax_window_size * cfg.pattern_length + 20
+        _max_buf = max(200, _min_buf, 500)
+        if len(recent_prices) > _max_buf:
+            del recent_prices[:-_max_buf]
+            del recent_highs[:-_max_buf]
+            del recent_lows[:-_max_buf]
 
         # Incremental SAX encoding: feed one candle at a time
         single_df = candle.to_dataframe_row()
