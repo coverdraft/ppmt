@@ -244,7 +244,7 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                 await websocket.send_json({
                     "type": "candle",
                     "data": {
-                        "time": int(df.index[i].timestamp()),
+                        "time": int(df.index[i].timestamp()) if isinstance(df.index[i], pd.Timestamp) else int(df.index[i]),
                         "open": float(r["open"]),
                         "high": float(r["high"]),
                         "low": float(r["low"]),
@@ -723,7 +723,7 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
                 engine.process_new_candle(candle_df=df.iloc[[i]], current_price=float(df["close"].iloc[i]))
             for i in range(max(0, len(df) - 50), len(df)):
                 r = df.iloc[i]
-                await websocket.send_json({"type": "candle", "data": {"time": int(df.index[i].timestamp()), "open": float(r["open"]), "high": float(r["high"]), "low": float(r["low"]), "close": float(r["close"])}})
+                await websocket.send_json({"type": "candle", "data": {"time": int(df.index[i].timestamp()) if isinstance(df.index[i], pd.Timestamp) else int(df.index[i]), "open": float(r["open"]), "high": float(r["high"]), "low": float(r["low"]), "close": float(r["close"])}})
     except Exception as e:
         logger.warning(f"[WS-LIVE] Warmup failed: {e}")
 

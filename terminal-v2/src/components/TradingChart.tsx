@@ -183,7 +183,7 @@ export default function TradingChart({
       // First load: set all data
       if (prevCandleCountRef.current === 0) {
         const chartData: CandlestickData<Time>[] = liveCandles.map((c) => ({
-          time: c.time as Time,
+          time: Math.floor(Number(c.time)) as Time,
           open: c.open,
           high: c.high,
           low: c.low,
@@ -200,7 +200,7 @@ export default function TradingChart({
         for (let i = prevCandleCountRef.current; i < newCount; i++) {
           const c = liveCandles[i]!;
           series.update({
-            time: c.time as Time,
+            time: Math.floor(Number(c.time)) as Time,
             open: c.open,
             high: c.high,
             low: c.low,

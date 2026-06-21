@@ -82,9 +82,11 @@ export function usePaperLive(symbol: string | null, timeframe: string) {
 
         switch (msg.type) {
           case 'candle':
+            // Coerce time to integer — backend may send Timestamp objects or strings
+            const candleData = { ...msg.data, time: Math.floor(Number(msg.data.time)) };
             setState((prev) => ({
               ...prev,
-              candles: [...prev.candles.slice(-199), msg.data],  // Keep last 200
+              candles: [...prev.candles.slice(-199), candleData],  // Keep last 200
             }));
             break;
 

@@ -137,9 +137,11 @@ export function useLiveTrading(symbol: string | null, timeframe: string) {
               break;
 
             case 'candle':
+              // Coerce time to integer — backend may send Timestamp objects or strings
+              const candleData = { ...msg.data, time: Math.floor(Number(msg.data.time)) };
               setState((prev) => ({
                 ...prev,
-                candles: [...prev.candles.slice(-199), msg.data],
+                candles: [...prev.candles.slice(-199), candleData],
               }));
               break;
 
