@@ -41,3 +41,33 @@ Stage Summary:
 - 3 new REST endpoints for risk control (all tested and working)
 - _LIVE_SESSIONS bridges WebSocket position state to REST API
 - Commit: 61f2da0
+
+---
+Task ID: 21
+Agent: main
+Task: TAREA 21 — Build professional PPMT terminal with trie brain viz, sequence tracker, and learning feed
+
+Work Log:
+- Analyzed existing WebSocket protocol: brain_update (n1/n2/weighted conf, sax symbols), position_update (full PositionState), candle
+- Added _RISK_CONFIG, _OPEN_POSITIONS, _LAST_NET_EV global dicts to v2_server.py
+- Added _emit_log() helper for structured log forwarding through WebSocket
+- Added 3 REST endpoints: GET /api/risk/status, POST /api/risk/config, GET /api/portfolio/live
+- Enhanced brain_update message with n3_confidence, n4_confidence, current_pattern, ev_score, ev_passed, net_rr
+- Added log emissions at EV GATE pass/reject, SIGNAL, WALK-FORWARD match, PATTERN BROKEN, LEARN (position close)
+- Added _OPEN_POSITIONS tracking when positions open/close
+- Complete rewrite of index.html (945 lines) with Tailwind CSS CDN:
+  - PANEL 1: Trie Brain with N1/N3/N4 confidence bars, EV score, pattern display
+  - PANEL 2: Sequence Tracker with Expected vs Real boxes (green=match, red=diverge)
+  - PANEL 3: Position Management with trailing stop animation, live P&L, status badges
+  - PANEL 4: Learning Feed with filtered log entries ([EV GATE], [LEARN], [PATTERN BROKEN])
+  - PANEL 5: Risk Control with slider for risk_per_trade, capital input, session stats
+  - MEXC Placeholder: lock icon + instructions for API key integration
+- All endpoints tested: risk status, config update, portfolio live
+- v2_server.py syntax verified, all routes registered
+
+Stage Summary:
+- Professional PPMT terminal built with 5 operational panels + MEXC placeholder
+- WebSocket log forwarding enables real-time [EV GATE], [LEARN], [PATTERN BROKEN] feed
+- Trailing stop changes trigger pulse animation in position panel
+- Sequence tracker shows divergence in real-time with red flash
+- Risk control connects to REST API endpoints

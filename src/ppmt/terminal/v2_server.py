@@ -56,6 +56,29 @@ _NET_EV_STATS: dict[str, int] = {
     "rejected_overlap": 0,   # Same symbol already has position in another TF
 }
 
+# ─── v0.58.0 (TAREA 21): Session-wide open positions tracker ──
+_OPEN_POSITIONS: dict[str, dict] = {}  # {"SOL/USDT": {direction, entry, pnl_pct, ev_score, ...}}
+
+# ─── v0.58.0 (TAREA 21): Last Net EV score per symbol ─────────
+_LAST_NET_EV: dict[str, dict] = {}  # {"SOL/USDT": {ev_score, passed, net_rr, conf, ...}}
+
+# ─── v0.58.0 (TAREA 21): Log emitter helper ──────────────────
+async def _emit_log(websocket, tag: str, message: str, level: str = "info"):
+    """Emit a structured log message through the WebSocket for the terminal feed."""
+    try:
+        await websocket.send_json({
+            "type": "log",
+            "data": {
+                "timestamp": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+                "tag": tag,
+                "message": message,
+                "level": level,
+            },
+        })
+    except Exception:
+        pass  # Don't break the poll loop if WS send fails
+
+
 # ─── Helpers ──────────────────────────────────────────────────
 
 def _sax_symbol_to_str(sym) -> str:
@@ -177,35 +200,17 @@ class RiskConfigPayload(BaseModel):
 
 @app.get("/api/risk/status")
 async def risk_status():
-    """Return the current risk configuration.
-
-    v0.58.0: TAREA 20 — GET /api/risk/status
-    Returns risk_per_trade, max_positions, total_capital, current_drawdown.
-    These values are stored in memory and can be updated via
-    POST /api/risk/config without restarting the server.
-    """
-    return {
-        "risk_per_trade": _RISK_CONFIG["risk_per_trade"],
-        "max_positions": _RISK_CONFIG["max_positions"],
-        "total_capital": _RISK_CONFIG["total_capital"],
-        "current_drawdown": _RISK_CONFIG["current_drawdown"],
-    }
+    """Return the current risk configuration."""
+    return dict(_RISK_CONFIG)
 
 
 @app.post("/api/risk/config")
 async def risk_config(payload: RiskConfigPayload):
     """Update risk configuration parameters in memory.
 
-    v0.58.0: TAREA 20 — POST /api/risk/config
     Accepts a partial JSON body with any of:
       risk_per_trade (0.001–0.10), max_positions (1–20),
       total_capital (>0), current_drawdown (0.0–1.0)
-
-    Only provided fields are updated; omitted fields remain unchanged.
-    The server uses these values when calculating position size
-    in paper-live and live-trading sessions.
-
-    Example: {"risk_per_trade": 0.005} to change to 0.5% risk per trade.
     """
     updated = {}
 
@@ -243,27 +248,18 @@ async def risk_config(payload: RiskConfigPayload):
 
 @app.get("/api/portfolio/live")
 async def portfolio_live():
-    """Return the current state of all open positions across sessions.
+    """Return currently open positions with aggregate stats.
 
-    v0.58.0: TAREA 20 — GET /api/portfolio/live
-    Aggregates position data from all active WebSocket sessions
-    (paper-live and live-trading). Each session registers its
-    position in the _LIVE_SESSIONS dict when opening/closing.
-
-    Returns:
-      positions: list of dicts with symbol, direction, entry, pnl, ev_score
-      total_exposure: sum of position sizes as % of total_capital
-      session_ev: aggregate EV across all open positions
+    Aggregates from both _LIVE_SESSIONS (TAREA 20) and _OPEN_POSITIONS (TAREA 21).
     """
     positions = []
-    total_size_usdt = 0.0
-    total_ev_r = 0.0
-    n_positions = 0
+    total_exposure = 0.0
+    session_ev = 0.0
 
+    # From _LIVE_SESSIONS (populated by live-trading WS)
     for session_key, data in _LIVE_SESSIONS.items():
         if data.get("status") not in ("ACTIVE", "BREAK_EVEN_SECURED", "TP_EXTENDED"):
             continue
-
         pos_info = {
             "symbol": data.get("symbol", session_key),
             "direction": data.get("direction", "LONG"),
@@ -274,22 +270,20 @@ async def portfolio_live():
             "timeframe": data.get("timeframe", ""),
         }
         positions.append(pos_info)
+        total_exposure += data.get("size_usdt", 0.0)
+        session_ev += data.get("ev_r", 0.0)
 
-        size = data.get("size_usdt", 0.0)
-        total_size_usdt += size
-        total_ev_r += data.get("ev_r", 0.0)
-        n_positions += 1
-
-    capital = _RISK_CONFIG["total_capital"]
-    exposure_pct = (total_size_usdt / capital * 100.0) if capital > 0 else 0.0
-
-    session_ev = f"+{total_ev_r:.2f}R" if total_ev_r >= 0 else f"{total_ev_r:.2f}R"
+    # From _OPEN_POSITIONS (populated by paper-live WS)
+    for sym, pos_data in _OPEN_POSITIONS.items():
+        positions.append({"symbol": sym, **pos_data})
+        total_exposure += pos_data.get("size_usdt", 0.0)
+        session_ev += pos_data.get("ev_score", 0.0)
 
     return {
         "positions": positions,
-        "total_exposure": f"{exposure_pct:.1f}%",
-        "open_count": n_positions,
-        "session_ev": session_ev,
+        "total_exposure": round(total_exposure, 2),
+        "active_count": len(positions),
+        "session_ev": round(session_ev, 3),
     }
 
 
@@ -643,6 +637,40 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                     else:
                         logger.debug(f"[WS] No pattern in buffer yet (buf={buf is not None}, symbols={len(buf._pattern_buffer) if buf else 0})")
 
+                # ─── Extract N3/N4 confidence from match results ──────
+                n3_conf = 0.0
+                n4_conf = 0.0
+                if result is not None:
+                    if result.n3_match and result.n3_match.node and result.n3_match.node.metadata:
+                        n3_conf = result.n3_match.node.metadata.confidence
+                    if result.n4_match and result.n4_match.node and result.n4_match.node.metadata:
+                        n4_conf = result.n4_match.node.metadata.confidence
+                else:
+                    # Also extract from quick_match result if available
+                    if result is None:
+                        try:
+                            _qr_n3 = getattr(engine, '_last_n3_match', None)
+                            _qr_n4 = getattr(engine, '_last_n4_match', None)
+                            if _qr_n3 and _qr_n3.node and _qr_n3.node.metadata:
+                                n3_conf = _qr_n3.node.metadata.confidence
+                            if _qr_n4 and _qr_n4.node and _qr_n4.node.metadata:
+                                n4_conf = _qr_n4.node.metadata.confidence
+                        except Exception:
+                            pass
+
+                # ─── Extract full current SAX pattern buffer ───────
+                current_pattern = []
+                _pat_buf = getattr(engine, '_streaming_buffer', None)
+                if _pat_buf and _pat_buf._pattern_buffer:
+                    for _sym in _pat_buf._pattern_buffer:
+                        if isinstance(_sym, tuple):
+                            current_pattern.append([str(s) for s in _sym])
+                        else:
+                            current_pattern.append(str(_sym))
+
+                # ─── Get last known EV score for this symbol ────────
+                _ev_info = _LAST_NET_EV.get(symbol, {})
+
                 brain_msg = {
                     "type": "brain_update",
                     "data": {
@@ -650,8 +678,14 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                         "active_path_ids": active_path_ids,
                         "n1_confidence": round(n1_conf, 4),
                         "n2_confidence": round(n2_conf, 4),
+                        "n3_confidence": round(n3_conf, 4),
+                        "n4_confidence": round(n4_conf, 4),
                         "weighted_confidence": round(weighted_conf, 4),
                         "signal_type": signal_type,
+                        "current_pattern": current_pattern,
+                        "ev_score": round(_ev_info.get("ev_score", 0.0), 3),
+                        "ev_passed": _ev_info.get("passed", False),
+                        "net_rr": round(_ev_info.get("net_rr", 0.0), 2),
                     },
                 }
                 await websocket.send_json(brain_msg)
@@ -671,10 +705,12 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                     if symbol in _ACTIVE_SYMBOLS:
                         existing_tf = _ACTIVE_SYMBOLS[symbol]
                         _NET_EV_STATS["rejected_overlap"] += 1
+                        _LAST_NET_EV[symbol] = {"ev_score": 0.0, "passed": False, "net_rr": 0.0, "conf": sig.confidence, "reason": "overlap"}
                         logger.info(
                             f"[NET EV GATE] OVERLAP REJECTED: {symbol} already has "
                             f"position in {existing_tf}, ignoring {timeframe} signal"
                         )
+                        await _emit_log(websocket, "EV GATE", f"OVERLAP REJECTED: {symbol} already in {existing_tf}", "warn")
                     else:
                         # ─── Net EV Gate calculation ─────────────
                         # The signal's expected_move_pct is the AVERAGE move (small).
@@ -708,12 +744,14 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                         # 4. If Net_Favorable <= 0: REJECT (signal doesn't cover costs)
                         if net_favorable <= 0:
                             _NET_EV_STATS["rejected_spread"] += 1
+                            _LAST_NET_EV[symbol] = {"ev_score": 0.0, "passed": False, "net_rr": 0.0, "conf": sig.confidence, "reason": "spread"}
                             logger.info(
                                 f"[NET EV GATE] SPREAD REJECTED: {symbol} {timeframe} "
                                 f"favorable={favorable_pct:.3f}% "
                                 f"spread={spread_pct:.3f}% "
                                 f"net_favorable={net_favorable:.3f}% (≤0)"
                             )
+                            await _emit_log(websocket, "EV GATE", f"SPREAD REJECTED: {symbol} favorable={favorable_pct:.3f}% spread={spread_pct:.3f}%", "warn")
                         else:
                             # 5. Net R:R = net_favorable / drawdown
                             net_rr = net_favorable / drawdown_pct
@@ -725,21 +763,25 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                             # 7. Gate: Net EV must be >= 0.80
                             if net_ev < 0.80:
                                 _NET_EV_STATS["rejected_ev_score"] += 1
+                                _LAST_NET_EV[symbol] = {"ev_score": net_ev, "passed": False, "net_rr": net_rr_capped, "conf": sig.confidence, "reason": "ev_score"}
                                 logger.info(
                                     f"[NET EV GATE] EV REJECTED: {symbol} {timeframe} "
                                     f"conf={sig.confidence:.3f} net_R:R={net_rr_capped:.2f} "
                                     f"Net_EV={net_ev:.3f} (min 0.80)"
                                 )
+                                await _emit_log(websocket, "EV GATE", f"EV REJECTED: conf={sig.confidence:.3f} R:R={net_rr_capped:.2f} EV={net_ev:.3f}", "warn")
                             else:
                                 # ─── PASSED: Open position ─────────
                                 _NET_EV_STATS["passed_net_ev"] += 1
                                 _ACTIVE_SYMBOLS[symbol] = timeframe  # Register in anti-overlap
+                                _LAST_NET_EV[symbol] = {"ev_score": net_ev, "passed": True, "net_rr": net_rr_capped, "conf": sig.confidence}
                                 logger.info(
                                     f"[NET EV GATE] PASSED: {symbol} {timeframe} "
                                     f"conf={sig.confidence:.3f} net_R:R={net_rr_capped:.2f} "
                                     f"Net_EV={net_ev:.3f} spread={spread_pct:.3f}% "
                                     f"favorable={favorable_pct:.3f}% drawdown={drawdown_pct:.3f}%"
                                 )
+                                await _emit_log(websocket, "EV GATE", f"PASSED: conf={sig.confidence:.3f} R:R={net_rr_capped:.2f} EV={net_ev:.3f}", "info")
                                 try:
                                     pos = await executor.open_position(
                                         symbol=symbol,
@@ -754,6 +796,16 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                                             "spread_pct": spread_pct,
                                         },
                                     )
+                                    # Track in session-wide positions
+                                    _OPEN_POSITIONS[symbol] = {
+                                        "direction": pos.direction,
+                                        "entry_price": pos.entry_price,
+                                        "size_usdt": pos.size_usdt,
+                                        "pnl_pct": 0.0,
+                                        "ev_score": net_ev,
+                                        "status": pos.status,
+                                        "timeframe": timeframe,
+                                    }
                                     logger.info(
                                         f"[WS] SIGNAL {sig.signal_type.value} @ {current_price:.6f} "
                                         f"conf={sig.confidence:.3f} Net_EV={net_ev:.3f} "
@@ -775,6 +827,17 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                                     }
                                     logger.info(f"[WS] Session tracker: registered {_session_key}")
 
+                                    # v0.58.0: TAREA 21 — Track in _OPEN_POSITIONS + emit log
+                                    _OPEN_POSITIONS[symbol] = {
+                                        "direction": pos.direction,
+                                        "entry_price": pos.entry_price,
+                                        "size_usdt": pos.size_usdt,
+                                        "pnl_pct": 0.0,
+                                        "ev_score": net_ev,
+                                        "status": pos.status,
+                                        "timeframe": timeframe,
+                                    }
+                                    await _emit_log(websocket, "SIGNAL", f"{sig.signal_type.value} {pos.direction} @ {current_price:.6f} EV={net_ev:.3f}", "info")
                                     await websocket.send_json({
                                         "type": "position_update",
                                         "data": pos.to_dict(),
@@ -782,16 +845,20 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                                 except Exception as e:
                                     # Position failed — remove from active symbols
                                     _ACTIVE_SYMBOLS.pop(symbol, None)
+                                    _OPEN_POSITIONS.pop(symbol, None)
                                     logger.error(f"[WS] Failed to open position: {e}")
 
                 # ─── Walk-Forward check ───────────────────────
                 if result and executor.is_in_position and current_sax:
                     updated = executor.check_walk_forward(current_sax, current_price)
                     if updated:
+                        # Check if this was a MATCH (sequence_index advanced)
+                        _old_idx = updated.sequence_index
                         logger.info(
                             f"[WS] Walk-Forward: seq_idx={updated.sequence_index} "
                             f"status={updated.status} SL={updated.current_sl:.6f} TP={updated.current_tp:.6f}"
                         )
+                        await _emit_log(websocket, "WALK-FORWARD", f"MATCH #{updated.sequence_index} → {updated.status} SL={updated.current_sl:.6f}", "info")
                         await websocket.send_json({
                             "type": "position_update",
                             "data": updated.to_dict(),
@@ -803,6 +870,7 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                     if closed:
                         # v0.57.0 (TAREA 19): Remove from anti-overlap when position closes
                         _ACTIVE_SYMBOLS.pop(symbol, None)
+                        _OPEN_POSITIONS.pop(symbol, None)
                         logger.info(
                             f"[WS] CLOSED: {closed.status} @ {closed.close_price:.6f} "
                             f"PnL={closed.pnl_pct:+.2f}% (${closed.pnl_usdt:+.2f})"
@@ -815,6 +883,20 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                             _LIVE_SESSIONS[_session_key]["pnl_pct"] = f"{closed.pnl_pct:+.2f}%"
                             logger.info(f"[WS] Session tracker: closed {_session_key} → {closed.status}")
 
+                        # v0.58.0: TAREA 21 — Determine log tag + emit learning feed
+                        _close_tag = "LEARN"
+                        if "DIVERGENCE" in (closed.close_reason or ""):
+                            _close_tag = "PATTERN BROKEN"
+                        elif "SL" in (closed.close_reason or "") or "CATASTROPHIC" in (closed.close_reason or ""):
+                            _close_tag = "LEARN"
+                        elif "TP" in (closed.close_reason or ""):
+                            _close_tag = "LEARN"
+                        _won = closed.pnl_pct is not None and closed.pnl_pct > 0
+                        await _emit_log(
+                            websocket, _close_tag,
+                            f"{'Won' if _won else 'Lost'}: {closed.status} @ {closed.close_price:.6f} PnL={closed.pnl_pct:+.2f}% pattern=closed",
+                            "info" if _won else "warn"
+                        )
                         await websocket.send_json({
                             "type": "position_update",
                             "data": closed.to_dict(),
