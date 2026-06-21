@@ -24,6 +24,7 @@ from typing import Optional
 import pandas as pd
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 from ppmt.data.storage import PPMTStorage
 from ppmt.engine.ppmt import PPMT, PPMTResult
@@ -115,6 +116,23 @@ MOCK_LIVE = os.environ.get("PPMT_MOCK_LIVE", "0") == "1"
 if MOCK_LIVE:
     logger.warning("⚠️  PPMT_MOCK_LIVE=1 — Live trading uses PaperExecutor (NO REAL MONEY)")
 
+# ─── v0.58.0: TAREA 20 — Risk Config & Live Session Tracker ──────
+# In-memory risk configuration adjustable via /api/risk/config.
+# Live session registry: each active WS connection registers its
+# position state so /api/portfolio/live can report across sessions.
+
+_RISK_CONFIG: dict = {
+    "risk_per_trade": 0.01,      # 1% por defecto
+    "max_positions": 3,
+    "total_capital": 1000.0,     # USDT
+    "current_drawdown": 0.0,     # % drawdown actual
+}
+
+# _LIVE_SESSIONS tracks active positions across all WS connections.
+# Key: "SOL/USDT:5m" → value: dict with position summary.
+# Populated by WebSocket handlers when positions open/close.
+_LIVE_SESSIONS: dict[str, dict] = {}
+
 
 def get_storage() -> PPMTStorage:
     global _storage
@@ -144,6 +162,134 @@ async def net_ev_stats():
     return {
         "stats": dict(_NET_EV_STATS),
         "active_symbols": dict(_ACTIVE_SYMBOLS),
+    }
+
+
+# ─── REST: Risk Control Endpoints (TAREA 20) ─────────────────────
+
+class RiskConfigPayload(BaseModel):
+    """Payload for POST /api/risk/config — partial update of risk parameters."""
+    risk_per_trade: Optional[float] = None
+    max_positions: Optional[int] = None
+    total_capital: Optional[float] = None
+    current_drawdown: Optional[float] = None
+
+
+@app.get("/api/risk/status")
+async def risk_status():
+    """Return the current risk configuration.
+
+    v0.58.0: TAREA 20 — GET /api/risk/status
+    Returns risk_per_trade, max_positions, total_capital, current_drawdown.
+    These values are stored in memory and can be updated via
+    POST /api/risk/config without restarting the server.
+    """
+    return {
+        "risk_per_trade": _RISK_CONFIG["risk_per_trade"],
+        "max_positions": _RISK_CONFIG["max_positions"],
+        "total_capital": _RISK_CONFIG["total_capital"],
+        "current_drawdown": _RISK_CONFIG["current_drawdown"],
+    }
+
+
+@app.post("/api/risk/config")
+async def risk_config(payload: RiskConfigPayload):
+    """Update risk configuration parameters in memory.
+
+    v0.58.0: TAREA 20 — POST /api/risk/config
+    Accepts a partial JSON body with any of:
+      risk_per_trade (0.001–0.10), max_positions (1–20),
+      total_capital (>0), current_drawdown (0.0–1.0)
+
+    Only provided fields are updated; omitted fields remain unchanged.
+    The server uses these values when calculating position size
+    in paper-live and live-trading sessions.
+
+    Example: {"risk_per_trade": 0.005} to change to 0.5% risk per trade.
+    """
+    updated = {}
+
+    if payload.risk_per_trade is not None:
+        val = payload.risk_per_trade
+        if not (0.001 <= val <= 0.10):
+            return {"error": "risk_per_trade must be between 0.001 and 0.10"}
+        _RISK_CONFIG["risk_per_trade"] = val
+        updated["risk_per_trade"] = val
+
+    if payload.max_positions is not None:
+        val = payload.max_positions
+        if not (1 <= val <= 20):
+            return {"error": "max_positions must be between 1 and 20"}
+        _RISK_CONFIG["max_positions"] = val
+        updated["max_positions"] = val
+
+    if payload.total_capital is not None:
+        val = payload.total_capital
+        if val <= 0:
+            return {"error": "total_capital must be > 0"}
+        _RISK_CONFIG["total_capital"] = val
+        updated["total_capital"] = val
+
+    if payload.current_drawdown is not None:
+        val = payload.current_drawdown
+        if not (0.0 <= val <= 1.0):
+            return {"error": "current_drawdown must be between 0.0 and 1.0"}
+        _RISK_CONFIG["current_drawdown"] = val
+        updated["current_drawdown"] = val
+
+    logger.info(f"[RISK] Config updated: {updated}")
+    return {"status": "ok", "updated": updated, "config": dict(_RISK_CONFIG)}
+
+
+@app.get("/api/portfolio/live")
+async def portfolio_live():
+    """Return the current state of all open positions across sessions.
+
+    v0.58.0: TAREA 20 — GET /api/portfolio/live
+    Aggregates position data from all active WebSocket sessions
+    (paper-live and live-trading). Each session registers its
+    position in the _LIVE_SESSIONS dict when opening/closing.
+
+    Returns:
+      positions: list of dicts with symbol, direction, entry, pnl, ev_score
+      total_exposure: sum of position sizes as % of total_capital
+      session_ev: aggregate EV across all open positions
+    """
+    positions = []
+    total_size_usdt = 0.0
+    total_ev_r = 0.0
+    n_positions = 0
+
+    for session_key, data in _LIVE_SESSIONS.items():
+        if data.get("status") not in ("ACTIVE", "BREAK_EVEN_SECURED", "TP_EXTENDED"):
+            continue
+
+        pos_info = {
+            "symbol": data.get("symbol", session_key),
+            "direction": data.get("direction", "LONG"),
+            "entry": data.get("entry_price", 0.0),
+            "pnl": data.get("pnl_pct", "0.0%"),
+            "ev_score": data.get("ev_score", 0.0),
+            "status": data.get("status", "UNKNOWN"),
+            "timeframe": data.get("timeframe", ""),
+        }
+        positions.append(pos_info)
+
+        size = data.get("size_usdt", 0.0)
+        total_size_usdt += size
+        total_ev_r += data.get("ev_r", 0.0)
+        n_positions += 1
+
+    capital = _RISK_CONFIG["total_capital"]
+    exposure_pct = (total_size_usdt / capital * 100.0) if capital > 0 else 0.0
+
+    session_ev = f"+{total_ev_r:.2f}R" if total_ev_r >= 0 else f"{total_ev_r:.2f}R"
+
+    return {
+        "positions": positions,
+        "total_exposure": f"{exposure_pct:.1f}%",
+        "open_count": n_positions,
+        "session_ev": session_ev,
     }
 
 
@@ -613,6 +759,22 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                                         f"conf={sig.confidence:.3f} Net_EV={net_ev:.3f} "
                                         f"SL={pos.current_sl:.6f} TP={pos.current_tp:.6f}"
                                     )
+
+                                    # v0.58.0: TAREA 20 — Register position in live session tracker
+                                    _session_key = f"{symbol}:{timeframe}"
+                                    _LIVE_SESSIONS[_session_key] = {
+                                        "symbol": symbol,
+                                        "direction": sig.direction or "LONG",
+                                        "entry_price": current_price,
+                                        "size_usdt": 100.0,
+                                        "pnl_pct": "0.0%",
+                                        "ev_score": round(net_ev, 4),
+                                        "ev_r": round(net_ev, 4),
+                                        "status": "ACTIVE",
+                                        "timeframe": timeframe,
+                                    }
+                                    logger.info(f"[WS] Session tracker: registered {_session_key}")
+
                                     await websocket.send_json({
                                         "type": "position_update",
                                         "data": pos.to_dict(),
@@ -645,6 +807,14 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                             f"[WS] CLOSED: {closed.status} @ {closed.close_price:.6f} "
                             f"PnL={closed.pnl_pct:+.2f}% (${closed.pnl_usdt:+.2f})"
                         )
+
+                        # v0.58.0: TAREA 20 — Update session tracker on close
+                        _session_key = f"{symbol}:{timeframe}"
+                        if _session_key in _LIVE_SESSIONS:
+                            _LIVE_SESSIONS[_session_key]["status"] = closed.status
+                            _LIVE_SESSIONS[_session_key]["pnl_pct"] = f"{closed.pnl_pct:+.2f}%"
+                            logger.info(f"[WS] Session tracker: closed {_session_key} → {closed.status}")
+
                         await websocket.send_json({
                             "type": "position_update",
                             "data": closed.to_dict(),
@@ -672,6 +842,9 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
             await exchange.close()
         except Exception:
             pass
+        # v0.58.0: TAREA 20 — Clean up session tracker on disconnect
+        _session_key = f"{symbol}:{timeframe}"
+        _LIVE_SESSIONS.pop(_session_key, None)
         logger.info(f"[WS] Session closed: {symbol}/{timeframe}")
 
 
@@ -1086,6 +1259,22 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
                             f"[WS-LIVE] SIGNAL {sig.signal_type.value} @ {current_price:.6f} "
                             f"conf={sig.confidence:.3f} SL={pos.current_sl:.6f} TP={pos.current_tp:.6f}"
                         )
+
+                        # v0.58.0: TAREA 20 — Register position in live session tracker
+                        _live_session_key = f"{symbol}:{timeframe}"
+                        _LIVE_SESSIONS[_live_session_key] = {
+                            "symbol": symbol,
+                            "direction": sig.direction or "LONG",
+                            "entry_price": current_price,
+                            "size_usdt": allocated_usdt,
+                            "pnl_pct": "0.0%",
+                            "ev_score": round(sig.confidence, 4),
+                            "ev_r": round(sig.confidence * min((sig.expected_move_pct or 1.0) / max(abs(current_price - pos.current_sl) / current_price * 100, 0.01), 3.0), 4),
+                            "status": "ACTIVE",
+                            "timeframe": timeframe,
+                        }
+                        logger.info(f"[WS-LIVE] Session tracker: registered {_live_session_key}")
+
                         await websocket.send_json({"type": "position_update", "data": pos.to_dict()})
                     except Exception as e:
                         logger.error(f"[WS-LIVE] Failed to open position: {e}")
@@ -1234,6 +1423,14 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
                                 f"[WS-LIVE] CLOSED: {closed.status} @ {current_price:.6f} "
                                 f"PnL={closed.pnl_pct:+.2f}% (${closed.pnl_usdt:+.2f})"
                             )
+
+                            # v0.58.0: TAREA 20 — Update session tracker on close
+                            _live_session_key = f"{symbol}:{timeframe}"
+                            if _live_session_key in _LIVE_SESSIONS:
+                                _LIVE_SESSIONS[_live_session_key]["status"] = closed.status
+                                _LIVE_SESSIONS[_live_session_key]["pnl_pct"] = f"{closed.pnl_pct:+.2f}%"
+                                logger.info(f"[WS-LIVE] Session tracker: closed {_live_session_key} → {closed.status}")
+
                             await websocket.send_json({"type": "position_update", "data": closed.to_dict()})
 
             except WebSocketDisconnect:
@@ -1258,6 +1455,9 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
             pass
         if isinstance(executor, MexcFuturesExecutor):
             await executor.close()
+        # v0.58.0: TAREA 20 — Clean up session tracker on disconnect
+        _live_session_key = f"{symbol}:{timeframe}"
+        _LIVE_SESSIONS.pop(_live_session_key, None)
         logger.info(f"[WS-LIVE] Session closed: {symbol}/{timeframe}")
 
 
