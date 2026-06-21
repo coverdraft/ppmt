@@ -240,6 +240,54 @@ class PaperExecutor(IExecutor):
 
         return None  # No match
 
+    def check_divergence(self, pattern_break_score: float, current_price: float) -> bool:
+        """
+        v0.60.0 (TERMINAL-v2.1): Check if pattern divergence should close position.
+
+        Pattern break score ranges:
+        - score >= 0.7: Pattern maintains → hold position, no action
+        - 0.3 <= score < 0.7: Fuzzy match → tighten trailing stop (50% closer to entry)
+        - score < 0.3: Unknown block → close position with DIVERGENCE reason
+
+        Args:
+            pattern_break_score: From FuzzyMatcher.check_continuation(). 0.0 = total
+                break, 1.0 = perfect continuation.
+            current_price: Current market price for closing if needed.
+
+        Returns:
+            True if position was closed by divergence, False otherwise.
+        """
+        if not self.is_in_position or self._position is None:
+            return False
+
+        if pattern_break_score >= 0.7:
+            # Good continuation — pattern maintains
+            return False
+
+        if pattern_break_score < 0.3:
+            # Unknown block — close position immediately
+            self._close_position_sync(current_price, "DIVERGENCE")
+            return True
+
+        # 0.3–0.7: Fuzzy match — tighten trailing stop to 50% of current distance
+        if self._position.current_sl is not None:
+            entry = self._position.entry_price
+            sl = self._position.current_sl
+            if self._position.direction == "LONG":
+                # For LONG: SL is below entry. Move it 50% closer to entry.
+                new_sl = entry + (sl - entry) * 0.5
+                # Never move SL above entry for LONG
+                if new_sl < entry:
+                    self._position.current_sl = new_sl
+            else:
+                # For SHORT: SL is above entry. Move it 50% closer to entry.
+                new_sl = entry + (sl - entry) * 0.5
+                # Never move SL below entry for SHORT
+                if new_sl > entry:
+                    self._position.current_sl = new_sl
+
+        return False
+
     def check_price(self, current_price: float) -> Optional[PositionState]:
         """
         Check if current price hits SL, TP, or catastrophic SL.

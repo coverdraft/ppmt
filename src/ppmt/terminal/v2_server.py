@@ -866,6 +866,31 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                             "data": updated.to_dict(),
                         })
 
+                # ─── Pattern Divergence check ───────────────────
+                # v0.60.0 (TERMINAL-v2.1): Extract pattern_break_score from
+                # the best match result and pass to executor.
+                if executor.is_in_position and result is not None:
+                    _break_score = 1.0  # Default: assume continuation
+                    for _mr in [result.n3_match, result.n1_match, result.n2_match, result.n4_match]:
+                        if _mr is not None:
+                            _break_score = getattr(_mr, 'pattern_break_score', 1.0)
+                            break  # Use first available match
+
+                    divergence_closed = executor.check_divergence(_break_score, current_price)
+                    if divergence_closed:
+                        closed = executor._position  # Already closed by check_divergence
+                        if closed:
+                            logger.info(
+                                f"[WS] DIVERGENCE EXIT: score={_break_score:.2f} @ {current_price:.6f} "
+                                f"PnL={closed.pnl_pct:+.2f}%"
+                            )
+                            await websocket.send_json({
+                                "type": "position_update",
+                                "data": closed.to_dict(),
+                            })
+                            # Skip check_price() this candle — already closed
+                            continue
+
                 # ─── Check SL/TP hit ──────────────────────────
                 if executor.is_in_position:
                     closed = executor.check_price(current_price)
