@@ -17,6 +17,8 @@ import asyncio
 import json
 import logging
 import os
+import queue
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -315,7 +317,7 @@ async def get_trade_history():
 
 # ─── REST: Backtest ──────────────────────────────────────────────
 # v2.1: Run a quick OOS backtest on historical data using the real
-# PPMT engine with Config F. Results stream via WebSocket.
+# PPMT engine with Config F. Results stream via WebSocket IN REAL-TIME.
 
 class BacktestPayload(BaseModel):
     symbol: str = "SOL/USDT"
@@ -325,7 +327,10 @@ class BacktestPayload(BaseModel):
 
 # Track active backtest WebSocket connections so the endpoint can
 # stream results to the calling client.
-_BACKTEST_WS: dict[str, WebSocket] = {}  # key: session_id
+_BACKTEST_WS: dict[str, WebSocket] = {}  # key: "SOL/USDT:5m"
+
+# Track running backtests to prevent duplicates
+_BACKTEST_RUNNING: set[str] = set()  # keys like "SOL/USDT:5m"
 
 
 @app.post("/api/backtest")
@@ -333,12 +338,13 @@ async def run_backtest(payload: BacktestPayload):
     """Start a backtest for the given symbol/timeframe/days.
 
     Runs in a background thread. Results are streamed to the client
-    via the same WebSocket connection the client has open (identified
-    by the backtest_session_id query param on the WS connection).
+    in real-time via the same WebSocket connection the client has open.
     """
     symbol = payload.symbol
     timeframe = payload.timeframe
     days = payload.days
+
+    logger.info(f"[BACKTEST] POST received: {symbol} {timeframe} {days}d")
 
     if timeframe not in ("5m", "15m"):
         return {"status": "error", "message": f"Timeframe {timeframe} not supported for backtest. Use 5m or 15m."}
@@ -346,38 +352,88 @@ async def run_backtest(payload: BacktestPayload):
     if days < 1 or days > 30:
         return {"status": "error", "message": f"Days must be 1-30, got {days}"}
 
+    # Prevent duplicate backtests for the same symbol:tf
+    bt_key = f"{symbol}:{timeframe}"
+    if bt_key in _BACKTEST_RUNNING:
+        return {"status": "error", "message": f"Backtest already running for {symbol} {timeframe}"}
+
+    # Check if WS client is registered
+    ws = _BACKTEST_WS.get(bt_key)
+    if not ws:
+        logger.warning(f"[BACKTEST] No WS client registered for {bt_key}")
+        return {"status": "error", "message": f"No WebSocket connection for {symbol} {timeframe}. Connect to the terminal first."}
+
+    logger.info(f"[BACKTEST] Starting: {symbol} {timeframe} {days}d (WS client found)")
+
     # Run in background so we don't block the HTTP response
-    import asyncio
     asyncio.create_task(_run_backtest_async(symbol, timeframe, days))
 
     return {"status": "started", "symbol": symbol, "timeframe": timeframe, "days": days}
 
 
 async def _run_backtest_async(symbol: str, timeframe: str, days: int):
-    """Run the backtest in a thread pool and stream results via WebSocket."""
-    loop = asyncio.get_event_loop()
+    """Run the backtest in a thread and stream results via WebSocket in real-time."""
+    bt_key = f"{symbol}:{timeframe}"
+    _BACKTEST_RUNNING.add(bt_key)
+    msg_queue: queue.Queue = queue.Queue()
+
+    bt_thread = threading.Thread(
+        target=_backtest_sync,
+        args=(symbol, timeframe, days, msg_queue),
+        daemon=True,
+    )
+    bt_thread.start()
+    logger.info(f"[BACKTEST] Thread started for {bt_key}")
 
     try:
-        result = await loop.run_in_executor(None, _backtest_sync, symbol, timeframe, days, None)
-        messages = result.get("messages", [])
+        # Drain the queue and send messages in real-time via WS
+        got_complete = False
+        while True:
+            # Thread finished AND queue empty → done
+            if not bt_thread.is_alive() and msg_queue.empty():
+                break
 
-        # Stream messages to the WS client for this symbol
-        _bt_key = f"{symbol}:{timeframe}"
-        ws = _BACKTEST_WS.get(_bt_key)
-        if ws:
-            for msg in messages:
+            try:
+                msg = msg_queue.get(timeout=0.3)
+            except queue.Empty:
+                await asyncio.sleep(0.05)  # Yield to event loop
+                continue
+
+            # Send the message via WS
+            ws = _BACKTEST_WS.get(bt_key)
+            if ws:
                 try:
                     await ws.send_json(msg)
-                except Exception:
-                    _BACKTEST_WS.pop(_bt_key, None)
+                except Exception as e:
+                    logger.error(f"[BACKTEST] WS send failed: {e}")
+                    _BACKTEST_WS.pop(bt_key, None)
                     break
-        else:
-            logger.warning(f"[BACKTEST] No WS client for {_bt_key}, results not streamed")
+            else:
+                logger.warning(f"[BACKTEST] WS client gone for {bt_key}, stopping stream")
+                break
+
+            # If this was the completion message, we're done
+            if msg.get("type") == "backtest_complete":
+                got_complete = True
+                break
+
+        # If thread died without sending backtest_complete, send error
+        if not got_complete:
+            logger.error(f"[BACKTEST] Thread ended without sending complete for {bt_key}")
+            ws = _BACKTEST_WS.get(bt_key)
+            if ws:
+                try:
+                    await ws.send_json({"type": "backtest_complete", "data": {
+                        "error": "Backtest thread crashed (no completion message)",
+                        "trades": 0, "wins": 0, "losses": 0,
+                        "wr": 0, "pnl_pct": 0, "profit_factor": 0, "max_drawdown": 0,
+                    }})
+                except Exception:
+                    _BACKTEST_WS.pop(bt_key, None)
 
     except Exception as e:
-        logger.error(f"[BACKTEST] Failed: {e}")
-        _bt_key = f"{symbol}:{timeframe}"
-        ws = _BACKTEST_WS.get(_bt_key)
+        logger.error(f"[BACKTEST] Async streamer failed: {e}", exc_info=True)
+        ws = _BACKTEST_WS.get(bt_key)
         if ws:
             try:
                 await ws.send_json({"type": "backtest_complete", "data": {
@@ -385,11 +441,14 @@ async def _run_backtest_async(symbol: str, timeframe: str, days: int):
                     "wr": 0, "pnl_pct": 0, "profit_factor": 0, "max_drawdown": 0,
                 }})
             except Exception:
-                _BACKTEST_WS.pop(_bt_key, None)
+                _BACKTEST_WS.pop(bt_key, None)
+    finally:
+        _BACKTEST_RUNNING.discard(bt_key)
+        logger.info(f"[BACKTEST] Finished: {bt_key}")
 
 
-def _backtest_sync(symbol: str, timeframe: str, days: int, ws_conn=None) -> dict:
-    """Synchronous backtest logic — runs in a thread pool."""
+def _backtest_sync(symbol: str, timeframe: str, days: int, msg_queue: queue.Queue) -> None:
+    """Synchronous backtest logic — runs in a thread. Puts messages into msg_queue."""
     import ccxt
     from ppmt.data.classifier import AssetClassifier
     from ppmt.core.trie import PPMTTrie, RegimePartitionedTrie
@@ -397,236 +456,115 @@ def _backtest_sync(symbol: str, timeframe: str, days: int, ws_conn=None) -> dict
     from ppmt.core.profiles import SPREAD_ESTIMATES
     from ppmt.core.thresholds import SignalThresholds
 
-    # This function needs to send WS messages, but it's running in a thread.
-    # We'll collect results and the caller will send them.
-    # For simplicity, we'll queue messages and let the async caller drain them.
-    _messages = []
-
     def _send(msg_type: str, data: dict):
-        _messages.append({"type": msg_type, "data": data})
+        msg_queue.put({"type": msg_type, "data": data})
 
-    # 1. Classify asset
-    classifier = AssetClassifier()
-    info = classifier.classify(symbol)
-    asset_class = info.asset_class
-    weight_profile = info.weight_profile
+    try:
+        logger.info(f"[BACKTEST] _backtest_sync started: {symbol} {timeframe} {days}d")
 
-    # 2. Fetch historical data from Binance
-    exchange = ccxt.binance({"enableRateLimit": True})
-    limit_candles = days * 288 if timeframe == "5m" else days * 96  # 288 = 24h/5m
-    # Also fetch extra for warmup (500 candles)
-    total_fetch = limit_candles + 500
-    ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=total_fetch)
-    if len(ohlcv) < 500:
-        raise ValueError(f"Not enough data for {symbol} {timeframe}: {len(ohlcv)} candles (need 500+warmup)")
+        # 1. Classify asset
+        classifier = AssetClassifier()
+        info = classifier.classify(symbol)
+        asset_class = info.asset_class
+        weight_profile = info.weight_profile
+        logger.info(f"[BACKTEST] Classified: {symbol} → {asset_class}/{weight_profile}")
 
-    # 3. Build DataFrame
-    df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
-    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-    df = df.set_index("timestamp")
+        # 2. Fetch historical data from Binance
+        logger.info(f"[BACKTEST] Fetching {days}d of {timeframe} data from Binance...")
+        exchange = ccxt.binance({"enableRateLimit": True})
+        limit_candles = days * 288 if timeframe == "5m" else days * 96  # 288 = 24h/5m
+        # Also fetch extra for warmup (500 candles)
+        total_fetch = limit_candles + 500
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=total_fetch)
+        if len(ohlcv) < 500:
+            raise ValueError(f"Not enough data for {symbol} {timeframe}: {len(ohlcv)} candles (need 500+warmup)")
+        logger.info(f"[BACKTEST] Fetched {len(ohlcv)} candles")
 
-    # Split: warmup + OOS
-    warmup_df = df.iloc[:500]
-    oos_df = df.iloc[500:]
-    logger.info(f"[BACKTEST] {symbol} {timeframe}: {len(warmup_df)} warmup + {len(oos_df)} OOS candles")
+        # 3. Build DataFrame
+        df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+        df = df.set_index("timestamp")
 
-    # 4. Initialize PPMT engine
-    engine = PPMT(
-        symbol=symbol,
-        asset_class=asset_class,
-        weight_profile=weight_profile,
-        dual_sax=True,
-        min_confidence=0.08,
-        timeframe=timeframe,
-    )
+        # Split: warmup + OOS
+        warmup_df = df.iloc[:500]
+        oos_df = df.iloc[500:]
+        logger.info(f"[BACKTEST] {symbol} {timeframe}: {len(warmup_df)} warmup + {len(oos_df)} OOS candles")
 
-    # 5. Load tries from storage
-    storage = get_storage()
-    tries = storage.load_all_tries(symbol, asset_class, timeframe=timeframe)
-    engine.set_tries(
-        trie_n1=tries["n1"] if tries["n1"] else PPMTTrie(name="universal_empty"),
-        trie_n2=tries["n2"] if tries["n2"] else PPMTTrie(name="class_empty"),
-        trie_n3=tries["n3"] or PPMTTrie(name="n3_empty"),
-        trie_n4=tries["n4"] if tries["n4"] is not None else engine.trie_n4,
-    )
-
-    # 6. Warmup
-    thresholds = SignalThresholds.paper()
-    for idx, row in warmup_df.iterrows():
-        candle_df = pd.DataFrame(
-            {"open": [row["open"]], "high": [row["high"]], "low": [row["low"]],
-             "close": [row["close"]], "volume": [row["volume"]]},
-            index=pd.DatetimeIndex([idx]),
-        )
-        engine.process_new_candle(
-            candle_df=candle_df, current_price=float(row["close"]),
-            is_in_position=False, entry_price=None,
+        # 4. Initialize PPMT engine
+        engine = PPMT(
+            symbol=symbol,
+            asset_class=asset_class,
+            weight_profile=weight_profile,
+            dual_sax=True,
+            min_confidence=0.08,
+            timeframe=timeframe,
         )
 
-    # 7. OOS replay
-    executor = PaperExecutor(capital_usdt=100.0)
-    regime_detector = RegimeDetector()
-    regime_window = []
-    REGIME_WINDOW_SIZE = 10
-
-    trades = []
-    wins = 0
-    losses = 0
-    total_pnl = 0.0
-    gross_profit = 0.0
-    gross_loss = 0.0
-    max_drawdown = 0.0
-    peak_pnl = 0.0
-    long_count = 0
-    short_count = 0
-
-    # Config F parameters
-    EV_THRESHOLD = 0.40
-    SL_MULT = 2.0
-
-    for idx, row in oos_df.iterrows():
-        o, h, l, c, v = float(row["open"]), float(row["high"]), float(row["low"]), float(row["close"]), float(row["volume"])
-        current_price = c
-
-        # Check SL/TP if in position
-        if executor.is_in_position:
-            pos = executor.position
-            closed = executor.check_price(current_price)
-            if closed:
-                pnl = closed.realized_pnl_pct if hasattr(closed, 'realized_pnl_pct') else 0.0
-                # Calculate P&L manually for reliability
-                if pos.direction == "LONG":
-                    pnl = ((current_price - pos.entry_price) / pos.entry_price) * 100.0
-                else:
-                    pnl = ((pos.entry_price - current_price) / pos.entry_price) * 100.0
-
-                reason = "TP" if pnl > 0 else "SL"
-                trades.append({"direction": pos.direction, "entry": pos.entry_price, "exit": current_price,
-                               "pnl_pct": round(pnl, 2), "reason": reason})
-                if pnl > 0:
-                    wins += 1
-                    gross_profit += pnl
-                else:
-                    losses += 1
-                    gross_loss += abs(pnl)
-                total_pnl += pnl
-                peak_pnl = max(peak_pnl, total_pnl)
-                dd = peak_pnl - total_pnl
-                max_drawdown = max(max_drawdown, dd)
-
-                _send("backtest_trade", {
-                    "direction": pos.direction, "entry": round(pos.entry_price, 6),
-                    "exit": round(current_price, 6), "pnl_pct": round(pnl, 2),
-                    "close_reason": reason, "timestamp": int(idx.timestamp()),
-                })
-                continue  # Don't process this candle for new signals
-
-        # Regime detection
-        regime_window.append({"open": o, "high": h, "low": l, "close": c, "volume": v})
-        if len(regime_window) > REGIME_WINDOW_SIZE:
-            regime_window = regime_window[-REGIME_WINDOW_SIZE:]
-        if len(regime_window) >= 2:
-            try:
-                rw_df = pd.DataFrame(regime_window)
-                detected_regime = regime_detector.detect_simple(rw_df, timeframe=timeframe)
-                engine.set_regime(detected_regime)
-            except Exception:
-                pass
-
-        # Feed candle
-        candle_df = pd.DataFrame(
-            {"open": [o], "high": [h], "low": [l], "close": [c], "volume": [v]},
-            index=pd.DatetimeIndex([idx]),
+        # 5. Load tries from storage
+        storage = get_storage()
+        tries = storage.load_all_tries(symbol, asset_class, timeframe=timeframe)
+        engine.set_tries(
+            trie_n1=tries["n1"] if tries["n1"] else PPMTTrie(name="universal_empty"),
+            trie_n2=tries["n2"] if tries["n2"] else PPMTTrie(name="class_empty"),
+            trie_n3=tries["n3"] or PPMTTrie(name="n3_empty"),
+            trie_n4=tries["n4"] if tries["n4"] is not None else engine.trie_n4,
         )
-        result = engine.process_new_candle(
-            candle_df=candle_df, current_price=current_price,
-            is_in_position=executor.is_in_position,
-            entry_price=executor.position.entry_price if executor.position else None,
-        )
+        logger.info(f"[BACKTEST] Engine + tries loaded, starting warmup...")
 
-        # Signal gate
-        if result and result.signal and result.signal.is_entry and not executor.is_in_position:
-            sig = result.signal
+        # 6. Warmup
+        thresholds = SignalThresholds.paper()
+        for idx, row in warmup_df.iterrows():
+            candle_df = pd.DataFrame(
+                {"open": [row["open"]], "high": [row["high"]], "low": [row["low"]],
+                 "close": [row["close"]], "volume": [row["volume"]]},
+                index=pd.DatetimeIndex([idx]),
+            )
+            engine.process_new_candle(
+                candle_df=candle_df, current_price=float(row["close"]),
+                is_in_position=False, entry_price=None,
+            )
+        logger.info(f"[BACKTEST] Warmup done ({len(warmup_df)} candles), starting OOS replay...")
 
-            # Net EV Gate (Config F)
-            best_node = None
-            for _lvl, _mr in [("n3", result.n3_match), ("n1", result.n1_match),
-                              ("n2", result.n2_match), ("n4", result.n4_match)]:
-                if _mr and _mr.node and _mr.node.metadata.historical_count > 0:
-                    best_node = _mr.node
-                    break
+        # 7. OOS replay
+        executor = PaperExecutor(capital_usdt=100.0)
+        regime_detector = RegimeDetector()
+        regime_window = []
+        REGIME_WINDOW_SIZE = 10
 
-            if best_node:
-                favorable_pct = abs(best_node.metadata.max_favorable_pct)
-                drawdown_pct = abs(best_node.metadata.max_drawdown_pct)
-            else:
-                favorable_pct = abs(sig.expected_move_pct) if sig.expected_move_pct else 0.1
-                drawdown_pct = 0.5
+        trades = []
+        wins = 0
+        losses = 0
+        total_pnl = 0.0
+        gross_profit = 0.0
+        gross_loss = 0.0
+        max_drawdown = 0.0
+        peak_pnl = 0.0
+        long_count = 0
+        short_count = 0
 
-            if favorable_pct < 0.001:
-                favorable_pct = abs(sig.expected_move_pct) if sig.expected_move_pct else 0.1
-            if drawdown_pct < 0.001:
-                drawdown_pct = 0.5
+        # Config F parameters
+        EV_THRESHOLD = 0.40
+        SL_MULT = 2.0
 
-            spread_pct = SPREAD_ESTIMATES.get(asset_class, 0.050)
-            net_favorable = favorable_pct - spread_pct
-            ev_passed = True
-            net_ev = 0.0
-            net_rr = 0.0
+        for idx, row in oos_df.iterrows():
+            o, h, l, c, v = float(row["open"]), float(row["high"]), float(row["low"]), float(row["close"]), float(row["volume"])
+            current_price = c
 
-            if net_favorable <= 0:
-                ev_passed = False
-            else:
-                net_rr = min(net_favorable / drawdown_pct, 3.0)
-                net_ev = sig.confidence * net_rr
-                if net_ev < EV_THRESHOLD:
-                    ev_passed = False
-
-            if ev_passed:
-                # Open position
-                pos = executor.open_position_sync(
-                    symbol=symbol,
-                    direction=sig.direction or "LONG",
-                    entry_price=current_price,
-                    expected_move_pct=sig.expected_move_pct or 1.0,
-                    predicted_path_symbols=sig.predicted_path_symbols if sig.predicted_path else None,
-                    size_usdt=100.0,
-                )
-
-                # Config F: SL = max(default 1.2×EM, drawdown_pct × 2.0)
-                sl_dist_pct = abs(pos.entry_price - pos.current_sl) / pos.entry_price * 100.0
-                dd_sl_pct = drawdown_pct * SL_MULT
-                if dd_sl_pct > sl_dist_pct:
-                    extra = dd_sl_pct - sl_dist_pct
-                    if pos.direction == "LONG":
-                        pos.current_sl -= pos.entry_price * (extra / 100.0)
-                        pos.catastrophic_sl -= pos.entry_price * (extra / 100.0)
-                    else:
-                        pos.current_sl += pos.entry_price * (extra / 100.0)
-                        pos.catastrophic_sl += pos.entry_price * (extra / 100.0)
-
-                if pos.direction == "LONG":
-                    long_count += 1
-                else:
-                    short_count += 1
-
-                _send("backtest_signal", {
-                    "symbol": symbol, "direction": sig.direction or "LONG",
-                    "entry": round(current_price, 6), "confidence": round(sig.confidence, 3),
-                    "ev_score": round(net_ev, 2), "ev_passed": ev_passed,
-                    "timestamp": int(idx.timestamp()),
-                })
-
-                # Check entry candle for immediate SL/TP
+            # Check SL/TP if in position
+            if executor.is_in_position:
+                pos = executor.position
                 closed = executor.check_price(current_price)
                 if closed:
-                    pnl = 0.0
+                    pnl = closed.realized_pnl_pct if hasattr(closed, 'realized_pnl_pct') else 0.0
+                    # Calculate P&L manually for reliability
                     if pos.direction == "LONG":
                         pnl = ((current_price - pos.entry_price) / pos.entry_price) * 100.0
                     else:
                         pnl = ((pos.entry_price - current_price) / pos.entry_price) * 100.0
+
+                    reason = "TP" if pnl > 0 else "SL"
                     trades.append({"direction": pos.direction, "entry": pos.entry_price, "exit": current_price,
-                                   "pnl_pct": round(pnl, 2), "reason": "CANDLE"})
+                                   "pnl_pct": round(pnl, 2), "reason": reason})
                     if pnl > 0:
                         wins += 1
                         gross_profit += pnl
@@ -638,41 +576,170 @@ def _backtest_sync(symbol: str, timeframe: str, days: int, ws_conn=None) -> dict
                     dd = peak_pnl - total_pnl
                     max_drawdown = max(max_drawdown, dd)
 
-    # Force-close any remaining position
-    if executor.is_in_position:
-        pos = executor.position
-        last_price = float(oos_df.iloc[-1]["close"]) if len(oos_df) > 0 else current_price
-        pnl = 0.0
-        if pos.direction == "LONG":
-            pnl = ((last_price - pos.entry_price) / pos.entry_price) * 100.0
-        else:
-            pnl = ((pos.entry_price - last_price) / pos.entry_price) * 100.0
-        trades.append({"direction": pos.direction, "entry": pos.entry_price, "exit": last_price,
-                       "pnl_pct": round(pnl, 2), "reason": "REPLAY_END"})
-        if pnl > 0:
-            wins += 1
-            gross_profit += pnl
-        else:
-            losses += 1
-            gross_loss += abs(pnl)
-        total_pnl += pnl
+                    _send("backtest_trade", {
+                        "direction": pos.direction, "entry": round(pos.entry_price, 6),
+                        "exit": round(current_price, 6), "pnl_pct": round(pnl, 2),
+                        "close_reason": reason, "timestamp": int(idx.timestamp()),
+                    })
+                    continue  # Don't process this candle for new signals
 
-    # Summary
-    total_trades = wins + losses
-    wr = round((wins / total_trades * 100), 1) if total_trades > 0 else 0
-    pf = round(gross_profit / gross_loss, 2) if gross_loss > 0 else 999.99
+            # Regime detection
+            regime_window.append({"open": o, "high": h, "low": l, "close": c, "volume": v})
+            if len(regime_window) > REGIME_WINDOW_SIZE:
+                regime_window = regime_window[-REGIME_WINDOW_SIZE:]
+            if len(regime_window) >= 2:
+                try:
+                    rw_df = pd.DataFrame(regime_window)
+                    detected_regime = regime_detector.detect_simple(rw_df, timeframe=timeframe)
+                    engine.set_regime(detected_regime)
+                except Exception:
+                    pass
 
-    summary = {
-        "trades": total_trades, "longs": long_count, "shorts": short_count,
-        "wins": wins, "losses": losses, "wr": wr,
-        "pnl_pct": round(total_pnl, 2), "profit_factor": pf,
-        "max_drawdown": round(max_drawdown, 2),
-    }
+            # Feed candle
+            candle_df = pd.DataFrame(
+                {"open": [o], "high": [h], "low": [l], "close": [c], "volume": [v]},
+                index=pd.DatetimeIndex([idx]),
+            )
+            result = engine.process_new_candle(
+                candle_df=candle_df, current_price=current_price,
+                is_in_position=executor.is_in_position,
+                entry_price=executor.position.entry_price if executor.position else None,
+            )
 
-    _send("backtest_complete", summary)
-    logger.info(f"[BACKTEST] {symbol} {timeframe} {days}d: {summary}")
+            # Signal gate
+            if result and result.signal and result.signal.is_entry and not executor.is_in_position:
+                sig = result.signal
 
-    return {"messages": _messages, "summary": summary}
+                # Net EV Gate (Config F)
+                best_node = None
+                for _lvl, _mr in [("n3", result.n3_match), ("n1", result.n1_match),
+                                  ("n2", result.n2_match), ("n4", result.n4_match)]:
+                    if _mr and _mr.node and _mr.node.metadata.historical_count > 0:
+                        best_node = _mr.node
+                        break
+
+                if best_node:
+                    favorable_pct = abs(best_node.metadata.max_favorable_pct)
+                    drawdown_pct = abs(best_node.metadata.max_drawdown_pct)
+                else:
+                    favorable_pct = abs(sig.expected_move_pct) if sig.expected_move_pct else 0.1
+                    drawdown_pct = 0.5
+
+                if favorable_pct < 0.001:
+                    favorable_pct = abs(sig.expected_move_pct) if sig.expected_move_pct else 0.1
+                if drawdown_pct < 0.001:
+                    drawdown_pct = 0.5
+
+                spread_pct = SPREAD_ESTIMATES.get(asset_class, 0.050)
+                net_favorable = favorable_pct - spread_pct
+                ev_passed = True
+                net_ev = 0.0
+                net_rr = 0.0
+
+                if net_favorable <= 0:
+                    ev_passed = False
+                else:
+                    net_rr = min(net_favorable / drawdown_pct, 3.0)
+                    net_ev = sig.confidence * net_rr
+                    if net_ev < EV_THRESHOLD:
+                        ev_passed = False
+
+                if ev_passed:
+                    # Open position
+                    pos = executor.open_position_sync(
+                        symbol=symbol,
+                        direction=sig.direction or "LONG",
+                        entry_price=current_price,
+                        expected_move_pct=sig.expected_move_pct or 1.0,
+                        predicted_path_symbols=sig.predicted_path_symbols if sig.predicted_path else None,
+                        size_usdt=100.0,
+                    )
+
+                    # Config F: SL = max(default 1.2×EM, drawdown_pct × 2.0)
+                    sl_dist_pct = abs(pos.entry_price - pos.current_sl) / pos.entry_price * 100.0
+                    dd_sl_pct = drawdown_pct * SL_MULT
+                    if dd_sl_pct > sl_dist_pct:
+                        extra = dd_sl_pct - sl_dist_pct
+                        if pos.direction == "LONG":
+                            pos.current_sl -= pos.entry_price * (extra / 100.0)
+                            pos.catastrophic_sl -= pos.entry_price * (extra / 100.0)
+                        else:
+                            pos.current_sl += pos.entry_price * (extra / 100.0)
+                            pos.catastrophic_sl += pos.entry_price * (extra / 100.0)
+
+                    if pos.direction == "LONG":
+                        long_count += 1
+                    else:
+                        short_count += 1
+
+                    _send("backtest_signal", {
+                        "symbol": symbol, "direction": sig.direction or "LONG",
+                        "entry": round(current_price, 6), "confidence": round(sig.confidence, 3),
+                        "ev_score": round(net_ev, 2), "ev_passed": ev_passed,
+                        "timestamp": int(idx.timestamp()),
+                    })
+
+                    # Check entry candle for immediate SL/TP
+                    closed = executor.check_price(current_price)
+                    if closed:
+                        pnl = 0.0
+                        if pos.direction == "LONG":
+                            pnl = ((current_price - pos.entry_price) / pos.entry_price) * 100.0
+                        else:
+                            pnl = ((pos.entry_price - current_price) / pos.entry_price) * 100.0
+                        trades.append({"direction": pos.direction, "entry": pos.entry_price, "exit": current_price,
+                                       "pnl_pct": round(pnl, 2), "reason": "CANDLE"})
+                        if pnl > 0:
+                            wins += 1
+                            gross_profit += pnl
+                        else:
+                            losses += 1
+                            gross_loss += abs(pnl)
+                        total_pnl += pnl
+                        peak_pnl = max(peak_pnl, total_pnl)
+                        dd = peak_pnl - total_pnl
+                        max_drawdown = max(max_drawdown, dd)
+
+        # Force-close any remaining position
+        if executor.is_in_position:
+            pos = executor.position
+            last_price = float(oos_df.iloc[-1]["close"]) if len(oos_df) > 0 else current_price
+            pnl = 0.0
+            if pos.direction == "LONG":
+                pnl = ((last_price - pos.entry_price) / pos.entry_price) * 100.0
+            else:
+                pnl = ((pos.entry_price - last_price) / pos.entry_price) * 100.0
+            trades.append({"direction": pos.direction, "entry": pos.entry_price, "exit": last_price,
+                           "pnl_pct": round(pnl, 2), "reason": "REPLAY_END"})
+            if pnl > 0:
+                wins += 1
+                gross_profit += pnl
+            else:
+                losses += 1
+                gross_loss += abs(pnl)
+            total_pnl += pnl
+
+        # Summary
+        total_trades = wins + losses
+        wr = round((wins / total_trades * 100), 1) if total_trades > 0 else 0
+        pf = round(gross_profit / gross_loss, 2) if gross_loss > 0 else 999.99
+
+        summary = {
+            "trades": total_trades, "longs": long_count, "shorts": short_count,
+            "wins": wins, "losses": losses, "wr": wr,
+            "pnl_pct": round(total_pnl, 2), "profit_factor": pf,
+            "max_drawdown": round(max_drawdown, 2),
+        }
+
+        _send("backtest_complete", summary)
+        logger.info(f"[BACKTEST] {symbol} {timeframe} {days}d: {summary}")
+
+    except Exception as e:
+        logger.error(f"[BACKTEST] _backtest_sync FAILED: {e}", exc_info=True)
+        _send("backtest_complete", {
+            "error": str(e), "trades": 0, "wins": 0, "losses": 0,
+            "wr": 0, "pnl_pct": 0, "profit_factor": 0, "max_drawdown": 0,
+        })
 
 
 # ─── WebSocket: Paper Live ────────────────────────────────────

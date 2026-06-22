@@ -1303,34 +1303,54 @@ document.addEventListener('DOMContentLoaded', () => {
 let _backtestRunning = false;
 
 function runBacktest() {
+  console.log('[BACKTEST] runBacktest() called, running=', _backtestRunning, 'ws=', S.ws ? S.ws.readyState : 'null');
   if (_backtestRunning) return;
   if (!S.ws || S.ws.readyState !== WebSocket.OPEN) {
-    addLogEntry('BACKTEST', 'Connect to server first', 'warn');
+    addLogEntry('BACKTEST', 'Connect to server first (WebSocket not open)', 'warn');
     return;
   }
   _backtestRunning = true;
   const btn = document.getElementById('btnBacktest');
-  btn.textContent = 'Running...';
-  btn.classList.add('opacity-50');
-  btn.classList.remove('hover:bg-purple-600');
+  if (btn) {
+    btn.textContent = 'Running...';
+    btn.classList.add('opacity-50');
+    btn.classList.remove('hover:bg-purple-600');
+    btn.disabled = true;
+  }
 
   const symbol = S.symbol.replace('-', '/');
   const tf = S.timeframe;
+  console.log('[BACKTEST] Sending POST /api/backtest', {symbol, timeframe: tf, days: 7});
   fetch('/api/backtest', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({symbol: symbol, timeframe: tf, days: 7}),
   })
-  .then(r => r.json())
+  .then(r => {
+    console.log('[BACKTEST] POST response status:', r.status);
+    if (!r.ok) {
+      throw new Error(`HTTP ${r.status}: ${r.statusText}`);
+    }
+    return r.json();
+  })
   .then(data => {
+    console.log('[BACKTEST] POST response data:', data);
     if (data.status === 'error') {
       addLogEntry('BACKTEST', data.message, 'warn');
       _resetBacktestBtn();
     } else {
-      addLogEntry('BACKTEST', `Started ${data.symbol} ${data.timeframe} ${data.days}d`, 'info');
+      addLogEntry('BACKTEST', `Started ${data.symbol} ${data.timeframe} ${data.days}d — waiting for results...`, 'info');
+      // Timeout safety: reset button if no complete message in 60s
+      setTimeout(() => {
+        if (_backtestRunning) {
+          addLogEntry('BACKTEST', 'Timeout: no results after 60s, resetting', 'warn');
+          _resetBacktestBtn();
+        }
+      }, 60000);
     }
   })
   .catch(e => {
+    console.error('[BACKTEST] POST failed:', e);
     addLogEntry('BACKTEST', 'Request failed: ' + e.message, 'warn');
     _resetBacktestBtn();
   });
@@ -1339,12 +1359,16 @@ function runBacktest() {
 function _resetBacktestBtn() {
   _backtestRunning = false;
   const btn = document.getElementById('btnBacktest');
-  btn.textContent = 'Run Backtest';
-  btn.classList.remove('opacity-50');
-  btn.classList.add('hover:bg-purple-600');
+  if (btn) {
+    btn.textContent = 'Run Backtest';
+    btn.classList.remove('opacity-50');
+    btn.classList.add('hover:bg-purple-600');
+    btn.disabled = false;
+  }
 }
 
 function handleBacktestSignal(data) {
+  console.log('[BACKTEST] Signal received:', data);
   const dirClass = data.direction === 'LONG' ? 'text-grn' : 'text-red';
   addLogEntry('BACKTEST', 
     `Signal: <span class="${dirClass} font-bold">${data.direction}</span> @ ${data.entry} conf=${data.confidence} EV=${data.ev_score}R ${data.ev_passed ? '&#10003;' : '&#10007;'}`, 
@@ -1352,6 +1376,7 @@ function handleBacktestSignal(data) {
 }
 
 function handleBacktestTrade(data) {
+  console.log('[BACKTEST] Trade received:', data);
   const pnlClass = data.pnl_pct >= 0 ? 'text-grn' : 'text-red';
   addLogEntry('BACKTEST', 
     `Trade: ${data.direction} entry=${data.entry} exit=${data.exit} <span class="${pnlClass} font-bold">${data.pnl_pct > 0 ? '+' : ''}${data.pnl_pct}%</span> [${data.close_reason}]`, 
@@ -1359,6 +1384,7 @@ function handleBacktestTrade(data) {
 }
 
 function handleBacktestComplete(data) {
+  console.log('[BACKTEST] Complete received:', data);
   _resetBacktestBtn();
   
   if (data.error) {
