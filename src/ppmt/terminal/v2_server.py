@@ -485,6 +485,7 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
     # This ensures the displayed price matches Binance in real-time.
     _last_engine_ts = 0  # Last candle timestamp fed to engine
     _last_ui_update = 0.0  # Timestamp of last UI update (monotonic)
+    _ticker_price = 0.0  # v2.1: Real-time price from /api/v3/ticker/price
     try:
         while True:
             try:
@@ -495,16 +496,35 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                     await asyncio.sleep(poll_interval)
                     continue
 
-                # ─── Always send current price to UI ─────────────
-                # The last element is the current (possibly forming) candle.
-                # This gives real-time price updates every poll interval.
+                # ─── Fetch REAL-TIME price from Binance ticker ───
+                # klines close price can lag (forming candle, cache).
+                # /api/v3/ticker/price returns the LAST TRADE price —
+                # the most accurate real-time price for display.
+                try:
+                    ticker = await exchange.fetch_ticker(api_symbol)
+                    _ticker_price = float(ticker.get("last", 0))
+                except Exception as _te:
+                    logger.debug(f"[WS] Ticker fetch failed (using kline close): {_te}")
+                    _ticker_price = 0.0
+
                 latest = ohlcv_raw[-1]
                 ts_ms, o, h, l, c, v = latest
                 ts_sec = int(ts_ms / 1000)
-                current_price = float(c)
+                kline_close = float(c)
+                # Use ticker price for display/engine if available, fallback to kline close
+                current_price = _ticker_price if _ticker_price > 0 else kline_close
+
+                # ─── Diagnostic logging ─────────────────────────
+                # Log the exact timestamps so we can verify data freshness
+                logger.info(
+                    f"[WS] Binance fetch: kline_ts={ts_sec} kline_C={kline_close:.6f} "
+                    f"ticker_C={_ticker_price:.6f} delta={abs(_ticker_price - kline_close):.6f} "
+                    f"({symbol})"
+                )
 
                 # Emit candle to frontend on EVERY poll.
                 # candleSeries.update() handles overwriting the forming candle.
+                # ticker_price is the real-time price for display; chart uses OHLC.
                 candle_msg = {
                     "type": "candle",
                     "data": {
@@ -513,6 +533,7 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                         "high": float(h),
                         "low": float(l),
                         "close": float(c),
+                        "ticker_price": round(_ticker_price, 8) if _ticker_price > 0 else None,
                     },
                 }
                 await websocket.send_json(candle_msg)
@@ -1326,6 +1347,7 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
     # v2.1 FIX: Same real-time price separation as paper-live path.
     _last_engine_ts_live = 0
     _last_ui_update_live = 0.0
+    _ticker_price_live = 0.0  # v2.1: Real-time price from /api/v3/ticker/price
     try:
         while True:
             try:
@@ -1334,13 +1356,31 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
                     await asyncio.sleep(poll_interval)
                     continue
 
+                # ─── Fetch REAL-TIME price from Binance ticker ───
+                try:
+                    ticker = await exchange.fetch_ticker(api_symbol)
+                    _ticker_price_live = float(ticker.get("last", 0))
+                except Exception as _te:
+                    logger.debug(f"[WS-LIVE] Ticker fetch failed (using kline close): {_te}")
+                    _ticker_price_live = 0.0
+
                 latest = ohlcv_raw[-1]
                 ts_ms, o, h, l, c, v = latest
                 ts_sec = int(ts_ms / 1000)
-                current_price = float(c)
+                kline_close = float(c)
+                # Use ticker price for display/engine if available, fallback to kline close
+                current_price = _ticker_price_live if _ticker_price_live > 0 else kline_close
+
+                # ─── Diagnostic logging ─────────────────────────
+                logger.info(
+                    f"[WS-LIVE] Binance fetch: kline_ts={ts_sec} kline_C={kline_close:.6f} "
+                    f"ticker_C={_ticker_price_live:.6f} delta={abs(_ticker_price_live - kline_close):.6f} "
+                    f"({symbol})"
+                )
 
                 # Always send current price to UI (forming candle updates)
-                await websocket.send_json({"type": "candle", "data": {"time": ts_sec, "open": float(o), "high": float(h), "low": float(l), "close": float(c)}})
+                # ticker_price is the real-time price for display; chart uses OHLC.
+                await websocket.send_json({"type": "candle", "data": {"time": ts_sec, "open": float(o), "high": float(h), "low": float(l), "close": float(c), "ticker_price": round(_ticker_price_live, 8) if _ticker_price_live > 0 else None}})
                 _last_ui_update_live = time.monotonic()
 
                 # Only feed closed candles to engine

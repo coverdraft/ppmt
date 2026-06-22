@@ -535,11 +535,15 @@ function handleMessage(msg) {
 
 // ─── Candle Handler ────────────────────────────────────────────
 function handleCandle(data) {
-  S.currentPrice = data.close;
+  // v2.1 FIX: Use ticker_price (from /api/v3/ticker/price) for display
+  // if available — this is the LAST TRADE price, not the forming candle close.
+  // Chart still uses OHLC from klines for correct candle rendering.
+  const displayPrice = data.ticker_price || data.close;
+  S.currentPrice = displayPrice;
   const el = document.getElementById('currentPrice');
-  el.textContent = formatPrice(data.close);
-  // Color based on candle direction
-  if (data.close >= data.open) {
+  el.textContent = formatPrice(displayPrice);
+  // Color based on price direction vs previous
+  if (displayPrice >= data.open) {
     el.classList.remove('text-red');
     el.classList.add('text-grn');
   } else {
@@ -550,7 +554,7 @@ function handleCandle(data) {
   setLiveStatus('live');
   // Ensure chart exists (may not if tab wasn't visible on connect)
   if (!chartCreated) initChart();
-  // Update chart candle
+  // Update chart candle (uses OHLC, not ticker_price)
   updateChartCandle(data);
   // Update live P&L if in position
   if (S.position && isOpen(S.position)) {
