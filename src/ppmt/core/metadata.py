@@ -1014,19 +1014,56 @@ class BlockLifecycleMetadata:
         #   P7 (v0.40.22, wins ≡ count):  PnL -8090%, WR 0.421, PF 0.62
         #   P7C (v0.40.23, wins = outcome): PnL -4353%, WR 0.446, PF 0.67
         #   Δ P7C-P7: +3736pp PnL total, 8/8 tokens improve, 3/3 windows improve.
-        if move_pct > 0:
+        # v2.2 UNIVERSAL DIRECTION FIX: Each observation feeds BOTH direction
+        # pools, with mirrored outcomes. This is the canonical fix for the
+        # "0 SHORTs" bug that made the motor 100% LONG during bull-market IS.
+        #
+        # BEFORE (v0.40.23): if move_pct > 0 → long_stats only; if < 0 → short
+        # only. Result: in a 90-day bull IS (BTC +18%, SOL +60%), 80%+ of obs
+        # went to long_stats. short_stats stayed empty → best_direction_p7()
+        # always returned "LONG" because short_count == 0 → no SHORT signal
+        # ever generated, even when the same pattern was predictive of
+        # downward moves.
+        #
+        # AFTER (v2.2): Each observation is recorded TWICE — once as a LONG
+        # trade (won = move_pct > 0) and once as a SHORT trade
+        # (won = move_pct < 0). This is the standard "label both sides"
+        # technique from supervised learning: every sample contributes
+        # evidence to BOTH classifiers.
+        #
+        # Effect on best_direction_p7():
+        #   - If a pattern systematically produces move_pct > 0 → long_stats
+        #     has high WR, short_stats has low WR → motor picks LONG. ✓
+        #   - If a pattern systematically produces move_pct < 0 → short_stats
+        #     has high WR, long_stats has low WR → motor picks SHORT. ✓
+        #   - If pattern is non-predictive (50/50) → both ~50% → motor
+        #     returns None (no edge). ✓
+        #
+        # This fix is FULLY BACKWARD COMPATIBLE:
+        #   - avg_move_long, avg_move_short unchanged in sign and magnitude
+        #   - long_count == short_count == historical_count (so the "if lc==0"
+        #     branch in best_direction_p7 never fires when data exists)
+        #   - bayesian_wr_long / bayesian_wr_short now reflect actual
+        #     directional predictive power, not sample imbalance
+        if move_pct != 0:
+            # LONG perspective: trade wins if price went up
             self.long_stats.count += 1
-            if won:
+            long_won = move_pct > 0
+            if long_won:
                 self.long_stats.wins += 1
             self.long_stats.total_move_pct += move_pct
             self.long_stats.total_drawdown_pct += drawdown_pct
-        elif move_pct < 0:
+
+            # SHORT perspective: trade wins if price went down
+            # (move_pct unchanged in sign — DirectionStats.avg_move_short
+            #  remains negative, consistent with v0.40.23 contract)
             self.short_stats.count += 1
-            if won:
+            short_won = move_pct < 0
+            if short_won:
                 self.short_stats.wins += 1
-            self.short_stats.total_move_pct += move_pct  # negative
+            self.short_stats.total_move_pct += move_pct  # negative when down
             self.short_stats.total_drawdown_pct += drawdown_pct
-        # move_pct == 0: don't classify — degenerate case.
+        # move_pct == 0: skip (degenerate, no directional info)
 
         # V4.1: Track move variance using Welford's online algorithm
         # This is numerically stable and doesn't require storing raw data.

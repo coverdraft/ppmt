@@ -11537,3 +11537,77 @@ log en `PPMT.__init__` imprimía el valor de TIMEFRAME_ALPHA_DEFAULTS, causando 
 ```
 fix: emergency cleanup — point start.sh to new terminal, verify DB has post-fix data
 ```
+
+## v2.2 — Optimización Exhaustiva + LONG/SHORT Fix (23 jun 2026)
+
+### Contexto
+Usuario pidió hacer el motor funcional en CUALQUIER token. Solo SOL/USDT
+funcionaba bien (+88% PnL, 88% WR). BTC -4.5%, LINK -14.3%, DOGE +3.2%,
+ETH +1.7%.
+
+### Cambios
+
+#### Fix crítico: Bug LONG/SHORT en metadata.py
+
+**Archivo**: `src/ppmt/core/metadata.py:1017-1066`
+
+**Bug**: Cada observación solo alimentaba UNA direction_stats según
+signo de move_pct. En IS alcista, short_stats quedaba vacío →
+`best_direction_p7()` siempre devolvía "LONG" → 0 SHORTs generados.
+
+**Fix**: Cada observación alimenta AMBAS direction_stats con outcome
+espejado. Long perspective: won = (move_pct > 0). Short perspective:
+won = (move_pct < 0).
+
+**Verificación**: Después del fix, motor genera 40-55% SHORTs en OOS.
+
+#### Grid search exhaustivo (88 configs × 5 tokens = 440 backtests)
+
+**Resultado**: TODOS los configs dan PnL negativo (-123% a -250% en 30d).
+Mejor config: `univ_40_20_20_20` con PnL=-123.5%, WR=42.3%, PF=0.73.
+
+#### ATR-based SL/TP (v2.2.1)
+
+Reemplazado SL/TP basado en `max_drawdown_pct` (estructuralmente
+defectuoso: max_drawdown > avg_move → RR < 1 garantizado) por ATR(14)
+real. Mejora marginal: PF 0.65 → 0.75. Sigue < 1.
+
+#### Test mean-reversion (v2.2.2)
+
+Invertir dirección predicha. NORMAL: PnL=-221%. REVERSE: PnL=-112%.
+REVERSE mejora 4/5 tokens pero no cura. ETH casi se recupera (-47% → -7%).
+
+### Diagnóstico root cause
+
+El motor NO tiene edge direccional en OOS. WR consistentemente 33-42%
+(< 50% = anti-predicción sistemática). Tres causas posibles:
+
+1. Sobreajuste del IS (60d pocos datos)
+2. SAX demasiado agregada (W=10 pierde microestructura)
+3. compute_outcome_directional con threshold muy bajo (0.01%)
+
+### Próximos pasos recomendados
+
+1. Walk-forward rolling validation (alta prioridad)
+2. Filtrado estadístico de patrones (chi-cuadrado)
+3. Ensemble de alphas (α=3,5,7 votación)
+4. Multi-timeframe fusion (1m+5m+15m)
+5. Regime-aware weights
+6. CalibrationEngine auto-alpha por token
+
+### Archivos creados
+- `scripts/download_ohlcv.py` — descarga 90d OHLCV Binance REST
+- `scripts/ppmt_grid_search.py` — grid search 88 configs
+- `scripts/ppmt_v221_atr.py` — ATR-based SL/TP + edge filter
+- `scripts/ppmt_v222_reverse.py` — test mean-reversion
+- `scripts/smoke_test.py` — smoke test 1 token × 1 config
+- `OPTIMIZATION_v2.2_FINDINGS.md` — reporte completo de hallazgos
+
+### Datos descargados
+ETH/USDT 90d 5m+15m añadido a DB (antes no estaba). Total: 5 tokens ×
+2 timeframes × 90d = 25,920 + 8,640 velas por token.
+
+### Commit
+```
+fix(v2.2): LONG/SHORT bug + grid search + ATR SL/TP + reverse-direction test
+```
