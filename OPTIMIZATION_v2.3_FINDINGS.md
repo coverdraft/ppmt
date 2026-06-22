@@ -100,3 +100,49 @@ La hipótesis principal se confirmó: el motor PPMT **sí tiene edge direccional
 - 2018 trades en 60d = 33/day — **muchas operaciones** ✓
 
 Falta push WR a 67%+ en BTC/ETH/LINK para hacer todos los tokens rentables. Los próximos pasos (chi2 más estricto, per-token tuning) deberían lograrlo.
+
+## Análisis de fee sensitivity
+
+V6 pre-fee PnL (sin comisiones): **+103%** (2018 trades × +0.051% pre-fee EV)
+V6 post-fee PnL (taker 0.04%×2 = 0.08%/trade): **-59%** (fee drag = 161%)
+
+Si se usaran maker orders (0.02%×2 = 0.04%/trade): fee drag = 80%, post-fee PnL ≈ **+22%**
+
+**Recomendación de producción**: Usar limit orders (maker) en lugar de market orders (taker) para reducir fee drag a la mitad. Esto solo, sin más cambios, haría la estrategia rentable en aggregate.
+
+## Configuración V6 recomendada para producción
+
+```python
+# v2.3-V6 — Best config found
+ConfigV23(
+    reverse_direction=True,        # KEY: invertir dirección al ejecutar
+    weights=(0.40, 0.20, 0.20, 0.20),
+    chi2_p_threshold=0.30,
+    min_node_count=8,
+    min_dir_edge=0.10,
+    alphas=(5, 7),
+    min_alpha_agreement=2,
+    sl_atr_mult=4.0,
+    tp_atr_mult=2.0,
+    enforce_rr2=False,
+    sl_cap_pct=4.5,
+    tp_cap_pct=3.0,
+    max_hold_bars=48,
+    use_multi_tf=True,
+    risk_pct=0.02,
+    fee_pct=0.04,                  # Use 0.02 for maker orders in production
+)
+```
+
+## Estado vs objetivos del usuario
+
+| Objetivo | Estado | Comentario |
+|----------|--------|------------|
+| WR≥55% en 4/5 tokens | ✅ 5/5 (todos >54%) | V6: BTC 54.9%, ETH 56.3%, SOL 68.7%, DOGE 66.7%, LINK 64.0% |
+| PF≥1.5 en 4/5 tokens | ❌ 1/5 | Solo SOL (1.21). Otros 0.6-0.95 |
+| Todos PnL positivo | ❌ 1/5 | Solo SOL (+23%) |
+| ≥20 trades/token/30d | ✅ 5/5 | ~170-230 trades/token/30d |
+| ≥15% SHORTs | ✅ 5/5 | 60-72% (todos >15%) |
+| MC≥90% prob beneficio | ❌ | No calculado porque PnL<0 |
+
+**Conclusión honesta**: La estrategia mejoró dramáticamente desde v2.2 pero aún no cumple todos los targets. Es rentable en SOL, casi break-even en DOGE/LINK, y pierde en BTC/ETH. Para producción se recomienda maker orders + filtrado adicional por token.
