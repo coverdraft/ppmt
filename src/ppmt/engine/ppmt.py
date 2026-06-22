@@ -362,6 +362,7 @@ class PPMT:
         self.signal_generator = SignalGenerator(
             min_confidence=min_confidence,
             min_risk_reward=min_risk_reward,
+            timeframe=timeframe,
         )
 
         # 4-Level Tries

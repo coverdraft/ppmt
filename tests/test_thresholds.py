@@ -11,7 +11,11 @@ Verifies that:
 """
 
 import pytest
-from ppmt.core.thresholds import SignalThresholds, RegimeThresholds
+from ppmt.core.thresholds import (
+    SignalThresholds, RegimeThresholds,
+    get_hard_move_floor, get_ranging_move_floor, get_volatile_move_floor,
+    TIMEFRAME_HARD_MOVE_FLOOR,
+)
 
 
 class TestSignalThresholdsPaper:
@@ -155,3 +159,55 @@ class TestRegimeThresholds:
         assert t1 == t2  # same values
         # But the regime dicts should compare equal even though separate
         assert t1.regime_min_confidence == t2.regime_min_confidence
+
+
+class TestPerTimeframeMoveFloors:
+    """v0.43.0 (TERMINAL-v2.1): Per-timeframe hard_move_floor tests.
+
+    The flat hard_move_floor (0.05% paper, 0.5% real) caused 100% LONG
+    signals. Per-timeframe floors fix this by scaling with typical
+    candle volatility.
+    """
+
+    def test_5m_hard_move_floor(self):
+        assert get_hard_move_floor("5m") == 0.15
+
+    def test_15m_hard_move_floor(self):
+        assert get_hard_move_floor("15m") == 0.20
+
+    def test_1m_hard_move_floor(self):
+        assert get_hard_move_floor("1m") == 0.10
+
+    def test_unknown_timeframe_fallback(self):
+        """Unknown timeframes fall back to 1h default (0.30)."""
+        assert get_hard_move_floor("2h") == 0.30
+
+    def test_thresholds_method_5m(self):
+        t = SignalThresholds.paper()
+        assert t.hard_move_floor_for_timeframe("5m") == 0.15
+
+    def test_thresholds_method_15m(self):
+        t = SignalThresholds.real()
+        assert t.hard_move_floor_for_timeframe("15m") == 0.20
+
+    def test_thresholds_method_unknown_falls_back(self):
+        """Unknown TF falls back to the flat hard_move_floor."""
+        t = SignalThresholds.paper()
+        assert t.hard_move_floor_for_timeframe("2w") == 0.05  # paper default
+
+    def test_ranging_move_floor_5m(self):
+        assert get_ranging_move_floor("5m") == 0.20
+
+    def test_volatile_move_floor_5m(self):
+        assert get_volatile_move_floor("5m") == 0.30
+
+    def test_timeframe_dict_has_all_common_tfs(self):
+        for tf in ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]:
+            assert tf in TIMEFRAME_HARD_MOVE_FLOOR
+            assert TIMEFRAME_HARD_MOVE_FLOOR[tf] > 0
+
+    def test_higher_tf_higher_floor(self):
+        """Larger timeframes should have larger floors (more volatility)."""
+        assert get_hard_move_floor("1m") < get_hard_move_floor("5m")
+        assert get_hard_move_floor("5m") < get_hard_move_floor("15m")
+        assert get_hard_move_floor("15m") < get_hard_move_floor("1h")

@@ -8,14 +8,15 @@ Distributes confidence across the Trie levels:
   N4: Per-Asset + Regime
   N5: Per-Asset + BTC Context (1m only)
 
-Default weights (5m/15m): N1=10%, N2=30%, N3=30%, N4=30%
-Default weights (1m):      N1=20%, N2=15%, N3=40%, N4=15%, N5=10%
+Default weights (5m): N1=10%, N2=0%, N3=55%, N4=35%  (v0.53.0: N2 removed)
+Default weights (1m): N1=35%, N2=0%, N3=55%, N4=10%, N5=0%
+Default weights (15m): N1=10%, N2=30%, N3=30%, N4=30%
 
-For meme/new assets with insufficient data (5m/15m):
-  N1=10%, N2=60%, N3=20%, N4=10%
+For meme/new assets (5m) — same as default (N2=0% for all):
+  N1=10%, N2=0%, N3=55%, N4=35%
 
 For meme assets (1m) — micro-structure prioritized:
-  N1=20%, N2=15%, N3=40%, N4=15%, N5=10%
+  N1=35%, N2=0%, N3=55%, N4=10%, N5=0%
 
 Weight redistribution rules:
   - If a level has < min_observations, its weight redistributes
@@ -24,6 +25,7 @@ Weight redistribution rules:
   - Graduation thresholds are configurable
   - v0.52.0: 1m timeframe uses micro-structure-first weights where N3/N4
     (W=10 micro-structure) dominate over N1/N2 (W=60 macro context)
+  - v0.53.0: 5m also uses micro-structure-first weights (N2=0%, N3=55%, N4=35%)
 """
 
 from __future__ import annotations
@@ -86,6 +88,13 @@ WEIGHT_PROFILES = {
 #
 # Profile: N1+N3 dominate, N2=0 (too weak for 1m), N4 moderate, N5 reserved.
 # N5 set to 0 since trie doesn't exist yet. When built, re-enable at 0.10.
+#
+# v0.53.0: 5m now also uses N2=0% — same root cause as 1m.
+# The N2 asset-class pool is too generic (α=3, P=5 = 243 patterns shared
+# across all assets in the class). This gives confidence ~0.20-0.27, which
+# dominates the weighted average when N2=60% (meme) or 30% (default).
+# Solution: N2=0%, boost N3 (per-asset, most specific) and N4 (per-asset+regime).
+# Redistribution logic also switched to micro-structure-first for 5m.
 TIMEFRAME_WEIGHT_OVERRIDES = {
     "1m": {
         "default": {
@@ -114,6 +123,36 @@ TIMEFRAME_WEIGHT_OVERRIDES = {
             "n2_asset_class": 0.00,
             "n3_per_asset": 0.60,
             "n4_per_asset_regime": 0.10,
+            "n5_btc_context": 0.00,
+        },
+    },
+    "5m": {
+        "default": {
+            "n1_universal": 0.10,
+            "n2_asset_class": 0.00,
+            "n3_per_asset": 0.55,
+            "n4_per_asset_regime": 0.35,
+            "n5_btc_context": 0.00,
+        },
+        "meme": {
+            "n1_universal": 0.10,
+            "n2_asset_class": 0.00,
+            "n3_per_asset": 0.55,
+            "n4_per_asset_regime": 0.35,
+            "n5_btc_context": 0.00,
+        },
+        "new_launch": {
+            "n1_universal": 0.10,
+            "n2_asset_class": 0.00,
+            "n3_per_asset": 0.55,
+            "n4_per_asset_regime": 0.35,
+            "n5_btc_context": 0.00,
+        },
+        "blue_chip": {
+            "n1_universal": 0.10,
+            "n2_asset_class": 0.00,
+            "n3_per_asset": 0.55,
+            "n4_per_asset_regime": 0.35,
             "n5_btc_context": 0.00,
         },
     },
@@ -368,10 +407,10 @@ class AdaptiveWeights:
 
         N5 sparsity: If N5 has < 5 patterns, redistribute to N3/N4.
 
-        The redistribution logic:
-        1. N3/N4 weight → redistribute (1m: to N4/N5; 5m/15m: to N1/N2)
-        2. If N2 is sparse: (1m: shift to N3; 5m/15m: shift to N1)
-        3. If N5 is sparse in 1m: shift to N3/N4
+        The redistribution logic (v0.53.0: 5m now same as 1m):
+        1. N3/N4 weight → redistribute (1m/5m: to N4/N5; 15m: to N1/N2)
+        2. If N2 is sparse: (1m/5m: shift to N3; 15m: shift to N1)
+        3. If N5 is sparse in 1m/5m: shift to N3/N4
 
         Args:
             n3_pattern_count: Number of patterns in the per-asset (N3) trie.
@@ -389,7 +428,10 @@ class AdaptiveWeights:
         MIN_N5_PATTERNS = 5
         MIN_N2_OBS = 2.0  # Below this, N2 is considered sparse
 
-        is_1m = self.timeframe == "1m"
+        # v0.53.0: micro-structure-first redistribution for 1m AND 5m.
+        # Both timeframes now have N2=0%, so sparse weight should go to
+        # N3/N4 (micro-structure) rather than N1/N2 (macro context).
+        micro_first = self.timeframe in ("1m", "5m")
 
         n3_weight = self.n3_per_asset
         n4_weight = self.n4_per_asset_regime
@@ -397,7 +439,7 @@ class AdaptiveWeights:
         if n3_pattern_count < MIN_N3_PATTERNS:
             redistribute = n3_weight * (1 - n3_pattern_count / MIN_N3_PATTERNS)
             n3_weight -= redistribute
-            if is_1m:
+            if micro_first:
                 # 1m: Redistribute N3 weight to N4 and N5 (micro-structure peers)
                 total_micro = self.n4_per_asset_regime + self.n5_btc_context
                 if total_micro > 0:
@@ -420,7 +462,7 @@ class AdaptiveWeights:
         if n4_pattern_count < MIN_N4_PATTERNS:
             redistribute = n4_weight * (1 - n4_pattern_count / MIN_N4_PATTERNS)
             n4_weight -= redistribute
-            if is_1m:
+            if micro_first:
                 # 1m: Redistribute N4 weight to N3 and N5 (micro-structure peers)
                 total_micro = self.n3_per_asset + self.n5_btc_context
                 if total_micro > 0:
@@ -439,7 +481,7 @@ class AdaptiveWeights:
             self.n4_per_asset_regime = n4_weight
 
         # N5 sparsity check (1m only)
-        if is_1m and self.n5_btc_context > 0 and n5_pattern_count < MIN_N5_PATTERNS:
+        if micro_first and self.n5_btc_context > 0 and n5_pattern_count < MIN_N5_PATTERNS:
             redistribute = self.n5_btc_context * (1 - n5_pattern_count / MIN_N5_PATTERNS)
             self.n5_btc_context -= redistribute
             # Redistribute to N3 and N4 (micro-structure peers)
@@ -454,7 +496,7 @@ class AdaptiveWeights:
             sparsity_factor = 1.0 - (n2_avg_obs / MIN_N2_OBS)
             shift = self.n2_asset_class * sparsity_factor * 0.5  # Cap at 50% shift
             self.n2_asset_class -= shift
-            if is_1m:
+            if micro_first:
                 self.n3_per_asset += shift  # N3 is the main signal in 1m
             else:
                 self.n1_universal += shift  # N1 is the fallback in 5m/15m

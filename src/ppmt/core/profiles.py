@@ -125,8 +125,8 @@ ASSET_CLASS_DEFAULTS = {
         "sax_window_size": 18,  # v0.42.0: sensible default for 5m; overridden by timeframe
         "catastrophic_loss_pct": 0.15,
         "max_position_pct": 0.03,
-        "short_allowed": False,
-        "short_confidence_multiplier": 99.0,  # effectively disabled
+        "short_allowed": True,  # v0.43.0: Enabled — was False, caused 100% LONG bug
+        "short_confidence_multiplier": 2.0,  # v0.43.0: Was 99.0 (effectively disabled)
         "weight_profile": "meme",
         "fuzzy_threshold": 0.75,
         "min_observations_for_trade": 5,

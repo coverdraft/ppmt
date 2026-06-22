@@ -352,6 +352,7 @@ class SignalGenerator:
         trailing_distance_pct: float = 0.015,
         prediction_depth: int = 5,
         validation_mode: bool = False,
+        timeframe: str = "1h",
     ):
         """
         v0.38.8: Thresholds now sourced from SignalThresholds (core/thresholds.py).
@@ -365,6 +366,8 @@ class SignalGenerator:
         keyed with 'TRENDING_UP' (uppercase) — and RegimeDetector returns
         'trending_up' (lowercase), so the lookup always fell back to
         'UNKNOWN'. Now both sides use lowercase.
+
+        v0.43.0: Added timeframe param for per-timeframe hard_move_floor.
         """
         self.min_confidence = min_confidence
         self.min_risk_reward = min_risk_reward
@@ -373,6 +376,7 @@ class SignalGenerator:
         self.trailing_distance_pct = trailing_distance_pct
         self.prediction_depth = prediction_depth
         self.validation_mode = validation_mode
+        self.timeframe = timeframe
 
         # v0.38.8: Unified thresholds from core/thresholds.py.
         # .paper() for validation_mode=True, .real() otherwise.
@@ -613,7 +617,7 @@ class SignalGenerator:
             if signal_type == SignalType.ENTRY_LONG
             else abs(meta.avg_move_short)
         )
-        if effective_move < self.thresholds.hard_move_floor:
+        if effective_move < self.thresholds.hard_move_floor_for_timeframe(self.timeframe):
             return None
 
         # Compute SL/TP from metadata

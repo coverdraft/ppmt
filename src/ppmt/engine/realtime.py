@@ -1284,6 +1284,7 @@ class RealtimeTrader:
                         effective_min_conf = cfg.min_confidence
 
                         # v0.11.0: TokenProfile SHORT gating
+                        # v0.43.0: meme tokens now have short_allowed=True (was False)
                         if prediction.direction == "SHORT":
                             if token_profile is not None and not token_profile.short_allowed:
                                 continue
@@ -1358,7 +1359,8 @@ class RealtimeTrader:
                         # that passes the floor also passes the final entry gate.
                         # Paper trading: 0.05% (just above Binance spread).
                         # Real money: 0.5% (only meaningful moves).
-                        _hard_move_floor = _sig_thresholds.hard_move_floor
+                        # v0.43.0: Per-timeframe hard_move_floor (was flat 0.05/0.5)
+                        _hard_move_floor = _sig_thresholds.hard_move_floor_for_timeframe(cfg.timeframe)
                         if abs(prediction.expected_total_move_pct) < _hard_move_floor:
                             if result.candles_processed % 20 == 0:
                                 console.print(
@@ -1379,7 +1381,7 @@ class RealtimeTrader:
                                         f"[dim][{cfg.symbol}] skip: ranging prob={prediction.overall_probability:.2f} < {ranging_prob_gate}[/dim]"
                                     )
                                 continue
-                            _ranging_move_floor = _sig_thresholds.ranging_move_floor
+                            _ranging_move_floor = _sig_thresholds.ranging_move_floor_for_timeframe(cfg.timeframe)
                             if abs(prediction.expected_total_move_pct) < _ranging_move_floor:
                                 if result.candles_processed % 20 == 0:
                                     console.print(
@@ -1394,7 +1396,7 @@ class RealtimeTrader:
                                         f"[dim][{cfg.symbol}] skip: volatile prob={prediction.overall_probability:.2f} < {volatile_prob_gate}[/dim]"
                                     )
                                 continue
-                            _volatile_move_floor = _sig_thresholds.volatile_move_floor
+                            _volatile_move_floor = _sig_thresholds.volatile_move_floor_for_timeframe(cfg.timeframe)
                             if abs(prediction.expected_total_move_pct) < _volatile_move_floor:
                                 if result.candles_processed % 20 == 0:
                                     console.print(
@@ -2280,8 +2282,9 @@ class RealtimeTrader:
                     result.candles_processed += 1
                     return (sax_buffer, pattern_buffer, position_state, current_position,
                             trade_counter, current_regime, peak_capital, last_losing_trade_idx)
-                # Filter 2: hard move floor
-                if abs(prediction.expected_total_move_pct) < _live_sig.hard_move_floor:
+                # Filter 2: hard move floor (per-timeframe, v0.43.0)
+                _live_tf = getattr(cfg, 'timeframe', '1h')
+                if abs(prediction.expected_total_move_pct) < _live_sig.hard_move_floor_for_timeframe(_live_tf):
                     result.candles_processed += 1
                     return (sax_buffer, pattern_buffer, position_state, current_position,
                             trade_counter, current_regime, peak_capital, last_losing_trade_idx)
@@ -2291,7 +2294,7 @@ class RealtimeTrader:
                         result.candles_processed += 1
                         return (sax_buffer, pattern_buffer, position_state, current_position,
                                 trade_counter, current_regime, peak_capital, last_losing_trade_idx)
-                    if abs(prediction.expected_total_move_pct) < _live_sig.ranging_move_floor:
+                    if abs(prediction.expected_total_move_pct) < _live_sig.ranging_move_floor_for_timeframe(_live_tf):
                         result.candles_processed += 1
                         return (sax_buffer, pattern_buffer, position_state, current_position,
                                 trade_counter, current_regime, peak_capital, last_losing_trade_idx)
@@ -2301,7 +2304,7 @@ class RealtimeTrader:
                         result.candles_processed += 1
                         return (sax_buffer, pattern_buffer, position_state, current_position,
                                 trade_counter, current_regime, peak_capital, last_losing_trade_idx)
-                    if abs(prediction.expected_total_move_pct) < _live_sig.volatile_move_floor:
+                    if abs(prediction.expected_total_move_pct) < _live_sig.volatile_move_floor_for_timeframe(_live_tf):
                         result.candles_processed += 1
                         return (sax_buffer, pattern_buffer, position_state, current_position,
                                 trade_counter, current_regime, peak_capital, last_losing_trade_idx)

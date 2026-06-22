@@ -1632,9 +1632,9 @@ class PaperTrader:
                 # always false for conf >= 0.167).
                 if prediction.direction == "SHORT":
                     # v0.6.4: TokenProfile SHORT gating
-                    # If the token profile says short_allowed=False, skip SHORT entries.
-                    # Meme tokens (DOGE, SHIB, PEPE) have short_allowed=False because
-                    # their SHORT signals are unreliable in the validated data.
+                    # v0.43.0: meme short_allowed changed to True (was False — caused
+                    # 100% LONG bug). The confidence_multiplier=2.0 still provides
+                    # a quality gate for meme SHORT signals.
                     if token_profile is not None and not token_profile.short_allowed:
                         continue
 

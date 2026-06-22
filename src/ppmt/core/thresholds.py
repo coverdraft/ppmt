@@ -19,7 +19,84 @@ Two factory methods cover the two operating modes:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict
+from typing import Dict, Optional
+
+
+# -------------------------------------------------------------------- #
+# Per-timeframe hard_move_floor
+# -------------------------------------------------------------------- #
+# v0.43.0 (TERMINAL-v2.1): The old flat hard_move_floor (0.05% paper,
+# 0.5% real) caused a critical bug — 100% LONG, 0 SHORT signals in 5m
+# replay. Root cause: SHORT moves are typically smaller than LONG moves
+# in crypto uptrends, so a single flat floor either:
+#   - Was too low (0.05%) → let noise through, SHORT signals survived
+#     but were too weak to be useful.
+#   - Was too high (0.5%) → killed all SHORT signals because their
+#     expected_move was below 0.5% on lower timeframes.
+#
+# The per-timeframe floor scales with typical candle volatility:
+#   1m: ~0.04% per candle → floor 0.10%
+#   5m: ~0.10% per candle → floor 0.15%
+#   15m: ~0.20% per candle → floor 0.20%
+#   1h+: larger moves → floor 0.30-0.50%
+#
+# These are applied in BOTH paper and real mode. The old separate
+# paper/real move floors (0.05 vs 0.5) are replaced by this single
+# per-timeframe scale.
+
+TIMEFRAME_HARD_MOVE_FLOOR: Dict[str, float] = {
+    "1m":  0.10,
+    "5m":  0.15,
+    "15m": 0.20,
+    "30m": 0.25,
+    "1h":  0.30,
+    "4h":  0.40,
+    "1d":  0.50,
+}
+
+TIMEFRAME_RANGING_MOVE_FLOOR: Dict[str, float] = {
+    "1m":  0.15,
+    "5m":  0.20,
+    "15m": 0.30,
+    "30m": 0.35,
+    "1h":  0.50,
+    "4h":  0.70,
+    "1d":  1.00,
+}
+
+TIMEFRAME_VOLATILE_MOVE_FLOOR: Dict[str, float] = {
+    "1m":  0.20,
+    "5m":  0.30,
+    "15m": 0.40,
+    "30m": 0.50,
+    "1h":  0.80,
+    "4h":  1.20,
+    "1d":  1.60,
+}
+
+
+def get_hard_move_floor(timeframe: str, mode: str = "paper") -> float:
+    """Get the per-timeframe hard_move_floor.
+
+    Args:
+        timeframe: Candle interval (e.g. '5m', '15m', '1h').
+        mode: 'paper' or 'real'. Both use the same per-timeframe value
+            now — the mode parameter is kept for API compatibility.
+
+    Returns:
+        hard_move_floor value for this timeframe.
+    """
+    return TIMEFRAME_HARD_MOVE_FLOOR.get(timeframe, 0.30)  # default = 1h
+
+
+def get_ranging_move_floor(timeframe: str) -> float:
+    """Get the per-timeframe ranging_move_floor."""
+    return TIMEFRAME_RANGING_MOVE_FLOOR.get(timeframe, 0.50)
+
+
+def get_volatile_move_floor(timeframe: str) -> float:
+    """Get the per-timeframe volatile_move_floor."""
+    return TIMEFRAME_VOLATILE_MOVE_FLOOR.get(timeframe, 0.80)
 
 
 # -------------------------------------------------------------------- #
@@ -224,6 +301,36 @@ class SignalThresholds:
     # ---------------------------------------------------------------- #
     # Helpers
     # ---------------------------------------------------------------- #
+
+    def hard_move_floor_for_timeframe(self, timeframe: str) -> float:
+        """Get the per-timeframe hard_move_floor, overriding the flat default.
+
+        v0.43.0 (TERMINAL-v2.1): The flat hard_move_floor caused 100% LONG
+        signals. Per-timeframe floors ensure SHORT signals on lower TFs
+        aren't killed by an inappropriately high floor, while still
+        filtering noise on higher TFs.
+
+        Returns the per-timeframe value from TIMEFRAME_HARD_MOVE_FLOOR,
+        falling back to self.hard_move_floor if no TF-specific value exists.
+        """
+        tf_floor = TIMEFRAME_HARD_MOVE_FLOOR.get(timeframe)
+        if tf_floor is not None:
+            return tf_floor
+        return self.hard_move_floor
+
+    def ranging_move_floor_for_timeframe(self, timeframe: str) -> float:
+        """Get the per-timeframe ranging_move_floor."""
+        tf_floor = TIMEFRAME_RANGING_MOVE_FLOOR.get(timeframe)
+        if tf_floor is not None:
+            return tf_floor
+        return self.ranging_move_floor
+
+    def volatile_move_floor_for_timeframe(self, timeframe: str) -> float:
+        """Get the per-timeframe volatile_move_floor."""
+        tf_floor = TIMEFRAME_VOLATILE_MOVE_FLOOR.get(timeframe)
+        if tf_floor is not None:
+            return tf_floor
+        return self.volatile_move_floor
 
     def regime_confidence(self, regime_name: str) -> float:
         """Get min_confidence for a regime (case-insensitive). Defaults to 'unknown'."""
