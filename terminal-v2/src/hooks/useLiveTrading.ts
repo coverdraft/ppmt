@@ -153,9 +153,12 @@ export function useLiveTrading(symbol: string | null, timeframe: string) {
               break;
 
             case 'brain_update':
+              // v2.1 FIX: Also extract ticker_price from brain_update for reliability
+              const brainTp = (msg.data as Record<string, unknown>).ticker_price as number | null | undefined;
               setState((prev) => ({
                 ...prev,
                 brainUpdate: msg.data,
+                tickerPrice: brainTp != null && brainTp > 0 ? brainTp : prev.tickerPrice,
               }));
               break;
 

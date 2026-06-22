@@ -48,14 +48,14 @@ export default function RightPanel({ position, brainUpdate, tickerPrice, isLive 
           </div>
           {/* v2.1: Real-time ticker price display */}
           <div className="flex items-center gap-3 text-xs font-mono">
-            {isLive && (tickerPrice != null && tickerPrice > 0) && (
+            {(tickerPrice != null && tickerPrice > 0) && (
               <span className="text-white font-semibold">
                 ${tickerPrice.toFixed(tickerPrice < 1 ? 6 : tickerPrice < 100 ? 4 : 2)}
               </span>
             )}
           </div>
           <div className="flex items-center gap-2 text-[10px] font-mono">
-            {isLive && brainUpdate ? (
+            {brainUpdate ? (
               <>
                 <span className="text-gray-500">N1:</span>
                 <span className="text-gray-300">{brainUpdate.n1_confidence.toFixed(2)}</span>

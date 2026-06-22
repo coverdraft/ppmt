@@ -34,6 +34,7 @@ export interface BrainUpdateMessage {
     ev_score?: number;       // v2.1: Net EV score
     ev_passed?: boolean;     // v2.1: Whether signal passed EV gate
     net_rr?: number;         // v2.1: Net risk:reward
+    ticker_price?: number | null;  // v2.1: Real-time price (also in brain_update for reliability)
   };
 }
 

@@ -127,32 +127,35 @@ TIMEFRAME_WEIGHT_OVERRIDES = {
         },
     },
     "5m": {
+        # v2.1 (TERMINAL-v2.1): Config C — validated 30-day OOS on 4 tokens.
+        # P&L=+31.00%, PF=1.52, WR=45.7%, MaxDD=18.29%
+        # Key: N3=80% (per-asset dominant), N4=10% (sparse, regime-specific)
         "default": {
             "n1_universal": 0.10,
             "n2_asset_class": 0.00,
-            "n3_per_asset": 0.55,
-            "n4_per_asset_regime": 0.35,
+            "n3_per_asset": 0.80,
+            "n4_per_asset_regime": 0.10,
             "n5_btc_context": 0.00,
         },
         "meme": {
             "n1_universal": 0.10,
             "n2_asset_class": 0.00,
-            "n3_per_asset": 0.55,
-            "n4_per_asset_regime": 0.35,
+            "n3_per_asset": 0.80,
+            "n4_per_asset_regime": 0.10,
             "n5_btc_context": 0.00,
         },
         "new_launch": {
             "n1_universal": 0.10,
             "n2_asset_class": 0.00,
-            "n3_per_asset": 0.55,
-            "n4_per_asset_regime": 0.35,
+            "n3_per_asset": 0.80,
+            "n4_per_asset_regime": 0.10,
             "n5_btc_context": 0.00,
         },
         "blue_chip": {
             "n1_universal": 0.10,
             "n2_asset_class": 0.00,
-            "n3_per_asset": 0.55,
-            "n4_per_asset_regime": 0.35,
+            "n3_per_asset": 0.80,
+            "n4_per_asset_regime": 0.10,
             "n5_btc_context": 0.00,
         },
     },

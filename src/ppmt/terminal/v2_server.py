@@ -497,6 +497,14 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
     _last_engine_ts = 0  # Last candle timestamp fed to engine
     _last_ui_update = 0.0  # Timestamp of last UI update (monotonic)
     _ticker_price = 0.0  # v2.1: Real-time price from /api/v3/ticker/price
+    # v2.1 FIX: Sticky N3/N4 confidence — preserve last known good values
+    # between full matches (result=YES). Without this, the quick match
+    # (result=no) overwrites N3/N4 with 0.0 every 10s, causing the UI
+    # to show 0.00 between candles.
+    _sticky_n3_conf = 0.0
+    _sticky_n4_conf = 0.0
+    _sticky_direction = "FLAT"
+    _sticky_direction_score = 0.0
     try:
         while True:
             try:
@@ -615,12 +623,12 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                 active_path_ids = ["root"]
                 n1_conf = 0.0
                 n2_conf = 0.0
-                n3_conf = 0.0
-                n4_conf = 0.0
+                n3_conf = _sticky_n3_conf  # v2.1 FIX: Start with sticky values
+                n4_conf = _sticky_n4_conf  # v2.1 FIX: Start with sticky values
                 weighted_conf = 0.0
                 signal_type = "NO_SIGNAL"
-                direction = "FLAT"
-                direction_score = 0.0
+                direction = _sticky_direction  # v2.1 FIX: Start with sticky direction
+                direction_score = _sticky_direction_score  # v2.1 FIX
                 _last_best_level = None  # Track last known active path level
 
                 if result is not None:
@@ -667,6 +675,11 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                     signal_type = result.signal.signal_type.value if result.signal else "NO_SIGNAL"
                     direction = result.direction if hasattr(result, 'direction') else "FLAT"
                     direction_score = result.direction_score if hasattr(result, 'direction_score') else 0.0
+                    # v2.1 FIX: Update sticky values from full match
+                    _sticky_n3_conf = n3_conf
+                    _sticky_n4_conf = n4_conf
+                    _sticky_direction = direction
+                    _sticky_direction_score = direction_score
                 else:
                     # No SAX window completed this candle — still extract
                     # current buffer state so the frontend shows partial progress
@@ -697,14 +710,28 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                                 current_symbols_n2=current_pattern_n2 or None,
                                 current_symbols_n3=current_pattern_n3,
                             )
+                            # v2.1 FIX: Also extract N4 buffer symbols
+                            buf_n4 = getattr(engine, '_streaming_buffer_n4', None)
+                            current_pattern_n4 = buf_n4.get_pattern() if buf_n4 and buf_n4.has_pattern() else None
+
                             if quick_result:
                                 n1_conf = quick_result.n1_confidence
                                 n2_conf = quick_result.n2_confidence
-                                n3_conf = quick_result.n3_confidence
-                                n4_conf = quick_result.n4_confidence
+                                # v2.1 FIX: Only update N3/N4 if quick match found them,
+                                # otherwise keep sticky values from last full match.
+                                if quick_result.n3_confidence > 0:
+                                    n3_conf = quick_result.n3_confidence
+                                    _sticky_n3_conf = n3_conf
+                                if quick_result.n4_confidence > 0:
+                                    n4_conf = quick_result.n4_confidence
+                                    _sticky_n4_conf = n4_conf
                                 weighted_conf = quick_result.weighted_confidence
-                                direction = quick_result.direction if hasattr(quick_result, 'direction') else "FLAT"
-                                direction_score = quick_result.direction_score if hasattr(quick_result, 'direction_score') else 0.0
+                                if quick_result.direction and quick_result.direction != "FLAT":
+                                    direction = quick_result.direction
+                                    _sticky_direction = direction
+                                if quick_result.direction_score != 0:
+                                    direction_score = quick_result.direction_score
+                                    _sticky_direction_score = direction_score
                                 
                                 # Find best match for active path
                                 best_match = None
@@ -764,6 +791,7 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                         "ev_score": round(_ev_info.get("ev_score", 0.0) or 0.0, 3),
                         "ev_passed": _ev_info.get("passed", False),
                         "net_rr": round(_ev_info.get("net_rr", 0.0) or 0.0, 2),
+                        "ticker_price": round(_ticker_price, 8) if _ticker_price > 0 else None,  # v2.1 FIX: Price in brain_update too
                     },
                 }
                 await websocket.send_json(brain_msg)
@@ -838,14 +866,17 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                             # 6. Net EV = confidence × min(Net_R:R, 3.0)
                             net_ev = sig.confidence * net_rr_capped
 
-                            # 7. Gate: Net EV must be >= 0.80
-                            if net_ev < 0.80:
+                            # 7. Gate: Net EV must be >= 0.40 (v2.1 Config C)
+                            # v2.1: Lowered from 0.80 to 0.40 — validated 30-day OOS
+                            # Config C: P&L=+31.00%, PF=1.52, WR=45.7%
+                            _EV_THRESHOLD = 0.40
+                            if net_ev < _EV_THRESHOLD:
                                 _NET_EV_STATS["rejected_ev_score"] += 1
                                 _LAST_NET_EV[symbol] = {"ev_score": net_ev, "passed": False, "net_rr": net_rr_capped, "conf": sig.confidence, "reason": "ev_score"}
                                 logger.info(
                                     f"[NET EV GATE] EV REJECTED: {symbol} {timeframe} "
                                     f"conf={sig.confidence:.3f} net_R:R={net_rr_capped:.2f} "
-                                    f"Net_EV={net_ev:.3f} (min 0.80)"
+                                    f"Net_EV={net_ev:.3f} (min {_EV_THRESHOLD})"
                                 )
                                 await _emit_log(websocket, "EV GATE", f"EV REJECTED: conf={sig.confidence:.3f} R:R={net_rr_capped:.2f} EV={net_ev:.3f}", "warn")
                             else:
@@ -874,6 +905,18 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                                             "spread_pct": spread_pct,
                                         },
                                     )
+                                    # v2.1 Config C: SL = max(default 1.2×EM, drawdown_pct × 1.5)
+                                    _SL_MULT = 1.5
+                                    current_sl_distance_pct = abs(pos.entry_price - pos.current_sl) / pos.entry_price * 100.0
+                                    drawdown_sl_pct = drawdown_pct * _SL_MULT
+                                    if drawdown_sl_pct > current_sl_distance_pct:
+                                        extra_distance = drawdown_sl_pct - current_sl_distance_pct
+                                        if pos.direction == "LONG":
+                                            pos.current_sl -= pos.entry_price * (extra_distance / 100.0)
+                                            pos.catastrophic_sl -= pos.entry_price * (extra_distance / 100.0)
+                                        else:
+                                            pos.current_sl += pos.entry_price * (extra_distance / 100.0)
+                                            pos.catastrophic_sl += pos.entry_price * (extra_distance / 100.0)
                                     # Track in session-wide positions
                                     _OPEN_POSITIONS[symbol] = {
                                         "direction": pos.direction,
@@ -1277,6 +1320,12 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
     last_candle_ts = 0
     heartbeat_counter = 0  # ticks every loop iteration; used to throttle heartbeat
 
+    # v2.1 FIX: Sticky N3/N4 confidence for live path (same as paper)
+    _sticky_n3_conf_live = 0.0
+    _sticky_n4_conf_live = 0.0
+    _sticky_direction_live = "FLAT"
+    _sticky_direction_score_live = 0.0
+
     # ── v2.1 FIX: Regime detection for N4 (same as paper path) ──
     from ppmt.core.regime import RegimeDetector
     _regime_detector_live = RegimeDetector()
@@ -1457,8 +1506,12 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
 
                 # brain_update (identical logic — now includes N3/N4/direction)
                 current_sax, active_path_ids = [], ["root"]
-                n1_conf, n2_conf, n3_conf, n4_conf = 0.0, 0.0, 0.0, 0.0
-                weighted_conf, signal_type, direction, direction_score = 0.0, "NO_SIGNAL", "FLAT", 0.0
+                n1_conf, n2_conf = 0.0, 0.0
+                n3_conf = _sticky_n3_conf_live  # v2.1 FIX: Start with sticky values
+                n4_conf = _sticky_n4_conf_live  # v2.1 FIX: Start with sticky values
+                weighted_conf, signal_type = 0.0, "NO_SIGNAL"
+                direction = _sticky_direction_live  # v2.1 FIX: Sticky
+                direction_score = _sticky_direction_score_live  # v2.1 FIX: Sticky
 
                 if result is not None:
                     if result.sax_symbols:
@@ -1477,6 +1530,11 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
                     signal_type = result.signal.signal_type.value if result.signal else "NO_SIGNAL"
                     direction = result.direction if hasattr(result, 'direction') else "FLAT"
                     direction_score = result.direction_score if hasattr(result, 'direction_score') else 0.0
+                    # v2.1 FIX: Update sticky values from full match
+                    _sticky_n3_conf_live = n3_conf
+                    _sticky_n4_conf_live = n4_conf
+                    _sticky_direction_live = direction
+                    _sticky_direction_score_live = direction_score
                 else:
                     buf = getattr(engine, '_streaming_buffer', None)
                     if buf and buf._pattern_buffer:
@@ -1487,10 +1545,20 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
                             qr = engine.match(current_symbols=buf.get_pattern(), current_price=current_price, is_in_position=_in_pos, entry_price=_entry)
                             if qr:
                                 n1_conf, n2_conf = qr.n1_confidence, qr.n2_confidence
-                                n3_conf, n4_conf = qr.n3_confidence, qr.n4_confidence
+                                # v2.1 FIX: Only update N3/N4 if quick match found them
+                                if qr.n3_confidence > 0:
+                                    n3_conf = qr.n3_confidence
+                                    _sticky_n3_conf_live = n3_conf
+                                if qr.n4_confidence > 0:
+                                    n4_conf = qr.n4_confidence
+                                    _sticky_n4_conf_live = n4_conf
                                 weighted_conf = qr.weighted_confidence
-                                direction = qr.direction if hasattr(qr, 'direction') else "FLAT"
-                                direction_score = qr.direction_score if hasattr(qr, 'direction_score') else 0.0
+                                if qr.direction and qr.direction != "FLAT":
+                                    direction = qr.direction
+                                    _sticky_direction_live = direction
+                                if qr.direction_score != 0:
+                                    direction_score = qr.direction_score
+                                    _sticky_direction_score_live = direction_score
                                 best_match = None
                                 for level, match in [("n3", qr.n3_match), ("n2", qr.n2_match), ("n4", qr.n4_match), ("n1", qr.n1_match)]:
                                     if match and match.node:
@@ -1521,12 +1589,42 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
                         "ev_score": round(_ev_info_live.get("ev_score", 0.0) or 0.0, 3),
                         "ev_passed": _ev_info_live.get("passed", False),
                         "net_rr": round(_ev_info_live.get("net_rr", 0.0) or 0.0, 2),
+                        "ticker_price": round(current_price, 8) if current_price > 0 else None,  # v2.1 FIX: Price in brain_update
                     },
                 })
 
                 # ── ROUTED EXECUTION: paper vs live ────────────
                 if result and result.signal and result.signal.is_entry and not _in_pos:
                     sig = result.signal
+                    # v2.1 Config C: Apply same EV gate to live path
+                    _live_best_node = None
+                    for _lvl, _mr in [("n3", result.n3_match), ("n1", result.n1_match),
+                                      ("n2", result.n2_match), ("n4", result.n4_match)]:
+                        if _mr and _mr.node and _mr.node.metadata.historical_count > 0:
+                            _live_best_node = _mr.node
+                            break
+                    _live_fav = abs(_live_best_node.metadata.max_favorable_pct) if _live_best_node else 0.0
+                    _live_dd = abs(_live_best_node.metadata.max_drawdown_pct) if _live_best_node else 0.5
+                    if _live_fav < 0.001:
+                        _live_fav = abs(sig.expected_move_pct) if sig.expected_move_pct else 0.1
+                    if _live_dd < 0.001:
+                        _live_dd = 0.5
+                    from ppmt.core.profiles import SPREAD_ESTIMATES as _SPREAD_LIVE
+                    _live_spread = _SPREAD_LIVE.get(asset_class, 0.050)
+                    _live_net_fav = _live_fav - _live_spread
+                    _live_ev_passed = True
+                    if _live_net_fav <= 0:
+                        _live_ev_passed = False
+                        logger.info(f"[WS-LIVE] EV GATE REJECTED (spread): {symbol}")
+                    else:
+                        _live_net_rr = min(_live_net_fav / _live_dd, 3.0)
+                        _live_net_ev = sig.confidence * _live_net_rr
+                        _LAST_NET_EV[symbol] = {"ev_score": _live_net_ev, "passed": _live_net_ev >= 0.40, "net_rr": _live_net_rr, "conf": sig.confidence}
+                        if _live_net_ev < 0.40:
+                            _live_ev_passed = False
+                            logger.info(f"[WS-LIVE] EV GATE REJECTED (ev): {symbol} EV={_live_net_ev:.3f}")
+                    if not _live_ev_passed:
+                        continue
                     try:
                         pos = await executor.open_position(
                             symbol=symbol,
@@ -1538,6 +1636,18 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
                                 "predicted_path_symbols": sig.predicted_path_symbols if sig.predicted_path else None,
                             },
                         )
+                        # v2.1 Config C: SL = max(default 1.2×EM, drawdown_pct × 1.5)
+                        _SL_MULT_LIVE = 1.5
+                        _live_sl_dist = abs(pos.entry_price - pos.current_sl) / pos.entry_price * 100.0
+                        _live_dd_sl = _live_dd * _SL_MULT_LIVE
+                        if _live_dd_sl > _live_sl_dist:
+                            _live_extra = _live_dd_sl - _live_sl_dist
+                            if pos.direction == "LONG":
+                                pos.current_sl -= pos.entry_price * (_live_extra / 100.0)
+                                pos.catastrophic_sl -= pos.entry_price * (_live_extra / 100.0)
+                            else:
+                                pos.current_sl += pos.entry_price * (_live_extra / 100.0)
+                                pos.catastrophic_sl += pos.entry_price * (_live_extra / 100.0)
                         logger.info(
                             f"[WS-LIVE] SIGNAL {sig.signal_type.value} @ {current_price:.6f} "
                             f"conf={sig.confidence:.3f} SL={pos.current_sl:.6f} TP={pos.current_tp:.6f}"
