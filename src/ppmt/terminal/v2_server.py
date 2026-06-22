@@ -158,6 +158,9 @@ _RISK_CONFIG: dict = {
 # Populated by WebSocket handlers when positions open/close.
 _LIVE_SESSIONS: dict[str, dict] = {}
 
+# v0.60.0 (TERMINAL-v2.1): Trade history — in-memory list of closed trades.
+_TRADE_HISTORY: list[dict] = []
+
 
 def get_storage() -> PPMTStorage:
     global _storage
@@ -287,6 +290,14 @@ async def portfolio_live():
         "active_count": len(positions),
         "session_ev": round(session_ev, 3),
     }
+
+
+# ─── REST: Trade History ──────────────────────────────────────
+# v0.60.0 (TERMINAL-v2.1): In-memory trade history endpoint.
+@app.get("/api/trades/history")
+async def get_trade_history():
+    """Return all closed trades from the current server session."""
+    return {"trades": _TRADE_HISTORY, "count": len(_TRADE_HISTORY)}
 
 
 # ─── WebSocket: Paper Live ────────────────────────────────────
@@ -880,6 +891,19 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                     if divergence_closed:
                         closed = executor._position  # Already closed by check_divergence
                         if closed:
+                            _ACTIVE_SYMBOLS.pop(symbol, None)
+                            _OPEN_POSITIONS.pop(symbol, None)
+                            # v0.60.0 (TERMINAL-v2.1): Append to trade history
+                            _TRADE_HISTORY.append({
+                                "timestamp": int(time.time() * 1000),
+                                "symbol": symbol,
+                                "timeframe": timeframe,
+                                "direction": closed.direction,
+                                "entry_price": closed.entry_price,
+                                "exit_price": closed.close_price,
+                                "pnl_pct": round(closed.pnl_pct or 0, 4),
+                                "close_reason": closed.close_reason or "DIVERGENCE",
+                            })
                             logger.info(
                                 f"[WS] DIVERGENCE EXIT: score={_break_score:.2f} @ {current_price:.6f} "
                                 f"PnL={closed.pnl_pct:+.2f}%"
@@ -909,6 +933,18 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                             _LIVE_SESSIONS[_session_key]["status"] = closed.status
                             _LIVE_SESSIONS[_session_key]["pnl_pct"] = f"{closed.pnl_pct:+.2f}%"
                             logger.info(f"[WS] Session tracker: closed {_session_key} → {closed.status}")
+
+                        # v0.60.0 (TERMINAL-v2.1): Append to trade history
+                        _TRADE_HISTORY.append({
+                            "timestamp": int(time.time() * 1000),
+                            "symbol": symbol,
+                            "timeframe": timeframe,
+                            "direction": closed.direction,
+                            "entry_price": closed.entry_price,
+                            "exit_price": closed.close_price,
+                            "pnl_pct": round(closed.pnl_pct or 0, 4),
+                            "close_reason": closed.close_reason or closed.status,
+                        })
 
                         # v0.58.0: TAREA 21 — Determine log tag + emit learning feed
                         _close_tag = "LEARN"

@@ -228,6 +228,35 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
       </div>
     </div>
 
+    <!-- ─── PANEL 3.5: TRADE HISTORY (collapsible) ──────────────── -->
+    <div class="panel">
+      <div class="panel-header cursor-pointer select-none" onclick="toggleHistory()">
+        <svg class="w-3.5 h-3.5 text-yel" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>
+        <span id="historyToggle">&#9656;</span> Trade History
+        <span class="ml-auto text-txt3 text-[0.6rem]" id="tradeCount">0 trades</span>
+      </div>
+      <div id="historyContent" class="hidden">
+        <div class="overflow-x-auto max-h-[200px] overflow-y-auto">
+          <table class="w-full text-xs">
+            <thead class="text-txt3 bg-bg3 sticky top-0">
+              <tr>
+                <th class="px-2 py-1 text-left">Time</th>
+                <th class="px-2 py-1 text-left">Sym</th>
+                <th class="px-2 py-1 text-left">Dir</th>
+                <th class="px-2 py-1 text-right">Entry</th>
+                <th class="px-2 py-1 text-right">Exit</th>
+                <th class="px-2 py-1 text-right">P&L</th>
+                <th class="px-2 py-1 text-left">Reason</th>
+              </tr>
+            </thead>
+            <tbody id="historyBody" class="divide-y divide-bdr">
+              <tr><td colspan="7" class="text-center text-txt3 py-4">No closed trades yet</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
     <!-- ─── PANEL 4: LEARNING FEED ────────────────────────────── -->
     <div class="panel flex-1 flex flex-col min-h-[180px]">
       <div class="panel-header">
@@ -603,6 +632,11 @@ function handlePositionUpdate(data) {
   
   // Update chart markers for entry/exit
   updateChartPosition(data);
+  
+  // Refresh trade history when position closes
+  if (!isOpen(data) && historyOpen) {
+    fetchHistory();
+  }
   
   // Track real sequence: store current SAX when position is active
   if (isOpen(data) && S.brain.currentSAX.length > 0) {
@@ -1070,6 +1104,62 @@ function switchTab(tab) {
     document.getElementById('tabMexc').classList.add('active');
     document.querySelectorAll('.tab-btn')[1].classList.add('active');
   }
+}
+
+// ─── Trade History ────────────────────────────────────────────
+let historyOpen = false;
+
+function toggleHistory() {
+  historyOpen = !historyOpen;
+  const content = document.getElementById('historyContent');
+  const toggle = document.getElementById('historyToggle');
+  if (historyOpen) {
+    content.classList.remove('hidden');
+    toggle.innerHTML = '&#9662;';
+    fetchHistory();
+  } else {
+    content.classList.add('hidden');
+    toggle.innerHTML = '&#9656;';
+  }
+}
+
+async function fetchHistory() {
+  try {
+    const resp = await fetch('/api/trades/history');
+    const data = await resp.json();
+    renderHistory(data.trades || []);
+  } catch(e) {
+    // Server not reachable
+  }
+}
+
+function renderHistory(trades) {
+  const tbody = document.getElementById('historyBody');
+  const count = document.getElementById('tradeCount');
+  count.textContent = trades.length + ' trades';
+
+  if (trades.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="7" class="text-center text-txt3 py-4">No closed trades yet</td></tr>';
+    return;
+  }
+
+  // Show newest first
+  const sorted = [...trades].reverse();
+  tbody.innerHTML = sorted.map(t => {
+    const pnlColor = t.pnl_pct > 0 ? 'text-grn' : 'text-red';
+    const dirColor = t.direction === 'LONG' ? 'text-grn' : 'text-red';
+    const ts = new Date(t.timestamp);
+    const timeStr = ts.toLocaleTimeString('en-US', {hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit'});
+    return `<tr class="hover:bg-bg3">
+      <td class="px-2 py-1 text-txt3">${timeStr}</td>
+      <td class="px-2 py-1 text-txt2">${(t.symbol || '').replace('/USDT','')}</td>
+      <td class="px-2 py-1 ${dirColor} font-bold">${t.direction || '--'}</td>
+      <td class="px-2 py-1 text-right text-txt2">${t.entry_price ? t.entry_price.toFixed(4) : '--'}</td>
+      <td class="px-2 py-1 text-right text-txt2">${t.exit_price ? t.exit_price.toFixed(4) : '--'}</td>
+      <td class="px-2 py-1 text-right ${pnlColor} font-bold">${t.pnl_pct >= 0 ? '+' : ''}${t.pnl_pct.toFixed(2)}%</td>
+      <td class="px-2 py-1 text-txt3">${t.close_reason || '--'}</td>
+    </tr>`;
+  }).join('');
 }
 
 // ─── Utility Functions ─────────────────────────────────────────
