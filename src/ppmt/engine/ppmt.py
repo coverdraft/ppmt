@@ -1374,22 +1374,26 @@ class PPMT:
 
         # FASE 1 Tarea 1.1: Initialize 4 streaming buffers (one per level)
         # Each buffer tracks its own SAX symbol stream for its level's encoder.
+        # v2.1 FIX: Use per-level pattern_length from LEVEL_PATTERN_CONFIG.
+        # N3/N4 tries store P=3 patterns but buffers were using hardcoded P=5,
+        # causing get_pattern() to return 5 symbols against a trie that only
+        # knows 3-symbol patterns → never matches.
         if not hasattr(self, '_streaming_buffer') or self._streaming_buffer is None:
             self._streaming_buffer = StreamingPatternBuffer(
-                pattern_length=5,  # default, should match build() pattern_length
+                pattern_length=self.pl_n3,  # N3: LEVEL_PATTERN_CONFIG (was hardcoded 5)
                 max_buffer_length=0,  # auto
             )
         if not hasattr(self, '_streaming_buffer_n1') or self._streaming_buffer_n1 is None:
             self._streaming_buffer_n1 = StreamingPatternBuffer(
-                pattern_length=5, max_buffer_length=0,
+                pattern_length=self.pl_n1, max_buffer_length=0,  # N1: explicit, currently 5
             )
         if not hasattr(self, '_streaming_buffer_n2') or self._streaming_buffer_n2 is None:
             self._streaming_buffer_n2 = StreamingPatternBuffer(
-                pattern_length=5, max_buffer_length=0,
+                pattern_length=self.pl_n2, max_buffer_length=0,  # N2: explicit, currently 5
             )
         if not hasattr(self, '_streaming_buffer_n4') or self._streaming_buffer_n4 is None:
             self._streaming_buffer_n4 = StreamingPatternBuffer(
-                pattern_length=5, max_buffer_length=0,
+                pattern_length=self.pl_n4, max_buffer_length=0,  # N4: LEVEL_PATTERN_CONFIG (was hardcoded 5)
             )
 
         buf = self._streaming_buffer  # N3 buffer (primary, backwards compat)
@@ -1417,28 +1421,41 @@ class PPMT:
 
         # Update streaming buffers with new symbols
         matchable_n3 = buf.update(new_symbols_n3, updated_sax_buffer_n3)
-        buf_n1.update(new_symbols_n1, updated_sax_buffer_n1)
-        buf_n2.update(new_symbols_n2, updated_sax_buffer_n2)
-        buf_n4.update(new_symbols_n4, updated_sax_buffer_n4)
+        matchable_n1 = buf_n1.update(new_symbols_n1, updated_sax_buffer_n1)
+        matchable_n2 = buf_n2.update(new_symbols_n2, updated_sax_buffer_n2)
+        matchable_n4 = buf_n4.update(new_symbols_n4, updated_sax_buffer_n4)
 
-        if not matchable_n3 or not buf.has_pattern():
+        # v2.1 FIX: Evaluate N1/N2 INDEPENDENTLY of N3.
+        # Old code did `if not matchable_n3 or not buf.has_pattern(): return None`
+        # which blocked N1/N2 evaluation when N3 (W=10) hadn't completed a
+        # window yet but N1 (W=24) already had P=5 patterns buffered.
+        # Now: if ANY level has a matchable pattern, we proceed with the match.
+        # Levels without enough symbols contribute 0.0 confidence (harmless).
+        has_any_pattern = (
+            buf.has_pattern() or
+            buf_n1.has_pattern() or
+            buf_n2.has_pattern() or
+            buf_n4.has_pattern()
+        )
+        if not has_any_pattern:
             return None
 
         # Get current patterns for matching (per-level)
-        current_pattern_n3 = buf.get_pattern()
-        current_pattern_n1 = buf_n1.get_pattern()
-        current_pattern_n2 = buf_n2.get_pattern()
-        current_pattern_n4 = buf_n4.get_pattern()
+        # Levels without enough symbols return empty list → confidence 0.0
+        current_pattern_n3 = buf.get_pattern() if buf.has_pattern() else []
+        current_pattern_n1 = buf_n1.get_pattern() if buf_n1.has_pattern() else []
+        current_pattern_n2 = buf_n2.get_pattern() if buf_n2.has_pattern() else []
+        current_pattern_n4 = buf_n4.get_pattern() if buf_n4.has_pattern() else []
 
         # Run 4-level match with per-level symbols
         result = self.match(
-            current_symbols=current_pattern_n3,
+            current_symbols=current_pattern_n3 if current_pattern_n3 else [],
             current_price=current_price,
             is_in_position=is_in_position,
             entry_price=entry_price,
             current_symbols_n1=current_pattern_n1 or None,
             current_symbols_n2=current_pattern_n2 or None,
-            current_symbols_n3=current_pattern_n3,
+            current_symbols_n3=current_pattern_n3 if current_pattern_n3 else None,
             current_symbols_n4=current_pattern_n4 or None,
         )
 
@@ -1446,7 +1463,7 @@ class PPMT:
         if result.signal.signal_type != SignalType.NO_SIGNAL:
             buf.record_match(
                 confidence=result.weighted_confidence,
-                matched_pattern=current_pattern_n3,
+                matched_pattern=current_pattern_n3 if current_pattern_n3 else [],
             )
 
         return result
