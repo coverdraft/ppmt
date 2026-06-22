@@ -86,7 +86,16 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
 .tag-broken{background:rgba(248,113,113,0.15);color:#f87171}
 .tag-signal{background:rgba(167,139,250,0.15);color:#a78bfa}
 .tag-wf{background:rgba(251,191,36,0.15);color:#fbbf24}
+
+/* Tab styles */
+.tab-btn{padding:4px 12px;font-size:0.7rem;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;border:1px solid #1e2a3d;border-radius:6px 6px 0 0;cursor:pointer;transition:all 0.2s}
+.tab-btn.active{background:#1a2334;color:#5fa8f5;border-bottom-color:#1a2334}
+.tab-btn:not(.active){background:#0b1019;color:#5a6878;border-bottom-color:#1e2a3d}
+.tab-btn:not(.active):hover{color:#8a9bb0}
+.tab-content{display:none}
+.tab-content.active{display:flex;flex-direction:column;flex:1}
 </style>
+<script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
 </head>
 <body class="flex flex-col h-screen">
 
@@ -287,53 +296,65 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
 
   </div>
 
-  <!-- RIGHT COLUMN: MEXC Live Placeholder (30%) -->
+  <!-- RIGHT COLUMN: Chart + MEXC (30%) -->
   <div class="flex flex-col p-2" style="width:30%">
-    <div class="panel flex-1 flex flex-col items-center justify-center">
-      <div class="panel-header w-full">
-        <svg class="w-3.5 h-3.5 text-red" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
-        MEXC Live Execution
+    <!-- Tab buttons -->
+    <div class="flex gap-1 mb-1">
+      <button class="tab-btn active" onclick="switchTab('chart')">Chart</button>
+      <button class="tab-btn" onclick="switchTab('mexc')">MEXC</button>
+    </div>
+    <div class="panel flex-1 flex flex-col overflow-hidden">
+      <!-- Tab: Chart -->
+      <div id="tabChart" class="tab-content active flex-1 min-h-0">
+        <div id="chartContainer" style="width:100%;height:100%"></div>
       </div>
-      <div class="flex-1 flex flex-col items-center justify-center p-6 text-center">
-        <!-- Lock icon -->
-        <div class="w-20 h-20 rounded-full bg-bg3 border-2 border-bdr2 flex items-center justify-center mb-5">
-          <svg class="w-10 h-10 text-txt3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/>
-          </svg>
+      <!-- Tab: MEXC (placeholder) -->
+      <div id="tabMexc" class="tab-content flex-1 flex flex-col items-center justify-center">
+        <div class="panel-header w-full">
+          <svg class="w-3.5 h-3.5 text-red" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
+          MEXC Live Execution
         </div>
-        <h3 class="text-base font-bold text-txt2 mb-2">Pending API Keys Integration</h3>
-        <p class="text-txt3 text-xs leading-relaxed max-w-[240px]">
-          MEXC Futures execution requires encrypted API credentials. 
-          This zone will activate when you configure your MEXC API keys 
-          through the authentication flow.
-        </p>
-        <div class="mt-6 space-y-2 text-left text-[0.65rem] text-txt3 max-w-[260px]">
-          <div class="flex items-start gap-2">
-            <span class="text-grn mt-0.5">1.</span>
-            <span>Set environment variable <code class="text-accent">PPMT_MOCK_LIVE=1</code> for testing</span>
+        <div class="flex-1 flex flex-col items-center justify-center p-6 text-center">
+          <!-- Lock icon -->
+          <div class="w-20 h-20 rounded-full bg-bg3 border-2 border-bdr2 flex items-center justify-center mb-5">
+            <svg class="w-10 h-10 text-txt3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/>
+            </svg>
           </div>
-          <div class="flex items-start gap-2">
-            <span class="text-yel mt-0.5">2.</span>
-            <span>Use <code class="text-accent">/ws/live-trading/{sym}/{tf}</code> with encrypted auth</span>
+          <h3 class="text-base font-bold text-txt2 mb-2">Pending API Keys Integration</h3>
+          <p class="text-txt3 text-xs leading-relaxed max-w-[240px]">
+            MEXC Futures execution requires encrypted API credentials. 
+            This zone will activate when you configure your MEXC API keys 
+            through the authentication flow.
+          </p>
+          <div class="mt-6 space-y-2 text-left text-[0.65rem] text-txt3 max-w-[260px]">
+            <div class="flex items-start gap-2">
+              <span class="text-grn mt-0.5">1.</span>
+              <span>Set environment variable <code class="text-accent">PPMT_MOCK_LIVE=1</code> for testing</span>
+            </div>
+            <div class="flex items-start gap-2">
+              <span class="text-yel mt-0.5">2.</span>
+              <span>Use <code class="text-accent">/ws/live-trading/{sym}/{tf}</code> with encrypted auth</span>
+            </div>
+            <div class="flex items-start gap-2">
+              <span class="text-red mt-0.5">3.</span>
+              <span>Real execution requires Fernet-encrypted API key + secret</span>
+            </div>
           </div>
-          <div class="flex items-start gap-2">
-            <span class="text-red mt-0.5">3.</span>
-            <span>Real execution requires Fernet-encrypted API key + secret</span>
-          </div>
-        </div>
-        <!-- Status bar -->
-        <div class="mt-8 w-full px-4 py-3 bg-bg3 rounded border border-bdr">
-          <div class="flex items-center justify-between text-xs">
-            <span class="text-txt3">Status</span>
-            <span class="text-red font-bold">OFFLINE</span>
-          </div>
-          <div class="flex items-center justify-between text-xs mt-1">
-            <span class="text-txt3">Exchange</span>
-            <span class="text-txt2">MEXC Futures</span>
-          </div>
-          <div class="flex items-center justify-between text-xs mt-1">
-            <span class="text-txt3">Auth</span>
-            <span class="text-txt3">Not configured</span>
+          <!-- Status bar -->
+          <div class="mt-8 w-full px-4 py-3 bg-bg3 rounded border border-bdr">
+            <div class="flex items-center justify-between text-xs">
+              <span class="text-txt3">Status</span>
+              <span class="text-red font-bold">OFFLINE</span>
+            </div>
+            <div class="flex items-center justify-between text-xs mt-1">
+              <span class="text-txt3">Exchange</span>
+              <span class="text-txt2">MEXC Futures</span>
+            </div>
+            <div class="flex items-center justify-between text-xs mt-1">
+              <span class="text-txt3">Auth</span>
+              <span class="text-txt3">Not configured</span>
+            </div>
           </div>
         </div>
       </div>
@@ -394,6 +415,8 @@ function connect() {
     document.getElementById('btnConnect').textContent = 'Disconnect';
     document.getElementById('btnConnect').classList.remove('bg-accent2','hover:bg-accent');
     document.getElementById('btnConnect').classList.add('bg-red2','hover:bg-red');
+    // Initialize chart on first connection
+    initChart();
   };
 
   S.ws.onclose = () => {
@@ -485,6 +508,8 @@ function handleCandle(data) {
     el.classList.remove('text-grn');
     el.classList.add('text-red');
   }
+  // Update chart candle
+  updateChartCandle(data);
   // Update live P&L if in position
   if (S.position && isOpen(S.position)) {
     updateLivePnL();
@@ -575,6 +600,9 @@ function updatePatternDisplay() {
 function handlePositionUpdate(data) {
   S.prevPosition = S.position ? {...S.position} : null;
   S.position = data;
+  
+  // Update chart markers for entry/exit
+  updateChartPosition(data);
   
   // Track real sequence: store current SAX when position is active
   if (isOpen(data) && S.brain.currentSAX.length > 0) {
@@ -918,6 +946,130 @@ function updateRiskDisplay() {
   document.getElementById('capitalInput').value = r.total_capital || 1000;
   document.getElementById('maxPos').textContent = r.max_positions || 3;
   document.getElementById('drawdown').textContent = ((r.current_drawdown || 0) * 100).toFixed(2) + '%';
+}
+
+// ─── Chart (lightweight-charts) ───────────────────────────────
+let chart = null;
+let candleSeries = null;
+let chartMarkers = [];
+let chartCreated = false;
+
+function initChart() {
+  const container = document.getElementById('chartContainer');
+  if (!container || chartCreated) return;
+  if (typeof LightweightCharts === 'undefined') return;
+
+  chart = LightweightCharts.createChart(container, {
+    width: container.clientWidth,
+    height: container.clientHeight,
+    layout: {
+      background: { color: '#0a0a0f' },
+      textColor: '#8a9bb0',
+      fontSize: 11,
+    },
+    grid: {
+      vertLines: { color: '#1a1a2e' },
+      horzLines: { color: '#1a1a2e' },
+    },
+    timeScale: {
+      timeVisible: true,
+      secondsVisible: false,
+      borderColor: '#1e2a3d',
+    },
+    rightPriceScale: {
+      borderColor: '#1e2a3d',
+    },
+    crosshair: {
+      vertLine: { color: '#5fa8f5', width: 1, style: 2 },
+      horzLine: { color: '#5fa8f5', width: 1, style: 2 },
+    },
+  });
+
+  candleSeries = chart.addCandlestickSeries({
+    upColor: '#22c55e',
+    downColor: '#ef4444',
+    borderUpColor: '#22c55e',
+    borderDownColor: '#ef4444',
+    wickUpColor: '#22c55e',
+    wickDownColor: '#ef4444',
+  });
+
+  // Resize observer
+  const ro = new ResizeObserver(entries => {
+    if (chart && entries.length > 0) {
+      const { width, height } = entries[0].contentRect;
+      chart.applyOptions({ width, height });
+    }
+  });
+  ro.observe(container);
+  chartCreated = true;
+}
+
+function updateChartCandle(data) {
+  if (!candleSeries) return;
+  // lightweight-charts needs time as Unix timestamp (seconds)
+  const ts = data.time || data.timestamp;
+  if (!ts) return;
+  const timeSec = typeof ts === 'number' && ts > 1e10 ? Math.floor(ts) : ts;
+  candleSeries.update({
+    time: timeSec,
+    open: data.open,
+    high: data.high,
+    low: data.low,
+    close: data.close,
+  });
+}
+
+function updateChartPosition(data) {
+  if (!candleSeries) return;
+  const isOpen = ['ACTIVE', 'BREAK_EVEN_SECURED', 'TP_EXTENDED'].includes(data.status);
+
+  if (isOpen && data.entry_price) {
+    // Entry marker
+    const isLong = data.direction === 'LONG';
+    const marker = {
+      time: Math.floor(Date.now() / 1000),
+      position: isLong ? 'belowBar' : 'aboveBar',
+      color: isLong ? '#22c55e' : '#ef4444',
+      shape: isLong ? 'arrowUp' : 'arrowDown',
+      text: data.direction,
+    };
+    chartMarkers = [marker]; // Reset — only one position at a time
+    candleSeries.setMarkers(chartMarkers);
+  } else if (!isOpen && data.close_price) {
+    // Exit marker
+    const won = data.pnl_pct && data.pnl_pct > 0;
+    const exitMarker = {
+      time: Math.floor(Date.now() / 1000),
+      position: won ? 'aboveBar' : 'belowBar',
+      color: won ? '#22c55e' : '#ef4444',
+      shape: won ? 'circle' : 'square',
+      text: data.close_reason || 'CLOSED',
+    };
+    chartMarkers.push(exitMarker);
+    candleSeries.setMarkers(chartMarkers);
+    // Clear markers after 3 seconds so chart stays clean
+    setTimeout(() => {
+      chartMarkers = [];
+      if (candleSeries) candleSeries.setMarkers([]);
+    }, 3000);
+  }
+}
+
+// ─── Tab Switching ────────────────────────────────────────────
+function switchTab(tab) {
+  document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+
+  if (tab === 'chart') {
+    document.getElementById('tabChart').classList.add('active');
+    document.querySelectorAll('.tab-btn')[0].classList.add('active');
+    // Initialize chart on first view
+    setTimeout(() => initChart(), 50);
+  } else {
+    document.getElementById('tabMexc').classList.add('active');
+    document.querySelectorAll('.tab-btn')[1].classList.add('active');
+  }
 }
 
 // ─── Utility Functions ─────────────────────────────────────────
