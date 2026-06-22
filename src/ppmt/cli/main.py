@@ -155,29 +155,36 @@ def build(symbol: str, timeframe: str, pattern_length: int):
     classifier = AssetClassifier()
     info = classifier.classify(symbol)
 
-    # Create engine
-    sax_config = config.get("sax", {})
+    # Create engine WITH timeframe — critical for per-TF windows (W=24 for 5m, etc.)
+    # v0.60.0 FIX: Previously CLI build() did NOT pass timeframe to PPMT(),
+    # so tries were built with default W=10/α=8 and saved WITHOUT timeframe key.
+    # The terminal loads with timeframe=5m → finds nothing. This fixes it.
     engine = PPMT(
         symbol=symbol,
         asset_class=info.asset_class,
-        sax_alphabet_size=sax_config.get("alphabet_size", 8),
-        sax_window_size=sax_config.get("window_size", 10),
-        sax_strategy=sax_config.get("strategy", "ohlcv"),
-        weight_profile=info.weight_profile,
+        dual_sax=True,
+        timeframe=timeframe,  # ← CRITICAL: enables per-TF SAX windows
     )
+
+    # Attach storage for cross-asset N1/N2 pool contributions
+    engine.attach_storage(storage)
 
     # Build Trie
     count = engine.build(df, pattern_length=pattern_length)
 
-    # Save Tries
+    # Save per-symbol tries with timeframe key
+    # N1/N2 are already saved by build() via the storage flush to shared pools.
+    # We save N3/N4 explicitly as a safety net (idempotent).
     for level, trie in [
-        ("n1", engine.trie_n1),
-        ("n2", engine.trie_n2),
         ("n3", engine.trie_n3),
         ("n4", engine.trie_n4),
     ]:
-        storage.save_trie(symbol, level, trie)
+        storage.save_trie(symbol, level, trie, timeframe=timeframe)
         console.print(f"  N{level[-1]} Trie: {trie.pattern_count} patterns, max depth {trie.max_depth}")
+
+    # Also show N1/N2 stats (they were saved to shared pools by build())
+    console.print(f"  N1 (universal pool): {engine.trie_n1.pattern_count} patterns")
+    console.print(f"  N2 (class pool): {engine.trie_n2.pattern_count} patterns")
 
     # Save engine state
     storage.save_engine_state(symbol, engine.get_stats())
