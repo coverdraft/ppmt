@@ -448,16 +448,30 @@ async def _run_backtest_async(symbol: str, timeframe: str, days: int):
 
 
 def _backtest_sync(symbol: str, timeframe: str, days: int, msg_queue: queue.Queue) -> None:
-    """Synchronous backtest logic — runs in a thread. Puts messages into msg_queue."""
+    """Synchronous backtest logic — runs in a thread. Puts messages into msg_queue.
+
+    CRITICAL: ALL SQLite connections must be created INSIDE this function
+    because SQLite objects can only be used in the thread that created them.
+    We create a NEW PPMTStorage instance here, not reuse the global singleton.
+    """
     import ccxt
+    import copy
     from ppmt.data.classifier import AssetClassifier
+    from ppmt.data.storage import PPMTStorage as _PPMTStorage
     from ppmt.core.trie import PPMTTrie, RegimePartitionedTrie
     from ppmt.core.regime import RegimeDetector
     from ppmt.core.profiles import SPREAD_ESTIMATES
-    from ppmt.core.thresholds import SignalThresholds
+    from ppmt.core.thresholds import SignalThresholds, TIMEFRAME_HARD_MOVE_FLOOR
+    from ppmt.engine.weights import AdaptiveWeights
+    from ppmt.core.sax import LEVEL_DUAL_ALPHA_CONFIG, LEVEL_DUAL_ALPHA_TF_OVERRIDES
 
     def _send(msg_type: str, data: dict):
         msg_queue.put({"type": msg_type, "data": data})
+
+    # Config F parameters (aligned with full_replay_v21.py Config F)
+    EV_THRESHOLD = 0.40
+    SL_MULT = 2.0
+    CONFIG_F_WEIGHTS = {"n1": 0.10, "n2": 0.00, "n3": 0.90, "n4": 0.00, "n5": 0.00}
 
     try:
         logger.info(f"[BACKTEST] _backtest_sync started: {symbol} {timeframe} {days}d")
@@ -469,16 +483,27 @@ def _backtest_sync(symbol: str, timeframe: str, days: int, msg_queue: queue.Queu
         weight_profile = info.weight_profile
         logger.info(f"[BACKTEST] Classified: {symbol} → {asset_class}/{weight_profile}")
 
-        # 2. Fetch historical data from Binance
+        # 2. Fetch historical data from Binance (paginated — Binance limit=1000 per request)
         logger.info(f"[BACKTEST] Fetching {days}d of {timeframe} data from Binance...")
-        exchange = ccxt.binance({"enableRateLimit": True})
+        exchange = ccxt.binance({"enableRateLimit": True, "options": {"defaultType": "spot"}})
         limit_candles = days * 288 if timeframe == "5m" else days * 96  # 288 = 24h/5m
-        # Also fetch extra for warmup (500 candles)
-        total_fetch = limit_candles + 500
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=total_fetch)
+        total_fetch = limit_candles + 500  # OOS + warmup
+        ohlcv = []
+        since = None
+        while len(ohlcv) < total_fetch:
+            batch = exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=1000)
+            if not batch:
+                break
+            # Avoid duplicates on pagination boundary
+            if ohlcv and batch[0][0] == ohlcv[-1][0]:
+                batch = batch[1:]
+            ohlcv.extend(batch)
+            if len(batch) < 1000:
+                break  # No more data available
+            since = batch[-1][0] + 1  # Start from next ms after last candle
         if len(ohlcv) < 500:
             raise ValueError(f"Not enough data for {symbol} {timeframe}: {len(ohlcv)} candles (need 500+warmup)")
-        logger.info(f"[BACKTEST] Fetched {len(ohlcv)} candles")
+        logger.info(f"[BACKTEST] Fetched {len(ohlcv)} candles (requested {total_fetch})")
 
         # 3. Build DataFrame
         df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
@@ -490,29 +515,69 @@ def _backtest_sync(symbol: str, timeframe: str, days: int, msg_queue: queue.Queu
         oos_df = df.iloc[500:]
         logger.info(f"[BACKTEST] {symbol} {timeframe}: {len(warmup_df)} warmup + {len(oos_df)} OOS candles")
 
-        # 4. Initialize PPMT engine
-        engine = PPMT(
-            symbol=symbol,
-            asset_class=asset_class,
-            weight_profile=weight_profile,
-            dual_sax=True,
-            min_confidence=0.08,
-            timeframe=timeframe,
-        )
-
-        # 5. Load tries from storage
-        storage = get_storage()
+        # 4. Create NEW PPMTStorage inside this thread (fixes SQLite thread error)
+        storage = _PPMTStorage()
         tries = storage.load_all_tries(symbol, asset_class, timeframe=timeframe)
-        engine.set_tries(
-            trie_n1=tries["n1"] if tries["n1"] else PPMTTrie(name="universal_empty"),
-            trie_n2=tries["n2"] if tries["n2"] else PPMTTrie(name="class_empty"),
-            trie_n3=tries["n3"] or PPMTTrie(name="n3_empty"),
-            trie_n4=tries["n4"] if tries["n4"] is not None else engine.trie_n4,
-        )
-        logger.info(f"[BACKTEST] Engine + tries loaded, starting warmup...")
 
-        # 6. Warmup
-        thresholds = SignalThresholds.paper()
+        # Log trie pattern counts for diagnostics
+        trie_counts = {}
+        for lvl in ("n1", "n2", "n3", "n4"):
+            t = tries.get(lvl)
+            trie_counts[lvl] = t.pattern_count if t else 0
+        logger.info(f"[BACKTEST] Tries loaded: N1={trie_counts['n1']} N2={trie_counts['n2']} N3={trie_counts['n3']} N4={trie_counts['n4']}")
+
+        if not tries.get("n1") and not tries.get("n2") and not tries.get("n3"):
+            raise ValueError(f"No tries found for {symbol} {timeframe}! Backtest cannot run.")
+
+        # 5. Override alpha + hard_move_floor for Config F (same as full_replay_v21.py)
+        saved_n3 = LEVEL_DUAL_ALPHA_CONFIG["n3"].copy()
+        saved_n4 = LEVEL_DUAL_ALPHA_CONFIG["n4"].copy()
+        saved_tf_overrides = copy.deepcopy(LEVEL_DUAL_ALPHA_TF_OVERRIDES)
+        saved_hmf = TIMEFRAME_HARD_MOVE_FLOOR.get(timeframe, 0.15)
+
+        LEVEL_DUAL_ALPHA_CONFIG["n3"] = {"price": 3, "volume": 0}
+        LEVEL_DUAL_ALPHA_CONFIG["n4"] = {"price": 3, "volume": 0}
+        for tf_k in LEVEL_DUAL_ALPHA_TF_OVERRIDES:
+            for lvl in ["n3", "n4"]:
+                LEVEL_DUAL_ALPHA_TF_OVERRIDES[tf_k].pop(lvl, None)
+        TIMEFRAME_HARD_MOVE_FLOOR[timeframe] = 0.10  # Config F: floor=0.10%
+
+        try:
+            # 6. Initialize PPMT engine
+            engine = PPMT(
+                symbol=symbol,
+                asset_class=asset_class,
+                weight_profile=weight_profile,
+                dual_sax=True,
+                min_confidence=0.08,
+                timeframe=timeframe,
+            )
+
+            # 7. Apply Config F weights: N1=10%, N2=0%, N3=90%, N4=0%
+            engine.weights = AdaptiveWeights(
+                n1_universal=CONFIG_F_WEIGHTS["n1"],
+                n2_asset_class=CONFIG_F_WEIGHTS["n2"],
+                n3_per_asset=CONFIG_F_WEIGHTS["n3"],
+                n4_per_asset_regime=CONFIG_F_WEIGHTS["n4"],
+                n5_btc_context=CONFIG_F_WEIGHTS["n5"],
+            )
+            logger.info(f"[BACKTEST] Config F applied: weights N1={CONFIG_F_WEIGHTS['n1']} N2={CONFIG_F_WEIGHTS['n2']} N3={CONFIG_F_WEIGHTS['n3']} N4={CONFIG_F_WEIGHTS['n4']}")
+
+            engine.set_tries(
+                trie_n1=tries["n1"] if tries["n1"] else PPMTTrie(name="empty_n1"),
+                trie_n2=tries["n2"] if tries["n2"] else PPMTTrie(name="empty_n2"),
+                trie_n3=tries["n3"] if tries["n3"] else PPMTTrie(name="empty_n3"),
+                trie_n4=tries["n4"] if tries["n4"] is not None else engine.trie_n4,
+            )
+        finally:
+            # Restore global state
+            LEVEL_DUAL_ALPHA_CONFIG["n3"] = saved_n3
+            LEVEL_DUAL_ALPHA_CONFIG["n4"] = saved_n4
+            LEVEL_DUAL_ALPHA_TF_OVERRIDES.clear()
+            LEVEL_DUAL_ALPHA_TF_OVERRIDES.update(saved_tf_overrides)
+            TIMEFRAME_HARD_MOVE_FLOOR[timeframe] = saved_hmf
+
+        # 8. Warmup
         for idx, row in warmup_df.iterrows():
             candle_df = pd.DataFrame(
                 {"open": [row["open"]], "high": [row["high"]], "low": [row["low"]],
@@ -525,7 +590,7 @@ def _backtest_sync(symbol: str, timeframe: str, days: int, msg_queue: queue.Queu
             )
         logger.info(f"[BACKTEST] Warmup done ({len(warmup_df)} candles), starting OOS replay...")
 
-        # 7. OOS replay
+        # 9. OOS replay (aligned with full_replay_v21.py)
         executor = PaperExecutor(capital_usdt=100.0)
         regime_detector = RegimeDetector()
         regime_window = []
@@ -541,29 +606,49 @@ def _backtest_sync(symbol: str, timeframe: str, days: int, msg_queue: queue.Queu
         peak_pnl = 0.0
         long_count = 0
         short_count = 0
+        total_signals = 0
+        signals_rejected_spread = 0
+        signals_rejected_ev = 0
 
-        # Config F parameters
-        EV_THRESHOLD = 0.40
-        SL_MULT = 2.0
+        spread_pct = SPREAD_ESTIMATES.get(asset_class, 0.050)
 
         for idx, row in oos_df.iterrows():
-            o, h, l, c, v = float(row["open"]), float(row["high"]), float(row["low"]), float(row["close"]), float(row["volume"])
+            o = float(row["open"])
+            h = float(row["high"])
+            l = float(row["low"])
+            c = float(row["close"])
+            v = float(row["volume"])
             current_price = c
 
-            # Check SL/TP if in position
+            # Check SL/TP if in position (uses high/low for intra-candle, like full_replay_v21.py)
             if executor.is_in_position:
                 pos = executor.position
-                closed = executor.check_price(current_price)
+                closed = None
+                if pos.direction == "LONG":
+                    if l <= pos.catastrophic_sl:
+                        closed = executor.force_close(pos.catastrophic_sl, "CATASTROPHIC_SL")
+                    elif l <= pos.current_sl:
+                        closed = executor.force_close(pos.current_sl, "CLOSED_BY_SL")
+                    elif h >= pos.current_tp:
+                        closed = executor.force_close(pos.current_tp, "CLOSED_BY_TP")
+                else:  # SHORT
+                    if h >= pos.catastrophic_sl:
+                        closed = executor.force_close(pos.catastrophic_sl, "CATASTROPHIC_SL")
+                    elif h >= pos.current_sl:
+                        closed = executor.force_close(pos.current_sl, "CLOSED_BY_SL")
+                    elif l <= pos.current_tp:
+                        closed = executor.force_close(pos.current_tp, "CLOSED_BY_TP")
+
                 if closed:
-                    pnl = closed.realized_pnl_pct if hasattr(closed, 'realized_pnl_pct') else 0.0
+                    pnl = closed.pnl_pct if hasattr(closed, 'pnl_pct') and closed.pnl_pct else 0.0
                     # Calculate P&L manually for reliability
                     if pos.direction == "LONG":
-                        pnl = ((current_price - pos.entry_price) / pos.entry_price) * 100.0
+                        pnl = ((closed.close_price - pos.entry_price) / pos.entry_price) * 100.0
                     else:
-                        pnl = ((pos.entry_price - current_price) / pos.entry_price) * 100.0
+                        pnl = ((pos.entry_price - closed.close_price) / pos.entry_price) * 100.0
 
-                    reason = "TP" if pnl > 0 else "SL"
-                    trades.append({"direction": pos.direction, "entry": pos.entry_price, "exit": current_price,
+                    reason = closed.close_reason or ("TP" if pnl > 0 else "SL")
+                    trades.append({"direction": pos.direction, "entry": pos.entry_price, "exit": closed.close_price,
                                    "pnl_pct": round(pnl, 2), "reason": reason})
                     if pnl > 0:
                         wins += 1
@@ -578,9 +663,11 @@ def _backtest_sync(symbol: str, timeframe: str, days: int, msg_queue: queue.Queu
 
                     _send("backtest_trade", {
                         "direction": pos.direction, "entry": round(pos.entry_price, 6),
-                        "exit": round(current_price, 6), "pnl_pct": round(pnl, 2),
+                        "exit": round(closed.close_price, 6), "pnl_pct": round(pnl, 2),
                         "close_reason": reason, "timestamp": int(idx.timestamp()),
                     })
+                    # Clear position so we can open a new one
+                    executor._position = None
                     continue  # Don't process this candle for new signals
 
             # Regime detection
@@ -593,7 +680,7 @@ def _backtest_sync(symbol: str, timeframe: str, days: int, msg_queue: queue.Queu
                     detected_regime = regime_detector.detect_simple(rw_df, timeframe=timeframe)
                     engine.set_regime(detected_regime)
                 except Exception:
-                    pass
+                    engine.set_regime("ranging")
 
             # Feed candle
             candle_df = pd.DataFrame(
@@ -609,96 +696,107 @@ def _backtest_sync(symbol: str, timeframe: str, days: int, msg_queue: queue.Queu
             # Signal gate
             if result and result.signal and result.signal.is_entry and not executor.is_in_position:
                 sig = result.signal
+                total_signals += 1
 
-                # Net EV Gate (Config F)
+                # Net EV Gate (Config F) — same logic as full_replay_v21.py
                 best_node = None
-                for _lvl, _mr in [("n3", result.n3_match), ("n1", result.n1_match),
-                                  ("n2", result.n2_match), ("n4", result.n4_match)]:
-                    if _mr and _mr.node and _mr.node.metadata.historical_count > 0:
+                for _mr in [result.n3_match, result.n1_match, result.n2_match, result.n4_match]:
+                    if _mr and _mr.node and _mr.node.metadata and _mr.node.metadata.historical_count > 0:
                         best_node = _mr.node
                         break
 
-                if best_node:
-                    favorable_pct = abs(best_node.metadata.max_favorable_pct)
-                    drawdown_pct = abs(best_node.metadata.max_drawdown_pct)
-                else:
-                    favorable_pct = abs(sig.expected_move_pct) if sig.expected_move_pct else 0.1
-                    drawdown_pct = 0.5
+                favorable_pct = abs(best_node.metadata.max_favorable_pct) if best_node else 0.0
+                drawdown_pct = abs(best_node.metadata.max_drawdown_pct) if best_node else 0.5
 
                 if favorable_pct < 0.001:
                     favorable_pct = abs(sig.expected_move_pct) if sig.expected_move_pct else 0.1
                 if drawdown_pct < 0.001:
                     drawdown_pct = 0.5
 
-                spread_pct = SPREAD_ESTIMATES.get(asset_class, 0.050)
                 net_favorable = favorable_pct - spread_pct
-                ev_passed = True
-                net_ev = 0.0
-                net_rr = 0.0
-
                 if net_favorable <= 0:
-                    ev_passed = False
-                else:
-                    net_rr = min(net_favorable / drawdown_pct, 3.0)
-                    net_ev = sig.confidence * net_rr
-                    if net_ev < EV_THRESHOLD:
-                        ev_passed = False
+                    signals_rejected_spread += 1
+                    continue
 
-                if ev_passed:
-                    # Open position
-                    pos = executor.open_position_sync(
-                        symbol=symbol,
-                        direction=sig.direction or "LONG",
-                        entry_price=current_price,
-                        expected_move_pct=sig.expected_move_pct or 1.0,
-                        predicted_path_symbols=sig.predicted_path_symbols if sig.predicted_path else None,
-                        size_usdt=100.0,
-                    )
+                net_rr = min(net_favorable / drawdown_pct, 3.0)
+                net_ev = sig.confidence * net_rr
 
-                    # Config F: SL = max(default 1.2×EM, drawdown_pct × 2.0)
-                    sl_dist_pct = abs(pos.entry_price - pos.current_sl) / pos.entry_price * 100.0
-                    dd_sl_pct = drawdown_pct * SL_MULT
-                    if dd_sl_pct > sl_dist_pct:
-                        extra = dd_sl_pct - sl_dist_pct
-                        if pos.direction == "LONG":
-                            pos.current_sl -= pos.entry_price * (extra / 100.0)
-                            pos.catastrophic_sl -= pos.entry_price * (extra / 100.0)
-                        else:
-                            pos.current_sl += pos.entry_price * (extra / 100.0)
-                            pos.catastrophic_sl += pos.entry_price * (extra / 100.0)
+                if net_ev < EV_THRESHOLD:
+                    signals_rejected_ev += 1
+                    continue
 
+                # Signal passed EV gate → open position
+                direction = sig.direction or "LONG"
+                expected_move_pct = sig.expected_move_pct or 1.0
+                pos = executor.open_position_sync(
+                    symbol=symbol,
+                    direction=direction,
+                    entry_price=current_price,
+                    expected_move_pct=expected_move_pct,
+                    predicted_path_symbols=sig.predicted_path_symbols if sig.predicted_path else None,
+                    size_usdt=100.0,
+                )
+
+                # Config F: SL = max(default 1.2×EM, drawdown_pct × 2.0)
+                sl_dist_pct = abs(pos.entry_price - pos.current_sl) / pos.entry_price * 100.0
+                dd_sl_pct = drawdown_pct * SL_MULT
+                if dd_sl_pct > sl_dist_pct:
+                    extra = dd_sl_pct - sl_dist_pct
                     if pos.direction == "LONG":
-                        long_count += 1
+                        pos.current_sl -= pos.entry_price * (extra / 100.0)
+                        pos.catastrophic_sl -= pos.entry_price * (extra / 100.0)
                     else:
-                        short_count += 1
+                        pos.current_sl += pos.entry_price * (extra / 100.0)
+                        pos.catastrophic_sl += pos.entry_price * (extra / 100.0)
 
-                    _send("backtest_signal", {
-                        "symbol": symbol, "direction": sig.direction or "LONG",
-                        "entry": round(current_price, 6), "confidence": round(sig.confidence, 3),
-                        "ev_score": round(net_ev, 2), "ev_passed": ev_passed,
-                        "timestamp": int(idx.timestamp()),
-                    })
+                if pos.direction == "LONG":
+                    long_count += 1
+                else:
+                    short_count += 1
 
-                    # Check entry candle for immediate SL/TP
-                    closed = executor.check_price(current_price)
-                    if closed:
-                        pnl = 0.0
-                        if pos.direction == "LONG":
-                            pnl = ((current_price - pos.entry_price) / pos.entry_price) * 100.0
-                        else:
-                            pnl = ((pos.entry_price - current_price) / pos.entry_price) * 100.0
-                        trades.append({"direction": pos.direction, "entry": pos.entry_price, "exit": current_price,
-                                       "pnl_pct": round(pnl, 2), "reason": "CANDLE"})
-                        if pnl > 0:
-                            wins += 1
-                            gross_profit += pnl
-                        else:
-                            losses += 1
-                            gross_loss += abs(pnl)
-                        total_pnl += pnl
-                        peak_pnl = max(peak_pnl, total_pnl)
-                        dd = peak_pnl - total_pnl
-                        max_drawdown = max(max_drawdown, dd)
+                _send("backtest_signal", {
+                    "symbol": symbol, "direction": direction,
+                    "entry": round(current_price, 6), "confidence": round(sig.confidence, 3),
+                    "ev_score": round(net_ev, 2), "ev_passed": True,
+                    "timestamp": int(idx.timestamp()),
+                })
+
+                # Check entry candle for immediate SL/TP (using high/low)
+                closed = None
+                if pos.direction == "LONG":
+                    if l <= pos.catastrophic_sl:
+                        closed = executor.force_close(pos.catastrophic_sl, "CATASTROPHIC_SL")
+                    elif l <= pos.current_sl:
+                        closed = executor.force_close(pos.current_sl, "CLOSED_BY_SL")
+                    elif h >= pos.current_tp:
+                        closed = executor.force_close(pos.current_tp, "CLOSED_BY_TP")
+                else:
+                    if h >= pos.catastrophic_sl:
+                        closed = executor.force_close(pos.catastrophic_sl, "CATASTROPHIC_SL")
+                    elif h >= pos.current_sl:
+                        closed = executor.force_close(pos.current_sl, "CLOSED_BY_SL")
+                    elif l <= pos.current_tp:
+                        closed = executor.force_close(pos.current_tp, "CLOSED_BY_TP")
+
+                if closed:
+                    pnl = 0.0
+                    if pos.direction == "LONG":
+                        pnl = ((closed.close_price - pos.entry_price) / pos.entry_price) * 100.0
+                    else:
+                        pnl = ((pos.entry_price - closed.close_price) / pos.entry_price) * 100.0
+                    trades.append({"direction": pos.direction, "entry": pos.entry_price, "exit": closed.close_price,
+                                   "pnl_pct": round(pnl, 2), "reason": closed.close_reason or "ENTRY_CANDLE"})
+                    if pnl > 0:
+                        wins += 1
+                        gross_profit += pnl
+                    else:
+                        losses += 1
+                        gross_loss += abs(pnl)
+                    total_pnl += pnl
+                    peak_pnl = max(peak_pnl, total_pnl)
+                    dd = peak_pnl - total_pnl
+                    max_drawdown = max(max_drawdown, dd)
+                    executor._position = None
 
         # Force-close any remaining position
         if executor.is_in_position:
@@ -724,15 +822,23 @@ def _backtest_sync(symbol: str, timeframe: str, days: int, msg_queue: queue.Queu
         wr = round((wins / total_trades * 100), 1) if total_trades > 0 else 0
         pf = round(gross_profit / gross_loss, 2) if gross_loss > 0 else 999.99
 
+        logger.info(
+            f"[BACKTEST] {symbol} {timeframe} {days}d: "
+            f"signals={total_signals} rejected_spread={signals_rejected_spread} rejected_ev={signals_rejected_ev} "
+            f"trades={total_trades} WR={wr}% PnL={round(total_pnl,2)}% PF={pf}"
+        )
+
         summary = {
             "trades": total_trades, "longs": long_count, "shorts": short_count,
             "wins": wins, "losses": losses, "wr": wr,
             "pnl_pct": round(total_pnl, 2), "profit_factor": pf,
             "max_drawdown": round(max_drawdown, 2),
+            "signals_total": total_signals,
+            "signals_rejected_spread": signals_rejected_spread,
+            "signals_rejected_ev": signals_rejected_ev,
         }
 
         _send("backtest_complete", summary)
-        logger.info(f"[BACKTEST] {symbol} {timeframe} {days}d: {summary}")
 
     except Exception as e:
         logger.error(f"[BACKTEST] _backtest_sync FAILED: {e}", exc_info=True)
