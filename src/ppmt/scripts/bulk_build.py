@@ -16,6 +16,9 @@ Usage (from repo root):
     # Force rebuild (overwrite existing tries)
     python3 scripts/bulk_build.py --force
 
+    # Clean all tries and rebuild from scratch
+    python3 scripts/bulk_build.py --clean --timeframe 5m
+
     # Dry run (show what would be built without building)
     python3 scripts/bulk_build.py --dry-run
 """
@@ -181,10 +184,23 @@ def main():
     parser.add_argument("--symbol", "-s", default=None, help="Build only this symbol")
     parser.add_argument("--timeframe", "-t", default=None, help="Build only this timeframe")
     parser.add_argument("--force", "-f", action="store_true", help="Rebuild even if tries exist")
+    parser.add_argument("--clean", "-c", action="store_true", help="DELETE all tries before building (fresh start)")
     parser.add_argument("--dry-run", action="store_true", help="Show what would be built without building")
     args = parser.parse_args()
 
     storage = PPMTStorage()
+
+    # --clean: wipe all tries before building
+    if args.clean:
+        cursor = storage._ensure_conn().cursor()
+        cursor.execute("SELECT COUNT(*) FROM tries")
+        old_count = cursor.fetchone()[0]
+        if old_count > 0:
+            cursor.execute("DELETE FROM tries")
+            storage._ensure_conn().commit()
+            console.print(f"[yellow]Cleaned {old_count} trie rows from database[/yellow]")
+        else:
+            console.print("[dim]No tries to clean[/dim]")
 
     # Discover available data
     available = get_available_data(storage)

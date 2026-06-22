@@ -16,6 +16,7 @@ Schema:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import time
@@ -24,6 +25,8 @@ from typing import Optional
 import pandas as pd
 
 from ppmt.core.trie import PPMTTrie, RegimePartitionedTrie
+
+logger = logging.getLogger("ppmt.storage")
 
 
 # v0.40.3 FIX-1C: Special storage keys for cross-asset pools.
@@ -131,7 +134,13 @@ class PPMTStorage:
         return self.conn
 
     def _create_tables(self) -> None:
-        """Create database tables if they don't exist."""
+        """Create database tables if they don't exist.
+
+        v0.60.0: Added _migrate_tries_schema() call to handle existing
+        databases where the tries table has PRIMARY KEY(symbol, level)
+        instead of PRIMARY KEY(symbol, timeframe, level). The ON CONFLICT
+        clause in save_trie requires the 3-column PK to work.
+        """
         cursor = self._ensure_conn().cursor()
 
         cursor.execute("""
@@ -175,6 +184,13 @@ class PPMTStorage:
                 PRIMARY KEY(symbol, timeframe, level)
             )
         """)
+
+        # v0.60.0: Migrate old tries table schema if needed.
+        # Old schema: PRIMARY KEY(symbol, level) — no timeframe column.
+        # New schema: PRIMARY KEY(symbol, timeframe, level) — with timeframe.
+        # CREATE TABLE IF NOT EXISTS won't alter an existing table,
+        # so we detect the old schema and rebuild it.
+        self._migrate_tries_schema()
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS engine_states (
@@ -294,6 +310,96 @@ class PPMTStorage:
         """)
 
         self._ensure_conn().commit()
+
+    def _migrate_tries_schema(self) -> None:
+        """v0.60.0: Migrate tries table from old schema to new schema.
+
+        Old DBs created before v0.54.0 have PRIMARY KEY(symbol, level) with
+        no timeframe column. The save_trie() ON CONFLICT(symbol, timeframe, level)
+        requires a 3-column PK. This method detects the old schema and rebuilds
+        the table, preserving existing data by adding timeframe='' to old rows.
+
+        Safe to call repeatedly — exits early if schema is already correct.
+        """
+        cursor = self._ensure_conn().cursor()
+
+        # Check if tries table exists
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='tries'"
+        )
+        if not cursor.fetchone():
+            return  # Table doesn't exist yet — _create_tables will make it
+
+        # Check current PK columns
+        cursor.execute("PRAGMA table_info(tries)")
+        columns = {row[1]: row for row in cursor.fetchall()}
+
+        # If timeframe column exists and PK is correct, nothing to do
+        if "timeframe" not in columns:
+            # Old schema detected — no timeframe column at all
+            # Rebuild table with new schema
+            logger.info(
+                "Migrating tries table: adding timeframe column to PRIMARY KEY"
+            )
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS tries_new (
+                    symbol TEXT NOT NULL,
+                    timeframe TEXT NOT NULL DEFAULT '',
+                    level TEXT NOT NULL,
+                    data TEXT NOT NULL,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY(symbol, timeframe, level)
+                )
+            """)
+            # Copy old data with timeframe=''
+            cursor.execute("""
+                INSERT INTO tries_new (symbol, timeframe, level, data, updated_at)
+                SELECT symbol, '', level, data, updated_at FROM tries
+            """)
+            cursor.execute("DROP TABLE tries")
+            cursor.execute("ALTER TABLE tries_new RENAME TO tries")
+            self._ensure_conn().commit()
+            logger.info("tries table migration complete — old rows have timeframe=''")
+            return
+
+        # Check if the PK includes timeframe
+        cursor.execute("PRAGMA index_list(tries)")
+        indexes = cursor.fetchall()
+        pk_cols = set()
+        for idx in indexes:
+            if idx[2] == 1:  # unique/pk flag
+                cursor.execute(f"PRAGMA index_info('{idx[1]}')")
+                for col_row in cursor.fetchall():
+                    pk_cols.add(col_row[2])
+
+        # If PK already has 3 cols (symbol, timeframe, level), we're fine
+        if len(pk_cols) >= 3 and "timeframe" in pk_cols:
+            return
+
+        # PK is (symbol, level) — need to rebuild with (symbol, timeframe, level)
+        logger.info(
+            "Migrating tries table: expanding PK from (symbol, level) "
+            "to (symbol, timeframe, level)"
+        )
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS tries_new (
+                symbol TEXT NOT NULL,
+                timeframe TEXT NOT NULL DEFAULT '',
+                level TEXT NOT NULL,
+                data TEXT NOT NULL,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY(symbol, timeframe, level)
+            )
+        """)
+        # Copy data — old rows get timeframe='' (their original default)
+        cursor.execute("""
+            INSERT OR IGNORE INTO tries_new (symbol, timeframe, level, data, updated_at)
+            SELECT symbol, timeframe, level, data, updated_at FROM tries
+        """)
+        cursor.execute("DROP TABLE tries")
+        cursor.execute("ALTER TABLE tries_new RENAME TO tries")
+        self._ensure_conn().commit()
+        logger.info("tries table PK migration complete")
 
     # === Asset Management ===
 
