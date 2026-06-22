@@ -465,8 +465,10 @@ function connect() {
       const msg = JSON.parse(event.data);
       handleMessage(msg);
     } catch(e) {
-      // Try parsing as plain text log
-      addLogEntry('RAW', event.data, 'info');
+      // v2.1 FIX: Don't add unparseable messages to the Learning Feed.
+      // Previously, NaN values in JSON caused parse failures which flooded
+      // the feed with RAW entries. Now we silently drop them.
+      console.warn('[WS] Unparseable message dropped:', event.data.substring(0, 100));
     }
   };
 }
@@ -870,6 +872,14 @@ function handleLogMessage(data) {
 }
 
 function addLogEntry(tag, message, level, timestamp) {
+  // v2.1 FIX: Only show Learning Feed entries with relevant tags.
+  // Prevents the feed from flooding with RAW/unfiltered messages.
+  const allowedTags = new Set([
+    'LEARN', 'PATTERN BROKEN', 'EV GATE', 'SIGNAL', 'WALK-FORWARD',
+    'DIVERGE', 'ERROR', 'INFO',
+  ]);
+  if (!allowedTags.has(tag.toUpperCase())) return;
+  
   const ts = timestamp || new Date().toTimeString().slice(0, 8);
   const entry = { ts, tag, message, level };
   S.logs.push(entry);

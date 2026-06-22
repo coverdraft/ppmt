@@ -65,8 +65,21 @@ _OPEN_POSITIONS: dict[str, dict] = {}  # {"SOL/USDT": {direction, entry, pnl_pct
 _LAST_NET_EV: dict[str, dict] = {}  # {"SOL/USDT": {ev_score, passed, net_rr, conf, ...}}
 
 # ─── v0.58.0 (TAREA 21): Log emitter helper ──────────────────
+# v2.1: Only emit logs with these tags to the Learning Feed.
+# Prevents noise from spurious tags flooding the frontend.
+_FEED_ALLOWED_TAGS = frozenset({
+    "LEARN", "PATTERN BROKEN", "EV GATE", "SIGNAL", "WALK-FORWARD",
+    "DIVERGE", "ERROR",
+})
+
 async def _emit_log(websocket, tag: str, message: str, level: str = "info"):
-    """Emit a structured log message through the WebSocket for the terminal feed."""
+    """Emit a structured log message through the WebSocket for the terminal feed.
+    
+    v2.1 FIX: Only emit if tag is in the allowlist. This prevents the Learning
+    Feed from filling with irrelevant entries (e.g. raw candle data).
+    """
+    if tag.upper() not in _FEED_ALLOWED_TAGS:
+        return
     try:
         await websocket.send_json({
             "type": "log",
@@ -689,16 +702,16 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                     "data": {
                         "current_sax_symbol": current_sax,
                         "active_path_ids": active_path_ids,
-                        "n1_confidence": round(n1_conf, 4),
-                        "n2_confidence": round(n2_conf, 4),
-                        "n3_confidence": round(n3_conf, 4),
-                        "n4_confidence": round(n4_conf, 4),
-                        "weighted_confidence": round(weighted_conf, 4),
+                        "n1_confidence": round(n1_conf if n1_conf and n1_conf == n1_conf else 0.0, 4),  # NaN guard
+                        "n2_confidence": round(n2_conf if n2_conf and n2_conf == n2_conf else 0.0, 4),
+                        "n3_confidence": round(n3_conf if n3_conf and n3_conf == n3_conf else 0.0, 4),
+                        "n4_confidence": round(n4_conf if n4_conf and n4_conf == n4_conf else 0.0, 4),
+                        "weighted_confidence": round(weighted_conf if weighted_conf and weighted_conf == weighted_conf else 0.0, 4),
                         "signal_type": signal_type,
                         "current_pattern": current_pattern,
-                        "ev_score": round(_ev_info.get("ev_score", 0.0), 3),
+                        "ev_score": round(_ev_info.get("ev_score", 0.0) or 0.0, 3),
                         "ev_passed": _ev_info.get("passed", False),
-                        "net_rr": round(_ev_info.get("net_rr", 0.0), 2),
+                        "net_rr": round(_ev_info.get("net_rr", 0.0) or 0.0, 2),
                     },
                 }
                 await websocket.send_json(brain_msg)
@@ -1158,7 +1171,7 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
             min_confidence=0.08, timeframe=timeframe,
         )
 
-        tries = storage.load_all_tries(symbol, asset_class)
+        tries = storage.load_all_tries(symbol, asset_class, timeframe=timeframe)
         n1, n2, n3, n4 = tries.get("n1"), tries.get("n2"), tries.get("n3"), tries.get("n4")
         n1c = n1.pattern_count if n1 else 0
         n2c = n2.pattern_count if n2 else 0
@@ -1384,7 +1397,7 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
                         except Exception:
                             pass
 
-                await websocket.send_json({"type": "brain_update", "data": {"current_sax_symbol": current_sax, "active_path_ids": active_path_ids, "n1_confidence": round(n1_conf, 4), "n2_confidence": round(n2_conf, 4), "weighted_confidence": round(weighted_conf, 4), "signal_type": signal_type}})
+                await websocket.send_json({"type": "brain_update", "data": {"current_sax_symbol": current_sax, "active_path_ids": active_path_ids, "n1_confidence": round(n1_conf if n1_conf and n1_conf == n1_conf else 0.0, 4), "n2_confidence": round(n2_conf if n2_conf and n2_conf == n2_conf else 0.0, 4), "weighted_confidence": round(weighted_conf if weighted_conf and weighted_conf == weighted_conf else 0.0, 4), "signal_type": signal_type}})
 
                 # ── ROUTED EXECUTION: paper vs live ────────────
                 if result and result.signal and result.signal.is_entry and not _in_pos:

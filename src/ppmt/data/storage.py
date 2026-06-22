@@ -667,12 +667,62 @@ class PPMTStorage:
             n1_symbol = symbol
             n2_symbol = symbol
 
-        return {
+        result = {
             "n1": self.load_trie(n1_symbol, "n1", timeframe=timeframe),
             "n2": self.load_trie(n2_symbol, "n2", timeframe=timeframe),
             "n3": self.load_trie(symbol, "n3", timeframe=timeframe),
             "n4": self.load_trie(symbol, "n4", timeframe=timeframe),
         }
+
+        # v2.1 FIX: If all tries are None with the given timeframe, try
+        # falling back to timeframe=''. This handles the common case where
+        # the schema migration preserved old data with timeframe='' but
+        # the caller queries with timeframe='5m'.
+        if all(v is None for v in result.values()) and timeframe:
+            logger.info(
+                f"load_all_tries: no tries found with timeframe='{timeframe}', "
+                f"falling back to timeframe=''"
+            )
+            result = {
+                "n1": self.load_trie(n1_symbol, "n1", timeframe=""),
+                "n2": self.load_trie(n2_symbol, "n2", timeframe=""),
+                "n3": self.load_trie(symbol, "n3", timeframe=""),
+                "n4": self.load_trie(symbol, "n4", timeframe=""),
+            }
+            if any(v is not None for v in result.values()):
+                logger.info(
+                    f"load_all_tries: found tries with timeframe='' (migrated data). "
+                    f"Re-run bulk_build to save with timeframe='{timeframe}'."
+                )
+
+        # Diagnostic: if still all None, log what's actually in the DB
+        if all(v is None for v in result.values()):
+            try:
+                cursor = self._ensure_conn().cursor()
+                cursor.execute(
+                    "SELECT symbol, timeframe, level, length(data) FROM tries "
+                    "WHERE symbol IN (?, ?, ?) ORDER BY symbol, level",
+                    (n1_symbol, n2_symbol, symbol),
+                )
+                rows = cursor.fetchall()
+                if rows:
+                    logger.warning(
+                        f"load_all_tries: tries exist in DB but not matching "
+                        f"query keys. DB rows for {n1_symbol}/{n2_symbol}/{symbol}:"
+                    )
+                    for r in rows:
+                        logger.warning(
+                            f"  symbol={r[0]!r} tf={r[1]!r} level={r[2]!r} bytes={r[3]}"
+                        )
+                else:
+                    logger.warning(
+                        f"load_all_tries: no tries rows at all for "
+                        f"{n1_symbol}/{n2_symbol}/{symbol}. Run bulk_build first."
+                    )
+            except Exception:
+                pass
+
+        return result
 
     def add_observation_to_universal_n1(
         self,
