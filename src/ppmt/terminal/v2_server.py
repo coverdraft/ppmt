@@ -615,8 +615,12 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                 active_path_ids = ["root"]
                 n1_conf = 0.0
                 n2_conf = 0.0
+                n3_conf = 0.0
+                n4_conf = 0.0
                 weighted_conf = 0.0
                 signal_type = "NO_SIGNAL"
+                direction = "FLAT"
+                direction_score = 0.0
                 _last_best_level = None  # Track last known active path level
 
                 if result is not None:
@@ -657,8 +661,12 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
 
                     n1_conf = result.n1_confidence
                     n2_conf = result.n2_confidence
+                    n3_conf = result.n3_confidence
+                    n4_conf = result.n4_confidence
                     weighted_conf = result.weighted_confidence
                     signal_type = result.signal.signal_type.value if result.signal else "NO_SIGNAL"
+                    direction = result.direction if hasattr(result, 'direction') else "FLAT"
+                    direction_score = result.direction_score if hasattr(result, 'direction_score') else 0.0
                 else:
                     # No SAX window completed this candle — still extract
                     # current buffer state so the frontend shows partial progress
@@ -692,7 +700,11 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                             if quick_result:
                                 n1_conf = quick_result.n1_confidence
                                 n2_conf = quick_result.n2_confidence
+                                n3_conf = quick_result.n3_confidence
+                                n4_conf = quick_result.n4_confidence
                                 weighted_conf = quick_result.weighted_confidence
+                                direction = quick_result.direction if hasattr(quick_result, 'direction') else "FLAT"
+                                direction_score = quick_result.direction_score if hasattr(quick_result, 'direction_score') else 0.0
                                 
                                 # Find best match for active path
                                 best_match = None
@@ -715,33 +727,12 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                                     _last_best_level = best_level
                                     logger.info(
                                         f"[WS] Quick match ({best_level}): path={active_path_ids} "
-                                        f"n1={n1_conf:.3f} n2={n2_conf:.3f} wconf={weighted_conf:.3f}"
+                                        f"n1={n1_conf:.3f} n2={n2_conf:.3f} n3={n3_conf:.3f} n4={n4_conf:.3f} wconf={weighted_conf:.3f}"
                                     )
                         except Exception as e:
                             logger.debug(f"[WS] Quick match failed: {e}")
                     else:
                         logger.debug(f"[WS] No pattern in buffer yet (buf={buf is not None}, symbols={len(buf._pattern_buffer) if buf else 0})")
-
-                # ─── Extract N3/N4 confidence from match results ──────
-                n3_conf = 0.0
-                n4_conf = 0.0
-                if result is not None:
-                    if result.n3_match and result.n3_match.node and result.n3_match.node.metadata:
-                        n3_conf = result.n3_match.node.metadata.confidence
-                    if result.n4_match and result.n4_match.node and result.n4_match.node.metadata:
-                        n4_conf = result.n4_match.node.metadata.confidence
-                else:
-                    # Also extract from quick_match result if available
-                    if result is None:
-                        try:
-                            _qr_n3 = getattr(engine, '_last_n3_match', None)
-                            _qr_n4 = getattr(engine, '_last_n4_match', None)
-                            if _qr_n3 and _qr_n3.node and _qr_n3.node.metadata:
-                                n3_conf = _qr_n3.node.metadata.confidence
-                            if _qr_n4 and _qr_n4.node and _qr_n4.node.metadata:
-                                n4_conf = _qr_n4.node.metadata.confidence
-                        except Exception:
-                            pass
 
                 # ─── Extract full current SAX pattern buffer ───────
                 current_pattern = []
@@ -768,6 +759,8 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                         "weighted_confidence": round(weighted_conf if weighted_conf and weighted_conf == weighted_conf else 0.0, 4),
                         "signal_type": signal_type,
                         "current_pattern": current_pattern,
+                        "direction": direction,
+                        "direction_score": round(direction_score, 4),
                         "ev_score": round(_ev_info.get("ev_score", 0.0) or 0.0, 3),
                         "ev_passed": _ev_info.get("passed", False),
                         "net_rr": round(_ev_info.get("net_rr", 0.0) or 0.0, 2),
@@ -1462,9 +1455,10 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
                     f" result={'YES' if result else 'no'} C={current_price:.6f}"
                 )
 
-                # brain_update (identical logic)
+                # brain_update (identical logic — now includes N3/N4/direction)
                 current_sax, active_path_ids = [], ["root"]
-                n1_conf, n2_conf, weighted_conf, signal_type = 0.0, 0.0, 0.0, "NO_SIGNAL"
+                n1_conf, n2_conf, n3_conf, n4_conf = 0.0, 0.0, 0.0, 0.0
+                weighted_conf, signal_type, direction, direction_score = 0.0, "NO_SIGNAL", "FLAT", 0.0
 
                 if result is not None:
                     if result.sax_symbols:
@@ -1478,8 +1472,11 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
                                 best_match, best_level = match, level
                     if best_match and best_match.node:
                         active_path_ids = _build_active_path_ids(best_match.node.get_backward_path())
-                    n1_conf, n2_conf, weighted_conf = result.n1_confidence, result.n2_confidence, result.weighted_confidence
+                    n1_conf, n2_conf, n3_conf, n4_conf = result.n1_confidence, result.n2_confidence, result.n3_confidence, result.n4_confidence
+                    weighted_conf = result.weighted_confidence
                     signal_type = result.signal.signal_type.value if result.signal else "NO_SIGNAL"
+                    direction = result.direction if hasattr(result, 'direction') else "FLAT"
+                    direction_score = result.direction_score if hasattr(result, 'direction_score') else 0.0
                 else:
                     buf = getattr(engine, '_streaming_buffer', None)
                     if buf and buf._pattern_buffer:
@@ -1489,7 +1486,11 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
                         try:
                             qr = engine.match(current_symbols=buf.get_pattern(), current_price=current_price, is_in_position=_in_pos, entry_price=_entry)
                             if qr:
-                                n1_conf, n2_conf, weighted_conf = qr.n1_confidence, qr.n2_confidence, qr.weighted_confidence
+                                n1_conf, n2_conf = qr.n1_confidence, qr.n2_confidence
+                                n3_conf, n4_conf = qr.n3_confidence, qr.n4_confidence
+                                weighted_conf = qr.weighted_confidence
+                                direction = qr.direction if hasattr(qr, 'direction') else "FLAT"
+                                direction_score = qr.direction_score if hasattr(qr, 'direction_score') else 0.0
                                 best_match = None
                                 for level, match in [("n3", qr.n3_match), ("n2", qr.n2_match), ("n4", qr.n4_match), ("n1", qr.n1_match)]:
                                     if match and match.node:
@@ -1501,7 +1502,27 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
                         except Exception:
                             pass
 
-                await websocket.send_json({"type": "brain_update", "data": {"current_sax_symbol": current_sax, "active_path_ids": active_path_ids, "n1_confidence": round(n1_conf if n1_conf and n1_conf == n1_conf else 0.0, 4), "n2_confidence": round(n2_conf if n2_conf and n2_conf == n2_conf else 0.0, 4), "weighted_confidence": round(weighted_conf if weighted_conf and weighted_conf == weighted_conf else 0.0, 4), "signal_type": signal_type}})
+                # Get last known EV score
+                _ev_info_live = _LAST_NET_EV.get(symbol, {})
+
+                await websocket.send_json({
+                    "type": "brain_update",
+                    "data": {
+                        "current_sax_symbol": current_sax,
+                        "active_path_ids": active_path_ids,
+                        "n1_confidence": round(n1_conf if n1_conf and n1_conf == n1_conf else 0.0, 4),
+                        "n2_confidence": round(n2_conf if n2_conf and n2_conf == n2_conf else 0.0, 4),
+                        "n3_confidence": round(n3_conf if n3_conf and n3_conf == n3_conf else 0.0, 4),
+                        "n4_confidence": round(n4_conf if n4_conf and n4_conf == n4_conf else 0.0, 4),
+                        "weighted_confidence": round(weighted_conf if weighted_conf and weighted_conf == weighted_conf else 0.0, 4),
+                        "signal_type": signal_type,
+                        "direction": direction,
+                        "direction_score": round(direction_score, 4),
+                        "ev_score": round(_ev_info_live.get("ev_score", 0.0) or 0.0, 3),
+                        "ev_passed": _ev_info_live.get("passed", False),
+                        "net_rr": round(_ev_info_live.get("net_rr", 0.0) or 0.0, 2),
+                    },
+                })
 
                 # ── ROUTED EXECUTION: paper vs live ────────────
                 if result and result.signal and result.signal.is_entry and not _in_pos:

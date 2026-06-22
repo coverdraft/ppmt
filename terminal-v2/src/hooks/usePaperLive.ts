@@ -36,6 +36,7 @@ export interface PaperLiveState {
   connected: boolean;
   candles: CandleMessage['data'][];
   brainUpdate: BrainUpdateMessage['data'] | null;
+  tickerPrice: number | null;  // v2.1: Real-time price from Binance ticker
   position: PositionState | null;
   error: string | null;
 }
@@ -51,6 +52,7 @@ export function usePaperLive(symbol: string | null, timeframe: string) {
     connected: false,
     candles: [],
     brainUpdate: null,
+    tickerPrice: null,
     position: null,
     error: null,
   });
@@ -84,9 +86,12 @@ export function usePaperLive(symbol: string | null, timeframe: string) {
           case 'candle':
             // Coerce time to integer — backend may send Timestamp objects or strings
             const candleData = { ...msg.data, time: Math.floor(Number(msg.data.time)) };
+            // v2.1: Extract ticker_price for real-time price display
+            const tp = (msg.data as Record<string, unknown>).ticker_price as number | null | undefined;
             setState((prev) => ({
               ...prev,
               candles: [...prev.candles.slice(-199), candleData],  // Keep last 200
+              tickerPrice: tp != null && tp > 0 ? tp : prev.tickerPrice,
             }));
             break;
 
@@ -141,6 +146,7 @@ export function usePaperLive(symbol: string | null, timeframe: string) {
       connected: false,
       candles: [],
       brainUpdate: null,
+      tickerPrice: null,
       position: null,
       error: null,
     });

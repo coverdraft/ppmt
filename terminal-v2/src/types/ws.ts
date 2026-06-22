@@ -14,6 +14,7 @@ export interface CandleMessage {
     high: number;
     low: number;
     close: number;
+    ticker_price?: number | null;  // v2.1: Real-time price from Binance ticker
   };
 }
 
@@ -24,8 +25,15 @@ export interface BrainUpdateMessage {
     active_path_ids: string[];
     n1_confidence: number;
     n2_confidence: number;
+    n3_confidence?: number;  // v2.1: Per-asset trie confidence
+    n4_confidence?: number;  // v2.1: Per-asset+regime trie confidence
     weighted_confidence: number;
     signal_type: string;
+    direction?: string;      // v2.1: Weighted direction vote (LONG/SHORT/FLAT)
+    direction_score?: number; // v2.1: Weighted direction score
+    ev_score?: number;       // v2.1: Net EV score
+    ev_passed?: boolean;     // v2.1: Whether signal passed EV gate
+    net_rr?: number;         // v2.1: Net risk:reward
   };
 }
 

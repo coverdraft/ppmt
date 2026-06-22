@@ -9,9 +9,17 @@ interface RightPanelProps {
     active_path_ids: string[];
     n1_confidence: number;
     n2_confidence: number;
+    n3_confidence?: number;
+    n4_confidence?: number;
     weighted_confidence: number;
     signal_type: string;
+    direction?: string;
+    direction_score?: number;
+    ev_score?: number;
+    ev_passed?: boolean;
   } | null;
+  /** Real-time ticker price */
+  tickerPrice?: number | null;
   /** Whether we're in live mode */
   isLive?: boolean;
 }
@@ -24,10 +32,10 @@ interface RightPanelProps {
  *   Block B: PositionCard + Walk-Forward strip (30% height)
  *   Block C: Trie Lab D3.js Radial Tree (60% height)
  */
-export default function RightPanel({ position, brainUpdate, isLive = false }: RightPanelProps) {
+export default function RightPanel({ position, brainUpdate, tickerPrice, isLive = false }: RightPanelProps) {
   return (
     <div className="w-full h-full flex flex-col gap-2 min-w-0">
-      {/* ─── Block A: BTC Context (10%) ──────────────────────── */}
+      {/* ─── Block A: BTC Context + Ticker Price (10%) ─────────── */}
       <div className="bg-[#0d0d14] border border-terminal-border rounded-lg px-4 py-2.5 flex-shrink-0">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -38,7 +46,15 @@ export default function RightPanel({ position, brainUpdate, isLive = false }: Ri
               </span>
             </span>
           </div>
+          {/* v2.1: Real-time ticker price display */}
           <div className="flex items-center gap-3 text-xs font-mono">
+            {isLive && (tickerPrice != null && tickerPrice > 0) && (
+              <span className="text-white font-semibold">
+                ${tickerPrice.toFixed(tickerPrice < 1 ? 6 : tickerPrice < 100 ? 4 : 2)}
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-2 text-[10px] font-mono">
             {isLive && brainUpdate ? (
               <>
                 <span className="text-gray-500">N1:</span>
@@ -47,10 +63,28 @@ export default function RightPanel({ position, brainUpdate, isLive = false }: Ri
                 <span className="text-gray-500">N2:</span>
                 <span className="text-gray-300">{brainUpdate.n2_confidence.toFixed(2)}</span>
                 <span className="text-terminal-border">|</span>
+                <span className="text-gray-500">N3:</span>
+                <span className={brainUpdate.n3_confidence != null && brainUpdate.n3_confidence > 0.2 ? 'text-cyan-400' : 'text-gray-500'}>
+                  {(brainUpdate.n3_confidence ?? 0).toFixed(2)}
+                </span>
+                <span className="text-terminal-border">|</span>
+                <span className="text-gray-500">N4:</span>
+                <span className={brainUpdate.n4_confidence != null && brainUpdate.n4_confidence > 0.2 ? 'text-purple-400' : 'text-gray-500'}>
+                  {(brainUpdate.n4_confidence ?? 0).toFixed(2)}
+                </span>
+                <span className="text-terminal-border">|</span>
                 <span className="text-gray-500">Conf:</span>
                 <span className="text-emerald-400 font-semibold">
                   {brainUpdate.weighted_confidence.toFixed(3)}
                 </span>
+                {brainUpdate.direction && brainUpdate.direction !== 'FLAT' && (
+                  <>
+                    <span className="text-terminal-border">|</span>
+                    <span className={brainUpdate.direction === 'LONG' ? 'text-emerald-400 font-semibold' : 'text-red-400 font-semibold'}>
+                      {brainUpdate.direction}
+                    </span>
+                  </>
+                )}
               </>
             ) : (
               <>

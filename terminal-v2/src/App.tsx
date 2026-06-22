@@ -115,6 +115,7 @@ export default function App() {
 
   const connected = isLiveTrading ? liveState.status === 'connected' : paperLive.connected;
   const error = isLiveTrading ? liveState.error : paperLive.error;
+  const tickerPrice = isLiveTrading ? liveState.tickerPrice : paperLive.tickerPrice;
 
   const handlePositionUpdate = useCallback(
     (updater: (prev: PositionState) => PositionState) => {
@@ -231,6 +232,7 @@ export default function App() {
               <RightPanel
                 position={position}
                 brainUpdate={brainUpdate}
+                tickerPrice={tickerPrice}
                 isLive={isLive}
               />
             </div>
