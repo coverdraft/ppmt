@@ -1199,6 +1199,11 @@ class PortfolioRunner:
             raw_result = eng.ppmt_engine.match_raw(pattern, current_price)
             if raw_result is not None:
                 confidence = raw_result.weighted_confidence
+                # v0.44.0: Weighted Direction Vote overrides
+                if raw_result.direction != "FLAT":
+                    prediction.direction = raw_result.direction
+                elif prediction.direction != "FLAT":
+                    prediction.direction = "FLAT"
 
         # Apply regime-aware confidence adjustment
         if cfg.regime_aware and eng.current_regime:

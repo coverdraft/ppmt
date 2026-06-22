@@ -81,6 +81,23 @@ class PPMTResult:
     weighted_confidence: float = 0.0
     sax_symbols: list[str] = field(default_factory=list)
 
+    # v0.44.0: Weighted Direction Vote
+    # Instead of picking direction from a single best_match level,
+    # each level votes with its direction_edge (±1 × confidence)
+    # weighted by the level's weight in the profile.
+    direction_score: float = 0.0
+    """Weighted direction score: positive=LONG, negative=SHORT, ~0=FLAT."""
+
+    direction: str = "FLAT"
+    """Final direction from weighted vote: 'LONG', 'SHORT', or 'FLAT'."""
+
+    n1_direction: str = "FLAT"
+    n2_direction: str = "FLAT"
+    n3_direction: str = "FLAT"
+    n4_direction: str = "FLAT"
+    n5_direction: str = "FLAT"
+    """Per-level direction from best_direction_p7()."""
+
     search_time_ms: float = 0.0
     """Time spent on pattern matching in milliseconds."""
 
@@ -1118,6 +1135,45 @@ class PPMT:
             n5_confidence=n5_conf,
         )
 
+        # ── v0.44.0: Weighted Direction Vote ──────────────────────
+        # Instead of picking direction from a single best_match level,
+        # each level votes with direction_edge = sign(+1/-1/0) × confidence.
+        # The weighted sum gives direction_score:
+        #   > 0 → LONG, < 0 → SHORT, ≈ 0 → FLAT (no trade)
+        _DIRECTION_MAP = {"LONG": 1.0, "SHORT": -1.0, "FLAT": 0.0}
+
+        n1_dir = n1_match.node.metadata.best_direction_p7() if n1_match.node else "FLAT"
+        n2_dir = n2_match.node.metadata.best_direction_p7() if n2_match.node else "FLAT"
+        n3_dir = n3_match.node.metadata.best_direction_p7() if n3_match.node else "FLAT"
+        n4_dir = n4_match.node.metadata.best_direction_p7() if n4_match.node else "FLAT"
+        n5_dir = n5_match.node.metadata.best_direction_p7() if n5_match and n5_match.node else "FLAT"
+
+        # Direction edge per level: ±1 × confidence (0 if FLAT or no match)
+        n1_dir_edge = _DIRECTION_MAP.get(n1_dir, 0.0) * n1_conf
+        n2_dir_edge = _DIRECTION_MAP.get(n2_dir, 0.0) * n2_conf
+        n3_dir_edge = _DIRECTION_MAP.get(n3_dir, 0.0) * n3_conf
+        n4_dir_edge = _DIRECTION_MAP.get(n4_dir, 0.0) * n4_conf
+        n5_dir_edge = _DIRECTION_MAP.get(n5_dir, 0.0) * n5_conf
+
+        # Weighted direction score using the same weight profile as confidence
+        direction_score = (
+            safe_weights.n1_universal * n1_dir_edge
+            + safe_weights.n2_asset_class * n2_dir_edge
+            + safe_weights.n3_per_asset * n3_dir_edge
+            + safe_weights.n4_per_asset_regime * n4_dir_edge
+            + safe_weights.n5_btc_context * n5_dir_edge
+        )
+
+        # Threshold for FLAT: if |direction_score| < epsilon → FLAT
+        # Using 0.001 as threshold (effectively zero for a ±1 range score)
+        DIRECTION_FLAT_THRESHOLD = 0.001
+        if direction_score > DIRECTION_FLAT_THRESHOLD:
+            direction = "LONG"
+        elif direction_score < -DIRECTION_FLAT_THRESHOLD:
+            direction = "SHORT"
+        else:
+            direction = "FLAT"
+
         search_time = (time.perf_counter() - start_time) * 1000.0
 
         return PPMTResult(
@@ -1133,6 +1189,13 @@ class PPMT:
             n5_confidence=n5_conf,
             weighted_confidence=weighted_conf,
             sax_symbols=current_symbols,
+            direction_score=direction_score,
+            direction=direction,
+            n1_direction=n1_dir,
+            n2_direction=n2_dir,
+            n3_direction=n3_dir,
+            n4_direction=n4_dir,
+            n5_direction=n5_dir,
             search_time_ms=search_time,
         )
 
@@ -1257,6 +1320,34 @@ class PPMT:
             n4_confidence=n4_conf,
         )
 
+        # ── v0.44.0: Weighted Direction Vote ──────────────────────
+        _DIRECTION_MAP = {"LONG": 1.0, "SHORT": -1.0, "FLAT": 0.0}
+
+        n1_dir = n1_match.node.metadata.best_direction_p7() if n1_match.node else "FLAT"
+        n2_dir = n2_match.node.metadata.best_direction_p7() if n2_match.node else "FLAT"
+        n3_dir = n3_match.node.metadata.best_direction_p7() if n3_match.node else "FLAT"
+        n4_dir = n4_match.node.metadata.best_direction_p7() if n4_match.node else "FLAT"
+
+        n1_dir_edge = _DIRECTION_MAP.get(n1_dir, 0.0) * n1_conf
+        n2_dir_edge = _DIRECTION_MAP.get(n2_dir, 0.0) * n2_conf
+        n3_dir_edge = _DIRECTION_MAP.get(n3_dir, 0.0) * n3_conf
+        n4_dir_edge = _DIRECTION_MAP.get(n4_dir, 0.0) * n4_conf
+
+        direction_score = (
+            safe_weights.n1_universal * n1_dir_edge
+            + safe_weights.n2_asset_class * n2_dir_edge
+            + safe_weights.n3_per_asset * n3_dir_edge
+            + safe_weights.n4_per_asset_regime * n4_dir_edge
+        )
+
+        DIRECTION_FLAT_THRESHOLD = 0.001
+        if direction_score > DIRECTION_FLAT_THRESHOLD:
+            direction = "LONG"
+        elif direction_score < -DIRECTION_FLAT_THRESHOLD:
+            direction = "SHORT"
+        else:
+            direction = "FLAT"
+
         # Determine best matching level
         best_level = "n1"
         best_conf = n1_conf
@@ -1322,6 +1413,24 @@ class PPMT:
                 trie_level=best_level,
             ) or Signal(signal_type=SignalType.NO_SIGNAL, symbol=self.symbol)
 
+        # ── v2.1 FIX: Override signal direction with weighted direction vote ──
+        # signal.py uses best_match.best_direction_p7() which is biased toward
+        # LONG (single level). The weighted direction vote across N1-N4 is the
+        # correct direction. Override the signal's signal_type if direction differs.
+        # If the weighted vote is FLAT (no clear direction), suppress the signal.
+        if signal.is_entry:
+            if direction == "FLAT":
+                # Weighted vote says no clear direction → suppress
+                signal = Signal(signal_type=SignalType.NO_SIGNAL, symbol=self.symbol)
+            else:
+                voted_type = SignalType.ENTRY_LONG if direction == "LONG" else SignalType.ENTRY_SHORT
+                if signal.signal_type != voted_type:
+                    logger.debug(
+                        f"Direction override: signal.py={signal.direction} → vote={direction} "
+                        f"(score={direction_score:.4f})"
+                    )
+                    signal.signal_type = voted_type
+
         search_time = (time.perf_counter() - start_time) * 1000.0
 
         return PPMTResult(
@@ -1336,6 +1445,12 @@ class PPMT:
             n4_confidence=n4_conf,
             weighted_confidence=weighted_conf,
             sax_symbols=current_symbols,
+            direction_score=direction_score,
+            direction=direction,
+            n1_direction=n1_dir,
+            n2_direction=n2_dir,
+            n3_direction=n3_dir,
+            n4_direction=n4_dir,
             search_time_ms=search_time,
         )
 

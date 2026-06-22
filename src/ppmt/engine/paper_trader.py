@@ -1607,6 +1607,17 @@ class PaperTrader:
                         weighted_confidence = prediction.confidence
                         best_trie_level = "n3"
 
+                    # v0.44.0: Weighted Direction Vote overrides
+                    # prediction.direction. Each level votes with its
+                    # P7 direction (±1 × confidence), weighted by the
+                    # weight profile.
+                    if ppmt_result.direction != "FLAT":
+                        prediction.direction = ppmt_result.direction
+                    elif prediction.direction != "FLAT":
+                        # Direction vote is FLAT but prediction has a
+                        # direction — levels disagree. Use FLAT (no trade).
+                        prediction.direction = "FLAT"
+
                 # Effective minimum confidence
                 effective_min_conf = cfg.min_confidence
 

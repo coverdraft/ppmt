@@ -425,6 +425,22 @@ def run_replay(
             stats.signals_rejected_overlap += 1
             continue
 
+        # ─── SL FIX: Use max(1.2×expected_move, drawdown_pct×1.1) ──
+        # The node's drawdown_pct reflects the max IS drawdown for this pattern.
+        # If that's larger than the default 1.2×expected_move SL, use it.
+        current_sl_distance_pct = abs(pos.entry_price - pos.current_sl) / pos.entry_price * 100.0
+        drawdown_sl_pct = drawdown_pct * 1.1  # 10% buffer over observed max drawdown
+
+        if drawdown_sl_pct > current_sl_distance_pct:
+            # Widen SL to drawdown-based level
+            extra_distance = drawdown_sl_pct - current_sl_distance_pct
+            if pos.direction == "LONG":
+                pos.current_sl -= pos.entry_price * (extra_distance / 100.0)
+                pos.catastrophic_sl -= pos.entry_price * (extra_distance / 100.0)
+            else:
+                pos.current_sl += pos.entry_price * (extra_distance / 100.0)
+                pos.catastrophic_sl += pos.entry_price * (extra_distance / 100.0)
+
         # ─── Check SL/TP on ENTRY candle ──────────────────
         # The entry candle's high/low may already hit SL/TP.
         # This is realistic: you enter, then the same candle

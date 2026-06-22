@@ -12,19 +12,23 @@ trie:
   min_occurrences: 3      # Minimum occurrences to store a pattern
   fuzzy_threshold: 0.85   # Fuzzy match similarity threshold (0-1)
 
-# 4-Level Weights (default for established assets)
+# 4-Level Weights (base for 15m; overridden for 5m/1m in weights.py)
 weights:
   default:
     n1_universal: 0.10
     n2_asset_class: 0.30
     n3_per_asset: 0.30
     n4_per_asset_regime: 0.30
-  # Meme/new assets: more weight on asset class
+  # Meme/new assets: more weight on asset class (15m baseline)
   meme:
     n1_universal: 0.10
     n2_asset_class: 0.60
     n3_per_asset: 0.20
     n4_per_asset_regime: 0.10
+
+# Per-timeframe overrides (see weights.py TIMEFRAME_WEIGHT_OVERRIDES)
+# 5m (v0.53.0): N1=10%, N2=0%, N3=55%, N4=35% — N2 too generic, removed
+# 1m (v0.52.0): N1=35%, N2=0%, N3=55%, N4=10%, N5=0% — micro-structure first
 
 # Asset Classes
 asset_classes:

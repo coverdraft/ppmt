@@ -158,6 +158,7 @@ def main():
         signal_gen = SignalGenerator(
             min_confidence=min_conf,
             min_risk_reward=min_rr,
+            timeframe=args.timeframe,
         )
 
         # Try to match the current pattern in the trie

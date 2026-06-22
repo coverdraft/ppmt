@@ -1264,6 +1264,18 @@ class RealtimeTrader:
                                 weighted_confidence = prediction.confidence
                                 best_trie_level = "n3"
 
+                            # v0.44.0: Weighted Direction Vote overrides
+                            # prediction.direction. Each level votes with its
+                            # P7 direction (±1 × confidence), weighted by the
+                            # weight profile. This replaces the single-level
+                            # direction from the PredictionEngine.
+                            if ppmt_result.direction != "FLAT":
+                                prediction.direction = ppmt_result.direction
+                            elif prediction.direction != "FLAT":
+                                # Direction vote is FLAT but prediction has a
+                                # direction — levels disagree. Use FLAT (no trade).
+                                prediction.direction = "FLAT"
+
                         # v0.46.0: BTC Context Filter
                         # Adjust confidence based on BTC market regime.
                         # Longs in BTC downtrend get penalized; shorts in BTC uptrend get penalized.
@@ -2219,6 +2231,12 @@ class RealtimeTrader:
                     if weighted_confidence <= 0 and prediction.confidence > 0:
                         weighted_confidence = prediction.confidence
                         best_trie_level = "n3"
+
+                    # v0.44.0: Weighted Direction Vote overrides
+                    if ppmt_result.direction != "FLAT":
+                        prediction.direction = ppmt_result.direction
+                    elif prediction.direction != "FLAT":
+                        prediction.direction = "FLAT"
 
                 # v0.46.0: BTC Context Filter (live mode)
                 if btc_filter is not None and btc_filter._btc_regime is not None and weighted_confidence > 0:

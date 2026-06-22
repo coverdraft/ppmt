@@ -476,6 +476,17 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
     tf_seconds = {"1m": 5, "5m": 10, "15m": 15, "1h": 30}
     poll_interval = tf_seconds.get(timeframe, 5)
 
+    # ─── v2.1 FIX: Regime detection for N4 ─────────────────────
+    # BUG: Without set_regime(), N4's RegimePartitionedTrie defaults
+    # to _current_regime="trending_up" → 100% LONG bias.
+    # Fix: maintain a rolling window of recent candles and call
+    # detect_simple() before each process_new_candle().
+    from ppmt.core.regime import RegimeDetector
+    _regime_detector = RegimeDetector()
+    _regime_window: list[dict] = []  # rolling OHLCV window for regime
+    _REGIME_WINDOW_SIZE = 10  # same as trie build uses
+    _last_regime = "ranging"  # default until we have data
+
     last_candle_ts = 0
 
     # ─── 6. Main poll loop ────────────────────────────────────
@@ -548,6 +559,24 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                     logger.info(
                         f"[WS] Candle: ts={ts_sec} C={current_price:.6f} ({symbol})"
                     )
+
+                    # ── v2.1 FIX: Update regime for N4 ────────────
+                    # Maintain rolling window of recent candles and
+                    # detect regime before feeding the candle to engine.
+                    _regime_window.append({"open": o, "high": h, "low": l, "close": c, "volume": v})
+                    if len(_regime_window) > _REGIME_WINDOW_SIZE:
+                        _regime_window = _regime_window[-_REGIME_WINDOW_SIZE:]
+                    if len(_regime_window) >= 2:
+                        try:
+                            _rw_df = pd.DataFrame(_regime_window)
+                            _detected_regime = _regime_detector.detect_simple(_rw_df, timeframe=timeframe)
+                            if _detected_regime != _last_regime:
+                                logger.info(f"[WS] Regime changed: {_last_regime} → {_detected_regime} ({symbol})")
+                                _last_regime = _detected_regime
+                            engine.set_regime(_detected_regime)
+                        except Exception as _re:
+                            # Don't block trading if regime detection fails
+                            logger.debug(f"[WS] Regime detection failed: {_re}")
 
                     candle_df = pd.DataFrame(
                         {"open": [o], "high": [h], "low": [l], "close": [c], "volume": [v]},
@@ -1255,6 +1284,13 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
     last_candle_ts = 0
     heartbeat_counter = 0  # ticks every loop iteration; used to throttle heartbeat
 
+    # ── v2.1 FIX: Regime detection for N4 (same as paper path) ──
+    from ppmt.core.regime import RegimeDetector
+    _regime_detector_live = RegimeDetector()
+    _regime_window_live: list[dict] = []
+    _REGIME_WINDOW_SIZE = 10
+    _last_regime_live = "ranging"
+
     # ─── v0.50.0: ENTREGABLE 11 — Mock Live Test state ────────
     # The mock injection runs as a separate asyncio task so it fires
     # independently of the candle poll loop (which may skip iterations
@@ -1389,6 +1425,21 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
                 _entry = _executor_position(executor).entry_price if _in_pos else None
                 if ts_sec > _last_engine_ts_live:
                     _last_engine_ts_live = ts_sec
+
+                    # ── v2.1 FIX: Update regime for N4 ────────────
+                    _regime_window_live.append({"open": o, "high": h, "low": l, "close": c, "volume": v})
+                    if len(_regime_window_live) > _REGIME_WINDOW_SIZE:
+                        _regime_window_live = _regime_window_live[-_REGIME_WINDOW_SIZE:]
+                    if len(_regime_window_live) >= 2:
+                        try:
+                            _rw_df = pd.DataFrame(_regime_window_live)
+                            _detected_regime = _regime_detector_live.detect_simple(_rw_df, timeframe=timeframe)
+                            if _detected_regime != _last_regime_live:
+                                logger.info(f"[WS-LIVE] Regime changed: {_last_regime_live} → {_detected_regime} ({symbol})")
+                                _last_regime_live = _detected_regime
+                            engine.set_regime(_detected_regime)
+                        except Exception as _re:
+                            logger.debug(f"[WS-LIVE] Regime detection failed: {_re}")
 
                     candle_df = pd.DataFrame(
                         {"open": [o], "high": [h], "low": [l], "close": [c], "volume": [v]},
