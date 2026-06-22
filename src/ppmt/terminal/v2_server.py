@@ -866,9 +866,9 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                             # 6. Net EV = confidence × min(Net_R:R, 3.0)
                             net_ev = sig.confidence * net_rr_capped
 
-                            # 7. Gate: Net EV must be >= 0.40 (v2.1 Config C)
+                            # 7. Gate: Net EV must be >= 0.40 (v2.1 Config F)
                             # v2.1: Lowered from 0.80 to 0.40 — validated 30-day OOS
-                            # Config C: P&L=+31.00%, PF=1.52, WR=45.7%
+                            # Config F: N3=90%, N4=0%, SL=2.0×drawdown, hard_move_floor=0.10%
                             _EV_THRESHOLD = 0.40
                             if net_ev < _EV_THRESHOLD:
                                 _NET_EV_STATS["rejected_ev_score"] += 1
@@ -905,8 +905,8 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                                             "spread_pct": spread_pct,
                                         },
                                     )
-                                    # v2.1 Config C: SL = max(default 1.2×EM, drawdown_pct × 1.5)
-                                    _SL_MULT = 1.5
+                                    # v2.1 Config F: SL = max(default 1.2×EM, drawdown_pct × 2.0)
+                                    _SL_MULT = 2.0
                                     current_sl_distance_pct = abs(pos.entry_price - pos.current_sl) / pos.entry_price * 100.0
                                     drawdown_sl_pct = drawdown_pct * _SL_MULT
                                     if drawdown_sl_pct > current_sl_distance_pct:
@@ -1596,7 +1596,7 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
                 # ── ROUTED EXECUTION: paper vs live ────────────
                 if result and result.signal and result.signal.is_entry and not _in_pos:
                     sig = result.signal
-                    # v2.1 Config C: Apply same EV gate to live path
+                    # v2.1 Config F: Apply same EV gate to live path
                     _live_best_node = None
                     for _lvl, _mr in [("n3", result.n3_match), ("n1", result.n1_match),
                                       ("n2", result.n2_match), ("n4", result.n4_match)]:
@@ -1636,8 +1636,8 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
                                 "predicted_path_symbols": sig.predicted_path_symbols if sig.predicted_path else None,
                             },
                         )
-                        # v2.1 Config C: SL = max(default 1.2×EM, drawdown_pct × 1.5)
-                        _SL_MULT_LIVE = 1.5
+                        # v2.1 Config F: SL = max(default 1.2×EM, drawdown_pct × 2.0)
+                        _SL_MULT_LIVE = 2.0
                         _live_sl_dist = abs(pos.entry_price - pos.current_sl) / pos.entry_price * 100.0
                         _live_dd_sl = _live_dd * _SL_MULT_LIVE
                         if _live_dd_sl > _live_sl_dist:

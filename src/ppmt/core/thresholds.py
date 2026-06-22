@@ -36,7 +36,7 @@ from typing import Dict, Optional
 #
 # The per-timeframe floor scales with typical candle volatility:
 #   1m: ~0.04% per candle → floor 0.10%
-#   5m: ~0.10% per candle → floor 0.15%
+#   5m: ~0.10% per candle → floor 0.10%  (v2.1 Config F: lowered from 0.15%)
 #   15m: ~0.20% per candle → floor 0.20%
 #   1h+: larger moves → floor 0.30-0.50%
 #
@@ -46,7 +46,7 @@ from typing import Dict, Optional
 
 TIMEFRAME_HARD_MOVE_FLOOR: Dict[str, float] = {
     "1m":  0.10,
-    "5m":  0.15,
+    "5m":  0.10,
     "15m": 0.20,
     "30m": 0.25,
     "1h":  0.30,

@@ -626,6 +626,13 @@ function handleBrainUpdate(data) {
   S.brain.evPassed = data.ev_passed || false;
   S.brain.netRR = data.net_rr || 0;
 
+  // v2.1 FIX: Update live price from brain_update too (arrives between candle polls)
+  if (data.ticker_price && data.ticker_price > 0) {
+    S.currentPrice = data.ticker_price;
+    const priceEl = document.getElementById('currentPrice');
+    priceEl.textContent = formatPrice(data.ticker_price);
+  }
+
   updateConfidenceBars();
   updateEVScore();
   updatePatternDisplay();

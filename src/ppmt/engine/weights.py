@@ -8,12 +8,12 @@ Distributes confidence across the Trie levels:
   N4: Per-Asset + Regime
   N5: Per-Asset + BTC Context (1m only)
 
-Default weights (5m): N1=10%, N2=0%, N3=55%, N4=35%  (v0.53.0: N2 removed)
+Default weights (5m): N1=10%, N2=0%, N3=90%, N4=0%  (v2.1 Config F: N3 dominant, N4=0% sparse)
 Default weights (1m): N1=35%, N2=0%, N3=55%, N4=10%, N5=0%
 Default weights (15m): N1=10%, N2=30%, N3=30%, N4=30%
 
 For meme/new assets (5m) — same as default (N2=0% for all):
-  N1=10%, N2=0%, N3=55%, N4=35%
+  N1=10%, N2=0%, N3=90%, N4=0%
 
 For meme assets (1m) — micro-structure prioritized:
   N1=35%, N2=0%, N3=55%, N4=10%, N5=0%
@@ -25,7 +25,8 @@ Weight redistribution rules:
   - Graduation thresholds are configurable
   - v0.52.0: 1m timeframe uses micro-structure-first weights where N3/N4
     (W=10 micro-structure) dominate over N1/N2 (W=60 macro context)
-  - v0.53.0: 5m also uses micro-structure-first weights (N2=0%, N3=55%, N4=35%)
+  - v0.53.0: 5m also uses micro-structure-first weights (N2=0%)
+  - v2.1: 5m Config F — N3=90%, N4=0% (sparse N4 data hurts more than it helps)
 """
 
 from __future__ import annotations
@@ -127,35 +128,34 @@ TIMEFRAME_WEIGHT_OVERRIDES = {
         },
     },
     "5m": {
-        # v2.1 (TERMINAL-v2.1): Config C — validated 30-day OOS on 4 tokens.
-        # P&L=+31.00%, PF=1.52, WR=45.7%, MaxDD=18.29%
-        # Key: N3=80% (per-asset dominant), N4=10% (sparse, regime-specific)
+        # v2.1 (TERMINAL-v2.1): Config F — N3=90% dominant, N4=0% (sparse data hurts).
+        # EV=0.40, SL=2.0×drawdown, hard_move_floor=0.10%
         "default": {
             "n1_universal": 0.10,
             "n2_asset_class": 0.00,
-            "n3_per_asset": 0.80,
-            "n4_per_asset_regime": 0.10,
+            "n3_per_asset": 0.90,
+            "n4_per_asset_regime": 0.00,
             "n5_btc_context": 0.00,
         },
         "meme": {
             "n1_universal": 0.10,
             "n2_asset_class": 0.00,
-            "n3_per_asset": 0.80,
-            "n4_per_asset_regime": 0.10,
+            "n3_per_asset": 0.90,
+            "n4_per_asset_regime": 0.00,
             "n5_btc_context": 0.00,
         },
         "new_launch": {
             "n1_universal": 0.10,
             "n2_asset_class": 0.00,
-            "n3_per_asset": 0.80,
-            "n4_per_asset_regime": 0.10,
+            "n3_per_asset": 0.90,
+            "n4_per_asset_regime": 0.00,
             "n5_btc_context": 0.00,
         },
         "blue_chip": {
             "n1_universal": 0.10,
             "n2_asset_class": 0.00,
-            "n3_per_asset": 0.80,
-            "n4_per_asset_regime": 0.10,
+            "n3_per_asset": 0.90,
+            "n4_per_asset_regime": 0.00,
             "n5_btc_context": 0.00,
         },
     },
