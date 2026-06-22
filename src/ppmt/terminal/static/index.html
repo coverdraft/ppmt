@@ -135,11 +135,17 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;bac
       <div id="statusDot" class="w-2 h-2 rounded-full bg-txt3"></div>
       <span id="statusText" class="text-txt3 text-xs">Disconnected</span>
     </div>
-    <!-- Current price -->
+    <!-- Current price + LIVE indicator -->
     <div class="h-5 w-px bg-bdr2"></div>
-    <div class="text-xs">
+    <div class="text-xs flex items-center gap-1.5">
       <span class="text-txt3">Price:</span>
       <span id="currentPrice" class="text-txt font-bold ml-1">--</span>
+    </div>
+    <!-- LIVE/STALE indicator -->
+    <div class="h-5 w-px bg-bdr2"></div>
+    <div class="flex items-center gap-1.5">
+      <div id="liveDot" class="w-2 h-2 rounded-full bg-txt3"></div>
+      <span id="liveLabel" class="text-xs font-bold text-txt3">OFFLINE</span>
     </div>
   </div>
 </header>
@@ -481,6 +487,7 @@ function disconnect() {
   S.connected = false;
   S.position = null;
   S.realSequence = [];
+  setLiveStatus('offline');  // v2.1: Reset LIVE indicator
   updatePositionPanel();
   updateSequencePanel();
 }
@@ -539,11 +546,64 @@ function handleCandle(data) {
     el.classList.remove('text-grn');
     el.classList.add('text-red');
   }
+  // v2.1: Update LIVE indicator
+  setLiveStatus('live');
+  // Ensure chart exists (may not if tab wasn't visible on connect)
+  if (!chartCreated) initChart();
   // Update chart candle
   updateChartCandle(data);
   // Update live P&L if in position
   if (S.position && isOpen(S.position)) {
     updateLivePnL();
+  }
+}
+
+// ─── LIVE/STALE Indicator ──────────────────────────────────────
+let _liveCheckInterval = null;
+
+function setLiveStatus(status) {
+  const dot = document.getElementById('liveDot');
+  const label = document.getElementById('liveLabel');
+  if (!dot || !label) return;
+  
+  // Remove all state classes
+  dot.classList.remove('bg-grn', 'bg-red', 'bg-txt3', 'dot-pulse');
+  label.classList.remove('text-grn', 'text-red', 'text-txt3');
+  
+  switch(status) {
+    case 'live':
+      dot.classList.add('bg-grn', 'dot-pulse');
+      label.classList.add('text-grn');
+      label.textContent = 'LIVE';
+      // Start stale check if not already running
+      if (!_liveCheckInterval) {
+        _liveCheckInterval = setInterval(checkStaleStatus, 5000);
+      }
+      break;
+    case 'stale':
+      dot.classList.add('bg-red');
+      label.classList.add('text-red');
+      label.textContent = 'STALE';
+      break;
+    case 'offline':
+    default:
+      dot.classList.add('bg-txt3');
+      label.classList.add('text-txt3');
+      label.textContent = 'OFFLINE';
+      if (_liveCheckInterval) {
+        clearInterval(_liveCheckInterval);
+        _liveCheckInterval = null;
+      }
+      break;
+  }
+}
+
+function checkStaleStatus() {
+  // If no candle received in 30 seconds, mark as STALE
+  if (!lastCandleTime) return;
+  const elapsed = Date.now() - lastCandleTime;
+  if (elapsed > 30000 && S.connected) {
+    setLiveStatus('stale');
   }
 }
 
@@ -997,6 +1057,7 @@ let chart = null;
 let candleSeries = null;
 let chartMarkers = [];
 let chartCreated = false;
+let lastCandleTime = 0;  // v2.1: track last candle timestamp for LIVE detection
 
 function initChart() {
   const container = document.getElementById('chartContainer');
@@ -1019,6 +1080,8 @@ function initChart() {
       timeVisible: true,
       secondsVisible: false,
       borderColor: '#1e2a3d',
+      barSpacing: 8,           // v2.1: tighter spacing for more data visible
+      minBarSpacing: 2,
     },
     rightPriceScale: {
       borderColor: '#1e2a3d',
@@ -1036,6 +1099,12 @@ function initChart() {
     borderDownColor: '#ef4444',
     wickUpColor: '#22c55e',
     wickDownColor: '#ef4444',
+  });
+
+  // v2.1: Auto-scroll to latest candle on every update
+  chart.timeScale().subscribeVisibleLogicalRangeChange(range => {
+    // If user scrolled far left, don't force-scroll
+    // But if they're near the edge, auto-follow
   });
 
   // Resize observer
@@ -1062,6 +1131,12 @@ function updateChartCandle(data) {
     low: data.low,
     close: data.close,
   });
+  // v2.1: Track last candle time for LIVE/STALE detection
+  lastCandleTime = Date.now();
+  // Auto-scroll to the latest candle
+  if (chart) {
+    chart.timeScale().scrollToRealTime();
+  }
 }
 
 function updateChartPosition(data) {

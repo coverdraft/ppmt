@@ -479,30 +479,32 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
     last_candle_ts = 0
 
     # ─── 6. Main poll loop ────────────────────────────────────
+    # v2.1 FIX: Separate UI price updates from engine candle processing.
+    # - UI gets the LATEST price on EVERY poll (forming candle updates)
+    # - Engine only gets CLOSED candles (new timestamp = new candle)
+    # This ensures the displayed price matches Binance in real-time.
+    _last_engine_ts = 0  # Last candle timestamp fed to engine
+    _last_ui_update = 0.0  # Timestamp of last UI update (monotonic)
     try:
         while True:
             try:
-                # Fetch latest candle
+                # Fetch latest candles (last 2: closed + forming)
                 ohlcv_raw = await exchange.fetch_ohlcv(api_symbol, timeframe, limit=2)
 
                 if not ohlcv_raw:
                     await asyncio.sleep(poll_interval)
                     continue
 
-                # Get the most recent closed candle
+                # ─── Always send current price to UI ─────────────
+                # The last element is the current (possibly forming) candle.
+                # This gives real-time price updates every poll interval.
                 latest = ohlcv_raw[-1]
                 ts_ms, o, h, l, c, v = latest
                 ts_sec = int(ts_ms / 1000)
-
-                # Skip if we've already processed this candle
-                if ts_sec <= last_candle_ts:
-                    await asyncio.sleep(poll_interval)
-                    continue
-
-                last_candle_ts = ts_sec
                 current_price = float(c)
 
-                # ─── Emit candle to frontend ──────────────────
+                # Emit candle to frontend on EVERY poll.
+                # candleSeries.update() handles overwriting the forming candle.
                 candle_msg = {
                     "type": "candle",
                     "data": {
@@ -514,22 +516,29 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                     },
                 }
                 await websocket.send_json(candle_msg)
-                logger.info(
-                    f"[WS] Candle: ts={ts_sec} C={float(c):.6f} ({symbol})"
-                )
+                _last_ui_update = time.monotonic()
 
-                # ─── Feed to PPMT engine ──────────────────────
-                candle_df = pd.DataFrame(
-                    {"open": [o], "high": [h], "low": [l], "close": [c], "volume": [v]},
-                    index=pd.DatetimeIndex([datetime.fromtimestamp(ts_sec, tz=timezone.utc)]),
-                )
+                # ─── Feed CLOSED candles to PPMT engine ──────────
+                # Only process when a NEW candle closes (timestamp changes).
+                # The forming candle would corrupt the SAX buffer.
+                result = None  # Reset on every tick
+                if ts_sec > _last_engine_ts:
+                    _last_engine_ts = ts_sec
+                    logger.info(
+                        f"[WS] Candle: ts={ts_sec} C={current_price:.6f} ({symbol})"
+                    )
 
-                result: Optional[PPMTResult] = engine.process_new_candle(
-                    candle_df=candle_df,
-                    current_price=current_price,
-                    is_in_position=executor.is_in_position,
-                    entry_price=executor.position.entry_price if executor.position else None,
-                )
+                    candle_df = pd.DataFrame(
+                        {"open": [o], "high": [h], "low": [l], "close": [c], "volume": [v]},
+                        index=pd.DatetimeIndex([datetime.fromtimestamp(ts_sec, tz=timezone.utc)]),
+                    )
+
+                    result: Optional[PPMTResult] = engine.process_new_candle(
+                        candle_df=candle_df,
+                        current_price=current_price,
+                        is_in_position=executor.is_in_position,
+                        entry_price=executor.position.entry_price if executor.position else None,
+                    )
 
                 # ─── SAX output log (ENTREGABLE 13 FIX) ───────
                 # Log current SAX buffer state on EVERY candle so we can
@@ -1314,6 +1323,9 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
         logger.info("[WS-LIVE-MOCK] Mock signal injection task started (10s/20s/30s)")
 
     # ─── 4. Main poll loop — routed execution + Walk-Forward ───
+    # v2.1 FIX: Same real-time price separation as paper-live path.
+    _last_engine_ts_live = 0
+    _last_ui_update_live = 0.0
     try:
         while True:
             try:
@@ -1325,27 +1337,28 @@ async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: s
                 latest = ohlcv_raw[-1]
                 ts_ms, o, h, l, c, v = latest
                 ts_sec = int(ts_ms / 1000)
-                if ts_sec <= last_candle_ts:
-                    await asyncio.sleep(poll_interval)
-                    continue
-                last_candle_ts = ts_sec
                 current_price = float(c)
 
+                # Always send current price to UI (forming candle updates)
                 await websocket.send_json({"type": "candle", "data": {"time": ts_sec, "open": float(o), "high": float(h), "low": float(l), "close": float(c)}})
+                _last_ui_update_live = time.monotonic()
 
-                candle_df = pd.DataFrame(
-                    {"open": [o], "high": [h], "low": [l], "close": [c], "volume": [v]},
-                    index=pd.DatetimeIndex([datetime.fromtimestamp(ts_sec, tz=timezone.utc)]),
-                )
-
-                # Position state — works for any IExecutor
+                # Only feed closed candles to engine
+                result = None
                 _in_pos = _executor_in_position(executor)
                 _entry = _executor_position(executor).entry_price if _in_pos else None
+                if ts_sec > _last_engine_ts_live:
+                    _last_engine_ts_live = ts_sec
 
-                result = engine.process_new_candle(
-                    candle_df=candle_df, current_price=current_price,
-                    is_in_position=_in_pos, entry_price=_entry,
-                )
+                    candle_df = pd.DataFrame(
+                        {"open": [o], "high": [h], "low": [l], "close": [c], "volume": [v]},
+                        index=pd.DatetimeIndex([datetime.fromtimestamp(ts_sec, tz=timezone.utc)]),
+                    )
+
+                    result = engine.process_new_candle(
+                        candle_df=candle_df, current_price=current_price,
+                        is_in_position=_in_pos, entry_price=_entry,
+                    )
 
                 # ─── SAX output log (ENTREGABLE 13 FIX) ───────
                 _sax_buf = getattr(engine, '_streaming_buffer', None)
