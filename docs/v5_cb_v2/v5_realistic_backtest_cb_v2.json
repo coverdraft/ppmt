@@ -1,0 +1,2409 @@
+{
+  "configs": [
+    {
+      "threshold": 0.5,
+      "use_gate": true,
+      "regime": "RECENT_2026",
+      "n_trades": 20086,
+      "win_rate": 0.8462610773673205,
+      "profit_factor": 4.6890472078295895,
+      "total_net_pnl_pct": 43060.919999999984,
+      "avg_net_pnl_pct": 2.143827541571243,
+      "total_gross_pnl_pct": 62745.20000000002,
+      "total_fees_pct": 14060.199999999997,
+      "total_slippage_pct": 5624.080000000003,
+      "avg_leverage": 7.0,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 6408,
+          "win_rate": 0.8475343320848939,
+          "pf": 4.735319761931837,
+          "total_pnl_pct": 13794.759999999997,
+          "avg_pnl_pct": 2.1527403245942565
+        },
+        "AVAXUSDT": {
+          "n_trades": 7027,
+          "win_rate": 0.8413263127935108,
+          "pf": 4.5167247965454225,
+          "total_pnl_pct": 14821.939999999995,
+          "avg_pnl_pct": 2.1092841895545744
+        },
+        "LINKUSDT": {
+          "n_trades": 6651,
+          "win_rate": 0.8502480829950383,
+          "pf": 4.8365684962070485,
+          "total_pnl_pct": 14444.219999999996,
+          "avg_pnl_pct": 2.1717365809652676
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 6581,
+          "win_rate": 0.7858987995745328,
+          "pf": 3.126882737954419,
+          "total_pnl_pct": 11327.819999999996,
+          "avg_pnl_pct": 1.7212915970217286
+        },
+        "5m": {
+          "n_trades": 13505,
+          "win_rate": 0.8756756756756757,
+          "pf": 5.999999999999998,
+          "total_pnl_pct": 31733.09999999999,
+          "avg_pnl_pct": 2.349729729729729
+        }
+      }
+    },
+    {
+      "threshold": 0.5,
+      "use_gate": true,
+      "regime": "RANGE_2025",
+      "n_trades": 17387,
+      "win_rate": 0.8470696497383102,
+      "profit_factor": 4.718343013942862,
+      "total_net_pnl_pct": 37373.13999999999,
+      "avg_net_pnl_pct": 2.149487548168171,
+      "total_gross_pnl_pct": 54412.400000000016,
+      "total_fees_pct": 12170.899999999998,
+      "total_slippage_pct": 4868.360000000002,
+      "avg_leverage": 7.0,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 5425,
+          "win_rate": 0.8447926267281106,
+          "pf": 4.636623559426409,
+          "total_pnl_pct": 11574.499999999998,
+          "avg_pnl_pct": 2.133548387096774
+        },
+        "AVAXUSDT": {
+          "n_trades": 5931,
+          "win_rate": 0.8563480020232676,
+          "pf": 5.078116849243608,
+          "total_pnl_pct": 13133.819999999998,
+          "avg_pnl_pct": 2.2144360141628727
+        },
+        "LINKUSDT": {
+          "n_trades": 6031,
+          "win_rate": 0.8399933676007295,
+          "pf": 4.472001535213969,
+          "total_pnl_pct": 12664.819999999996,
+          "avg_pnl_pct": 2.0999535732051062
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 5968,
+          "win_rate": 0.7997654155495979,
+          "pf": 3.4024174802417475,
+          "total_pnl_pct": 10851.959999999995,
+          "avg_pnl_pct": 1.8183579088471842
+        },
+        "5m": {
+          "n_trades": 11419,
+          "win_rate": 0.8717926263245468,
+          "pf": 5.792476219388786,
+          "total_pnl_pct": 26521.179999999993,
+          "avg_pnl_pct": 2.322548384271827
+        }
+      }
+    },
+    {
+      "threshold": 0.5,
+      "use_gate": false,
+      "regime": "RECENT_2026",
+      "n_trades": 101475,
+      "win_rate": 0.809421039664942,
+      "profit_factor": 3.617958720911303,
+      "total_net_pnl_pct": 191376.4999999999,
+      "avg_net_pnl_pct": 1.8859472776545938,
+      "total_gross_pnl_pct": 290822.00000000006,
+      "total_fees_pct": 71032.5,
+      "total_slippage_pct": 28413.000000000022,
+      "avg_leverage": 7.0,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 8455,
+          "win_rate": 0.8290952099349498,
+          "pf": 4.132513135973343,
+          "total_pnl_pct": 17110.1,
+          "avg_pnl_pct": 2.023666469544648
+        },
+        "AVAXUSDT": {
+          "n_trades": 9265,
+          "win_rate": 0.8245008094981112,
+          "pf": 4.002027242494646,
+          "total_pnl_pct": 18451.299999999996,
+          "avg_pnl_pct": 1.9915056664867776
+        },
+        "BONKUSDT": {
+          "n_trades": 11608,
+          "win_rate": 0.7676602343211578,
+          "pf": 2.8145538939013166,
+          "total_pnl_pct": 18498.759999999995,
+          "avg_pnl_pct": 1.5936216402481043
+        },
+        "BTCUSDT": {
+          "n_trades": 2651,
+          "win_rate": 0.8732553753300641,
+          "pf": 5.869157848324513,
+          "total_pnl_pct": 6184.219999999999,
+          "avg_pnl_pct": 2.3327876273104486
+        },
+        "DOGEUSDT": {
+          "n_trades": 8792,
+          "win_rate": 0.8191537761601456,
+          "pf": 3.85851385977172,
+          "total_pnl_pct": 17180.239999999994,
+          "avg_pnl_pct": 1.9540764331210185
+        },
+        "ETHUSDT": {
+          "n_trades": 6609,
+          "win_rate": 0.8500529580874565,
+          "pf": 4.829166199499196,
+          "total_pnl_pct": 14343.979999999996,
+          "avg_pnl_pct": 2.1703707066121947
+        },
+        "LINKUSDT": {
+          "n_trades": 8740,
+          "win_rate": 0.8362700228832952,
+          "pf": 4.350933043455754,
+          "total_pnl_pct": 18125.799999999996,
+          "avg_pnl_pct": 2.073890160183066
+        },
+        "PEPEUSDT": {
+          "n_trades": 11124,
+          "win_rate": 0.7669003955411723,
+          "pf": 2.8026024481867124,
+          "total_pnl_pct": 17668.27999999999,
+          "avg_pnl_pct": 1.588302768788205
+        },
+        "SHIBUSDT": {
+          "n_trades": 8151,
+          "win_rate": 0.8330266225003067,
+          "pf": 4.2498707377472975,
+          "total_pnl_pct": 16719.219999999994,
+          "avg_pnl_pct": 2.051186357502146
+        },
+        "SOLUSDT": {
+          "n_trades": 7795,
+          "win_rate": 0.8436177036561898,
+          "pf": 4.59538784067086,
+          "total_pnl_pct": 16566.899999999994,
+          "avg_pnl_pct": 2.1253239255933285
+        },
+        "WIFUSDT": {
+          "n_trades": 11908,
+          "win_rate": 0.7536949949613705,
+          "pf": 2.606672475407558,
+          "total_pnl_pct": 17812.75999999999,
+          "avg_pnl_pct": 1.4958649647295927
+        },
+        "XRPUSDT": {
+          "n_trades": 6377,
+          "win_rate": 0.8248392661125922,
+          "pf": 4.011406213733876,
+          "total_pnl_pct": 12714.939999999995,
+          "avg_pnl_pct": 1.9938748627881442
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 32390,
+          "win_rate": 0.7532880518678604,
+          "pf": 2.6009677553914807,
+          "total_pnl_pct": 48358.79999999998,
+          "avg_pnl_pct": 1.4930163630750226
+        },
+        "5m": {
+          "n_trades": 69085,
+          "win_rate": 0.8357385829051169,
+          "pf": 4.334100314625516,
+          "total_pnl_pct": 143017.69999999995,
+          "avg_pnl_pct": 2.0701700803358176
+        }
+      }
+    },
+    {
+      "threshold": 0.5,
+      "use_gate": false,
+      "regime": "RANGE_2025",
+      "n_trades": 83743,
+      "win_rate": 0.8293230478965407,
+      "profit_factor": 4.139166802708395,
+      "total_net_pnl_pct": 169601.45999999993,
+      "avg_net_pnl_pct": 2.0252613352757836,
+      "total_gross_pnl_pct": 251669.60000000006,
+      "total_fees_pct": 58620.1,
+      "total_slippage_pct": 23448.040000000015,
+      "avg_leverage": 7.0,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 7235,
+          "win_rate": 0.827505183137526,
+          "pf": 4.0865681386514705,
+          "total_pnl_pct": 14560.699999999995,
+          "avg_pnl_pct": 2.0125362819626806
+        },
+        "AVAXUSDT": {
+          "n_trades": 7857,
+          "win_rate": 0.8438335242458954,
+          "pf": 4.602915874309517,
+          "total_pnl_pct": 16710.539999999994,
+          "avg_pnl_pct": 2.126834669721267
+        },
+        "BONKUSDT": {
+          "n_trades": 9521,
+          "win_rate": 0.808843608864615,
+          "pf": 3.6044566544566528,
+          "total_pnl_pct": 17917.619999999995,
+          "avg_pnl_pct": 1.881905262052305
+        },
+        "BTCUSDT": {
+          "n_trades": 1758,
+          "win_rate": 0.873151308304892,
+          "pf": 5.863643912971267,
+          "total_pnl_pct": 4099.759999999998,
+          "avg_pnl_pct": 2.3320591581342427
+        },
+        "DOGEUSDT": {
+          "n_trades": 8014,
+          "win_rate": 0.8264287496880459,
+          "pf": 4.055941635380887,
+          "total_pnl_pct": 16068.079999999994,
+          "avg_pnl_pct": 2.005001247816321
+        },
+        "ETHUSDT": {
+          "n_trades": 5433,
+          "win_rate": 0.8507270384686177,
+          "pf": 4.85482029501758,
+          "total_pnl_pct": 11817.259999999998,
+          "avg_pnl_pct": 2.1750892692803236
+        },
+        "LINKUSDT": {
+          "n_trades": 8137,
+          "win_rate": 0.8214329605505715,
+          "pf": 3.918635772730748,
+          "total_pnl_pct": 16030.139999999996,
+          "avg_pnl_pct": 1.9700307238539998
+        },
+        "PEPEUSDT": {
+          "n_trades": 8119,
+          "win_rate": 0.810690971794556,
+          "pf": 3.6479433239355155,
+          "total_pnl_pct": 15384.179999999995,
+          "avg_pnl_pct": 1.8948368025618911
+        },
+        "SHIBUSDT": {
+          "n_trades": 5488,
+          "win_rate": 0.8427478134110787,
+          "pf": 4.565254710098277,
+          "total_pnl_pct": 11630.359999999997,
+          "avg_pnl_pct": 2.1192346938775506
+        },
+        "SOLUSDT": {
+          "n_trades": 7386,
+          "win_rate": 0.8368535066341728,
+          "pf": 4.369540494851697,
+          "total_pnl_pct": 15347.919999999995,
+          "avg_pnl_pct": 2.0779745464392088
+        },
+        "WIFUSDT": {
+          "n_trades": 9288,
+          "win_rate": 0.8252583979328165,
+          "pf": 4.023071130280002,
+          "total_pnl_pct": 18546.359999999993,
+          "avg_pnl_pct": 1.996808785529715
+        },
+        "XRPUSDT": {
+          "n_trades": 5507,
+          "win_rate": 0.8380243326675141,
+          "pf": 4.407282843381497,
+          "total_pnl_pct": 11488.539999999997,
+          "avg_pnl_pct": 2.086170328672598
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 30005,
+          "win_rate": 0.784835860689885,
+          "pf": 3.1072272706411477,
+          "total_pnl_pct": 51424.099999999984,
+          "avg_pnl_pct": 1.7138510248291945
+        },
+        "5m": {
+          "n_trades": 53738,
+          "win_rate": 0.8541627898321486,
+          "pf": 4.989262709181044,
+          "total_pnl_pct": 118177.35999999996,
+          "avg_pnl_pct": 2.199139528825039
+        }
+      }
+    },
+    {
+      "threshold": 0.55,
+      "use_gate": true,
+      "regime": "RECENT_2026",
+      "n_trades": 20086,
+      "win_rate": 0.8462610773673205,
+      "profit_factor": 4.6890472078295895,
+      "total_net_pnl_pct": 43060.919999999984,
+      "avg_net_pnl_pct": 2.143827541571243,
+      "total_gross_pnl_pct": 62745.20000000002,
+      "total_fees_pct": 14060.199999999997,
+      "total_slippage_pct": 5624.080000000003,
+      "avg_leverage": 7.0,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 6408,
+          "win_rate": 0.8475343320848939,
+          "pf": 4.735319761931837,
+          "total_pnl_pct": 13794.759999999997,
+          "avg_pnl_pct": 2.1527403245942565
+        },
+        "AVAXUSDT": {
+          "n_trades": 7027,
+          "win_rate": 0.8413263127935108,
+          "pf": 4.5167247965454225,
+          "total_pnl_pct": 14821.939999999995,
+          "avg_pnl_pct": 2.1092841895545744
+        },
+        "LINKUSDT": {
+          "n_trades": 6651,
+          "win_rate": 0.8502480829950383,
+          "pf": 4.8365684962070485,
+          "total_pnl_pct": 14444.219999999996,
+          "avg_pnl_pct": 2.1717365809652676
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 6581,
+          "win_rate": 0.7858987995745328,
+          "pf": 3.126882737954419,
+          "total_pnl_pct": 11327.819999999996,
+          "avg_pnl_pct": 1.7212915970217286
+        },
+        "5m": {
+          "n_trades": 13505,
+          "win_rate": 0.8756756756756757,
+          "pf": 5.999999999999998,
+          "total_pnl_pct": 31733.09999999999,
+          "avg_pnl_pct": 2.349729729729729
+        }
+      }
+    },
+    {
+      "threshold": 0.55,
+      "use_gate": true,
+      "regime": "RANGE_2025",
+      "n_trades": 17387,
+      "win_rate": 0.8470696497383102,
+      "profit_factor": 4.718343013942862,
+      "total_net_pnl_pct": 37373.13999999999,
+      "avg_net_pnl_pct": 2.149487548168171,
+      "total_gross_pnl_pct": 54412.400000000016,
+      "total_fees_pct": 12170.899999999998,
+      "total_slippage_pct": 4868.360000000002,
+      "avg_leverage": 7.0,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 5425,
+          "win_rate": 0.8447926267281106,
+          "pf": 4.636623559426409,
+          "total_pnl_pct": 11574.499999999998,
+          "avg_pnl_pct": 2.133548387096774
+        },
+        "AVAXUSDT": {
+          "n_trades": 5931,
+          "win_rate": 0.8563480020232676,
+          "pf": 5.078116849243608,
+          "total_pnl_pct": 13133.819999999998,
+          "avg_pnl_pct": 2.2144360141628727
+        },
+        "LINKUSDT": {
+          "n_trades": 6031,
+          "win_rate": 0.8399933676007295,
+          "pf": 4.472001535213969,
+          "total_pnl_pct": 12664.819999999996,
+          "avg_pnl_pct": 2.0999535732051062
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 5968,
+          "win_rate": 0.7997654155495979,
+          "pf": 3.4024174802417475,
+          "total_pnl_pct": 10851.959999999995,
+          "avg_pnl_pct": 1.8183579088471842
+        },
+        "5m": {
+          "n_trades": 11419,
+          "win_rate": 0.8717926263245468,
+          "pf": 5.792476219388786,
+          "total_pnl_pct": 26521.179999999993,
+          "avg_pnl_pct": 2.322548384271827
+        }
+      }
+    },
+    {
+      "threshold": 0.55,
+      "use_gate": false,
+      "regime": "RECENT_2026",
+      "n_trades": 95084,
+      "win_rate": 0.8277523032266206,
+      "profit_factor": 4.0936531842625365,
+      "total_net_pnl_pct": 191524.47999999992,
+      "avg_net_pnl_pct": 2.014266122586344,
+      "total_gross_pnl_pct": 284706.80000000005,
+      "total_fees_pct": 66558.8,
+      "total_slippage_pct": 26623.52000000002,
+      "avg_leverage": 7.0,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 7969,
+          "win_rate": 0.8477851675241561,
+          "pf": 4.744526884675276,
+          "total_pnl_pct": 17169.179999999993,
+          "avg_pnl_pct": 2.154496172669092
+        },
+        "AVAXUSDT": {
+          "n_trades": 8790,
+          "win_rate": 0.8414106939704209,
+          "pf": 4.519581274244113,
+          "total_pnl_pct": 18545.799999999996,
+          "avg_pnl_pct": 2.109874857792946
+        },
+        "BONKUSDT": {
+          "n_trades": 10742,
+          "win_rate": 0.7851424315769875,
+          "pf": 3.11287630785031,
+          "total_pnl_pct": 18433.23999999999,
+          "avg_pnl_pct": 1.7159970210389117
+        },
+        "BTCUSDT": {
+          "n_trades": 2534,
+          "win_rate": 0.8847671665351223,
+          "pf": 6.540588533739217,
+          "total_pnl_pct": 6115.48,
+          "avg_pnl_pct": 2.413370165745856
+        },
+        "DOGEUSDT": {
+          "n_trades": 8253,
+          "win_rate": 0.8361807827456682,
+          "pf": 4.348098838483452,
+          "total_pnl_pct": 17110.659999999993,
+          "avg_pnl_pct": 2.073265479219677
+        },
+        "ETHUSDT": {
+          "n_trades": 6206,
+          "win_rate": 0.868836609732517,
+          "pf": 5.642733642733642,
+          "total_pnl_pct": 14285.319999999998,
+          "avg_pnl_pct": 2.3018562681276182
+        },
+        "LINKUSDT": {
+          "n_trades": 8229,
+          "win_rate": 0.8529590472718435,
+          "pf": 4.941444750535658,
+          "total_pnl_pct": 18027.379999999994,
+          "avg_pnl_pct": 2.1907133309029034
+        },
+        "PEPEUSDT": {
+          "n_trades": 10243,
+          "win_rate": 0.7883432588108953,
+          "pf": 3.172833811671449,
+          "total_pnl_pct": 17806.459999999992,
+          "avg_pnl_pct": 1.738402811676266
+        },
+        "SHIBUSDT": {
+          "n_trades": 7750,
+          "win_rate": 0.8482580645161291,
+          "pf": 4.761967750062987,
+          "total_pnl_pct": 16722.999999999993,
+          "avg_pnl_pct": 2.157806451612902
+        },
+        "SOLUSDT": {
+          "n_trades": 7342,
+          "win_rate": 0.8617542903840916,
+          "pf": 5.310016420361245,
+          "total_pnl_pct": 16536.239999999998,
+          "avg_pnl_pct": 2.2522800326886405
+        },
+        "WIFUSDT": {
+          "n_trades": 10986,
+          "win_rate": 0.7734389222647006,
+          "pf": 2.908069580227072,
+          "total_pnl_pct": 17951.91999999999,
+          "avg_pnl_pct": 1.634072455852903
+        },
+        "XRPUSDT": {
+          "n_trades": 6040,
+          "win_rate": 0.8432119205298013,
+          "pf": 4.581289843169462,
+          "total_pnl_pct": 12819.799999999997,
+          "avg_pnl_pct": 2.122483443708609
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 29523,
+          "win_rate": 0.7745825288757917,
+          "pf": 2.927144725491832,
+          "total_pnl_pct": 48479.05999999998,
+          "avg_pnl_pct": 1.6420777021305417
+        },
+        "5m": {
+          "n_trades": 65561,
+          "win_rate": 0.8516953676728543,
+          "pf": 4.892081014471223,
+          "total_pnl_pct": 143045.41999999995,
+          "avg_pnl_pct": 2.1818675737099795
+        }
+      }
+    },
+    {
+      "threshold": 0.55,
+      "use_gate": false,
+      "regime": "RANGE_2025",
+      "n_trades": 79024,
+      "win_rate": 0.8466921441587366,
+      "profit_factor": 4.704626954647588,
+      "total_net_pnl_pct": 169652.27999999994,
+      "avg_net_pnl_pct": 2.1468450091111553,
+      "total_gross_pnl_pct": 247095.80000000005,
+      "total_fees_pct": 55316.8,
+      "total_slippage_pct": 22126.720000000016,
+      "avg_leverage": 7.0,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 6828,
+          "win_rate": 0.8459285295840656,
+          "pf": 4.677087734121954,
+          "total_pnl_pct": 14622.159999999996,
+          "avg_pnl_pct": 2.141499707088459
+        },
+        "AVAXUSDT": {
+          "n_trades": 7486,
+          "win_rate": 0.8563986107400481,
+          "pf": 5.080206718346253,
+          "total_pnl_pct": 16579.919999999995,
+          "avg_pnl_pct": 2.214790275180336
+        },
+        "BONKUSDT": {
+          "n_trades": 8906,
+          "win_rate": 0.8294408264091624,
+          "pf": 4.142613317728524,
+          "total_pnl_pct": 18044.319999999992,
+          "avg_pnl_pct": 2.0260857848641356
+        },
+        "BTCUSDT": {
+          "n_trades": 1691,
+          "win_rate": 0.8852749852158486,
+          "pf": 6.573310423825887,
+          "total_pnl_pct": 4087.0199999999986,
+          "avg_pnl_pct": 2.4169248965109396
+        },
+        "DOGEUSDT": {
+          "n_trades": 7562,
+          "win_rate": 0.8426342237503306,
+          "pf": 4.561344537815125,
+          "total_pnl_pct": 16019.639999999996,
+          "avg_pnl_pct": 2.1184395662523134
+        },
+        "ETHUSDT": {
+          "n_trades": 5136,
+          "win_rate": 0.8685747663551402,
+          "pf": 5.629794238683127,
+          "total_pnl_pct": 11812.919999999998,
+          "avg_pnl_pct": 2.300023364485981
+        },
+        "LINKUSDT": {
+          "n_trades": 7677,
+          "win_rate": 0.8400416829490687,
+          "pf": 4.473609603088429,
+          "total_pnl_pct": 16123.939999999995,
+          "avg_pnl_pct": 2.10029178064348
+        },
+        "PEPEUSDT": {
+          "n_trades": 7632,
+          "win_rate": 0.8296645702306079,
+          "pf": 4.149173789173789,
+          "total_pnl_pct": 15475.039999999994,
+          "avg_pnl_pct": 2.027651991614255
+        },
+        "SHIBUSDT": {
+          "n_trades": 5205,
+          "win_rate": 0.8610951008645533,
+          "pf": 5.280774550484092,
+          "total_pnl_pct": 11699.099999999997,
+          "avg_pnl_pct": 2.2476657060518725
+        },
+        "SOLUSDT": {
+          "n_trades": 6988,
+          "win_rate": 0.8534630795649685,
+          "pf": 4.961371527777775,
+          "total_pnl_pct": 15333.359999999995,
+          "avg_pnl_pct": 2.194241556954779
+        },
+        "WIFUSDT": {
+          "n_trades": 8696,
+          "win_rate": 0.8429162833486661,
+          "pf": 4.5710644758961,
+          "total_pnl_pct": 18439.119999999995,
+          "avg_pnl_pct": 2.120413983440662
+        },
+        "XRPUSDT": {
+          "n_trades": 5217,
+          "win_rate": 0.8525972781291931,
+          "pf": 4.927226316042959,
+          "total_pnl_pct": 11415.739999999998,
+          "avg_pnl_pct": 2.188180946904351
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 27835,
+          "win_rate": 0.8040237111550207,
+          "pf": 3.494856910072307,
+          "total_pnl_pct": 51443.69999999998,
+          "avg_pnl_pct": 1.848165978085144
+        },
+        "5m": {
+          "n_trades": 51189,
+          "win_rate": 0.8698939225224169,
+          "pf": 5.695512178845511,
+          "total_pnl_pct": 118208.57999999996,
+          "avg_pnl_pct": 2.309257457656918
+        }
+      }
+    },
+    {
+      "threshold": 0.6,
+      "use_gate": true,
+      "regime": "RECENT_2026",
+      "n_trades": 18994,
+      "win_rate": 0.8621143519006002,
+      "profit_factor": 5.326106939318087,
+      "total_net_pnl_pct": 42827.67999999999,
+      "avg_net_pnl_pct": 2.254800463304201,
+      "total_gross_pnl_pct": 61441.80000000002,
+      "total_fees_pct": 13295.799999999997,
+      "total_slippage_pct": 5318.320000000002,
+      "avg_leverage": 7.0,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 6037,
+          "win_rate": 0.8636740102700017,
+          "pf": 5.396786823275278,
+          "total_pnl_pct": 13678.139999999998,
+          "avg_pnl_pct": 2.2657180718900114
+        },
+        "AVAXUSDT": {
+          "n_trades": 6676,
+          "win_rate": 0.8566506890353505,
+          "pf": 5.090638182592203,
+          "total_pnl_pct": 14797.719999999996,
+          "avg_pnl_pct": 2.216554823247453
+        },
+        "LINKUSDT": {
+          "n_trades": 6281,
+          "win_rate": 0.866422544180863,
+          "pf": 5.525360879353727,
+          "total_pnl_pct": 14351.819999999996,
+          "avg_pnl_pct": 2.28495780926604
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 6080,
+          "win_rate": 0.8041118421052632,
+          "pf": 3.496812513605124,
+          "total_pnl_pct": 11240.599999999997,
+          "avg_pnl_pct": 1.8487828947368417
+        },
+        "5m": {
+          "n_trades": 12914,
+          "win_rate": 0.8894223323524857,
+          "pf": 6.8517999792509565,
+          "total_pnl_pct": 31587.079999999994,
+          "avg_pnl_pct": 2.445956326467399
+        }
+      }
+    },
+    {
+      "threshold": 0.6,
+      "use_gate": true,
+      "regime": "RANGE_2025",
+      "n_trades": 16376,
+      "win_rate": 0.8637029799706888,
+      "profit_factor": 5.398114960838973,
+      "total_net_pnl_pct": 37106.71999999999,
+      "avg_net_pnl_pct": 2.265920859794821,
+      "total_gross_pnl_pct": 53155.20000000002,
+      "total_fees_pct": 11463.199999999997,
+      "total_slippage_pct": 4585.2800000000025,
+      "avg_leverage": 7.0,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 5094,
+          "win_rate": 0.8623871221044366,
+          "pf": 5.338352617953187,
+          "total_pnl_pct": 11495.679999999997,
+          "avg_pnl_pct": 2.2567098547310556
+        },
+        "AVAXUSDT": {
+          "n_trades": 5630,
+          "win_rate": 0.8699822380106572,
+          "pf": 5.699959522363893,
+          "total_pnl_pct": 13004.599999999997,
+          "avg_pnl_pct": 2.3098756660746
+        },
+        "LINKUSDT": {
+          "n_trades": 5652,
+          "win_rate": 0.8586341118188252,
+          "pf": 5.174013813563249,
+          "total_pnl_pct": 12606.439999999997,
+          "avg_pnl_pct": 2.2304387827317758
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 5487,
+          "win_rate": 0.818662292691817,
+          "pf": 3.84574725479248,
+          "total_pnl_pct": 10703.139999999996,
+          "avg_pnl_pct": 1.9506360488427184
+        },
+        "5m": {
+          "n_trades": 10889,
+          "win_rate": 0.8863991183763431,
+          "pf": 6.646785831911133,
+          "total_pnl_pct": 26403.579999999994,
+          "avg_pnl_pct": 2.4247938286344013
+        }
+      }
+    },
+    {
+      "threshold": 0.6,
+      "use_gate": false,
+      "regime": "RECENT_2026",
+      "n_trades": 88910,
+      "win_rate": 0.8454504555168147,
+      "profit_factor": 4.65998485203783,
+      "total_net_pnl_pct": 190103.19999999992,
+      "avg_net_pnl_pct": 2.1381531886177023,
+      "total_gross_pnl_pct": 277235.0000000001,
+      "total_fees_pct": 62237.0,
+      "total_slippage_pct": 24894.800000000017,
+      "avg_leverage": 7.0,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 7530,
+          "win_rate": 0.8636122177954847,
+          "pf": 5.3939557863608485,
+          "total_pnl_pct": 17057.599999999995,
+          "avg_pnl_pct": 2.2652855245683923
+        },
+        "AVAXUSDT": {
+          "n_trades": 8349,
+          "win_rate": 0.856030662354773,
+          "pf": 5.06504591113576,
+          "total_pnl_pct": 18469.779999999995,
+          "avg_pnl_pct": 2.2122146364834108
+        },
+        "BONKUSDT": {
+          "n_trades": 9860,
+          "win_rate": 0.8047667342799188,
+          "pf": 3.5113997113997097,
+          "total_pnl_pct": 18274.199999999993,
+          "avg_pnl_pct": 1.8533671399594314
+        },
+        "BTCUSDT": {
+          "n_trades": 2418,
+          "win_rate": 0.8961952026468155,
+          "pf": 7.354434115390288,
+          "total_pnl_pct": 6028.959999999999,
+          "avg_pnl_pct": 2.4933664185277085
+        },
+        "DOGEUSDT": {
+          "n_trades": 7738,
+          "win_rate": 0.8544843628844663,
+          "pf": 5.002170909808564,
+          "total_pnl_pct": 17034.359999999993,
+          "avg_pnl_pct": 2.2013905401912632
+        },
+        "ETHUSDT": {
+          "n_trades": 5861,
+          "win_rate": 0.8832963658078826,
+          "pf": 6.447422568767595,
+          "total_pnl_pct": 14084.419999999996,
+          "avg_pnl_pct": 2.4030745606551775
+        },
+        "LINKUSDT": {
+          "n_trades": 7785,
+          "win_rate": 0.8688503532434169,
+          "pf": 5.643414227155655,
+          "total_pnl_pct": 17920.699999999993,
+          "avg_pnl_pct": 2.301952472703917
+        },
+        "PEPEUSDT": {
+          "n_trades": 9357,
+          "win_rate": 0.8114780378326387,
+          "pf": 3.6667296548248918,
+          "total_pnl_pct": 17781.539999999994,
+          "avg_pnl_pct": 1.90034626482847
+        },
+        "SHIBUSDT": {
+          "n_trades": 7327,
+          "win_rate": 0.8655657158455029,
+          "pf": 5.484715172024815,
+          "total_pnl_pct": 16697.939999999995,
+          "avg_pnl_pct": 2.27896001091852
+        },
+        "SOLUSDT": {
+          "n_trades": 6939,
+          "win_rate": 0.8762069462458567,
+          "pf": 6.029405424050359,
+          "total_pnl_pct": 16330.579999999994,
+          "avg_pnl_pct": 2.3534486237209964
+        },
+        "WIFUSDT": {
+          "n_trades": 10066,
+          "win_rate": 0.7911782237234254,
+          "pf": 3.227472953448214,
+          "total_pnl_pct": 17698.519999999993,
+          "avg_pnl_pct": 1.7582475660639771
+        },
+        "XRPUSDT": {
+          "n_trades": 5680,
+          "win_rate": 0.8600352112676056,
+          "pf": 5.234334963894711,
+          "total_pnl_pct": 12724.599999999999,
+          "avg_pnl_pct": 2.2402464788732392
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 26715,
+          "win_rate": 0.7975669099756691,
+          "pf": 3.3562143874643864,
+          "total_pnl_pct": 48166.29999999999,
+          "avg_pnl_pct": 1.8029683698296832
+        },
+        "5m": {
+          "n_trades": 62195,
+          "win_rate": 0.8660181686630758,
+          "pf": 5.506113577876446,
+          "total_pnl_pct": 141936.89999999997,
+          "avg_pnl_pct": 2.28212718064153
+        }
+      }
+    },
+    {
+      "threshold": 0.6,
+      "use_gate": false,
+      "regime": "RANGE_2025",
+      "n_trades": 74499,
+      "win_rate": 0.8626290285775648,
+      "profit_factor": 5.349253396449018,
+      "total_net_pnl_pct": 168248.77999999994,
+      "avg_net_pnl_pct": 2.258403200042953,
+      "total_gross_pnl_pct": 241257.8000000001,
+      "total_fees_pct": 52149.299999999996,
+      "total_slippage_pct": 20859.720000000016,
+      "avg_leverage": 7.0,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 6422,
+          "win_rate": 0.864216754905014,
+          "pf": 5.421763506625891,
+          "total_pnl_pct": 14574.839999999997,
+          "avg_pnl_pct": 2.2695172843350977
+        },
+        "AVAXUSDT": {
+          "n_trades": 7108,
+          "win_rate": 0.8701463140123804,
+          "pf": 5.708238032181692,
+          "total_pnl_pct": 16426.759999999995,
+          "avg_pnl_pct": 2.3110241980866624
+        },
+        "BONKUSDT": {
+          "n_trades": 8322,
+          "win_rate": 0.8435472242249459,
+          "pf": 4.592933947772656,
+          "total_pnl_pct": 17682.839999999993,
+          "avg_pnl_pct": 2.1248305695746206
+        },
+        "BTCUSDT": {
+          "n_trades": 1612,
+          "win_rate": 0.8964019851116626,
+          "pf": 7.370813927700156,
+          "total_pnl_pct": 4021.6399999999994,
+          "avg_pnl_pct": 2.4948138957816375
+        },
+        "DOGEUSDT": {
+          "n_trades": 7105,
+          "win_rate": 0.8585503166783955,
+          "pf": 5.170444075916712,
+          "total_pnl_pct": 15843.099999999997,
+          "avg_pnl_pct": 2.229852216748768
+        },
+        "ETHUSDT": {
+          "n_trades": 4863,
+          "win_rate": 0.8871067242442936,
+          "pf": 6.693786682857719,
+          "total_pnl_pct": 11815.859999999997,
+          "avg_pnl_pct": 2.429747069710055
+        },
+        "LINKUSDT": {
+          "n_trades": 7209,
+          "win_rate": 0.8569843251491192,
+          "pf": 5.1045012034342765,
+          "total_pnl_pct": 15995.979999999994,
+          "avg_pnl_pct": 2.218890276043833
+        },
+        "PEPEUSDT": {
+          "n_trades": 7146,
+          "win_rate": 0.8492863140218304,
+          "pf": 4.800268234808624,
+          "total_pnl_pct": 15471.119999999995,
+          "avg_pnl_pct": 2.165004198152812
+        },
+        "SHIBUSDT": {
+          "n_trades": 4975,
+          "win_rate": 0.8725628140703517,
+          "pf": 5.832632316859444,
+          "total_pnl_pct": 11581.499999999996,
+          "avg_pnl_pct": 2.3279396984924614
+        },
+        "SOLUSDT": {
+          "n_trades": 6562,
+          "win_rate": 0.8715330691862238,
+          "pf": 5.77905188699969,
+          "total_pnl_pct": 15228.639999999996,
+          "avg_pnl_pct": 2.320731484303565
+        },
+        "WIFUSDT": {
+          "n_trades": 8236,
+          "win_rate": 0.8573336571151045,
+          "pf": 5.119085894405043,
+          "total_pnl_pct": 18294.92,
+          "avg_pnl_pct": 2.2213355998057307
+        },
+        "XRPUSDT": {
+          "n_trades": 4939,
+          "win_rate": 0.8671795910103259,
+          "pf": 5.561709575429085,
+          "total_pnl_pct": 11311.579999999998,
+          "avg_pnl_pct": 2.2902571370722815
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 25664,
+          "win_rate": 0.8217736907730673,
+          "pf": 3.9277559150755468,
+          "total_pnl_pct": 50620.07999999999,
+          "avg_pnl_pct": 1.972415835411471
+        },
+        "5m": {
+          "n_trades": 48835,
+          "win_rate": 0.8840995187877547,
+          "pf": 6.498004187933514,
+          "total_pnl_pct": 117628.69999999997,
+          "avg_pnl_pct": 2.408696631514282
+        }
+      }
+    },
+    {
+      "threshold": 0.65,
+      "use_gate": true,
+      "regime": "RECENT_2026",
+      "n_trades": 17869,
+      "win_rate": 0.876713861995635,
+      "profit_factor": 6.057699097190697,
+      "total_net_pnl_pct": 42117.179999999986,
+      "avg_net_pnl_pct": 2.3569970339694435,
+      "total_gross_pnl_pct": 59628.80000000002,
+      "total_fees_pct": 12508.299999999997,
+      "total_slippage_pct": 5003.320000000002,
+      "avg_leverage": 7.0,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 5637,
+          "win_rate": 0.880610253681036,
+          "pf": 6.2831985031093485,
+          "total_pnl_pct": 13440.139999999998,
+          "avg_pnl_pct": 2.384271775767252
+        },
+        "AVAXUSDT": {
+          "n_trades": 6299,
+          "win_rate": 0.8714081600254009,
+          "pf": 5.772610882487424,
+          "total_pnl_pct": 14612.779999999997,
+          "avg_pnl_pct": 2.3198571201778053
+        },
+        "LINKUSDT": {
+          "n_trades": 5933,
+          "win_rate": 0.878644867689196,
+          "pf": 6.1676440329218085,
+          "total_pnl_pct": 14064.259999999998,
+          "avg_pnl_pct": 2.370514073824372
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 5571,
+          "win_rate": 0.8224735236043799,
+          "pf": 3.9465977605512474,
+          "total_pnl_pct": 11015.619999999999,
+          "avg_pnl_pct": 1.9773146652306586
+        },
+        "5m": {
+          "n_trades": 12298,
+          "win_rate": 0.901284761749878,
+          "pf": 7.7775337116358525,
+          "total_pnl_pct": 31101.55999999999,
+          "avg_pnl_pct": 2.5289933322491454
+        }
+      }
+    },
+    {
+      "threshold": 0.65,
+      "use_gate": true,
+      "regime": "RANGE_2025",
+      "n_trades": 15344,
+      "win_rate": 0.8783889468196038,
+      "profit_factor": 6.1528720574808435,
+      "total_net_pnl_pct": 36345.67999999999,
+      "avg_net_pnl_pct": 2.3687226277372257,
+      "total_gross_pnl_pct": 51382.80000000002,
+      "total_fees_pct": 10740.8,
+      "total_slippage_pct": 4296.3200000000015,
+      "avg_leverage": 7.0,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 4770,
+          "win_rate": 0.8769392033542976,
+          "pf": 6.070351441731338,
+          "total_pnl_pct": 11250.399999999998,
+          "avg_pnl_pct": 2.3585744234800834
+        },
+        "AVAXUSDT": {
+          "n_trades": 5287,
+          "win_rate": 0.8848118025345186,
+          "pf": 6.543453141154288,
+          "total_pnl_pct": 12761.14,
+          "avg_pnl_pct": 2.4136826177416304
+        },
+        "LINKUSDT": {
+          "n_trades": 5287,
+          "win_rate": 0.8732740684698317,
+          "pf": 5.870149253731341,
+          "total_pnl_pct": 12334.14,
+          "avg_pnl_pct": 2.3329184792888213
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 5004,
+          "win_rate": 0.8347322142286171,
+          "pf": 4.302521384746292,
+          "total_pnl_pct": 10323.879999999997,
+          "avg_pnl_pct": 2.063125499600319
+        },
+        "5m": {
+          "n_trades": 10340,
+          "win_rate": 0.8995164410058027,
+          "pf": 7.625672833565036,
+          "total_pnl_pct": 26021.799999999996,
+          "avg_pnl_pct": 2.5166150870406185
+        }
+      }
+    },
+    {
+      "threshold": 0.65,
+      "use_gate": false,
+      "regime": "RECENT_2026",
+      "n_trades": 82492,
+      "win_rate": 0.8628351840178442,
+      "profit_factor": 5.358573509435194,
+      "total_net_pnl_pct": 186419.23999999993,
+      "avg_net_pnl_pct": 2.2598462881249084,
+      "total_gross_pnl_pct": 267261.4000000002,
+      "total_fees_pct": 57744.4,
+      "total_slippage_pct": 23097.760000000017,
+      "avg_leverage": 7.0,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 7048,
+          "win_rate": 0.8801078320090806,
+          "pf": 6.253298268682882,
+          "total_pnl_pct": 16779.559999999998,
+          "avg_pnl_pct": 2.3807548240635636
+        },
+        "AVAXUSDT": {
+          "n_trades": 7886,
+          "win_rate": 0.8702764392594471,
+          "pf": 5.714818435248541,
+          "total_pnl_pct": 18231.92,
+          "avg_pnl_pct": 2.31193507481613
+        },
+        "BONKUSDT": {
+          "n_trades": 8946,
+          "win_rate": 0.8222669349429913,
+          "pf": 3.941020265548567,
+          "total_pnl_pct": 17676.119999999995,
+          "avg_pnl_pct": 1.9758685446009385
+        },
+        "BTCUSDT": {
+          "n_trades": 2298,
+          "win_rate": 0.9112271540469974,
+          "pf": 8.744008714596948,
+          "total_pnl_pct": 5971.5599999999995,
+          "avg_pnl_pct": 2.5985900783289817
+        },
+        "DOGEUSDT": {
+          "n_trades": 7204,
+          "win_rate": 0.8710438645197113,
+          "pf": 5.753897061754971,
+          "total_pnl_pct": 16693.879999999994,
+          "avg_pnl_pct": 2.317307051637978
+        },
+        "ETHUSDT": {
+          "n_trades": 5454,
+          "win_rate": 0.9004400440044005,
+          "pf": 7.704317577245753,
+          "total_pnl_pct": 13760.879999999997,
+          "avg_pnl_pct": 2.5230803080308024
+        },
+        "LINKUSDT": {
+          "n_trades": 7361,
+          "win_rate": 0.8808585789974188,
+          "pf": 6.298070019848809,
+          "total_pnl_pct": 17563.42,
+          "avg_pnl_pct": 2.3860100529819315
+        },
+        "PEPEUSDT": {
+          "n_trades": 8509,
+          "win_rate": 0.8318251263368198,
+          "pf": 4.2134223671610105,
+          "total_pnl_pct": 17381.979999999996,
+          "avg_pnl_pct": 2.0427758843577384
+        },
+        "SHIBUSDT": {
+          "n_trades": 6878,
+          "win_rate": 0.8806339052050014,
+          "pf": 6.284612261469751,
+          "total_pnl_pct": 16400.159999999996,
+          "avg_pnl_pct": 2.3844373364350098
+        },
+        "SOLUSDT": {
+          "n_trades": 6511,
+          "win_rate": 0.8892643219167563,
+          "pf": 6.840807520419169,
+          "total_pnl_pct": 15918.419999999995,
+          "avg_pnl_pct": 2.444850253417293
+        },
+        "WIFUSDT": {
+          "n_trades": 9117,
+          "win_rate": 0.8141932653285072,
+          "pf": 3.7327605054877764,
+          "total_pnl_pct": 17498.739999999994,
+          "avg_pnl_pct": 1.9193528572995497
+        },
+        "XRPUSDT": {
+          "n_trades": 5280,
+          "win_rate": 0.8793560606060606,
+          "pf": 6.20902378045235,
+          "total_pnl_pct": 12542.599999999999,
+          "avg_pnl_pct": 2.375492424242424
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 23882,
+          "win_rate": 0.8213298718700276,
+          "pf": 3.915883307727694,
+          "total_pnl_pct": 47031.03999999998,
+          "avg_pnl_pct": 1.9693091030901926
+        },
+        "5m": {
+          "n_trades": 58610,
+          "win_rate": 0.8797474833646135,
+          "pf": 6.232006978601756,
+          "total_pnl_pct": 139388.19999999995,
+          "avg_pnl_pct": 2.378232383552294
+        }
+      }
+    },
+    {
+      "threshold": 0.65,
+      "use_gate": false,
+      "regime": "RANGE_2025",
+      "n_trades": 69829,
+      "win_rate": 0.8775007518366295,
+      "profit_factor": 6.102083495700515,
+      "total_net_pnl_pct": 164971.37999999995,
+      "avg_net_pnl_pct": 2.3625052628564056,
+      "total_gross_pnl_pct": 233403.80000000013,
+      "total_fees_pct": 48880.299999999996,
+      "total_slippage_pct": 19552.120000000014,
+      "avg_leverage": 7.0,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 6018,
+          "win_rate": 0.8800265869059488,
+          "pf": 6.248486713860674,
+          "total_pnl_pct": 14323.959999999997,
+          "avg_pnl_pct": 2.380186108341641
+        },
+        "AVAXUSDT": {
+          "n_trades": 6678,
+          "win_rate": 0.8852949985025457,
+          "pf": 6.574605937530217,
+          "total_pnl_pct": 16141.159999999996,
+          "avg_pnl_pct": 2.417064989517819
+        },
+        "BONKUSDT": {
+          "n_trades": 7662,
+          "win_rate": 0.8604802923518664,
+          "pf": 5.253750476388455,
+          "total_pnl_pct": 17188.64,
+          "avg_pnl_pct": 2.2433620464630644
+        },
+        "BTCUSDT": {
+          "n_trades": 1541,
+          "win_rate": 0.90914990266061,
+          "pf": 8.524603174603174,
+          "total_pnl_pct": 3982.0199999999995,
+          "avg_pnl_pct": 2.5840493186242695
+        },
+        "DOGEUSDT": {
+          "n_trades": 6646,
+          "win_rate": 0.8740595847126091,
+          "pf": 5.912075755564403,
+          "total_pnl_pct": 15541.119999999995,
+          "avg_pnl_pct": 2.338417092988263
+        },
+        "ETHUSDT": {
+          "n_trades": 4557,
+          "win_rate": 0.8994952819837613,
+          "pf": 7.623888080219956,
+          "total_pnl_pct": 11467.539999999997,
+          "avg_pnl_pct": 2.5164669738863283
+        },
+        "LINKUSDT": {
+          "n_trades": 6741,
+          "win_rate": 0.8719774514167038,
+          "pf": 5.802068580747606,
+          "total_pnl_pct": 15665.019999999995,
+          "avg_pnl_pct": 2.3238421599169254
+        },
+        "PEPEUSDT": {
+          "n_trades": 6703,
+          "win_rate": 0.8637923317917351,
+          "pf": 5.402214920287208,
+          "total_pnl_pct": 15192.659999999996,
+          "avg_pnl_pct": 2.266546322542145
+        },
+        "SHIBUSDT": {
+          "n_trades": 4739,
+          "win_rate": 0.8860519096855877,
+          "pf": 6.623936899862825,
+          "total_pnl_pct": 11479.579999999998,
+          "avg_pnl_pct": 2.422363367799113
+        },
+        "SOLUSDT": {
+          "n_trades": 6180,
+          "win_rate": 0.8854368932038835,
+          "pf": 6.583804143126176,
+          "total_pnl_pct": 14943.599999999999,
+          "avg_pnl_pct": 2.4180582524271843
+        },
+        "WIFUSDT": {
+          "n_trades": 7743,
+          "win_rate": 0.8720134314865039,
+          "pf": 5.8039391561086795,
+          "total_pnl_pct": 17995.459999999992,
+          "avg_pnl_pct": 2.3240940204055267
+        },
+        "XRPUSDT": {
+          "n_trades": 4621,
+          "win_rate": 0.8816273533867128,
+          "pf": 6.344505382896608,
+          "total_pnl_pct": 11050.619999999999,
+          "avg_pnl_pct": 2.3913914737069897
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 23366,
+          "win_rate": 0.8395531969528375,
+          "pf": 4.4573960463531,
+          "total_pnl_pct": 48995.51999999998,
+          "avg_pnl_pct": 2.0968723786698615
+        },
+        "5m": {
+          "n_trades": 46463,
+          "win_rate": 0.8965843789682113,
+          "pf": 7.385316221528499,
+          "total_pnl_pct": 115975.85999999996,
+          "avg_pnl_pct": 2.496090652777478
+        }
+      }
+    },
+    {
+      "threshold": 0.7,
+      "use_gate": true,
+      "regime": "RECENT_2026",
+      "n_trades": 16497,
+      "win_rate": 0.8950112141601503,
+      "profit_factor": 7.261889487640063,
+      "total_net_pnl_pct": 40996.33999999999,
+      "avg_net_pnl_pct": 2.4850784991210517,
+      "total_gross_pnl_pct": 57163.400000000016,
+      "total_fees_pct": 11547.899999999998,
+      "total_slippage_pct": 4619.160000000003,
+      "avg_leverage": 7.0,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 5179,
+          "win_rate": 0.8992083413786445,
+          "pf": 7.599758762594009,
+          "total_pnl_pct": 13022.38,
+          "avg_pnl_pct": 2.5144583896505117
+        },
+        "AVAXUSDT": {
+          "n_trades": 5838,
+          "win_rate": 0.8905447070914697,
+          "pf": 6.930794644409666,
+          "total_pnl_pct": 14325.359999999997,
+          "avg_pnl_pct": 2.4538129496402874
+        },
+        "LINKUSDT": {
+          "n_trades": 5480,
+          "win_rate": 0.8958029197080292,
+          "pf": 7.323538950509177,
+          "total_pnl_pct": 13648.599999999997,
+          "avg_pnl_pct": 2.4906204379562036
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 4921,
+          "win_rate": 0.8465758992074781,
+          "pf": 4.7004169732646535,
+          "total_pnl_pct": 10560.619999999999,
+          "avg_pnl_pct": 2.1460312944523467
+        },
+        "5m": {
+          "n_trades": 11576,
+          "win_rate": 0.9156012439530062,
+          "pf": 9.24132832935289,
+          "total_pnl_pct": 30435.719999999994,
+          "avg_pnl_pct": 2.629208707671043
+        }
+      }
+    },
+    {
+      "threshold": 0.7,
+      "use_gate": true,
+      "regime": "RANGE_2025",
+      "n_trades": 14134,
+      "win_rate": 0.8933069194849299,
+      "profit_factor": 7.132282149523526,
+      "total_net_pnl_pct": 34955.479999999996,
+      "avg_net_pnl_pct": 2.4731484363945095,
+      "total_gross_pnl_pct": 48806.80000000001,
+      "total_fees_pct": 9893.8,
+      "total_slippage_pct": 3957.5200000000013,
+      "avg_leverage": 7.0,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 4407,
+          "win_rate": 0.8933514862718402,
+          "pf": 7.135618597320723,
+          "total_pnl_pct": 10900.539999999999,
+          "avg_pnl_pct": 2.4734604039028816
+        },
+        "AVAXUSDT": {
+          "n_trades": 4892,
+          "win_rate": 0.8996320523303353,
+          "pf": 7.635437881873723,
+          "total_pnl_pct": 12315.239999999998,
+          "avg_pnl_pct": 2.5174243663123463
+        },
+        "LINKUSDT": {
+          "n_trades": 4835,
+          "win_rate": 0.8868665977249225,
+          "pf": 6.677771006838648,
+          "total_pnl_pct": 11739.699999999997,
+          "avg_pnl_pct": 2.4280661840744564
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 4415,
+          "win_rate": 0.8498301245753115,
+          "pf": 4.820736271716662,
+          "total_pnl_pct": 9575.3,
+          "avg_pnl_pct": 2.16881087202718
+        },
+        "5m": {
+          "n_trades": 9719,
+          "win_rate": 0.9130568988579072,
+          "pf": 8.945956607495066,
+          "total_pnl_pct": 25380.179999999997,
+          "avg_pnl_pct": 2.61139829200535
+        }
+      }
+    },
+    {
+      "threshold": 0.7,
+      "use_gate": false,
+      "regime": "RECENT_2026",
+      "n_trades": 75263,
+      "win_rate": 0.8810703798679298,
+      "profit_factor": 6.310803262205337,
+      "total_net_pnl_pct": 179689.85999999996,
+      "avg_net_pnl_pct": 2.387492659075508,
+      "total_gross_pnl_pct": 253447.60000000015,
+      "total_fees_pct": 52684.1,
+      "total_slippage_pct": 21073.640000000014,
+      "avg_leverage": 7.0,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 6493,
+          "win_rate": 0.898968119513322,
+          "pf": 7.579663504968382,
+          "total_pnl_pct": 16315.459999999995,
+          "avg_pnl_pct": 2.5127768365932535
+        },
+        "AVAXUSDT": {
+          "n_trades": 7328,
+          "win_rate": 0.8879639737991266,
+          "pf": 6.751522533495734,
+          "total_pnl_pct": 17849.159999999996,
+          "avg_pnl_pct": 2.435747816593886
+        },
+        "BONKUSDT": {
+          "n_trades": 7953,
+          "win_rate": 0.8409405255878285,
+          "pf": 4.503703703703701,
+          "total_pnl_pct": 16753.659999999996,
+          "avg_pnl_pct": 2.106583679114799
+        },
+        "BTCUSDT": {
+          "n_trades": 2184,
+          "win_rate": 0.9235347985347986,
+          "pf": 10.28853404302506,
+          "total_pnl_pct": 5863.48,
+          "avg_pnl_pct": 2.6847435897435896
+        },
+        "DOGEUSDT": {
+          "n_trades": 6595,
+          "win_rate": 0.8874905231235785,
+          "pf": 6.719526804432463,
+          "total_pnl_pct": 16041.899999999998,
+          "avg_pnl_pct": 2.432433661865049
+        },
+        "ETHUSDT": {
+          "n_trades": 5008,
+          "win_rate": 0.9131389776357828,
+          "pf": 8.95521498510004,
+          "total_pnl_pct": 13080.759999999998,
+          "avg_pnl_pct": 2.611972843450479
+        },
+        "LINKUSDT": {
+          "n_trades": 6815,
+          "win_rate": 0.8975788701393984,
+          "pf": 7.465297675899393,
+          "total_pnl_pct": 17058.299999999996,
+          "avg_pnl_pct": 2.503052090975788
+        },
+        "PEPEUSDT": {
+          "n_trades": 7568,
+          "win_rate": 0.8537262156448203,
+          "pf": 4.971829101007057,
+          "total_pnl_pct": 16619.959999999995,
+          "avg_pnl_pct": 2.1960835095137416
+        },
+        "SHIBUSDT": {
+          "n_trades": 6382,
+          "win_rate": 0.896114070824193,
+          "pf": 7.348025249986031,
+          "total_pnl_pct": 15909.039999999995,
+          "avg_pnl_pct": 2.4927984957693505
+        },
+        "SOLUSDT": {
+          "n_trades": 6010,
+          "win_rate": 0.905657237936772,
+          "pf": 8.177477300934088,
+          "total_pnl_pct": 15383.199999999997,
+          "avg_pnl_pct": 2.559600665557404
+        },
+        "WIFUSDT": {
+          "n_trades": 8060,
+          "win_rate": 0.8354838709677419,
+          "pf": 4.326071169208423,
+          "total_pnl_pct": 16671.199999999997,
+          "avg_pnl_pct": 2.068387096774193
+        },
+        "XRPUSDT": {
+          "n_trades": 4867,
+          "win_rate": 0.8964454489418533,
+          "pf": 7.3742651381540245,
+          "total_pnl_pct": 12143.739999999998,
+          "avg_pnl_pct": 2.4951181425929727
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 20750,
+          "win_rate": 0.844144578313253,
+          "pf": 4.613802423326232,
+          "total_pnl_pct": 44176.999999999985,
+          "avg_pnl_pct": 2.1290120481927706
+        },
+        "5m": {
+          "n_trades": 54513,
+          "win_rate": 0.8951259332636252,
+          "pf": 7.2707649051885515,
+          "total_pnl_pct": 135512.85999999996,
+          "avg_pnl_pct": 2.4858815328453754
+        }
+      }
+    },
+    {
+      "threshold": 0.7,
+      "use_gate": false,
+      "regime": "RANGE_2025",
+      "n_trades": 64525,
+      "win_rate": 0.8932816737698567,
+      "profit_factor": 7.130393390776775,
+      "total_net_pnl_pct": 159568.49999999994,
+      "avg_net_pnl_pct": 2.4729717163889955,
+      "total_gross_pnl_pct": 222803.00000000012,
+      "total_fees_pct": 45167.49999999999,
+      "total_slippage_pct": 18067.00000000001,
+      "avg_leverage": 7.0,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 5566,
+          "win_rate": 0.895795903701042,
+          "pf": 7.322988505747126,
+          "total_pnl_pct": 13862.519999999999,
+          "avg_pnl_pct": 2.490571325907294
+        },
+        "AVAXUSDT": {
+          "n_trades": 6186,
+          "win_rate": 0.8999353378596832,
+          "pf": 7.661161969724166,
+          "total_pnl_pct": 15585.919999999998,
+          "avg_pnl_pct": 2.519547365017782
+        },
+        "BONKUSDT": {
+          "n_trades": 6961,
+          "win_rate": 0.8781784226404252,
+          "pf": 6.140766946191474,
+          "total_pnl_pct": 16478.419999999995,
+          "avg_pnl_pct": 2.3672489584829757
+        },
+        "BTCUSDT": {
+          "n_trades": 1455,
+          "win_rate": 0.9243986254295533,
+          "pf": 10.415824915824917,
+          "total_pnl_pct": 3915.0999999999995,
+          "avg_pnl_pct": 2.6907903780068723
+        },
+        "DOGEUSDT": {
+          "n_trades": 6113,
+          "win_rate": 0.893178472108621,
+          "pf": 7.122681640292665,
+          "total_pnl_pct": 15112.859999999997,
+          "avg_pnl_pct": 2.4722493047603464
+        },
+        "ETHUSDT": {
+          "n_trades": 4240,
+          "win_rate": 0.9148584905660377,
+          "pf": 9.15327793167128,
+          "total_pnl_pct": 11125.8,
+          "avg_pnl_pct": 2.624009433962264
+        },
+        "LINKUSDT": {
+          "n_trades": 6196,
+          "win_rate": 0.8860555196901226,
+          "pf": 6.624173748819639,
+          "total_pnl_pct": 15009.119999999997,
+          "avg_pnl_pct": 2.422388637830858
+        },
+        "PEPEUSDT": {
+          "n_trades": 6134,
+          "win_rate": 0.8809911966090642,
+          "pf": 6.306037544393707,
+          "total_pnl_pct": 14641.479999999996,
+          "avg_pnl_pct": 2.386938376263449
+        },
+        "SHIBUSDT": {
+          "n_trades": 4434,
+          "win_rate": 0.9000902119981957,
+          "pf": 7.674358331243204,
+          "total_pnl_pct": 11176.479999999998,
+          "avg_pnl_pct": 2.52063148398737
+        },
+        "SOLUSDT": {
+          "n_trades": 5719,
+          "win_rate": 0.9001573701696101,
+          "pf": 7.680093403385872,
+          "total_pnl_pct": 14418.179999999997,
+          "avg_pnl_pct": 2.52110159118727
+        },
+        "WIFUSDT": {
+          "n_trades": 7227,
+          "win_rate": 0.8855680088556801,
+          "pf": 6.592323883738634,
+          "total_pnl_pct": 17481.939999999995,
+          "avg_pnl_pct": 2.41897606198976
+        },
+        "XRPUSDT": {
+          "n_trades": 4294,
+          "win_rate": 0.8979972054028877,
+          "pf": 7.499408083882967,
+          "total_pnl_pct": 10760.679999999998,
+          "avg_pnl_pct": 2.505980437820214
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 20839,
+          "win_rate": 0.8568069485100053,
+          "pf": 5.097122927216759,
+          "total_pnl_pct": 46213.57999999999,
+          "avg_pnl_pct": 2.2176486395700366
+        },
+        "5m": {
+          "n_trades": 43686,
+          "win_rate": 0.9106807672938699,
+          "pf": 8.685308578696581,
+          "total_pnl_pct": 113354.91999999997,
+          "avg_pnl_pct": 2.5947653710570884
+        }
+      }
+    },
+    {
+      "threshold": 0.75,
+      "use_gate": true,
+      "regime": "RECENT_2026",
+      "n_trades": 14929,
+      "win_rate": 0.9124522740973944,
+      "profit_factor": 8.878290685482726,
+      "total_net_pnl_pct": 38922.37999999999,
+      "avg_net_pnl_pct": 2.6071659186817597,
+      "total_gross_pnl_pct": 53552.80000000002,
+      "total_fees_pct": 10450.3,
+      "total_slippage_pct": 4180.120000000002,
+      "avg_leverage": 7.0,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 4699,
+          "win_rate": 0.9159395616088529,
+          "pf": 9.281950304735112,
+          "total_pnl_pct": 12365.779999999997,
+          "avg_pnl_pct": 2.63157693126197
+        },
+        "AVAXUSDT": {
+          "n_trades": 5286,
+          "win_rate": 0.9090049186530458,
+          "pf": 8.509663509663508,
+          "total_pnl_pct": 13653.919999999998,
+          "avg_pnl_pct": 2.58303443057132
+        },
+        "LINKUSDT": {
+          "n_trades": 4944,
+          "win_rate": 0.9128236245954693,
+          "pf": 8.919738764286326,
+          "total_pnl_pct": 12902.679999999997,
+          "avg_pnl_pct": 2.609765372168284
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 4243,
+          "win_rate": 0.8696676879566344,
+          "pf": 5.684147076552139,
+          "total_pnl_pct": 9791.46,
+          "avg_pnl_pct": 2.307673815696441
+        },
+        "5m": {
+          "n_trades": 10686,
+          "win_rate": 0.9294403892944039,
+          "pf": 11.220945083014046,
+          "total_pnl_pct": 29130.91999999999,
+          "avg_pnl_pct": 2.7260827250608264
+        }
+      }
+    },
+    {
+      "threshold": 0.75,
+      "use_gate": true,
+      "regime": "RANGE_2025",
+      "n_trades": 12841,
+      "win_rate": 0.910365236352309,
+      "profit_factor": 8.651736010554426,
+      "total_net_pnl_pct": 33291.01999999999,
+      "avg_net_pnl_pct": 2.5925566544661622,
+      "total_gross_pnl_pct": 45875.20000000001,
+      "total_fees_pct": 8988.699999999999,
+      "total_slippage_pct": 3595.4800000000014,
+      "avg_leverage": 7.0,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 4004,
+          "win_rate": 0.9093406593406593,
+          "pf": 8.544332210998874,
+          "total_pnl_pct": 10351.879999999997,
+          "avg_pnl_pct": 2.5853846153846147
+        },
+        "AVAXUSDT": {
+          "n_trades": 4486,
+          "win_rate": 0.9144003566651806,
+          "pf": 9.099729938271603,
+          "total_pnl_pct": 11756.919999999998,
+          "avg_pnl_pct": 2.6208024966562635
+        },
+        "LINKUSDT": {
+          "n_trades": 4351,
+          "win_rate": 0.9071477821190531,
+          "pf": 8.322423909057571,
+          "total_pnl_pct": 11182.219999999998,
+          "avg_pnl_pct": 2.570034474833371
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 3816,
+          "win_rate": 0.8752620545073375,
+          "pf": 5.977279800809211,
+          "total_pnl_pct": 8955.519999999999,
+          "avg_pnl_pct": 2.3468343815513624
+        },
+        "5m": {
+          "n_trades": 9025,
+          "win_rate": 0.925207756232687,
+          "pf": 10.537722908093276,
+          "total_pnl_pct": 24335.499999999993,
+          "avg_pnl_pct": 2.696454293628808
+        }
+      }
+    },
+    {
+      "threshold": 0.75,
+      "use_gate": false,
+      "regime": "RECENT_2026",
+      "n_trades": 66872,
+      "win_rate": 0.9004964708697213,
+      "profit_factor": 7.709169644546859,
+      "total_net_pnl_pct": 168749.83999999997,
+      "avg_net_pnl_pct": 2.523475296088048,
+      "total_gross_pnl_pct": 234284.40000000014,
+      "total_fees_pct": 46810.399999999994,
+      "total_slippage_pct": 18724.160000000014,
+      "avg_leverage": 7.0,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 5900,
+          "win_rate": 0.9174576271186441,
+          "pf": 9.468324587421092,
+          "total_pnl_pct": 15588.999999999996,
+          "avg_pnl_pct": 2.6422033898305077
+        },
+        "AVAXUSDT": {
+          "n_trades": 6644,
+          "win_rate": 0.9066827212522577,
+          "pf": 8.276702508960572,
+          "total_pnl_pct": 17053.679999999997,
+          "avg_pnl_pct": 2.5667790487658033
+        },
+        "BONKUSDT": {
+          "n_trades": 6753,
+          "win_rate": 0.8631719235895158,
+          "pf": 5.373857623857623,
+          "total_pnl_pct": 15276.659999999996,
+          "avg_pnl_pct": 2.2622034651266096
+        },
+        "BTCUSDT": {
+          "n_trades": 2070,
+          "win_rate": 0.936231884057971,
+          "pf": 12.506734006734003,
+          "total_pnl_pct": 5741.399999999999,
+          "avg_pnl_pct": 2.7736231884057965
+        },
+        "DOGEUSDT": {
+          "n_trades": 5922,
+          "win_rate": 0.9094900371496116,
+          "pf": 8.559839690436704,
+          "total_pnl_pct": 15316.839999999997,
+          "avg_pnl_pct": 2.5864302600472806
+        },
+        "ETHUSDT": {
+          "n_trades": 4482,
+          "win_rate": 0.926595269968764,
+          "pf": 10.753011370032642,
+          "total_pnl_pct": 12129.039999999999,
+          "avg_pnl_pct": 2.7061668897813473
+        },
+        "LINKUSDT": {
+          "n_trades": 6155,
+          "win_rate": 0.9140536149471974,
+          "pf": 9.059581320450883,
+          "total_pnl_pct": 16116.099999999997,
+          "avg_pnl_pct": 2.6183753046303813
+        },
+        "PEPEUSDT": {
+          "n_trades": 6526,
+          "win_rate": 0.8726631933803248,
+          "pf": 5.837901680260282,
+          "total_pnl_pct": 15196.719999999996,
+          "avg_pnl_pct": 2.328642353662273
+        },
+        "SHIBUSDT": {
+          "n_trades": 5776,
+          "win_rate": 0.912915512465374,
+          "pf": 8.93004933362786,
+          "total_pnl_pct": 15077.719999999998,
+          "avg_pnl_pct": 2.6104085872576173
+        },
+        "SOLUSDT": {
+          "n_trades": 5417,
+          "win_rate": 0.9195126453756692,
+          "pf": 9.731821270812095,
+          "total_pnl_pct": 14390.739999999998,
+          "avg_pnl_pct": 2.6565885176296837
+        },
+        "WIFUSDT": {
+          "n_trades": 6834,
+          "win_rate": 0.860257535850161,
+          "pf": 5.244017839829357,
+          "total_pnl_pct": 15320.479999999996,
+          "avg_pnl_pct": 2.241802750951126
+        },
+        "XRPUSDT": {
+          "n_trades": 4393,
+          "win_rate": 0.915319826997496,
+          "pf": 9.207785742731977,
+          "total_pnl_pct": 11541.46,
+          "avg_pnl_pct": 2.627238788982472
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 17381,
+          "win_rate": 0.8681318681318682,
+          "pf": 5.608024691358023,
+          "total_pnl_pct": 39922.81999999999,
+          "avg_pnl_pct": 2.2969230769230764
+        },
+        "5m": {
+          "n_trades": 49491,
+          "win_rate": 0.9118627629265927,
+          "pf": 8.813210046359975,
+          "total_pnl_pct": 128827.01999999996,
+          "avg_pnl_pct": 2.603039340486148
+        }
+      }
+    },
+    {
+      "threshold": 0.75,
+      "use_gate": false,
+      "regime": "RANGE_2025",
+      "n_trades": 58416,
+      "win_rate": 0.9104183785264311,
+      "profit_factor": 8.657373788847128,
+      "total_net_pnl_pct": 151468.51999999996,
+      "avg_net_pnl_pct": 2.592928649685017,
+      "total_gross_pnl_pct": 208716.2000000001,
+      "total_fees_pct": 40891.2,
+      "total_slippage_pct": 16356.48000000001,
+      "avg_leverage": 7.0,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 5038,
+          "win_rate": 0.9126637554585153,
+          "pf": 8.901851851851848,
+          "total_pnl_pct": 13142.359999999999,
+          "avg_pnl_pct": 2.6086462882096066
+        },
+        "AVAXUSDT": {
+          "n_trades": 5676,
+          "win_rate": 0.914200140944327,
+          "pf": 9.076507719218188,
+          "total_pnl_pct": 14867.719999999998,
+          "avg_pnl_pct": 2.6194009866102883
+        },
+        "BONKUSDT": {
+          "n_trades": 6186,
+          "win_rate": 0.8989654057549304,
+          "pf": 7.579437037037036,
+          "total_pnl_pct": 15543.919999999996,
+          "avg_pnl_pct": 2.5127578402845128
+        },
+        "BTCUSDT": {
+          "n_trades": 1352,
+          "win_rate": 0.9341715976331361,
+          "pf": 12.08863920099875,
+          "total_pnl_pct": 3730.4399999999996,
+          "avg_pnl_pct": 2.7592011834319523
+        },
+        "DOGEUSDT": {
+          "n_trades": 5542,
+          "win_rate": 0.9083363406712378,
+          "pf": 8.441382327209098,
+          "total_pnl_pct": 14289.239999999998,
+          "avg_pnl_pct": 2.5783543846986645
+        },
+        "ETHUSDT": {
+          "n_trades": 3832,
+          "win_rate": 0.9287578288100209,
+          "pf": 11.105277438610772,
+          "total_pnl_pct": 10428.039999999997,
+          "avg_pnl_pct": 2.7213048016701453
+        },
+        "LINKUSDT": {
+          "n_trades": 5599,
+          "win_rate": 0.9056974459724951,
+          "pf": 8.181327160493826,
+          "total_pnl_pct": 14332.779999999995,
+          "avg_pnl_pct": 2.5598821218074646
+        },
+        "PEPEUSDT": {
+          "n_trades": 5433,
+          "win_rate": 0.9006073992269464,
+          "pf": 7.71872427983539,
+          "total_pnl_pct": 13714.259999999998,
+          "avg_pnl_pct": 2.5242517945886247
+        },
+        "SHIBUSDT": {
+          "n_trades": 4079,
+          "win_rate": 0.9149301299338073,
+          "pf": 9.161703490233746,
+          "total_pnl_pct": 10705.379999999997,
+          "avg_pnl_pct": 2.6245109095366503
+        },
+        "SOLUSDT": {
+          "n_trades": 5180,
+          "win_rate": 0.9166023166023166,
+          "pf": 9.362482853223591,
+          "total_pnl_pct": 13655.599999999999,
+          "avg_pnl_pct": 2.636216216216216
+        },
+        "WIFUSDT": {
+          "n_trades": 6594,
+          "win_rate": 0.9014255383682135,
+          "pf": 7.789857549857547,
+          "total_pnl_pct": 16682.679999999997,
+          "avg_pnl_pct": 2.5299787685774944
+        },
+        "XRPUSDT": {
+          "n_trades": 3905,
+          "win_rate": 0.9195902688860436,
+          "pf": 9.742038216560506,
+          "total_pnl_pct": 10376.099999999999,
+          "avg_pnl_pct": 2.6571318822023042
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 17986,
+          "win_rate": 0.8777382408539975,
+          "pf": 6.1155912620214545,
+          "total_pnl_pct": 42521.919999999984,
+          "avg_pnl_pct": 2.364167685977982
+        },
+        "5m": {
+          "n_trades": 40430,
+          "win_rate": 0.924956715310413,
+          "pf": 10.499621572792302,
+          "total_pnl_pct": 108946.59999999998,
+          "avg_pnl_pct": 2.694697007172891
+        }
+      }
+    },
+    {
+      "threshold": 0.8,
+      "use_gate": true,
+      "regime": "RECENT_2026",
+      "n_trades": 13089,
+      "win_rate": 0.9305523722209489,
+      "profit_factor": 11.414252536364744,
+      "total_net_pnl_pct": 35783.579999999994,
+      "avg_net_pnl_pct": 2.7338666055466416,
+      "total_gross_pnl_pct": 48610.8,
+      "total_fees_pct": 9162.3,
+      "total_slippage_pct": 3664.9200000000014,
+      "avg_leverage": 7.0,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 4108,
+          "win_rate": 0.9328140214216164,
+          "pf": 11.827160493827158,
+          "total_pnl_pct": 11295.759999999998,
+          "avg_pnl_pct": 2.749698149951314
+        },
+        "AVAXUSDT": {
+          "n_trades": 4655,
+          "win_rate": 0.9269602577873255,
+          "pf": 10.811002178649234,
+          "total_pnl_pct": 12609.099999999999,
+          "avg_pnl_pct": 2.7087218045112778
+        },
+        "LINKUSDT": {
+          "n_trades": 4326,
+          "win_rate": 0.9322699953767914,
+          "pf": 11.72531917583112,
+          "total_pnl_pct": 11878.719999999998,
+          "avg_pnl_pct": 2.74588996763754
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 3438,
+          "win_rate": 0.8923792902850495,
+          "pf": 7.063463463463462,
+          "total_pnl_pct": 8480.359999999999,
+          "avg_pnl_pct": 2.4666550319953457
+        },
+        "5m": {
+          "n_trades": 9651,
+          "win_rate": 0.9441508651953165,
+          "pf": 14.400879543736682,
+          "total_pnl_pct": 27303.219999999994,
+          "avg_pnl_pct": 2.8290560563672154
+        }
+      }
+    },
+    {
+      "threshold": 0.8,
+      "use_gate": true,
+      "regime": "RANGE_2025",
+      "n_trades": 11305,
+      "win_rate": 0.9265811587793011,
+      "profit_factor": 10.750780901383306,
+      "total_net_pnl_pct": 30592.09999999999,
+      "avg_net_pnl_pct": 2.7060681114551075,
+      "total_gross_pnl_pct": 41671.000000000015,
+      "total_fees_pct": 7913.499999999999,
+      "total_slippage_pct": 3165.4000000000015,
+      "avg_leverage": 7.0,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 3529,
+          "win_rate": 0.9266081042788326,
+          "pf": 10.755040755040751,
+          "total_pnl_pct": 9550.379999999997,
+          "avg_pnl_pct": 2.7062567299518268
+        },
+        "AVAXUSDT": {
+          "n_trades": 4004,
+          "win_rate": 0.9288211788211789,
+          "pf": 11.115919428200128,
+          "total_pnl_pct": 10897.879999999997,
+          "avg_pnl_pct": 2.721748251748251
+        },
+        "LINKUSDT": {
+          "n_trades": 3772,
+          "win_rate": 0.9241781548250265,
+          "pf": 10.383061383061381,
+          "total_pnl_pct": 10143.839999999997,
+          "avg_pnl_pct": 2.6892470837751845
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 3162,
+          "win_rate": 0.8937381404174574,
+          "pf": 7.164682539682537,
+          "total_pnl_pct": 7829.6399999999985,
+          "avg_pnl_pct": 2.4761669829222006
+        },
+        "5m": {
+          "n_trades": 8143,
+          "win_rate": 0.9393343976421467,
+          "pf": 13.189908532013794,
+          "total_pnl_pct": 22762.459999999995,
+          "avg_pnl_pct": 2.7953407834950257
+        }
+      }
+    },
+    {
+      "threshold": 0.8,
+      "use_gate": false,
+      "regime": "RECENT_2026",
+      "n_trades": 57418,
+      "win_rate": 0.9201295760911212,
+      "profit_factor": 9.813571093989758,
+      "total_net_pnl_pct": 152783.95999999996,
+      "avg_net_pnl_pct": 2.660907032637848,
+      "total_gross_pnl_pct": 209053.6000000001,
+      "total_fees_pct": 40192.6,
+      "total_slippage_pct": 16077.04000000001,
+      "avg_leverage": 7.0,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 5133,
+          "win_rate": 0.9359049288914865,
+          "pf": 12.438590566250138,
+          "total_pnl_pct": 14225.259999999998,
+          "avg_pnl_pct": 2.771334502240405
+        },
+        "AVAXUSDT": {
+          "n_trades": 5869,
+          "win_rate": 0.9241778837962175,
+          "pf": 10.383021223470658,
+          "total_pnl_pct": 15783.179999999997,
+          "avg_pnl_pct": 2.689245186573521
+        },
+        "BONKUSDT": {
+          "n_trades": 5510,
+          "win_rate": 0.8876588021778584,
+          "pf": 6.730868186441691,
+          "total_pnl_pct": 13409.199999999997,
+          "avg_pnl_pct": 2.4336116152450087
+        },
+        "BTCUSDT": {
+          "n_trades": 1850,
+          "win_rate": 0.9524324324324325,
+          "pf": 17.0563973063973,
+          "total_pnl_pct": 5340.999999999999,
+          "avg_pnl_pct": 2.8870270270270266
+        },
+        "DOGEUSDT": {
+          "n_trades": 5085,
+          "win_rate": 0.9292035398230089,
+          "pf": 11.180555555555554,
+          "total_pnl_pct": 13853.699999999997,
+          "avg_pnl_pct": 2.7244247787610614
+        },
+        "ETHUSDT": {
+          "n_trades": 3901,
+          "win_rate": 0.9430915149961548,
+          "pf": 14.116950283616948,
+          "total_pnl_pct": 11007.219999999998,
+          "avg_pnl_pct": 2.821640604973083
+        },
+        "LINKUSDT": {
+          "n_trades": 5414,
+          "win_rate": 0.9320280753601773,
+          "pf": 11.680555555555554,
+          "total_pnl_pct": 14857.079999999998,
+          "avg_pnl_pct": 2.744196527521241
+        },
+        "PEPEUSDT": {
+          "n_trades": 5334,
+          "win_rate": 0.8953880764904387,
+          "pf": 7.291119076065313,
+          "total_pnl_pct": 13269.479999999996,
+          "avg_pnl_pct": 2.48771653543307
+        },
+        "SHIBUSDT": {
+          "n_trades": 5079,
+          "win_rate": 0.9320732427643237,
+          "pf": 11.688888888888886,
+          "total_pnl_pct": 13939.379999999997,
+          "avg_pnl_pct": 2.744512699350265
+        },
+        "SOLUSDT": {
+          "n_trades": 4722,
+          "win_rate": 0.9335027530707327,
+          "pf": 11.958480773767395,
+          "total_pnl_pct": 13006.839999999998,
+          "avg_pnl_pct": 2.7545192714951288
+        },
+        "WIFUSDT": {
+          "n_trades": 5661,
+          "win_rate": 0.8807631160572337,
+          "pf": 6.292345679012345,
+          "total_pnl_pct": 13503.419999999998,
+          "avg_pnl_pct": 2.3853418124006356
+        },
+        "XRPUSDT": {
+          "n_trades": 3860,
+          "win_rate": 0.9318652849740933,
+          "pf": 11.650612589776083,
+          "total_pnl_pct": 10588.199999999997,
+          "avg_pnl_pct": 2.743056994818652
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 13651,
+          "win_rate": 0.8926818548091715,
+          "pf": 7.085779294653012,
+          "total_pnl_pct": 33701.21999999999,
+          "avg_pnl_pct": 2.4687729836641994
+        },
+        "5m": {
+          "n_trades": 43767,
+          "win_rate": 0.928690565951516,
+          "pf": 11.093998837029913,
+          "total_pnl_pct": 119082.73999999996,
+          "avg_pnl_pct": 2.720833961660611
+        }
+      }
+    },
+    {
+      "threshold": 0.8,
+      "use_gate": false,
+      "regime": "RANGE_2025",
+      "n_trades": 51349,
+      "win_rate": 0.9270287639486651,
+      "profit_factor": 10.821951388271106,
+      "total_net_pnl_pct": 139114.77999999997,
+      "avg_net_pnl_pct": 2.7092013476406547,
+      "total_gross_pnl_pct": 189436.80000000008,
+      "total_fees_pct": 35944.299999999996,
+      "total_slippage_pct": 14377.720000000008,
+      "avg_leverage": 7.0,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 4434,
+          "win_rate": 0.9285069914298602,
+          "pf": 11.063325154807801,
+          "total_pnl_pct": 12058.479999999998,
+          "avg_pnl_pct": 2.7195489400090205
+        },
+        "AVAXUSDT": {
+          "n_trades": 5058,
+          "win_rate": 0.9292210359826019,
+          "pf": 11.183529898613696,
+          "total_pnl_pct": 13780.759999999998,
+          "avg_pnl_pct": 2.7245472518782123
+        },
+        "BONKUSDT": {
+          "n_trades": 5292,
+          "win_rate": 0.9162887377173091,
+          "pf": 9.324220382911125,
+          "total_pnl_pct": 13939.239999999998,
+          "avg_pnl_pct": 2.6340211640211635
+        },
+        "BTCUSDT": {
+          "n_trades": 1250,
+          "win_rate": 0.9448,
+          "pf": 14.580246913580247,
+          "total_pnl_pct": 3541.9999999999995,
+          "avg_pnl_pct": 2.8335999999999997
+        },
+        "DOGEUSDT": {
+          "n_trades": 4867,
+          "win_rate": 0.926648859667146,
+          "pf": 10.761489781097621,
+          "total_pnl_pct": 13172.739999999998,
+          "avg_pnl_pct": 2.706542017670022
+        },
+        "ETHUSDT": {
+          "n_trades": 3378,
+          "win_rate": 0.9455298993487271,
+          "pf": 14.787037037037033,
+          "total_pnl_pct": 9589.159999999998,
+          "avg_pnl_pct": 2.8387092954410886
+        },
+        "LINKUSDT": {
+          "n_trades": 4875,
+          "win_rate": 0.9230769230769231,
+          "pf": 10.22222222222222,
+          "total_pnl_pct": 13072.499999999998,
+          "avg_pnl_pct": 2.681538461538461
+        },
+        "PEPEUSDT": {
+          "n_trades": 4708,
+          "win_rate": 0.9197111299915038,
+          "pf": 9.757985498726237,
+          "total_pnl_pct": 12513.759999999998,
+          "avg_pnl_pct": 2.6579779099405263
+        },
+        "SHIBUSDT": {
+          "n_trades": 3649,
+          "win_rate": 0.9334064127158126,
+          "pf": 11.939948178631303,
+          "total_pnl_pct": 10048.779999999999,
+          "avg_pnl_pct": 2.7538448890106877
+        },
+        "SOLUSDT": {
+          "n_trades": 4517,
+          "win_rate": 0.932698693823334,
+          "pf": 11.805433723196877,
+          "total_pnl_pct": 12416.739999999998,
+          "avg_pnl_pct": 2.748890856763338
+        },
+        "WIFUSDT": {
+          "n_trades": 5840,
+          "win_rate": 0.9155821917808219,
+          "pf": 9.239050409435803,
+          "total_pnl_pct": 15353.799999999996,
+          "avg_pnl_pct": 2.6290753424657525
+        },
+        "XRPUSDT": {
+          "n_trades": 3481,
+          "win_rate": 0.9350761275495547,
+          "pf": 12.26892822025565,
+          "total_pnl_pct": 9626.819999999996,
+          "avg_pnl_pct": 2.765532892846882
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 14867,
+          "win_rate": 0.8985672966973834,
+          "pf": 7.546345417035071,
+          "total_pnl_pct": 37315.73999999999,
+          "avg_pnl_pct": 2.509971076881684
+        },
+        "5m": {
+          "n_trades": 36482,
+          "win_rate": 0.9386272682418727,
+          "pf": 13.028121019635083,
+          "total_pnl_pct": 101799.03999999998,
+          "avg_pnl_pct": 2.7903908776931083
+        }
+      }
+    }
+  ],
+  "per_symbol_at_070": {
+    "ADAUSDT": {
+      "n_trades": 5179,
+      "win_rate": 0.8992083413786445,
+      "pf": 7.599758762594009,
+      "total_pnl_pct": 13022.38,
+      "avg_pnl_pct": 2.5144583896505117
+    },
+    "AVAXUSDT": {
+      "n_trades": 5838,
+      "win_rate": 0.8905447070914697,
+      "pf": 6.930794644409666,
+      "total_pnl_pct": 14325.359999999997,
+      "avg_pnl_pct": 2.4538129496402874
+    },
+    "LINKUSDT": {
+      "n_trades": 5480,
+      "win_rate": 0.8958029197080292,
+      "pf": 7.323538950509177,
+      "total_pnl_pct": 13648.599999999997,
+      "avg_pnl_pct": 2.4906204379562036
+    }
+  },
+  "per_tf_at_070": {
+    "15m": {
+      "n_trades": 4921,
+      "win_rate": 0.8465758992074781,
+      "pf": 4.7004169732646535,
+      "total_pnl_pct": 10560.619999999999,
+      "avg_pnl_pct": 2.1460312944523467
+    },
+    "5m": {
+      "n_trades": 11576,
+      "win_rate": 0.9156012439530062,
+      "pf": 9.24132832935289,
+      "total_pnl_pct": 30435.719999999994,
+      "avg_pnl_pct": 2.629208707671043
+    }
+  }
+}
