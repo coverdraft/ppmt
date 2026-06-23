@@ -1,0 +1,26 @@
+{
+  "PEPEUSDT|1m|RECENT_2026": {
+    "cursor": 1750636800000,
+    "end_ms": 1750636800000,
+    "done": true,
+    "final_count": 128218
+  },
+  "WIFUSDT|1m|RECENT_2026": {
+    "cursor": 1750636800000,
+    "end_ms": 1750636800000,
+    "done": true,
+    "final_count": 103701
+  },
+  "BTCUSDT|1m|BULL_2024": {
+    "cursor": 1735516800000,
+    "end_ms": 1735516800000,
+    "done": true,
+    "final_count": 129526
+  },
+  "BONKUSDT|1m|RECENT_2026": {
+    "cursor": 1750636800000,
+    "end_ms": 1750636800000,
+    "done": true,
+    "final_count": 125265
+  }
+}
