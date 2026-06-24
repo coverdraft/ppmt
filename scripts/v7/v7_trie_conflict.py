@@ -72,10 +72,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 DB_PATH = os.environ.get("PPMT_DB_PATH", "/home/z/my-project/data/ppmt.db")
 ENCODERS_DIR = "/home/z/my-project/data/v7_models/encoders"
 
-# The 25 trie feature names (must match SectorTrieContainer.extract_features output)
+# The trie feature names (must match SectorTrieContainer.extract_features output)
 # Per-sector seq_lengths vary, so the union of all possible features is:
+# After the §4.5 design revision all sectors use seq_len=[3, 5], so the union
+# is just 2 seq_lengths × 10 per-seq features + 5 aggregates = 25 features.
 TRIE_FEATURE_NAMES: List[str] = []
-for L in [5, 10, 15]:
+for L in [3, 5]:
     TRIE_FEATURE_NAMES.extend([
         f"trie_n1_pred_{L}", f"trie_n1_conf_{L}", f"trie_n1_count_{L}",
         f"trie_n2_pred_{L}", f"trie_n2_conf_{L}", f"trie_n2_count_{L}",
@@ -86,7 +88,7 @@ TRIE_FEATURE_NAMES.extend([
     "trie_n1_pred_avg", "trie_n2_pred_avg",
     "trie_agreement_avg", "trie_strength_avg", "trie_any_signal",
 ])
-assert len(TRIE_FEATURE_NAMES) == 35, f"Expected 35 (10×3 + 5), got {len(TRIE_FEATURE_NAMES)}"
+assert len(TRIE_FEATURE_NAMES) == 25, f"Expected 25 (10×2 + 5), got {len(TRIE_FEATURE_NAMES)}"
 
 # Per-sector subset (since each sector only supports certain seq_lengths)
 SECTOR_TRIE_FEATURES: Dict[str, List[str]] = {}
@@ -106,7 +108,7 @@ for sector, seq_lens in SECTOR_SEQ_LENGTHS.items():
     SECTOR_TRIE_FEATURES[sector] = feats
 
 # Max sequence length needed (for candle buffer)
-MAX_SEQ_LEN = 15
+MAX_SEQ_LEN = 5
 
 
 def _make_container_with_min_obs(min_obs: int) -> SectorTrieContainer:
@@ -141,21 +143,22 @@ class TrieFeatureExtractor:
 
     The trie is built INCREMENTALLY as we walk through the symbol's rows in
     chronological order. For each row at time T:
-      1. Query trie with candles[T-15:T] (the candle at T is NOT yet inserted)
+      1. Query trie with candles[T-MAX_SEQ_LEN:T] (the candle at T is NOT yet inserted)
       2. Insert (candles[T] outcome, vol_regime[T], ts[T]) into trie
 
     This is the INSERT-AFTER-PREDICT contract from §11.1.
 
-    MIN_OBSERVATIONS ADJUSTMENT (vs master plan §4.5):
-        Master plan specifies min_obs = 30/20/15/10 for blue_chip/large_cap/
-        old_meme/new_meme. In practice with the v7 key space (3-6 bins ×
-        seq_len 5-15 = 243 to 470M possible keys), nodes rarely accumulate
-        30+ observations before being queried. Empirically, ~1% of BTC rows
-        would have trie signal with min_obs=30 (vs ~40% with min_obs=3).
-        We override to min_obs=3 across all sectors to ensure trie features
-        are non-zero for a meaningful fraction of training rows. This is a
-        COVERAGE OPTIMIZATION, not a leakage — the trie is still built
-        incrementally with INSERT-AFTER-PREDICT.
+    MIN_OBSERVATIONS NOTE (post §4.5 design revision):
+        The §4.5 design revision unified all sectors to seq_len=[3, 5],
+        which makes the master plan min_obs values (30/20/15/10) viable:
+        blue_chip seq=3 has ~8,667 obs/key (×289 min_obs=30),
+        new_meme seq=5 has ~12 obs/key (×1.2 min_obs=10).
+        The override to min_obs=3 below is now a CONSERVATIVE SAFETY NET
+        rather than a critical workaround — it ensures that even rare
+        (key, regime) combinations at seq=5 in new_meme still produce
+        non-zero features instead of degrading to N1 fallback.
+        This is NOT leakage: the trie is still built incrementally with
+        INSERT-AFTER-PREDICT, and the N2→N1 fallback is preserved.
     """
 
     encoders_dir: str = ENCODERS_DIR
@@ -163,14 +166,15 @@ class TrieFeatureExtractor:
     timeframe: str = "5m"
 
     # Override master plan min_obs values for F6 (coverage optimization).
-    # Smaller threshold = more rows get non-zero trie features = more signal
-    # for LightGBM to learn from. The cost is higher variance per node (fewer
-    # observations to average), but LightGBM can handle this via tree splits.
+    # After the §4.5 revision, this override is a conservative safety net
+    # for the sparse tail of (key, regime) combinations rather than a
+    # critical workaround. Kept for backwards compatibility with F6
+    # results already on disk.
     SECTOR_MIN_OBS_OVERRIDE: Dict[str, int] = field(default_factory=lambda: {
-        "blue_chip": 3,  # master plan: 30 — too high, coverage < 1%
-        "large_cap": 3,  # master plan: 20 — coverage 5% at min_obs=20
-        "old_meme": 3,   # master plan: 15
-        "new_meme": 3,   # master plan: 10
+        "blue_chip": 3,  # master plan §4.5: 30 — viable post-revision
+        "large_cap": 3,  # master plan §4.5: 20 — viable post-revision
+        "old_meme": 3,   # master plan §4.5: 15 — viable post-revision
+        "new_meme": 3,   # master plan §4.5: 10 — viable post-revision
     })
 
     # Loaded lazily

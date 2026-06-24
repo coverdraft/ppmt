@@ -875,3 +875,89 @@ Next: F6 — Trie conflict features (agreement, strength). Add 25 trie-derived f
       (n1_pred_5/10/15, n2_pred_regime, trie_agreement, trie_conflict, sector_pred_agreement,
       cross_sector_pred_divergence) to the 71-feature set, diversifying signal sources
       beyond ATR-dominated volatility. Target: reduce top_feat_pct below 30% (guard #3 PASS).
+
+---
+Task ID: F5b-post
+Agent: main
+Task: §4.5 design revision — fix mathematically unviable trie seq_lengths
+
+User noticed the original master plan §4.5 config was inconsistent:
+  blue_chip:  bins=3, seq_len=[10, 15], min_obs=30
+But 3^10 = 59,049 and 3^15 = 14,348,907 possible keys vs ~234K observations
+means ~0.016 obs/key for seq=15 (impossible to reach min_obs=30).
+
+Work Log:
+- Mathematical audit confirmed the problem extends beyond blue_chip:
+    blue_chip s=15: 3^15=14.3M keys / 234K obs  = 0.016 obs/key  (need 30) ❌
+    blue_chip s=10: 3^10=59K keys   / 234K obs   = 4.0 obs/key    (need 30) ❌
+    large_cap s=10: 4^10=1.05M keys / 202K obs   = 0.19 obs/key   (need 20) ❌
+    old_meme  s=10: 5^10=9.76M keys / 154K obs   = 0.016 obs/key  (need 15) ❌
+- Found that F6 v7_trie_conflict.py already silently overrode min_obs to 3
+  (documented in its docstring: "~1% of BTC rows would have trie signal
+   with min_obs=30 vs ~40% with min_obs=3"). This patched over the symptom
+  but left the design broken.
+- Also found §4.5 contradicts §4.1: §4.1 critiques v0.x for "243 max patterns
+  at α=3, n=5 → too many sparse nodes", but §4.5 proposed 59K-14M patterns
+  (240x-59000x worse than what §4.1 deemed unacceptable).
+
+- Designed revised config: unified seq_len=[3, 5] for all 4 sectors,
+  retaining original bins (3/4/5/6) and min_obs (30/20/15/10).
+- Verified mathematical viability:
+    blue_chip (234K, 3 bins): s=3 → 8,667 obs/key ✓ / s=5 → 964 obs/key ✓
+    large_cap (202K, 4 bins): s=3 → 3,156 obs/key ✓ / s=5 → 197 obs/key ✓
+    old_meme  (154K, 5 bins): s=3 → 1,232 obs/key ✓ / s=5 → 49 obs/key  ✓
+    new_meme  (95K,  6 bins): s=3 → 440   obs/key ✓ / s=5 → 12 obs/key  ⚠️
+  All sectors exceed min_obs by ≥3x at s=3 and ≥1.2x at s=5. The N2
+  regime-filtered tier degrades gracefully via existing N1 fallback.
+
+Files updated:
+- PPMT_v7_MASTER_PLAN.md §4.4, §4.5, §2.1 diagram, §2.3 glossary
+  (added "Design revision" block with full mathematical audit table)
+- config/v7.yaml sectors.*.seq_lengths (all → [3, 5]) + trie_features comment
+- scripts/v7/v7_ohlcv_encoder.py SECTOR_SEQ_LENGTHS (all → [3, 5])
+- scripts/v7/v7_trie_conflict.py:
+    * TRIE_FEATURE_NAMES loop L=[5,10,15] → L=[3,5]
+    * assert len == 35 → 25 (10×2 + 5 aggregates)
+    * MAX_SEQ_LEN 15 → 5
+    * Updated MIN_OBSERVATIONS NOTE docstring (override is now safety net,
+      not critical workaround)
+    * candles[T-15:T] → candles[T-MAX_SEQ_LEN:T]
+- scripts/v7/v7_fit_encoders.py: comment "last 15 candles" → "last MAX_SEQ_LEN"
+- tests/v7/test_ohlcv_encoder.py: 3 tests updated
+    * test_encode_sequence_length (seq 10,15 → 3,5)
+    * test_encode_sequence_invalid_seq_len (was: 5,7 rejected → now 10,7)
+    * test_encode_sequence_insufficient_candles (was: 5 candles no seq=10 →
+      now 4 candles, seq=3 ok, seq=5 fails)
+    * test_real_db_sanity_check (key10/key15 → key3/key5)
+- tests/v7/test_sector_tries.py: 6 tests + 1 docstring updated
+    * test_rpt_construction (seq_len 10 → 3)
+    * test_rpt_invalid_seq_len (5 rejected → 10 rejected)
+    * test_container_insert_observation ([10,15] → [3,5])
+    * test_extract_features_keys_present (_10/_15 → _3/_5)
+    * test_extract_features_empty_when_no_data (count_10 → count_3)
+    * test_extract_features_insufficient_candles (8 candles/seq 10,15 →
+      4 candles/seq 3,5)
+    * test_container_save_load_all (blue_chip_10/15.json → _3/_5.json)
+    * test_real_db_sanity_check (matches_10/15 → matches_3/5)
+
+Stage Summary:
+- All 162 v7 tests pass (28 ohlcv_encoder + 28 sector_tries + 12 trie_metadata
+  + 29 train_long + 38 train_short + 27 features_extras).
+- v7_trie_conflict module loads correctly: TRIE_FEATURE_NAMES has 25 entries
+  (was 35), all sectors have 25 features each (was 25/25/25/15).
+- F6 implementation no longer needs its silent min_obs=30→3 override as a
+  critical workaround — it remains as a conservative safety net for sparse
+  (key, regime) tail combinations at seq=5 in new_meme.
+- Design now internally consistent: §4.1 and §4.5 use the same density
+  criteria, no contradictions.
+- Total feature count unchanged: 59 (v6 base) + 6 (F4) + 4 (trie core:
+  n1_pred_3, n1_pred_5, n2_pred_regime_3, n2_pred_regime_5) + 3 (trie meta)
+  = 72 features.
+- READY FOR F6: trie feature extraction can now run with master plan min_obs
+  values (30/20/15/10) instead of the silent override, producing higher-
+  quality (lower-variance) per-node predictions.
+
+Next: F6 — Trie conflict features. Re-run F6 trie feature extraction with
+      the revised seq_lengths and the master plan min_obs values (no override).
+      Then re-train LightGBM LONG+SHORT experts on the augmented 72-feature
+      set. Target: Guard #3 PASS (top_feat_pct < 30%, breaking ATR dominance).

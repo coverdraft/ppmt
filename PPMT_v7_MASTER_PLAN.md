@@ -76,7 +76,7 @@ PPMT v7 is the next-generation crypto trading system that combines:
 │       sector_one_hot (4 bins → 1 categorical)                    │
 │                                                                   │
 │   4 trie features (F6):                                           │
-│     - n1_pred_5, n1_pred_10, n1_pred_15, n2_pred_regime          │
+│     - n1_pred_3, n1_pred_5, n2_pred_regime_3, n2_pred_regime_5   │
 │     - trie_agreement, trie_conflict, trie_strength (3 extras)    │
 │                                                                   │
 │   TOTAL: 59 + 6 + 4 + 3 = 72 features                            │
@@ -92,7 +92,7 @@ PPMT v7 is the next-generation crypto trading system that combines:
 │   │ TRIE           │ │ TRIE           │ │ TRIE           │       │
 │   │ blue_chip      │ │ large_cap      │ │ old_meme       │  ...  │
 │   │ (BTC,ETH)      │ │ (SOL,ADA,...)  │ │ (XRP,DOGE,SHIB)│       │
-│   │ seq_len=10,15  │ │ seq_len=5,10   │ │ seq_len=5,10   │       │
+│   │ seq_len=3,5    │ │ seq_len=3,5    │ │ seq_len=3,5    │       │
 │   │ bins=3         │ │ bins=4         │ │ bins=5         │       │
 │   │ min_obs=30     │ │ min_obs=20     │ │ min_obs=15     │       │
 │   └────────────────┘ └────────────────┘ └────────────────┘       │
@@ -222,30 +222,73 @@ class TrieNodeV6Metadata:
 
 ### 4.4 Two levels (N1 + N2), not four (N1/N2/N3/N4)
 
-**N1 — Sequence length variations:**
-- `n1_pred_5`  — query trie with last 5 candles, return mean(fwd_ret_15m) of matched nodes
-- `n1_pred_10` — same with 10 candles
-- `n1_pred_15` — same with 15 candles
+**N1 — Sequence length variations (per sector, see §4.5):**
+- `n1_pred_3` — query trie with last 3 candles, return mean(fwd_ret_15m) of matched nodes
+- `n1_pred_5` — same with 5 candles
 
 **N2 — Regime-filtered:**
-- `n2_pred_regime` — same as `n1_pred_15` but only consider observations from current `vol_regime`
+- `n2_pred_regime_3` — same as `n1_pred_3` but only consider observations from current `vol_regime`
+- `n2_pred_regime_5` — same as `n1_pred_5` but only consider observations from current `vol_regime`
 
 **Why only 2 levels:** Audit found N3 (per_asset) and N4 (per_asset_regime) were structurally identical to N1/N2 — same patterns inserted in all 4 levels. The 2-level design captures the only meaningful distinction: unconditional vs regime-conditional probability.
 
-**Critical lesson from old system (v2.1 Config F):** "N3=90%, N4=0% (sparse N4 data hurts more than it helps)." → v7 must monitor N2 trie density. If N2 has < min_obs per node, fall back to N1 prediction (set `n2_pred_regime = n1_pred_15`).
+**Critical lesson from old system (v2.1 Config F):** "N3=90%, N4=0% (sparse N4 data hurts more than it helps)." → v7 must monitor N2 trie density. If N2 has < min_obs per node, fall back to N1 prediction (set `n2_pred_regime_L = n1_pred_L`).
 
 ### 4.5 Sectorial tries (4 parallel)
 
 ```
-trie_blue_chip:  BTC, ETH         — seq_len [10, 15], bins=3, min_obs=30
-trie_large_cap:  SOL, ADA, AVAX, LINK — seq_len [5, 10], bins=4, min_obs=20
-trie_old_meme:   XRP, DOGE, SHIB  — seq_len [5, 10], bins=5, min_obs=15
-trie_new_meme:   PEPE, WIF, BONK  — seq_len [5],      bins=6, min_obs=10
+trie_blue_chip:  BTC, ETH             — seq_len [3, 5], bins=3, min_obs=30
+trie_large_cap:  SOL, ADA, AVAX, LINK — seq_len [3, 5], bins=4, min_obs=20
+trie_old_meme:   XRP, DOGE, SHIB      — seq_len [3, 5], bins=5, min_obs=15
+trie_new_meme:   PEPE, WIF, BONK      — seq_len [3, 5], bins=6, min_obs=10
 ```
 
+**Design revision (post-F5b, pre-F6):** The original master plan specified
+`seq_len [10, 15]` for blue_chip, `[5, 10]` for large_cap/old_meme, and `[5]`
+for new_meme. Mathematical audit showed this was unviable:
+
+| Sector (orig)   | Key space (bins^seq_len)  | Obs available | Obs/key (avg) | vs min_obs |
+|-----------------|---------------------------|---------------|---------------|------------|
+| blue_chip s=10  | 3^10 = 59,049             | ~234K         | ~4.0          | need 30 ❌ |
+| blue_chip s=15  | 3^15 = 14,348,907         | ~234K         | ~0.016        | need 30 ❌ |
+| large_cap s=10  | 4^10 = 1,048,576          | ~202K         | ~0.19         | need 20 ❌ |
+| old_meme s=10   | 5^10 = 9,765,625          | ~154K         | ~0.016        | need 15 ❌ |
+
+The original design contradicts §4.1's own critique of v0.x ("243 max patterns
+at α=3, n=5 → too many sparse nodes") — §4.5 proposed 59K–14M patterns, which
+is 240×–59,000× worse than what §4.1 deemed unacceptable.
+
+The F6 implementation (`v7_trie_conflict.py`) already worked around this by
+silently overriding `min_obs=30→3` (documented in its docstring: "~1% of BTC
+rows would have trie signal with min_obs=30 vs ~40% with min_obs=3"). This
+patched over the symptom but left the design broken.
+
+**Revised config** unifies all sectors to `seq_len=[3, 5]`:
+
+| Sector          | bins | s=3 key space | s=3 obs/key | s=5 key space | s=5 obs/key |
+|-----------------|------|---------------|-------------|---------------|-------------|
+| blue_chip (234K)| 3    | 27            | 8,667  ✓    | 243           | 964   ✓     |
+| large_cap (202K)| 4    | 64            | 3,156  ✓    | 1,024         | 197   ✓     |
+| old_meme (154K) | 5    | 125           | 1,232  ✓    | 3,125         | 49    ✓     |
+| new_meme (95K)  | 6    | 216           | 440    ✓    | 7,776         | 12    ⚠️   |
+
+All sectors now exceed `min_obs` by ≥3× at seq=3 and ≥1.2× at seq=5. The N2
+(regime-filtered) tier degrades gracefully via its existing N1 fallback when
+a specific (key, regime) bucket is sparse — no silent min_obs override needed.
+
+**Why [3, 5] is the right length:**
+1. LightGBM already captures longer horizons via `ret_5`, `ret_10`, `ret_15`,
+   `log_ret_5/10` features — trie must complement, not duplicate.
+2. seq=3 captures "current candle + 2 previous" — sufficient microstructure
+   for momentum/reversal detection at 5m TF.
+3. seq=5 captures 25 minutes of context — enough for short-term regime shifts
+   without exploding the key space.
+4. Sector differentiation now comes from `bins` (3/4/5/6) and `min_obs`
+   (30/20/15/10) — both retained from the original design.
+
 **Why sectorial, not per-token:**
-- 12 tokens × 4 seq_len × 4 regimes = 192 sub-tries → too sparse
-- 4 sectors × 4 seq_len × 4 regimes = 64 sub-tries → manageable
+- 12 tokens × 2 seq_len × 4 regimes = 96 sub-tries → still sparse for new_meme
+- 4 sectors × 2 seq_len × 4 regimes = 32 sub-tries → manageable, dense
 - Tokens within a sector share microstructure (PEPE/WIF/BONK pump/dump similarly)
 - LightGBM sees `sector_one_hot` feature and learns fine-grained per-token adjustments
 
@@ -671,7 +714,7 @@ For now: direct to `main`. If we need experiment isolation:
 | fwd_ret_15m | Forward 15-minute return: `(close[T+3] - close[T]) / close[T]` on 5m TF |
 | vol_regime | Volatility regime 0-3 (0=low vol, 3=extreme vol), computed from ATR percentile |
 | sector | Token group: blue_chip, large_cap, old_meme, new_meme |
-| trie_agreement | Fraction of trie predictions (n1_pred_5/10/15, n2_pred_regime) that agree in sign |
+| trie_agreement | Fraction of trie predictions (n1_pred_3/5, n2_pred_regime_3/5) that agree in sign |
 | trie_conflict | `\|sector_pred - cross_sector_pred\|` — divergence between sectors |
 | drift | `\|pred_avg_24h - outcome_avg_24h\|` — model prediction error |
 | funding_rate_z | Z-score of funding rate vs 30-day rolling mean |

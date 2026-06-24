@@ -107,7 +107,7 @@ def fit_sector(sector: str, timeframe: str = "5m") -> OHLCVCompositeEncoder:
         vols = [r[5] for r in rows]
         vmas = compute_vol_ma20(vols, window=20)
         candles = [(rows[i][1], rows[i][2], rows[i][3], rows[i][4], rows[i][5], vmas[i]) for i in range(len(rows))]
-        # Use the last 15 candles
+        # Use the last MAX_SEQ_LEN candles (5 post §4.5 revision)
         for seq_len in SECTOR_SEQ_LENGTHS[sector]:
             if len(candles) >= seq_len:
                 key = enc.encode_sequence(candles, seq_len=seq_len)

@@ -77,9 +77,9 @@ def _make_candles(n: int = 20, base_price: float = 100.0, seed: int = 0) -> list
 # ---------------------------------------------------------------------------
 
 def test_rpt_construction():
-    rpt = RegimePartitionedTrie(sector="blue_chip", seq_len=10)
+    rpt = RegimePartitionedTrie(sector="blue_chip", seq_len=3)
     assert rpt.sector == "blue_chip"
-    assert rpt.seq_len == 10
+    assert rpt.seq_len == 3
     assert len(rpt.global_trie) == 0
     assert len(rpt.regime_tries) == 0
     print("✓ test_rpt_construction")
@@ -95,9 +95,9 @@ def test_rpt_invalid_sector():
 
 
 def test_rpt_invalid_seq_len():
-    # blue_chip allows [10, 15], not 5
+    # Post §4.5 revision: blue_chip allows [3, 5], not 10
     try:
-        RegimePartitionedTrie(sector="blue_chip", seq_len=5)
+        RegimePartitionedTrie(sector="blue_chip", seq_len=10)
         assert False
     except ValueError:
         pass
@@ -337,7 +337,7 @@ def test_container_insert_observation():
     """Insert observation across all seq_lengths for a sector."""
     container = SectorTrieContainer()
     enc = _make_fitted_encoder("blue_chip")
-    # blue_chip seq_lengths = [10, 15] -> need 15 candles
+    # Post §4.5 revision: blue_chip seq_lengths = [3, 5] -> need 5 candles
     candles = _make_candles(n=20, seed=1)
 
     n = container.insert_observation(
@@ -348,9 +348,9 @@ def test_container_insert_observation():
         vol_regime=1,
         timestamp=1000.0,
     )
-    assert n == 2  # both seq_lengths (10, 15) should insert
+    assert n == 2  # both seq_lengths (3, 5) should insert
     # Check both tries have the inserted key
-    for seq_len in [10, 15]:
+    for seq_len in [3, 5]:
         trie = container.tries["blue_chip"][seq_len]
         assert len(trie.global_trie) == 1
     print("✓ test_container_insert_observation")
@@ -407,14 +407,14 @@ def test_extract_features_keys_present():
         symbol="BTCUSDT", candles=candles, encoder=enc, vol_regime=1,
     )
 
-    # blue_chip seq_lengths = [10, 15]
+    # Post §4.5 revision: blue_chip seq_lengths = [3, 5]
     expected_per_seq = [
-        "trie_n1_pred_10", "trie_n1_conf_10", "trie_n1_count_10",
-        "trie_n2_pred_10", "trie_n2_conf_10", "trie_n2_count_10", "trie_n2_source_10",
-        "trie_agreement_10", "trie_conflict_10", "trie_strength_10",
-        "trie_n1_pred_15", "trie_n1_conf_15", "trie_n1_count_15",
-        "trie_n2_pred_15", "trie_n2_conf_15", "trie_n2_count_15", "trie_n2_source_15",
-        "trie_agreement_15", "trie_conflict_15", "trie_strength_15",
+        "trie_n1_pred_3", "trie_n1_conf_3", "trie_n1_count_3",
+        "trie_n2_pred_3", "trie_n2_conf_3", "trie_n2_count_3", "trie_n2_source_3",
+        "trie_agreement_3", "trie_conflict_3", "trie_strength_3",
+        "trie_n1_pred_5", "trie_n1_conf_5", "trie_n1_count_5",
+        "trie_n2_pred_5", "trie_n2_conf_5", "trie_n2_count_5", "trie_n2_source_5",
+        "trie_agreement_5", "trie_conflict_5", "trie_strength_5",
     ]
     expected_agg = [
         "trie_n1_pred_avg", "trie_n2_pred_avg",
@@ -426,8 +426,8 @@ def test_extract_features_keys_present():
     # trie_any_signal should be 1.0 (we inserted data)
     assert features["trie_any_signal"] == 1.0
     # n1_count should be 5 for both seq_lengths
-    assert features["trie_n1_count_10"] == 5.0
-    assert features["trie_n1_count_15"] == 5.0
+    assert features["trie_n1_count_3"] == 5.0
+    assert features["trie_n1_count_5"] == 5.0
     print(f"✓ test_extract_features_keys_present ({len(features)} features)")
 
 
@@ -439,7 +439,7 @@ def test_extract_features_empty_when_no_data():
         symbol="BTCUSDT", candles=candles, encoder=enc, vol_regime=1,
     )
     assert features["trie_any_signal"] == 0.0
-    assert features["trie_n1_count_10"] == 0.0
+    assert features["trie_n1_count_3"] == 0.0
     print("✓ test_extract_features_empty_when_no_data")
 
 
@@ -447,13 +447,15 @@ def test_extract_features_insufficient_candles():
     """If candles < seq_len, features for that seq_len are zeroed."""
     container = SectorTrieContainer()
     enc = _make_fitted_encoder("blue_chip")
-    # Only 8 candles — blue_chip needs 10 and 15
-    candles = _make_candles(n=8, seed=4)
+    # Only 4 candles — blue_chip needs 3 (OK) and 5 (FAIL)
+    candles = _make_candles(n=4, seed=4)
     features = container.extract_features(
         symbol="BTCUSDT", candles=candles, encoder=enc, vol_regime=1,
     )
-    assert features["trie_n1_count_10"] == 0.0
-    assert features["trie_n1_count_15"] == 0.0
+    # seq_len=3 succeeds (4 >= 3) but has no data -> count 0
+    # seq_len=5 fails (4 < 5) -> count 0
+    assert features["trie_n1_count_3"] == 0.0
+    assert features["trie_n1_count_5"] == 0.0
     print("✓ test_extract_features_insufficient_candles")
 
 
@@ -524,16 +526,16 @@ def test_container_save_load_all(tmp_path="/tmp"):
 
         # Files exist
         files = os.listdir(base_dir)
-        # blue_chip has seq_lengths [10, 15]
-        assert "blue_chip_10.json" in files
-        assert "blue_chip_15.json" in files
+        # Post §4.5 revision: blue_chip has seq_lengths [3, 5]
+        assert "blue_chip_3.json" in files
+        assert "blue_chip_5.json" in files
 
         # Load into a fresh container
         container2 = SectorTrieContainer()
         n = container2.load_all(base_dir)
         assert n > 0
         # Same data
-        for seq_len in [10, 15]:
+        for seq_len in [3, 5]:
             t1 = container.tries["blue_chip"][seq_len]
             t2 = container2.tries["blue_chip"][seq_len]
             assert len(t2.global_trie) == len(t1.global_trie) == 1
@@ -633,11 +635,10 @@ def test_real_db_sanity_check():
     2. Trie nodes accumulate observations (training coverage)
     3. Some test-period keys match training nodes (even if sparse)
 
-    NOTE: With ~4000 training bars and seq_len=10, the 3^10=59049 key
-    space is too large for high coverage. The trie signal improves with
-    more data (F4 will add 6 months of 5m candles = ~500K obs, raising
-    density to ~8 obs per node). This sanity check verifies the pipeline
-    works, not that the signal is strong.
+    NOTE: Post §4.5 revision, blue_chip uses seq_len=[3, 5]. With
+    ~8000 training bars and 3^3=27 / 3^5=243 key spaces, coverage
+    should be high (>50% for seq=3, >20% for seq=5). This sanity check
+    verifies the pipeline works end-to-end on real data.
     """
     db_path = os.path.join(os.path.dirname(__file__), "..", "..", "data", "ppmt.db")
     if not os.path.exists(db_path):
@@ -724,17 +725,17 @@ def test_real_db_sanity_check():
             pass
 
     stats = container.stats()
-    n_nodes_bc10 = stats["blue_chip"]["10"]["global_nodes"]
-    n_nodes_bc15 = stats["blue_chip"]["15"]["global_nodes"]
+    n_nodes_bc3 = stats["blue_chip"]["3"]["global_nodes"]
+    n_nodes_bc5 = stats["blue_chip"]["5"]["global_nodes"]
     print(f"  inserted {n_inserted} observations")
-    print(f"  blue_chip/10: {n_nodes_bc10} nodes (avg {n_inserted/max(1,n_nodes_bc10):.2f} obs/node)")
-    print(f"  blue_chip/15: {n_nodes_bc15} nodes (avg {n_inserted/max(1,n_nodes_bc15):.2f} obs/node)")
-    assert n_nodes_bc10 > 0, "blue_chip seq_len=10 has no nodes"
-    assert n_nodes_bc15 > 0, "blue_chip seq_len=15 has no nodes"
+    print(f"  blue_chip/3: {n_nodes_bc3} nodes (avg {n_inserted/max(1,n_nodes_bc3):.2f} obs/node)")
+    print(f"  blue_chip/5: {n_nodes_bc5} nodes (avg {n_inserted/max(1,n_nodes_bc5):.2f} obs/node)")
+    assert n_nodes_bc3 > 0, "blue_chip seq_len=3 has no nodes"
+    assert n_nodes_bc5 > 0, "blue_chip seq_len=5 has no nodes"
 
     # Query on test period: count how many test keys have ANY training data
-    test_matches_10 = 0
-    test_matches_15 = 0
+    test_matches_3 = 0
+    test_matches_5 = 0
     test_total = 0
     for i in range(n_train, n - 3):
         candles_window = candles[max(0, i-19):i+1]
@@ -743,21 +744,24 @@ def test_real_db_sanity_check():
             symbol="BTCUSDT", candles=candles_window, encoder=enc, vol_regime=vr,
         )
         test_total += 1
-        if features["trie_n1_count_10"] >= 1:
-            test_matches_10 += 1
-        if features["trie_n1_count_15"] >= 1:
-            test_matches_15 += 1
+        if features["trie_n1_count_3"] >= 1:
+            test_matches_3 += 1
+        if features["trie_n1_count_5"] >= 1:
+            test_matches_5 += 1
 
     print(f"  test period: {test_total} queries, "
-          f"matches seq_len=10: {test_matches_10}, "
-          f"matches seq_len=15: {test_matches_15}")
+          f"matches seq_len=3: {test_matches_3}, "
+          f"matches seq_len=5: {test_matches_5}")
 
-    # With 8000 training bars and 3^10=59049 possible keys, expected match
-    # rate is low (~10-15%). seq_len=15 has 3^15≈14M possible keys — even lower.
-    # This is acceptable: the trie is a SIGNAL ENHANCER, not the primary
-    # predictor. LightGBM (F5) is the primary predictor; trie features are
-    # auxiliary. Higher data density in F4 will improve coverage.
-    assert test_matches_10 > 0, "Expected at least some seq_len=10 matches"
+    # Post §4.5 revision: blue_chip uses seq_len=[3, 5].
+    # With 8000 training bars and 3^3=27 / 3^5=243 possible keys, expected
+    # match rate is HIGH (>50% for seq=3, >20% for seq=5). This is the
+    # whole point of the revision: long sequences were mathematically
+    # unviable (3^15=14.3M keys / 8K obs = 0.0006 obs/key).
+    # The trie remains a SIGNAL ENHANCER; LightGBM is still the primary
+    # predictor. Higher density means more rows get non-zero trie features
+    # = more signal for the model to learn from.
+    assert test_matches_3 > 0, "Expected at least some seq_len=3 matches"
 
     print("✓ test_real_db_sanity_check")
 

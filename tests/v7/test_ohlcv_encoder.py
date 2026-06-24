@@ -335,12 +335,13 @@ def test_encode_sequence_length():
         l = min(o, c) - 1
         candles.append((o, h, l, c, 150, 100))
 
-    key10 = enc.encode_sequence(candles, seq_len=10)
-    assert len(key10) == 10
-    assert all(ch in "abc" for ch in key10)
+    # Post §4.5 revision: blue_chip allows seq_len=[3, 5]
+    key3 = enc.encode_sequence(candles, seq_len=3)
+    assert len(key3) == 3
+    assert all(ch in "abc" for ch in key3)
 
-    key15 = enc.encode_sequence(candles, seq_len=15)
-    assert len(key15) == 15
+    key5 = enc.encode_sequence(candles, seq_len=5)
+    assert len(key5) == 5
     print("✓ test_encode_sequence_length")
 
 
@@ -371,13 +372,14 @@ def test_encode_sequence_uses_last_n():
 
 def test_encode_sequence_invalid_seq_len():
     """seq_len not allowed for sector must raise."""
-    enc = OHLCVCompositeEncoder.for_sector("blue_chip")  # allowed: [10, 15]
+    enc = OHLCVCompositeEncoder.for_sector("blue_chip")  # allowed: [3, 5]
     enc.breakpoints = [-0.5, 0.5]
     enc.fitted = True
     candles = [(100, 110, 95, 100, 150, 100)] * 20
 
+    # seq_len=10 and seq_len=7 are not allowed for blue_chip post-revision
     try:
-        enc.encode_sequence(candles, seq_len=5)
+        enc.encode_sequence(candles, seq_len=10)
         assert False
     except ValueError:
         pass
@@ -393,9 +395,14 @@ def test_encode_sequence_insufficient_candles():
     enc = OHLCVCompositeEncoder.for_sector("blue_chip")
     enc.breakpoints = [-0.5, 0.5]
     enc.fitted = True
-    candles = [(100, 110, 95, 100, 150, 100)] * 5
+    # Only 4 candles — blue_chip needs 3 (OK) and 5 (FAIL)
+    candles = [(100, 110, 95, 100, 150, 100)] * 4
+    # seq_len=3 should succeed (4 >= 3)
+    key3 = enc.encode_sequence(candles, seq_len=3)
+    assert len(key3) == 3
+    # seq_len=5 should fail (4 < 5)
     try:
-        enc.encode_sequence(candles, seq_len=10)
+        enc.encode_sequence(candles, seq_len=5)
         assert False
     except ValueError:
         pass
@@ -581,16 +588,16 @@ def test_real_db_sanity_check():
         # Check that all symbols are in 'a','b','c'
         assert all(s in "abc" for s in syms)
 
-        # Encode a sequence
+        # Encode a sequence (post §4.5 revision: blue_chip uses seq_len=[3, 5])
         candles = list(zip(opens, highs, lows, closes, vols, vmas))
-        key10 = enc.encode_sequence(candles, seq_len=10)
-        assert len(key10) == 10
-        assert all(ch in "abc" for ch in key10)
+        key3 = enc.encode_sequence(candles, seq_len=3)
+        assert len(key3) == 3
+        assert all(ch in "abc" for ch in key3)
 
-        key15 = enc.encode_sequence(candles, seq_len=15)
-        assert len(key15) == 15
+        key5 = enc.encode_sequence(candles, seq_len=5)
+        assert len(key5) == 5
 
-        print(f"✓ test_real_db_sanity_check (BTC: dist={dist}, key10={key10!r})")
+        print(f"✓ test_real_db_sanity_check (BTC: dist={dist}, key5={key5!r})")
     finally:
         conn.close()
 

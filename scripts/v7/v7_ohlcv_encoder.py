@@ -72,10 +72,15 @@ SECTOR_BINS: Dict[str, int] = {
 }
 
 SECTOR_SEQ_LENGTHS: Dict[str, List[int]] = {
-    "blue_chip": [10, 15],
-    "large_cap": [5, 10],
-    "old_meme":  [5, 10],
-    "new_meme":  [5],
+    # Design revision (post-F5b): unified [3, 5] for all sectors.
+    # Original [10, 15] / [5, 10] / [5] was mathematically unviable:
+    # blue_chip seq=15 -> 3^15 = 14.3M keys vs ~234K obs = 0.016 obs/key.
+    # With [3, 5] all sectors reach >=3x min_obs at seq=3 and >=1.2x at seq=5.
+    # See PPMT_v7_MASTER_PLAN.md §4.5 for the full audit table.
+    "blue_chip": [3, 5],
+    "large_cap": [3, 5],
+    "old_meme":  [3, 5],
+    "new_meme":  [3, 5],
 }
 
 # Default composite weights (mirror config/v7.yaml)

@@ -16,24 +16,30 @@ database:
   features_table_v7: "feature_observations_v7"  # NEW in F4
 
 sectors:
+  # Design revision (post-F5b): seq_lengths [3, 5] for all sectors.
+  # Original [10, 15] / [5, 10] / [5] was mathematically unviable:
+  #   - blue_chip seq=15: 3^15=14.3M possible keys / 234K obs -> 0.016 obs/key
+  #   - large_cap seq=10: 4^10=1.05M possible keys / 202K obs -> 0.19 obs/key
+  # All sectors now exceed min_obs by >=3x at seq=3 and >=1.2x at seq=5.
+  # See PPMT_v7_MASTER_PLAN.md §4.5 for full audit.
   blue_chip:
     tokens: ["BTC", "ETH"]
-    seq_lengths: [10, 15]
+    seq_lengths: [3, 5]
     quantization_bins: 3
     min_observations_per_node: 30
   large_cap:
     tokens: ["SOL", "ADA", "AVAX", "LINK"]
-    seq_lengths: [5, 10]
+    seq_lengths: [3, 5]
     quantization_bins: 4
     min_observations_per_node: 20
   old_meme:
     tokens: ["XRP", "DOGE", "SHIB"]
-    seq_lengths: [5, 10]
+    seq_lengths: [3, 5]
     quantization_bins: 5
     min_observations_per_node: 15
   new_meme:
     tokens: ["PEPE", "WIF", "BONK"]
-    seq_lengths: [5]
+    seq_lengths: [3, 5]
     quantization_bins: 6
     min_observations_per_node: 10
 
@@ -117,6 +123,6 @@ risk:
 features_v7:
   base_numeric: 59  # from v6
   new_features: 6   # funding_rate, funding_rate_z, oi_change_1h, oi_change_4h, sector_one_hot(1), day_of_week_sin
-  trie_features: 4  # n1_pred_5, n1_pred_10, n1_pred_15, n2_pred_regime
+  trie_features: 4  # n1_pred_3, n1_pred_5, n2_pred_regime_3, n2_pred_regime_5
   trie_meta_features: 3  # trie_agreement, trie_conflict, trie_strength
   total: 72
