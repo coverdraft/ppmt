@@ -1,0 +1,88 @@
+/home/z/my-project/scripts/v6/v6_backtest_short.py:283: SyntaxWarning: invalid escape sequence '\$'
+  print(f"  LONG-only, no filter:     \$+872 / 5mo  (+8.72% ROI), 1457 trades  [v6_backtest.py]")
+/home/z/my-project/scripts/v6/v6_backtest_short.py:284: SyntaxWarning: invalid escape sequence '\$'
+  print(f"  LONG-only, k=12 filter:   \$+1139 / 5mo (+11.39% ROI), 1020 trades [v6_backtest_filtered.py]")
+/home/z/my-project/scripts/v6/v6_backtest_short.py:285: SyntaxWarning: invalid escape sequence '\$'
+  print(f"  LONG+SHORT, k=12 filter:  \${agg_combined['dollars']:+.0f} / 5mo ({agg_combined['roi_pct']:+.2f}% ROI), {agg_combined['trades']} trades [THIS]")
+/home/z/my-project/scripts/v6/v6_backtest_short.py:287: SyntaxWarning: invalid escape sequence '\$'
+  print(f"  SHORT contribution:       \${agg_short['dollars']:+.0f} ({agg_short['dollars']/agg_long['dollars']*100:+.1f}% of LONG)")
+/home/z/my-project/scripts/v6/v6_backtest_short.py:295: SyntaxWarning: invalid escape sequence '\$'
+  print(f"  ✓ SHORT side is profitable ({agg_short['avg_wr']:.1%} WR, +\${agg_short['dollars']:.0f})")
+==============================================================================================================
+v6 LONG+SHORT BACKTEST — both sides, walk-forward k=12 hours filter
+==============================================================================================================
+LONG:  enter when pred > +0.3%,  PnL = +fwd_ret_3 - 0.14%
+SHORT: enter when pred < -0.3%,  PnL = -fwd_ret_3 - 0.14%
+Hours filter: k=12 top hours per side, chosen walk-forward from prior windows
+Windows: ['2025-04', '2025-05', '2025-06', '2025-09', '2025-10']
+
+Loading + predicting all windows...
+  2025-04: 102,991 rows, pred mean=-0.0014%, pred>thr=543, pred<-thr=393
+  2025-05: 107,087 rows, pred mean=+0.0015%, pred>thr=340, pred<-thr=190
+  2025-06: 76,001 rows, pred mean=+0.0006%, pred>thr=127, pred<-thr=80
+  2025-09: 103,194 rows, pred mean=-0.0013%, pred>thr=14, pred<-thr=56
+  2025-10: 100,345 rows, pred mean=+0.0045%, pred>thr=433, pred<-thr=114
+
+==============================================================================================================
+WALK-FORWARD RESULTS (per window)
+==============================================================================================================
+
+--- 2025-04 ---
+  LONG  hours=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+        trades=  543, WR=0.497, PF=1.14, tot=$+236.07, Sharpe=+3.94
+  SHORT hours=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+        trades=  393, WR=0.417, PF=0.79, tot=$-338.19, Sharpe=-6.24
+  COMBINED: trades=  936, tot=$-102.12, WR~0.464
+
+--- 2025-05 ---
+  LONG  hours=[0, 1, 4, 7, 8, 12, 13, 14, 15, 17, 19, 23]
+        trades=  254, WR=0.508, PF=1.15, tot=$+121.71, Sharpe=+2.60
+  SHORT hours=[0, 5, 6, 12, 13, 14, 15, 16, 18, 20, 21, 23]
+        trades=   89, WR=0.438, PF=0.71, tot=$-128.71, Sharpe=-4.28
+  COMBINED: trades=  343, tot=$-6.99, WR~0.490
+
+--- 2025-06 ---
+  LONG  hours=[0, 1, 4, 7, 8, 13, 14, 15, 16, 17, 19, 23]
+        trades=  103, WR=0.495, PF=0.82, tot=$-53.90, Sharpe=-2.75
+  SHORT hours=[3, 5, 6, 9, 11, 12, 13, 14, 18, 20, 21, 23]
+        trades=   13, WR=0.385, PF=0.60, tot=$-15.78, Sharpe=-2.26
+  COMBINED: trades=  116, tot=$-69.69, WR~0.483
+
+--- 2025-09 ---
+  LONG  hours=[1, 4, 7, 8, 13, 14, 15, 16, 17, 19, 21, 23]
+        trades=    0, WR=0.000, PF=0.00, tot=$+0.00, Sharpe=+0.00
+  SHORT hours=[5, 6, 9, 11, 12, 13, 14, 15, 18, 20, 21, 23]
+        trades=   55, WR=0.364, PF=0.41, tot=$-120.83, Sharpe=-9.02
+  COMBINED: trades=   55, tot=$-120.83, WR~0.364
+
+--- 2025-10 ---
+  LONG  hours=[1, 4, 6, 7, 8, 13, 14, 15, 16, 17, 19, 23]
+        trades=  120, WR=0.800, PF=4.33, tot=$+835.29, Sharpe=+21.72
+  SHORT hours=[3, 5, 9, 11, 12, 13, 14, 15, 18, 20, 21, 23]
+        trades=   54, WR=0.352, PF=0.82, tot=$-71.93, Sharpe=-1.67
+  COMBINED: trades=  174, tot=$+763.36, WR~0.661
+
+==============================================================================================================
+AGGREGATE (5 windows)
+==============================================================================================================
+  side        trades      dollars  avg_WR  avg_PF  avg_Sharpe
+  LONG          1020     +1139.16   0.575    1.86       +6.38
+  SHORT          604      -675.44   0.391    0.67       -4.69
+  COMBINED      1624      +463.73 (+4.64% ROI)
+
+==============================================================================================================
+COMPARISON vs PRIOR BASELINES
+==============================================================================================================
+  LONG-only, no filter:     \$+872 / 5mo  (+8.72% ROI), 1457 trades  [v6_backtest.py]
+  LONG-only, k=12 filter:   \$+1139 / 5mo (+11.39% ROI), 1020 trades [v6_backtest_filtered.py]
+  LONG+SHORT, k=12 filter:  \$+464 / 5mo (+4.64% ROI), 1624 trades [THIS]
+  SHORT contribution:       \$-675 (-59.3% of LONG)
+
+==============================================================================================================
+VERDICT
+==============================================================================================================
+  ✗ SHORT side is NOT profitable (39.1% WR, -675)
+  ✗ The model's directional signal is asymmetric — it can call LONGS but not SHORTS
+  → Stick with LONG-only strategy
+
+Saved: /home/z/my-project/data/v6_models/v6_short_backtest.json
