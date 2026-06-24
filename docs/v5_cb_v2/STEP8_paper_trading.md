@@ -224,11 +224,130 @@ After 1 week of live paper-trading, compare these against the Paso 5 backtest (t
 
 | Path | Purpose |
 |---|---|
-| `ppmt/scripts/v5/v5_paper_trader_cb_v2.py` | The paper trader harness (1025 lines). |
+| `ppmt/scripts/v5/v5_paper_trader_cb_v2.py` | The paper trader harness (1036 lines). |
+| `ppmt/scripts/v5/run_paper.sh` | Bash launcher (venv activation, dir creation, dup detection). |
 | `ppmt/docs/v5_cb_v2/STEP8_paper_trading.md` | This document. |
 | `state/v5_cb_v2/paper_trader_state.json` | (Created on first live run.) |
 | `logs/v5_paper_trader.log` | (Created on first live run.) |
 | `logs/smoke_long.log` | 6-min smoke test log (committed as evidence). |
+
+## Post-deployment fixes (commits after the initial Step 8 push)
+
+Three follow-up commits were made after the first user attempted to run
+the trader on a Mac (outside the container where it was developed):
+
+### Fix 1 — Portable paths (commit `921ec1b`)
+
+The original script had hardcoded `/home/z/my-project/...` paths.
+Made `MODEL_PATH` / `STATE_PATH` / `LOG_DIR` resolve relative to the
+repo root via `Path(__file__).resolve().parent.parent.parent`.
+All three are overridable via env vars: `PPMT_MODEL_PATH` /
+`PPMT_STATE_PATH` / `PPMT_LOG_DIR`.
+`save_state()` now does `mkdir -p` on the state dir so a fresh clone
+works without manual dir creation.
+`.gitignore`: added `/state/` and `/logs/` so local runtime artifacts
+aren't committed.
+
+### Fix 2 — Direct module load via `importlib` (commit `b11b4ee`)
+
+The original `from ppmt.risk.v5_risk_gate_cb_v2 import ...` triggered
+`ppmt/risk/__init__.py`, which imports `MoneyManager`, `PortfolioManager`,
+etc. — those pull in `rich`, `yaml`, `sqlalchemy`, and other heavy deps
+the paper trader doesn't actually need.
+
+Replaced with `importlib.util.spec_from_file_location` to load
+`v5_risk_gate_cb_v2.py` directly (the gate itself only uses `dataclasses`
++ `logging` from stdlib). Required registering the module in `sys.modules`
+BEFORE `exec_module()` to work around a Python 3.12+ dataclass quirk
+(`AttributeError: 'NoneType' object has no attribute '__dict__'`).
+
+Net effect: paper trader now needs only `lightgbm + pandas + numpy +
+requests` (+ `libomp` system lib on macOS).
+
+### Fix 3 — `run_paper.sh` launcher (commit `916bb15`)
+
+A convenience bash script that handles:
+- venv activation (if `.venv/` exists)
+- `mkdir -p logs state/v5_cb_v2`
+- duplicate-process detection (refuses to start if a trader is already running)
+- default config (7 days, thr=0.80, $100/trade, mc=3, lev=7x, $10K)
+- `--fresh-state` flag pass-through
+- clean PID reporting
+
+Usage:
+```bash
+./scripts/v5/run_paper.sh                 # 7 days, thr=0.80
+./scripts/v5/run_paper.sh --days 1        # 1 day
+./scripts/v5/run_paper.sh --threshold 0.70
+./scripts/v5/run_paper.sh --fresh-state   # ignore saved state
+```
+
+## macOS deployment troubleshooting
+
+These issues were hit when deploying to a MacBook Air (Apple Silicon)
+and are documented here for future reference.
+
+### 1. `libomp` not found
+
+**Symptom:**
+```
+OSError: dlopen(.../lightgbm/lib/lib_lightgbm.dylib, 0x0006):
+Library not loaded: @rpath/libomp.dylib
+Reason: tried: '/opt/homebrew/opt/libomp/lib/libomp.dylib' (no such file)
+```
+
+**Cause:** The PyPI wheel of `lightgbm` for macOS doesn't bundle
+`libomp` (OpenMP runtime). On Linux it's part of glibc; on macOS it
+must be installed separately.
+
+**Fix:**
+```bash
+# Install Homebrew (one-time)
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> ~/.zprofile
+eval "$(/opt/homebrew/bin/brew shellenv)"
+brew install libomp
+```
+
+### 2. `ModuleNotFoundError: No module named 'rich'` / `'yaml'`
+
+**Symptom:** The paper trader crashed on startup importing the gate.
+
+**Cause:** `ppmt/risk/__init__.py` imports the full risk stack
+(MoneyManager, PortfolioManager, etc.) which need `rich`, `yaml`,
+`sqlalchemy`. The paper trader doesn't use any of those.
+
+**Fix:** Resolved in Fix 2 above (commit `b11b4ee`). The trader now
+loads `v5_risk_gate_cb_v2.py` directly via `importlib`, bypassing the
+package `__init__.py`. No need to install `rich`/`yaml`/etc.
+
+### 3. zsh `dquote>` prompt when copy-pasting the launch command
+
+**Symptom:** Pasting the multi-line `nohup python3 ... \` command from
+the chat left the shell stuck in `dquote>` mode.
+
+**Cause:** The IM gateway converts ASCII double quotes `"..."` to
+typographic quotes `"..."`, which zsh doesn't recognize as string
+delimiters. The backslash-newline continuation then can't terminate.
+
+**Fix:** Either (a) use `run_paper.sh` (no quoting needed), or
+(b) paste a single-line command without quotes:
+```bash
+nohup python3 scripts/v5/v5_paper_trader_cb_v2.py --mode live --days 7 --threshold 0.80 --position-usd 100 --max-concurrent 3 --leverage 7 --account 10000 > /dev/null 2>&1 & echo PID=$!
+```
+
+## Live deployment status
+
+| Field | Value |
+|---|---|
+| Host | MacBook Air (Apple Silicon) |
+| Started at | 2026-06-24 06:14:17 UTC (user local TZ) |
+| PID | 85010 |
+| Mode | live, 7 days, thr=0.80, $100/trade, mc=3, lev=7x, $10K account |
+| First signals | expected within 5 min of startup (first 5m candle close) |
+| First OPEN | expected within 30-60 min (probability ~25% per signal × 12 tokens) |
+| State file | `state/v5_cb_v2/paper_trader_state.json` (saved every 30s) |
+| Log file | `logs/v5_paper_trader.log` (INFO level, every OPEN/EXIT + stats every 30s) |
 
 ## Next steps after the 1-week paper run
 
@@ -245,3 +364,54 @@ After 1 week of live paper-trading, compare these against the Paso 5 backtest (t
      leverage, raise threshold.
 4. After 4 weeks of profitable live trading, retrain on the augmented
    dataset (original + 4 weeks of live labels).
+
+## Planned but not yet built — Step 9: Live dashboard (`rich` TUI)
+
+A companion terminal UI script that reads `state/v5_cb_v2/paper_trader_state.json`
+and renders a live dashboard in the terminal. **Not yet implemented** —
+the paper trader is running fine without it; this is purely a UX upgrade.
+
+**Planned file:** `ppmt/scripts/v5/v5_paper_dashboard.py`
+
+**Planned display:**
+
+```
+┌─ PPMT Paper Trader — LIVE ──────────────────────────────────┐
+│ Account:  $10,042.17 (+0.42%)   │  Open: 2/3                │
+│ Signals:  127  Approved: 18     │  Closed: 16  WR: 87%      │
+│ PF: 5.84  Avg PnL: +2.31%       │  Uptime: 4h 12m           │
+├──────── Open Positions ─────────────────────────────────────┤
+│ Symbol    Entry     Now        TP         SL        PnL     │
+│ ETHUSDT   3420.55   3445.20    3441.79    3416.85   +1.7%   │
+│ SOLUSDT   142.80    143.15     143.66     142.79    +0.2%   │
+├──────── Equity Curve ───────────────────────────────────────┤
+│  $10,040 ┤        ╭─╮                                         │
+│  $10,020 ┤    ╭───╯ ╰───╮                                     │
+│  $10,000 ┼────╯        ╰────────────────                     │
+├──────── Last Decisions ─────────────────────────────────────┤
+│ 03:20:11 OPEN   ETHUSDT  proba=0.823  ✓ approved             │
+│ 03:20:12 SKIP   BTCUSDT  proba=0.712  < 0.80                 │
+│ 03:20:18 SKIP   ADAUSDT  proba=0.681  < 0.80                 │
+│ 03:20:24 OPEN   SOLUSDT  proba=0.815  ✓ approved             │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**Planned features:**
+- Auto-refresh every 2s by re-reading the JSON state file
+- Color-coded PnL (green/red), WR (green ≥ 80%, yellow 60-80%, red < 60%)
+- ASCII equity curve (last 100 closed trades)
+- Last 5 decisions log (OPEN/SKIP with reason)
+- Per-symbol breakdown of closed trades
+- Status indicators: Uptime, last state save time, last candle seen per token
+
+**Planned usage:**
+```bash
+# In a separate terminal (the trader keeps running in background)
+cd ~/ppmt
+source .venv/bin/activate   # or: conda activate ppmt
+pip install rich             # one-time
+python3 scripts/v5/v5_paper_dashboard.py
+```
+
+The dashboard will be **read-only** — it only reads the state file, never
+writes to it. So even if it crashes, the trader is unaffected.

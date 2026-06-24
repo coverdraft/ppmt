@@ -420,3 +420,60 @@ Files produced:
 - `ppmt/scripts/v5/v5_paper_trader_cb_v2.py` (1025 lines)
 - `ppmt/docs/v5_cb_v2/STEP8_paper_trading.md` (this task's documentation)
 - `logs/smoke_long.log` (6-min smoke test evidence)
+
+---
+Task ID: 9
+Agent: Super Z (main)
+Task: Deploy paper trader to user's Mac, fix deployment issues, document everything
+
+Work Log:
+- User cloned repo on local MacBook Air (Apple Silicon), tried to run
+  v5_paper_trader_cb_v2.py — hit 3 sequential deployment issues:
+
+  Issue 1: ModuleNotFoundError: No module named 'lightgbm'
+    → User installed: pip3 install lightgbm pandas numpy requests
+    → But hit OSError: dlopen lib_lightgbm.dylib — Library not loaded: libomp.dylib
+    → Cause: PyPI wheel for macOS doesn't bundle libomp (OpenMP runtime)
+    → Fix documented: brew install libomp (after installing Homebrew)
+
+  Issue 2: ModuleNotFoundError: No module named 'rich' / 'yaml'
+    → Cause: ppmt/risk/__init__.py imports MoneyManager/PortfolioManager/etc
+      which pull in rich/yaml/sqlalchemy — paper trader doesn't need any
+    → Fix (commit b11b4ee): load v5_risk_gate_cb_v2.py DIRECTLY via
+      importlib.util.spec_from_file_location, bypassing the package __init__
+    → Required sys.modules registration BEFORE exec_module to work around
+      a Python 3.12+ dataclass quirk ('NoneType' object has no attribute '__dict__')
+    → Net effect: trader now needs only lightgbm+pandas+numpy+requests+libomp
+
+  Issue 3: zsh dquote> prompt when copy-pasting launch command
+    → Cause: IM gateway converts ASCII quotes "..." to typographic "..."
+      which zsh doesn't recognize as string delimiters
+    → Fix: created run_paper.sh launcher script (commit 916bb15) that
+      handles venv activation, dir creation, dup detection, and runs
+      the python command internally without user-side quoting
+
+- User successfully ran 30s smoke test: 11 signals, 0 errors, p50=1372ms
+- User successfully launched 7-day live paper trading run:
+    PID=85010, thr=0.80, $100/trade, mc=3, lev=7x, $10K account
+    Started at 2026-06-24 06:14:17 UTC (user local TZ)
+    All 12 tokens primed, polling every 5s, state saving every 30s
+
+- Updated STEP8_paper_trading.md with:
+  - Post-deployment fixes section (3 commits documented)
+  - macOS deployment troubleshooting section (3 issues + fixes)
+  - Live deployment status table
+  - Planned Step 9: Live dashboard (rich TUI) — not yet implemented
+
+Stage Summary:
+- Paper trader is RUNNING LIVE on user's Mac (PID 85010)
+- All 3 deployment blockers resolved and documented
+- 7-day run in progress, first OPEN expected within 30-60 min
+- GitHub repo is up to date with all fixes + docs
+- Next: optionally build v5_paper_dashboard.py (rich TUI) for live monitoring
+
+Files produced/updated this task:
+- ppmt/scripts/v5/v5_paper_trader_cb_v2.py (importlib fix)
+- ppmt/scripts/v5/run_paper.sh (new launcher script)
+- ppmt/.gitignore (added /state/ and /logs/)
+- ppmt/docs/v5_cb_v2/STEP8_paper_trading.md (post-deploy fixes + troubleshooting + Step 9 plan)
+- worklog.md (this entry)
