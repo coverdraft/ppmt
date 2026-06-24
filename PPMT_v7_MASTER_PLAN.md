@@ -464,9 +464,9 @@ minimum_trade_threshold = 0.30%  # pred must exceed this to enter
 
 | Phase | Task | Effort | Status | Blocks |
 |-------|------|--------|--------|--------|
-| F0 | Cleanup repo + write master plan | 1h | IN PROGRESS | None |
-| F1 | TrieNodeV6Metadata (8 fields, no SAX) | 1h | pending | F0 |
-| F2 | OHLCV composite encoder (sectorized) | 3-4h | pending | F1 |
+| F0 | Cleanup repo + write master plan | 1h | DONE | None |
+| F1 | TrieNodeV6Metadata (8 fields, no SAX) | 1h | DONE | F0 |
+| F2 | OHLCV composite encoder (sectorized) | 3-4h | DONE | F1 |
 | F3 | 4 sectorial tries + RegimePartitioned | 4-5h | pending | F2 |
 | F4 | Features extras (funding rate, OI, sector) | 3-4h | pending | F3 |
 | F5a | LightGBM-LONG expert (retrain with labels>0) | 2-3h | pending | F4 |

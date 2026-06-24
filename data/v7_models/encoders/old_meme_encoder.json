@@ -1,0 +1,21 @@
+{
+  "bins": 5,
+  "breakpoints": [
+    -0.3648819119730461,
+    -0.06333075543095226,
+    0.6309381670796754,
+    0.8235450626769918
+  ],
+  "fitted": true,
+  "sector": "old_meme",
+  "train_count": 149940,
+  "train_mean": 0.27566214660329263,
+  "train_std": 0.5990142895430263,
+  "vol_signal_max": 5.0,
+  "vol_signal_min": 0.5,
+  "weights": {
+    "body_score": 0.4,
+    "direction": 0.35,
+    "vol_signal": 0.25
+  }
+}

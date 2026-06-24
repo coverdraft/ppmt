@@ -1,0 +1,20 @@
+{
+  "bins": 4,
+  "breakpoints": [
+    -0.3249055490988302,
+    0.47539519620594184,
+    0.7750000000000178
+  ],
+  "fitted": true,
+  "sector": "large_cap",
+  "train_count": 199920,
+  "train_mean": 0.27575648206025943,
+  "train_std": 0.6052097270738849,
+  "vol_signal_max": 5.0,
+  "vol_signal_min": 0.5,
+  "weights": {
+    "body_score": 0.4,
+    "direction": 0.35,
+    "vol_signal": 0.25
+  }
+}

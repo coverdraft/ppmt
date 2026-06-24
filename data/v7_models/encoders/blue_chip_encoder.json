@@ -1,0 +1,19 @@
+{
+  "bins": 3,
+  "breakpoints": [
+    -0.2359862251821061,
+    0.7027610579434727
+  ],
+  "fitted": true,
+  "sector": "blue_chip",
+  "train_count": 99960,
+  "train_mean": 0.2714018631068276,
+  "train_std": 0.5889477728735184,
+  "vol_signal_max": 5.0,
+  "vol_signal_min": 0.5,
+  "weights": {
+    "body_score": 0.4,
+    "direction": 0.35,
+    "vol_signal": 0.25
+  }
+}

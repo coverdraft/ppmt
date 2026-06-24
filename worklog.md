@@ -488,3 +488,62 @@ Stage Summary:
 - Foundation ready for F2 (OHLCV composite encoder)
 
 Next: F2 — OHLCV composite encoder with sectorized quantization.
+
+
+---
+Task ID: v7-f2-ohlcv-encoder
+Agent: super-z (main)
+Task: F2 — OHLCV composite encoder with sectorized quantization (3/4/5/6 bins per sector).
+
+Work Log:
+- Read PPMT_v7_MASTER_PLAN.md §4.1 (no SAX rationale), §4.2 (composite formula), §4.5 (sectorial tries)
+- Inspected ppmt.db schema: ohlcv_v6 table has columns (symbol, timeframe, timestamp, window, open, high, low, close, volume), symbols stored with 'USDT' suffix (e.g., BTCUSDT)
+- Created scripts/v7/v7_ohlcv_encoder.py (~580 lines):
+  * SECTOR_TOKENS / SECTOR_BINS / SECTOR_SEQ_LENGTHS — single source of truth (mirrors config/v7.yaml)
+  * symbol_to_sector() — strips USDT/USD/PERP/-USD suffixes, routes to sector
+  * compute_composite_score(o,h,l,c,v,vol_ma20,weights) — body*0.4 + direction*0.35 + vol_signal*0.25
+    - body_score: (close-open)/(high-low), clamped [-1,+1], handles high==low (doji)
+    - direction: sign(close-open) ∈ {-1, 0, +1}
+    - vol_signal: clip(volume/vol_ma20, 0.5, 5.0), warmup fallback if vol_ma20 invalid
+  * OHLCVCompositeEncoder dataclass:
+    - fit(composite_scores, method="percentile"|"normal")
+      - percentile: empirical quantiles (robust to outliers, default)
+      - normal: standard-normal z-score breakpoints (Acklam's algorithm, no scipy dep)
+    - encode_candle(o,h,l,c,v,vol_ma20) → symbol ('a'..'z')
+    - quantize(composite_score) → symbol; boundary rule: score<=bp[i] → bin i; NaN/inf → middle bin
+    - encode_sequence(candles, seq_len) → trie key string
+    - encode_series(opens, highs, lows, closes, vols, vmas) → list of symbols (batch)
+    - symbol_distribution(symbols) → empirical per-bin fraction
+    - to_dict / from_dict / to_json / from_json (persistence)
+    - for_sector / for_symbol factory classmethods
+  * compute_vol_ma20(volumes, window=20) — closed='left' rolling mean, returns warmup fallback (1.0) for first `window` bars (mirrors pandas default min_periods=window, prevents partial-window leakage)
+  * _normal_quantile(p) — Acklam's algorithm, max error ~1.15e-9
+- Created tests/v7/test_ohlcv_encoder.py (~620 lines, 28 tests):
+  1-3.  symbol_to_sector routing (12 tokens, suffix variants, unknown raises)
+  4-9.  composite math (bullish, bearish, doji, clipping, zero-range, warmup)
+  10-13. encoder construction (factory, unknown sector, not-fitted raises)
+  14-17. fit+quantize (percentile balanced, normal method, insufficient samples, boundary behavior, NaN handling)
+  18-21. encode_sequence (length, last-n usage, invalid seq_len, insufficient candles)
+  22.   vol_ma20 closed='left' anti-leakage (CRITICAL: ma[20] must NOT include volumes[20])
+  23-24. serialization (dict round-trip, JSON file round-trip)
+  25-26. encode_series batch + length mismatch
+  27.   real_db_sanity_check (loads 5000 BTC 5m candles from ppmt.db, fits, verifies distribution 0.20-0.50 per bin)
+  → All 28 tests PASS
+- Created scripts/v7/v7_fit_encoders.py — fits all 4 sector encoders on real DB candles (50000 per token, 50K-200K composite scores per sector), saves to data/v7_models/encoders/{sector}_encoder.json
+- Ran fit on real data, results:
+  * blue_chip (BTC,ETH): 3 bins, breakpoints=[-0.236, 0.703], dist=[0.333, 0.333, 0.333] — PERFECTLY balanced
+  * large_cap (SOL,ADA,AVAX,LINK): 4 bins, breakpoints=[-0.325, 0.475, 0.775], dist=[0.250, 0.250, 0.250, 0.250] — PERFECTLY balanced
+  * old_meme (XRP,DOGE,SHIB): 5 bins, breakpoints=[-0.365, -0.063, 0.631, 0.824], dist=[0.200 x 5] — PERFECTLY balanced
+  * new_meme (PEPE,WIF,BONK): 6 bins, breakpoints=[-0.425, -0.189, 0.211, 0.689, 0.875], dist=[0.177-0.187] — slightly skewed due to extreme moves in new_meme, but all bins in 14.6%-18.7% range (acceptable)
+- Verified all 4 saved encoders load back via from_json and produce identical quantization
+
+Stage Summary:
+- F2 COMPLETE: OHLCV composite encoder ready for F3 (sectorial trie construction)
+- 4 fitted encoders saved at data/v7_models/encoders/{sector}_encoder.json
+- Trie key format: lowercase letter per candle, concatenated (e.g., "baaaabcaaa" for 10-candle BTC sequence)
+- Anti-leakage enforced: vol_ma20 uses closed='left' (current bar excluded), warmup returns fallback
+- 28/28 tests pass including real-DB sanity check on BTC 5m candles
+- Memory: ~400 bytes per fitted encoder (JSON-serializable)
+- No SAX dependency, no scipy dependency (Acklam's algorithm for normal quantile)
+
+Next: F3 — 4 sectorial tries + RegimePartitionedTrie (use encoder keys as trie insertion keys, TrieNodeV6Metadata as node values).
