@@ -1,0 +1,585 @@
+{
+  "threshold": 0.3,
+  "round_trip_cost_pct": 0.14,
+  "position_notional": 700.0,
+  "per_symbol": [
+    {
+      "symbol": "PEPEUSDT",
+      "n_trades": 200,
+      "win_rate": 0.51,
+      "pf": 1.3044109033321356,
+      "avg_pnl_pct": 0.25069107874546853,
+      "total_pnl_pct": 50.1382157490937,
+      "total_dollars": 350.96751024365597
+    },
+    {
+      "symbol": "XRPUSDT",
+      "n_trades": 89,
+      "win_rate": 0.5842696629213483,
+      "pf": 1.571723980900101,
+      "avg_pnl_pct": 0.41746420656152283,
+      "total_pnl_pct": 37.15431438397553,
+      "total_dollars": 260.0802006878287
+    },
+    {
+      "symbol": "SHIBUSDT",
+      "n_trades": 78,
+      "win_rate": 0.5128205128205128,
+      "pf": 1.3487223367213406,
+      "avg_pnl_pct": 0.28173118507436706,
+      "total_pnl_pct": 21.97503243580063,
+      "total_dollars": 153.8252270506044
+    },
+    {
+      "symbol": "ADAUSDT",
+      "n_trades": 100,
+      "win_rate": 0.56,
+      "pf": 1.2137977667943405,
+      "avg_pnl_pct": 0.17665081520195858,
+      "total_pnl_pct": 17.66508152019586,
+      "total_dollars": 123.655570641371
+    },
+    {
+      "symbol": "ETHUSDT",
+      "n_trades": 78,
+      "win_rate": 0.5384615384615384,
+      "pf": 1.404615398399494,
+      "avg_pnl_pct": 0.15498885232203483,
+      "total_pnl_pct": 12.089130481118717,
+      "total_dollars": 84.62391336783102
+    },
+    {
+      "symbol": "AVAXUSDT",
+      "n_trades": 94,
+      "win_rate": 0.46808510638297873,
+      "pf": 1.1001340380333668,
+      "avg_pnl_pct": 0.09197503460280726,
+      "total_pnl_pct": 8.645653252663882,
+      "total_dollars": 60.51957276864717
+    },
+    {
+      "symbol": "DOGEUSDT",
+      "n_trades": 103,
+      "win_rate": 0.5339805825242718,
+      "pf": 1.1091199032912833,
+      "avg_pnl_pct": 0.08091152431169293,
+      "total_pnl_pct": 8.333887004104373,
+      "total_dollars": 58.33720902873061
+    },
+    {
+      "symbol": "BTCUSDT",
+      "n_trades": 32,
+      "win_rate": 0.46875,
+      "pf": 1.4659050556243771,
+      "avg_pnl_pct": 0.14870719801017235,
+      "total_pnl_pct": 4.758630336325515,
+      "total_dollars": 33.310412354278604
+    },
+    {
+      "symbol": "LINKUSDT",
+      "n_trades": 95,
+      "win_rate": 0.4631578947368421,
+      "pf": 1.0372171082077293,
+      "avg_pnl_pct": 0.032959789644205775,
+      "total_pnl_pct": 3.1311800161995484,
+      "total_dollars": 21.91826011339684
+    },
+    {
+      "symbol": "SOLUSDT",
+      "n_trades": 91,
+      "win_rate": 0.4175824175824176,
+      "pf": 0.8929321997266373,
+      "avg_pnl_pct": -0.07246713352960009,
+      "total_pnl_pct": -6.594509151193608,
+      "total_dollars": -46.16156405835526
+    },
+    {
+      "symbol": "BONKUSDT",
+      "n_trades": 216,
+      "win_rate": 0.5138888888888888,
+      "pf": 0.9304055574672272,
+      "avg_pnl_pct": -0.0536790893506124,
+      "total_pnl_pct": -11.594683299732278,
+      "total_dollars": -81.16278309812594
+    },
+    {
+      "symbol": "WIFUSDT",
+      "n_trades": 281,
+      "win_rate": 0.5266903914590747,
+      "pf": 0.9351906720616617,
+      "avg_pnl_pct": -0.0752020593671912,
+      "total_pnl_pct": -21.131778682180727,
+      "total_dollars": -147.92245077526508
+    }
+  ],
+  "per_hour": [
+    {
+      "hour_utc": 0,
+      "n_trades": 137,
+      "win_rate": 0.48175182481751827,
+      "pf": 1.0066467443967313,
+      "avg_pnl_pct": 0.003482191196065369,
+      "total_pnl_pct": 0.47706019386095555,
+      "total_dollars": 3.339421357026689
+    },
+    {
+      "hour_utc": 1,
+      "n_trades": 32,
+      "win_rate": 0.53125,
+      "pf": 1.1088587685293447,
+      "avg_pnl_pct": 0.04129809831875575,
+      "total_pnl_pct": 1.321539146200184,
+      "total_dollars": 9.250774023401288
+    },
+    {
+      "hour_utc": 2,
+      "n_trades": 26,
+      "win_rate": 0.6923076923076923,
+      "pf": 2.8146551703844542,
+      "avg_pnl_pct": 0.5746829261492904,
+      "total_pnl_pct": 14.94175607988155,
+      "total_dollars": 104.59229255917084
+    },
+    {
+      "hour_utc": 3,
+      "n_trades": 30,
+      "win_rate": 0.3333333333333333,
+      "pf": 0.8367867665367088,
+      "avg_pnl_pct": -0.08879953812516626,
+      "total_pnl_pct": -2.663986143754988,
+      "total_dollars": -18.647903006284917
+    },
+    {
+      "hour_utc": 4,
+      "n_trades": 12,
+      "win_rate": 0.5833333333333334,
+      "pf": 3.15043084632029,
+      "avg_pnl_pct": 0.5403962648716587,
+      "total_pnl_pct": 6.4847551784599045,
+      "total_dollars": 45.39328624921933
+    },
+    {
+      "hour_utc": 5,
+      "n_trades": 9,
+      "win_rate": 0.4444444444444444,
+      "pf": 0.11141347609617569,
+      "avg_pnl_pct": -1.3714978813090495,
+      "total_pnl_pct": -12.343480931781444,
+      "total_dollars": -86.40436652247011
+    },
+    {
+      "hour_utc": 6,
+      "n_trades": 25,
+      "win_rate": 0.56,
+      "pf": 1.7084606706548036,
+      "avg_pnl_pct": 0.5005299750672769,
+      "total_pnl_pct": 12.513249376681923,
+      "total_dollars": 87.59274563677346
+    },
+    {
+      "hour_utc": 7,
+      "n_trades": 30,
+      "win_rate": 0.6666666666666666,
+      "pf": 2.259397351445068,
+      "avg_pnl_pct": 0.5951155963837867,
+      "total_pnl_pct": 17.853467891513603,
+      "total_dollars": 124.97427524059522
+    },
+    {
+      "hour_utc": 8,
+      "n_trades": 18,
+      "win_rate": 0.9444444444444444,
+      "pf": 25.71950158401433,
+      "avg_pnl_pct": 2.021671808708865,
+      "total_pnl_pct": 36.390092556759576,
+      "total_dollars": 254.73064789731706
+    },
+    {
+      "hour_utc": 9,
+      "n_trades": 16,
+      "win_rate": 0.375,
+      "pf": 0.5633740546338037,
+      "avg_pnl_pct": -0.22553642213556116,
+      "total_pnl_pct": -3.6085827541689786,
+      "total_dollars": -25.26007927918285
+    },
+    {
+      "hour_utc": 10,
+      "n_trades": 5,
+      "win_rate": 0.2,
+      "pf": 0.23724389430401985,
+      "avg_pnl_pct": -0.5821183985002678,
+      "total_pnl_pct": -2.910591992501339,
+      "total_dollars": -20.374143947509374
+    },
+    {
+      "hour_utc": 11,
+      "n_trades": 27,
+      "win_rate": 0.3333333333333333,
+      "pf": 0.26893079232300526,
+      "avg_pnl_pct": -0.3873732747449064,
+      "total_pnl_pct": -10.459078418112473,
+      "total_dollars": -73.2135489267873
+    },
+    {
+      "hour_utc": 12,
+      "n_trades": 89,
+      "win_rate": 0.4044943820224719,
+      "pf": 0.7819137727376513,
+      "avg_pnl_pct": -0.07099884971115052,
+      "total_pnl_pct": -6.318897624292396,
+      "total_dollars": -44.23228337004678
+    },
+    {
+      "hour_utc": 13,
+      "n_trades": 35,
+      "win_rate": 0.7142857142857143,
+      "pf": 3.4307125696557335,
+      "avg_pnl_pct": 0.32362951388156425,
+      "total_pnl_pct": 11.327032985854748,
+      "total_dollars": 79.28923090098324
+    },
+    {
+      "hour_utc": 14,
+      "n_trades": 127,
+      "win_rate": 0.7401574803149606,
+      "pf": 3.7287170619231214,
+      "avg_pnl_pct": 0.7853219986070294,
+      "total_pnl_pct": 99.73589382309274,
+      "total_dollars": 698.1512567616492
+    },
+    {
+      "hour_utc": 15,
+      "n_trades": 94,
+      "win_rate": 0.648936170212766,
+      "pf": 2.2245373694530612,
+      "avg_pnl_pct": 0.3509692792404106,
+      "total_pnl_pct": 32.9911122485986,
+      "total_dollars": 230.93778574019018
+    },
+    {
+      "hour_utc": 16,
+      "n_trades": 14,
+      "win_rate": 0.6428571428571429,
+      "pf": 2.355219655051023,
+      "avg_pnl_pct": 0.3811851950077249,
+      "total_pnl_pct": 5.336592730108149,
+      "total_dollars": 37.35614911075704
+    },
+    {
+      "hour_utc": 17,
+      "n_trades": 57,
+      "win_rate": 0.7368421052631579,
+      "pf": 2.0157608975936614,
+      "avg_pnl_pct": 0.46058093882069223,
+      "total_pnl_pct": 26.253113512779457,
+      "total_dollars": 183.7717945894562
+    },
+    {
+      "hour_utc": 18,
+      "n_trades": 102,
+      "win_rate": 0.3235294117647059,
+      "pf": 0.37189989555349273,
+      "avg_pnl_pct": -0.3000658589414656,
+      "total_pnl_pct": -30.606717612029488,
+      "total_dollars": -214.24702328420642
+    },
+    {
+      "hour_utc": 19,
+      "n_trades": 26,
+      "win_rate": 0.7692307692307693,
+      "pf": 1.4142895141144791,
+      "avg_pnl_pct": 0.11367111867888767,
+      "total_pnl_pct": 2.9554490856510793,
+      "total_dollars": 20.688143599557556
+    },
+    {
+      "hour_utc": 20,
+      "n_trades": 28,
+      "win_rate": 0.25,
+      "pf": 0.014824202215739551,
+      "avg_pnl_pct": -3.5841141048495335,
+      "total_pnl_pct": -100.35519493578694,
+      "total_dollars": -702.4863645505087
+    },
+    {
+      "hour_utc": 21,
+      "n_trades": 228,
+      "win_rate": 0.5043859649122807,
+      "pf": 1.8110509944019997,
+      "avg_pnl_pct": 1.1392377246981606,
+      "total_pnl_pct": 259.74620123118063,
+      "total_dollars": 1818.2234086182646
+    },
+    {
+      "hour_utc": 22,
+      "n_trades": 196,
+      "win_rate": 0.2755102040816326,
+      "pf": 0.2656093420440705,
+      "avg_pnl_pct": -1.454587829651749,
+      "total_pnl_pct": -285.0992146117428,
+      "total_dollars": -1995.6945022821997
+    },
+    {
+      "hour_utc": 23,
+      "n_trades": 94,
+      "win_rate": 0.6595744680851063,
+      "pf": 2.3198059010070717,
+      "avg_pnl_pct": 0.5383891811693496,
+      "total_pnl_pct": 50.60858302991886,
+      "total_dollars": 354.26008120943203
+    }
+  ],
+  "per_symbol_hour_top15": [
+    {
+      "symbol": "PEPEUSDT",
+      "hour_utc": 21,
+      "n_trades": 27,
+      "win_rate": 0.5185185185185185,
+      "pf": 3.133984377501307,
+      "avg_pnl_pct": 2.6112071073399923,
+      "total_pnl_pct": 70.50259189817979,
+      "total_dollars": 493.5181432872585
+    },
+    {
+      "symbol": "AVAXUSDT",
+      "hour_utc": 21,
+      "n_trades": 15,
+      "win_rate": 0.5333333333333333,
+      "pf": 1.99959442274207,
+      "avg_pnl_pct": 1.8853219948938287,
+      "total_pnl_pct": 28.27982992340743,
+      "total_dollars": 197.958809463852
+    },
+    {
+      "symbol": "ADAUSDT",
+      "hour_utc": 21,
+      "n_trades": 17,
+      "win_rate": 0.5294117647058824,
+      "pf": 2.5289430810756097,
+      "avg_pnl_pct": 1.6459507216869873,
+      "total_pnl_pct": 27.981162268678784,
+      "total_dollars": 195.86813588075148
+    },
+    {
+      "symbol": "WIFUSDT",
+      "hour_utc": 21,
+      "n_trades": 29,
+      "win_rate": 0.5172413793103449,
+      "pf": 1.2305268620012404,
+      "avg_pnl_pct": 0.9046136368950048,
+      "total_pnl_pct": 26.23379546995514,
+      "total_dollars": 183.63656828968598
+    },
+    {
+      "symbol": "LINKUSDT",
+      "hour_utc": 21,
+      "n_trades": 16,
+      "win_rate": 0.5,
+      "pf": 2.977152654204526,
+      "avg_pnl_pct": 1.541796516169016,
+      "total_pnl_pct": 24.668744258704255,
+      "total_dollars": 172.6812098109298
+    },
+    {
+      "symbol": "PEPEUSDT",
+      "hour_utc": 8,
+      "n_trades": 6,
+      "win_rate": 1.0,
+      "pf": 99.0,
+      "avg_pnl_pct": 3.8309294926133517,
+      "total_pnl_pct": 22.98557695568011,
+      "total_dollars": 160.89903868976077
+    },
+    {
+      "symbol": "ETHUSDT",
+      "hour_utc": 21,
+      "n_trades": 21,
+      "win_rate": 0.5714285714285714,
+      "pf": 3.7704197480445893,
+      "avg_pnl_pct": 0.9015924936530918,
+      "total_pnl_pct": 18.933442366714928,
+      "total_dollars": 132.5340965670045
+    },
+    {
+      "symbol": "XRPUSDT",
+      "hour_utc": 21,
+      "n_trades": 15,
+      "win_rate": 0.5333333333333333,
+      "pf": 1.8017579932478367,
+      "avg_pnl_pct": 1.2367965275039017,
+      "total_pnl_pct": 18.551947912558525,
+      "total_dollars": 129.86363538790968
+    },
+    {
+      "symbol": "BONKUSDT",
+      "hour_utc": 21,
+      "n_trades": 25,
+      "win_rate": 0.6,
+      "pf": 2.0429115850164488,
+      "avg_pnl_pct": 0.7115461628740581,
+      "total_pnl_pct": 17.788654071851454,
+      "total_dollars": 124.52057850296018
+    },
+    {
+      "symbol": "SHIBUSDT",
+      "hour_utc": 21,
+      "n_trades": 16,
+      "win_rate": 0.4375,
+      "pf": 1.8229400657364283,
+      "avg_pnl_pct": 1.0371052546876658,
+      "total_pnl_pct": 16.593684075002653,
+      "total_dollars": 116.15578852501856
+    },
+    {
+      "symbol": "WIFUSDT",
+      "hour_utc": 14,
+      "n_trades": 15,
+      "win_rate": 0.9333333333333333,
+      "pf": 16.711301026336553,
+      "avg_pnl_pct": 1.0495871444260703,
+      "total_pnl_pct": 15.743807166391052,
+      "total_dollars": 110.20665016473737
+    },
+    {
+      "symbol": "WIFUSDT",
+      "hour_utc": 15,
+      "n_trades": 17,
+      "win_rate": 0.7647058823529411,
+      "pf": 10.278179187997264,
+      "avg_pnl_pct": 0.8459548514732744,
+      "total_pnl_pct": 14.381232475045666,
+      "total_dollars": 100.66862732531966
+    },
+    {
+      "symbol": "SOLUSDT",
+      "hour_utc": 21,
+      "n_trades": 18,
+      "win_rate": 0.3888888888888889,
+      "pf": 1.935455788044041,
+      "avg_pnl_pct": 0.7093767510814624,
+      "total_pnl_pct": 12.768781519466323,
+      "total_dollars": 89.38147063626427
+    },
+    {
+      "symbol": "DOGEUSDT",
+      "hour_utc": 14,
+      "n_trades": 12,
+      "win_rate": 0.75,
+      "pf": 4.815046014079714,
+      "avg_pnl_pct": 1.0606665676155667,
+      "total_pnl_pct": 12.727998811386799,
+      "total_dollars": 89.09599167970758
+    },
+    {
+      "symbol": "ADAUSDT",
+      "hour_utc": 17,
+      "n_trades": 8,
+      "win_rate": 0.875,
+      "pf": 12.337875291038076,
+      "avg_pnl_pct": 1.2764435922142394,
+      "total_pnl_pct": 10.211548737713915,
+      "total_dollars": 71.48084116399741
+    }
+  ],
+  "per_symbol_hour_bottom5": [
+    {
+      "symbol": "ADAUSDT",
+      "hour_utc": 22,
+      "n_trades": 18,
+      "win_rate": 0.2777777777777778,
+      "pf": 0.13750465502976714,
+      "avg_pnl_pct": -1.7333762856392185,
+      "total_pnl_pct": -31.200773141505934,
+      "total_dollars": -218.40541199054152
+    },
+    {
+      "symbol": "LINKUSDT",
+      "hour_utc": 22,
+      "n_trades": 17,
+      "win_rate": 0.11764705882352941,
+      "pf": 0.07372262171013594,
+      "avg_pnl_pct": -2.238141785981586,
+      "total_pnl_pct": -38.04841036168697,
+      "total_dollars": -266.33887253180876
+    },
+    {
+      "symbol": "BONKUSDT",
+      "hour_utc": 22,
+      "n_trades": 26,
+      "win_rate": 0.2692307692307692,
+      "pf": 0.3249484839661397,
+      "avg_pnl_pct": -1.6733529426603606,
+      "total_pnl_pct": -43.507176509169376,
+      "total_dollars": -304.55023556418564
+    },
+    {
+      "symbol": "PEPEUSDT",
+      "hour_utc": 22,
+      "n_trades": 23,
+      "win_rate": 0.17391304347826086,
+      "pf": 0.03740289108351922,
+      "avg_pnl_pct": -2.7866020418995445,
+      "total_pnl_pct": -64.09184696368952,
+      "total_dollars": -448.6429287458267
+    },
+    {
+      "symbol": "WIFUSDT",
+      "hour_utc": 22,
+      "n_trades": 23,
+      "win_rate": 0.21739130434782608,
+      "pf": 0.19946222961898447,
+      "avg_pnl_pct": -2.9553566895978456,
+      "total_pnl_pct": -67.97320386075044,
+      "total_dollars": -475.8124270252531
+    }
+  ],
+  "per_window": [
+    {
+      "window": "RANGE_2025",
+      "n_trades": 447,
+      "win_rate": 0.5525727069351231,
+      "pf": 1.1283961217733192,
+      "avg_pnl_pct": 0.21709742448820604,
+      "total_pnl_pct": 97.0425487462281,
+      "total_dollars": 679.2978412235967
+    },
+    {
+      "window": "RECENT_2026",
+      "n_trades": 1010,
+      "win_rate": 0.49504950495049505,
+      "pf": 1.0597487600079443,
+      "avg_pnl_pct": 0.027255054752616817,
+      "total_pnl_pct": 27.527605300142984,
+      "total_dollars": 192.69323710100088
+    }
+  ],
+  "good_symbols": [
+    "PEPEUSDT",
+    "XRPUSDT",
+    "SHIBUSDT",
+    "ADAUSDT",
+    "ETHUSDT",
+    "AVAXUSDT",
+    "DOGEUSDT",
+    "BTCUSDT",
+    "LINKUSDT"
+  ],
+  "good_hours": [
+    0,
+    1,
+    2,
+    4,
+    6,
+    7,
+    8,
+    13,
+    14,
+    15,
+    16,
+    17,
+    19,
+    21,
+    23
+  ]
+}
