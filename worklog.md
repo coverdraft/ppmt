@@ -98,3 +98,34 @@ Stage Summary:
 - Files created: download_ohlcv_extended.py, ppmt_v24_adaptive.py, v24_pure_edge.py, v25_hold_compare.py, ppmt_v25_hold48.py
 - Findings documented in OPTIMIZATION_v2.5_FINDINGS.md
 - Results saved to download/ppmt_v25_results.json
+
+---
+Task ID: v5_cb_v2-step4
+Agent: main
+Task: Paso 4 — Wire cb_v2 risk gate into the realistic backtest (was using v1 gate)
+
+Work Log:
+- Read worklog + v5_risk_gate_cb_v2.py + v5_backtest_realistic_cb_v2.py to understand state
+- Found the bug: backtest was importing `from ppmt.risk.v5_risk_gate import SignalV5, evaluate_signal` (the V1 Binance gate)
+- V1 gate blocks SHORT on blue/large/meme; in cb_v2 all signals were marked SHORT because `np.where(prior_expected_move > 0, "LONG", "SHORT")` returns SHORT when prior_expected_move=0
+- Result: only mid_cap (ADA/AVAX/LINK) signals passed — BTC/ETH/SOL/XRP/DOGE/SHIB/PEPE/WIF/BONK were all blocked
+- Copied v5_risk_gate_cb_v2.py from scripts/v5/ to src/ppmt/risk/ (was not in package location)
+- Edited v5_backtest_realistic_cb_v2.py:
+  * Import SignalV5Cb/evaluate_signal_cb_v2 (was SignalV5/evaluate_signal)
+  * Force direction="LONG" everywhere (cb_v2 label is LONG-directional)
+  * Pass expected_move_pct=0.0, win_rate=0.0 (not used by cb_v2 gate)
+  * Removed `np.where(prior_expected_move > 0, "LONG", "SHORT")` line
+- Re-ran backtest: 542,052 labeled observations loaded, predictions made, full grid executed
+- Backtest completed in ~3 minutes (542k obs × 7 thresholds × 2 gate × 2 regimes + per-symbol/per-tf breakdowns)
+- Wrote STEP4_gate_rewire.md executive summary
+- Committed v5_risk_gate.py (was untracked) + backtest changes + new results + summary doc
+- Pushed to GitHub: db320a4
+
+Stage Summary:
+- Bug was wiring-level, not model-level — the cb_v2 gate existed but was never invoked
+- After re-wiring: trades 16,497 -> 60,251 (+3.65×), total PnL ~41k% -> 143,300% (+3.5×)
+- All 12 tokens now pass the gate (was only 3)
+- BTC has the best PF (10.49) and WR (92.5%) of all 12 tokens — exactly as cb_v2 OOS precision predicted
+- 5m TF dominates (43,777 trades, WR=89.4%, PF=7.19) over 15m (16,474 trades, WR=84.2%, PF=4.53)
+- Compounded growth at 100 sequential trades = 10.49× account (+949%)
+- Next: concurrent backtest with capital allocation, walk-forward validation, live paper-trading
