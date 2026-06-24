@@ -1,0 +1,122 @@
+# PPMT v7 Runtime Configuration
+# Created: 2026-06-24 (F0)
+# Updated per phase as needed
+
+system:
+  version: "v7"
+  status: "development"
+  created: "2026-06-24"
+
+database:
+  path: "data/ppmt.db"
+  ohlcv_table_5m: "candles_5m"
+  ohlcv_table_15m: "candles_15m"
+  features_table_v6: "feature_observations_v6"
+  features_table_v6_15m: "feature_observations_v6_15m"
+  features_table_v7: "feature_observations_v7"  # NEW in F4
+
+sectors:
+  blue_chip:
+    tokens: ["BTC", "ETH"]
+    seq_lengths: [10, 15]
+    quantization_bins: 3
+    min_observations_per_node: 30
+  large_cap:
+    tokens: ["SOL", "ADA", "AVAX", "LINK"]
+    seq_lengths: [5, 10]
+    quantization_bins: 4
+    min_observations_per_node: 20
+  old_meme:
+    tokens: ["XRP", "DOGE", "SHIB"]
+    seq_lengths: [5, 10]
+    quantization_bins: 5
+    min_observations_per_node: 15
+  new_meme:
+    tokens: ["PEPE", "WIF", "BONK"]
+    seq_lengths: [5]
+    quantization_bins: 6
+    min_observations_per_node: 10
+
+trie_v7:
+  ohlcv_composite_weights:
+    body_score: 0.4
+    direction: 0.35
+    vol_signal: 0.25
+  time_decay_half_life_hours: 24
+  prune_every_n_inserts: 1000
+  max_nodes_per_sector: 100000
+  min_observations_for_prediction: 5
+
+lightgbm:
+  long_expert:
+    label_filter: "fwd_ret_15m > 0"
+    threshold: 0.30  # %
+    sample_weight_drops: 2.0
+    sample_weight_bear_2022: 2.0
+  short_expert:
+    label_filter: "fwd_ret_15m < 0"
+    threshold: 0.40  # % (more selective)
+    sample_weight_drops: 2.0
+    sample_weight_bear_2022: 2.0
+  shared_hyperparams:
+    objective: "regression"
+    metric: ["rmse", "l1"]
+    num_leaves: 31
+    learning_rate: 0.05
+    n_estimators: 300
+    early_stopping: 30
+    min_child_samples: 50
+    reg_alpha: 0.1
+    reg_lambda: 1.0
+    random_state: 42
+
+anti_leakage:
+  top_feat_gain_max_pct: 30
+  train_corr_max: 0.85
+  insert_after_predict_delay_minutes: 15
+  walk_forward_windows: ["2025-04", "2025-05", "2025-06", "2025-09", "2025-10"]
+
+online_learning:
+  layer1_trie:
+    enabled: false  # enabled in F8
+    insert_every_minutes: 5
+  layer2_rolling_retrain:
+    enabled: false  # enabled in F9
+    cadence_hours: 6
+    training_window_days: 30
+  layer3_walkforward_monthly:
+    enabled: false  # enabled in F11
+    cadence_days: 30
+    training_window_days: 90
+
+adaptive_manager:
+  enabled: false  # enabled in F10
+  check_every_minutes: 5
+  close_early_threshold_pct: 0.15
+  breakeven_move_threshold_pct: 0.05
+  max_early_closes_per_position: 1
+
+circuit_breakers:
+  consecutive_losses_pause: 3
+  drawdown_24h_pause_pct: 5.0
+  drift_warning_pct: 0.2
+  drift_critical_pct: 0.5
+  drift_stop_trading_pct: 1.0
+  funding_rate_extreme_pct: 0.10
+  funding_rate_z_gate_short: 1.5
+
+risk:
+  notional_per_trade_usd: 700
+  leverage: 7
+  margin_per_trade_usd: 100
+  round_trip_cost_pct: 0.14
+  max_concurrent_positions: 3
+  max_trades_per_day: 50
+  max_short_pct_concurrent: 30
+
+features_v7:
+  base_numeric: 59  # from v6
+  new_features: 6   # funding_rate, funding_rate_z, oi_change_1h, oi_change_4h, sector_one_hot(1), day_of_week_sin
+  trie_features: 4  # n1_pred_5, n1_pred_10, n1_pred_15, n2_pred_regime
+  trie_meta_features: 3  # trie_agreement, trie_conflict, trie_strength
+  total: 72

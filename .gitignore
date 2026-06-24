@@ -60,3 +60,8 @@ upload/
 data/personal/
 download/
 _archive/
+skills/
+agent-ctx/
+terminal-v2/
+_backup_pre_cleanup/
+tool-results/

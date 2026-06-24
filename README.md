@@ -1,88 +1,97 @@
-# PPMT - Progressive Pattern Matching Trie
+# PPMT — Progressive Pattern Matching for Crypto Trading
 
-Autonomous pattern-based trading engine using a novel 4-level Trie architecture with SAX symbolization, Block Lifecycle Metadata, and fuzzy matching.
+LightGBM + sectorial trie system for crypto trading on Coinbase Advanced.
 
-## Architecture
+**Current version:** v7 (in development)
+**Previous stable:** v6 LONG-only (+11.4% ROI/5mo walk-forward, WR 72%, PF 1.86, Sharpe +6.38)
 
-### 4-Level Trie
-| Level | Scope | Weight | Purpose |
-|-------|-------|--------|---------|
-| N1 | Universal | 10% | Cross-asset universal patterns |
-| N2 | Asset Class | 30% | Group patterns (Blue Chip, Meme, DeFi...) |
-| N3 | Per-Asset | 30% | Asset-specific patterns |
-| N4 | Per-Asset+Regime | 30% | Highest specificity |
+---
 
-### Block Lifecycle Metadata
-Each Trie node carries 12 metadata fields:
-- `trigger_candle` - Which candle activates the pattern
-- `remaining_candles` - Predicted candles left
-- `expected_move_pct` - Expected price movement
-- `max_drawdown_pct` - Maximum observed drawdown
-- `max_favorable_pct` - Maximum favorable excursion
-- `win_rate` - Historical win rate
-- `avg_duration` - Average pattern duration
-- `sl_price` - Stop loss level
-- `tp_price` - Take profit level
-- `continuation_nodes` - Nodes that continue the pattern
-- `break_nodes` - Nodes that break the pattern
-- `historical_count` - Number of historical occurrences
+## Quick start
 
-### Key Innovations
-- **Unknown Block = Predictive Exit**: If next SAX block doesn't exist in Trie, pattern broke → exit signal
-- **Dead Asset Knowledge Transfer**: Patterns from dead assets persist in Asset Class Trie
-- **O(k) Search**: Sub-microsecond regardless of total patterns
-- **Autonomous**: Only needs external Capital Risk Manager
-
-## Installation
+### 1. Setup
 
 ```bash
-# Clone
-git clone <repo-url>
+git clone https://github.com/coverdraft/ppmt.git
 cd ppmt
-
-# Create virtual environment
 python -m venv venv
-source venv/bin/activate  # Linux/Mac
-# venv\Scripts\activate   # Windows
-
-# Install
-pip install -e ".[dev]"
+source venv/bin/activate
+pip install -e .
 ```
 
-## Quick Start
+### 2. Database (OHLCV candles)
+
+The system uses a SQLite database at `data/ppmt.db` (4.4GB, gitignored).
+
+To populate from scratch:
 
 ```bash
-# Initialize database and configuration
-ppmt init
-
-# Ingest historical data for an asset
-ppmt ingest --symbol BTC/USDT --timeframe 1h --days 365
-
-# Build the Trie from ingested data
-ppmt build --symbol BTC/USDT
-
-# Run real-time pattern matching
-ppmt run --symbol BTC/USDT --timeframe 1h
-
-# Query pattern statistics
-ppmt stats --symbol BTC/USDT
+python scripts/v6/v6_download_ohlcv.py --timeframe 5m
+python scripts/v6/v6_download_ohlcv.py --timeframe 15m
 ```
 
-## Project Structure
+### 3. Train v6 (current production)
+
+```bash
+python scripts/v6/v6_extract_features.py --timeframe 5m
+python scripts/v6/v6_train_wf.py  # trains 5 walk-forward windows
+python scripts/v6/v6_backtest_filtered.py
+```
+
+### 4. v7 (in development)
+
+See `PPMT_v7_MASTER_PLAN.md` for the full plan.
+
+---
+
+## Repository structure
 
 ```
 ppmt/
-├── src/ppmt/
-│   ├── core/           # SAX, Trie, Delta Encoder, Fuzzy Matcher
-│   ├── engine/         # PPMT Engine, Adaptive Weights, Signal Generator
-│   ├── data/           # Data Collection, Storage, Asset Classification
-│   ├── risk/           # Capital Risk Manager
-│   └── cli/            # Command Line Interface
-├── tests/              # Unit & integration tests
-├── config/             # Configuration files
-└── docs/               # Documentation & PDF spec
+├── PPMT_v7_MASTER_PLAN.md    # v7 architecture & plan (READ THIS FIRST)
+├── worklog.md                # execution history (append-only)
+├── README.md                 # this file
+├── config/
+│   └── v7.yaml               # v7 runtime config
+├── docs/
+│   ├── v7/                   # v7 phase docs (added per phase)
+│   ├── audit_alternative/    # legacy trie audit (N1-N4 analysis)
+│   └── *.pdf                 # original PPMT technical docs
+├── scripts/
+│   ├── v6/                   # production v6 code (16 files)
+│   └── v7/                   # new v7 code (added per phase F1-F13)
+├── src/ppmt/                 # legacy code (v0.x trie + SAX, kept for reference)
+├── data/                     # gitignored (4.4GB DB + models)
+│   ├── ppmt.db               # OHLCV candles (5m + 15m, 12 tokens, ~1.4M rows)
+│   ├── v6_models/            # trained v6 LightGBM models
+│   └── v7_models/            # NEW v7 models
+└── tests/
+    └── v7/                   # v7 tests (added per phase)
 ```
 
-## License
+---
 
-Proprietary - All rights reserved.
+## Versions
+
+| Version | Status | Description |
+|---------|--------|-------------|
+| v6 | **PRODUCTION** | LightGBM regression, 5m, 59 features, LONG-only (+11.4% ROI/5mo) |
+| v7 | IN DEVELOPMENT | Adds trie+ML hybrid, sector awareness, dual experts, online learning |
+
+See `PPMT_v7_MASTER_PLAN.md` §2 for full version history.
+
+---
+
+## Documentation
+
+- `PPMT_v7_MASTER_PLAN.md` — **the single source of truth** for v7
+- `worklog.md` — execution history (every commit documented)
+- `docs/v7/` — per-phase documentation (added as phases complete)
+- `docs/audit_alternative/N1_N4_STRUCTURE_ANALYSIS.md` — legacy trie audit
+
+---
+
+## Contact
+
+- Repo owner: coverdraft
+- AI agent: super-z (GLM)
