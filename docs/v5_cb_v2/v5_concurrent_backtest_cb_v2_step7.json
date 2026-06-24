@@ -1,0 +1,2266 @@
+{
+  "configs": [
+    {
+      "threshold": 0.65,
+      "use_gate": true,
+      "max_concurrent": 3,
+      "n_trades": 18636,
+      "trades_skipped_capacity": 63856,
+      "win_rate": 0.7914251985404593,
+      "profit_factor": 3.2323033092263858,
+      "avg_net_pnl_pct": 1.7599763897832152,
+      "total_net_pnl_pct": 32798.92,
+      "initial_account": 10000.0,
+      "final_account": 337989.20000011724,
+      "total_return_pct": 3279.8920000011726,
+      "capital_at_risk": 3000.0,
+      "return_on_capital_at_risk_pct": 10932.97333333333,
+      "total_pnl_usd": 327989.1999999999,
+      "fixed_size_mode": true,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 1549,
+          "win_rate": 0.8102001291155584,
+          "total_pnl_usd": 29297.800000000705,
+          "avg_pnl_pct": 1.8914009038088724
+        },
+        "AVAXUSDT": {
+          "n_trades": 1774,
+          "win_rate": 0.7919954904171365,
+          "total_pnl_usd": 31292.800000000865,
+          "avg_pnl_pct": 1.7639684329199032
+        },
+        "BONKUSDT": {
+          "n_trades": 2188,
+          "win_rate": 0.7618829981718465,
+          "total_pnl_usd": 33983.60000000079,
+          "avg_pnl_pct": 1.5531809872028672
+        },
+        "BTCUSDT": {
+          "n_trades": 485,
+          "win_rate": 0.8309278350515464,
+          "total_pnl_usd": 9877.00000000003,
+          "avg_pnl_pct": 2.036494845360844
+        },
+        "DOGEUSDT": {
+          "n_trades": 1449,
+          "win_rate": 0.7908902691511387,
+          "total_pnl_usd": 25447.800000000676,
+          "avg_pnl_pct": 1.7562318840579552
+        },
+        "ETHUSDT": {
+          "n_trades": 1139,
+          "win_rate": 0.8516242317822651,
+          "total_pnl_usd": 24845.800000000498,
+          "avg_pnl_pct": 2.181369622475842
+        },
+        "LINKUSDT": {
+          "n_trades": 1532,
+          "win_rate": 0.8002610966057441,
+          "total_pnl_usd": 27910.400000000725,
+          "avg_pnl_pct": 1.8218276762401775
+        },
+        "PEPEUSDT": {
+          "n_trades": 2001,
+          "win_rate": 0.7586206896551724,
+          "total_pnl_usd": 30622.200000000925,
+          "avg_pnl_pct": 1.5303448275861684
+        },
+        "SHIBUSDT": {
+          "n_trades": 1433,
+          "win_rate": 0.8004187020237264,
+          "total_pnl_usd": 26122.60000000063,
+          "avg_pnl_pct": 1.8229309141660681
+        },
+        "SOLUSDT": {
+          "n_trades": 1380,
+          "win_rate": 0.8239130434782609,
+          "total_pnl_usd": 27426.000000000626,
+          "avg_pnl_pct": 1.9873913043477984
+        },
+        "WIFUSDT": {
+          "n_trades": 2460,
+          "win_rate": 0.7556910569105691,
+          "total_pnl_usd": 37142.000000000306,
+          "avg_pnl_pct": 1.5098373983739073
+        },
+        "XRPUSDT": {
+          "n_trades": 1246,
+          "win_rate": 0.8154093097913323,
+          "total_pnl_usd": 24021.200000000477,
+          "avg_pnl_pct": 1.927865168539315
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 8555,
+          "win_rate": 0.786791350087668,
+          "total_pnl_usd": 147790.99999999703,
+          "avg_pnl_pct": 1.7275394506134272
+        },
+        "5m": {
+          "n_trades": 10081,
+          "win_rate": 0.7953576034123598,
+          "total_pnl_usd": 180198.20000001506,
+          "avg_pnl_pct": 1.7875032238863442
+        }
+      },
+      "per_asset_class": {
+        "blue_chip": {
+          "n_trades": 1624,
+          "win_rate": 0.8454433497536946,
+          "total_pnl_usd": 34722.800000000476,
+          "avg_pnl_pct": 2.138103448275795
+        },
+        "large_cap": {
+          "n_trades": 2626,
+          "win_rate": 0.8198781416603199,
+          "total_pnl_usd": 51447.1999999983,
+          "avg_pnl_pct": 1.959146991622223
+        },
+        "meme": {
+          "n_trades": 9531,
+          "win_rate": 0.7698037981324101,
+          "total_pnl_usd": 153318.19999999795,
+          "avg_pnl_pct": 1.608626586926604
+        },
+        "mid_cap": {
+          "n_trades": 4855,
+          "win_rate": 0.8004119464469619,
+          "total_pnl_usd": 88500.99999999211,
+          "avg_pnl_pct": 1.822883625128775
+        }
+      },
+      "equity_curve_length": 18636
+    },
+    {
+      "threshold": 0.65,
+      "use_gate": true,
+      "max_concurrent": 5,
+      "n_trades": 28581,
+      "trades_skipped_capacity": 53911,
+      "win_rate": 0.8019313529967461,
+      "profit_factor": 3.4489391352136445,
+      "avg_net_pnl_pct": 1.8335194709772225,
+      "total_net_pnl_pct": 52403.81999999999,
+      "initial_account": 10000.0,
+      "final_account": 534038.200000198,
+      "total_return_pct": 5240.38200000198,
+      "capital_at_risk": 5000.0,
+      "return_on_capital_at_risk_pct": 10480.763999999997,
+      "total_pnl_usd": 524038.1999999999,
+      "fixed_size_mode": true,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 2355,
+          "win_rate": 0.8165605095541402,
+          "total_pnl_usd": 45590.999999999185,
+          "avg_pnl_pct": 1.9359235668789296
+        },
+        "AVAXUSDT": {
+          "n_trades": 2746,
+          "win_rate": 0.8008011653313911,
+          "total_pnl_usd": 50131.199999998214,
+          "avg_pnl_pct": 1.825608157319708
+        },
+        "BONKUSDT": {
+          "n_trades": 3316,
+          "win_rate": 0.7738238841978287,
+          "total_pnl_usd": 54275.19999999716,
+          "avg_pnl_pct": 1.636767189384789
+        },
+        "BTCUSDT": {
+          "n_trades": 763,
+          "win_rate": 0.8519003931847968,
+          "total_pnl_usd": 16658.600000000228,
+          "avg_pnl_pct": 2.1833027522936006
+        },
+        "DOGEUSDT": {
+          "n_trades": 2345,
+          "win_rate": 0.8,
+          "total_pnl_usd": 42678.9999999993,
+          "avg_pnl_pct": 1.8199999999999168
+        },
+        "ETHUSDT": {
+          "n_trades": 1765,
+          "win_rate": 0.8481586402266289,
+          "total_pnl_usd": 38073.00000000002,
+          "avg_pnl_pct": 2.1571104815863182
+        },
+        "LINKUSDT": {
+          "n_trades": 2368,
+          "win_rate": 0.8125,
+          "total_pnl_usd": 45169.59999999897,
+          "avg_pnl_pct": 1.9074999999999378
+        },
+        "PEPEUSDT": {
+          "n_trades": 3053,
+          "win_rate": 0.7743203406485424,
+          "total_pnl_usd": 50076.59999999831,
+          "avg_pnl_pct": 1.6402423845397656
+        },
+        "SHIBUSDT": {
+          "n_trades": 2267,
+          "win_rate": 0.8142920158800176,
+          "total_pnl_usd": 43527.39999999929,
+          "avg_pnl_pct": 1.9200441111600544
+        },
+        "SOLUSDT": {
+          "n_trades": 2116,
+          "win_rate": 0.8331758034026465,
+          "total_pnl_usd": 43425.19999999942,
+          "avg_pnl_pct": 2.0522306238184527
+        },
+        "WIFUSDT": {
+          "n_trades": 3647,
+          "win_rate": 0.7661091307924321,
+          "total_pnl_usd": 57723.3999999964,
+          "avg_pnl_pct": 1.5827639155470357
+        },
+        "XRPUSDT": {
+          "n_trades": 1840,
+          "win_rate": 0.825,
+          "total_pnl_usd": 36708.00000000018,
+          "avg_pnl_pct": 1.994999999999926
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 12743,
+          "win_rate": 0.7918857411912422,
+          "total_pnl_usd": 224684.60000004788,
+          "avg_pnl_pct": 1.7632001883387933
+        },
+        "5m": {
+          "n_trades": 15838,
+          "win_rate": 0.810013890642758,
+          "total_pnl_usd": 299353.6000000888,
+          "avg_pnl_pct": 1.8900972344997027
+        }
+      },
+      "per_asset_class": {
+        "blue_chip": {
+          "n_trades": 2528,
+          "win_rate": 0.8492879746835443,
+          "total_pnl_usd": 54731.59999999778,
+          "avg_pnl_pct": 2.1650158227848095
+        },
+        "large_cap": {
+          "n_trades": 3956,
+          "win_rate": 0.8293731041456016,
+          "total_pnl_usd": 80133.19999999434,
+          "avg_pnl_pct": 2.0256117290192983
+        },
+        "meme": {
+          "n_trades": 14628,
+          "win_rate": 0.7824719715613891,
+          "total_pnl_usd": 248281.60000006668,
+          "avg_pnl_pct": 1.697303800929929
+        },
+        "mid_cap": {
+          "n_trades": 7469,
+          "win_rate": 0.8094791806132012,
+          "total_pnl_usd": 140891.79999999257,
+          "avg_pnl_pct": 1.8863542642921893
+        }
+      },
+      "equity_curve_length": 28581
+    },
+    {
+      "threshold": 0.65,
+      "use_gate": false,
+      "max_concurrent": 3,
+      "n_trades": 18636,
+      "trades_skipped_capacity": 63856,
+      "win_rate": 0.7914251985404593,
+      "profit_factor": 3.2323033092263858,
+      "avg_net_pnl_pct": 1.7599763897832152,
+      "total_net_pnl_pct": 32798.92,
+      "initial_account": 10000.0,
+      "final_account": 337989.20000011724,
+      "total_return_pct": 3279.8920000011726,
+      "capital_at_risk": 3000.0,
+      "return_on_capital_at_risk_pct": 10932.97333333333,
+      "total_pnl_usd": 327989.1999999999,
+      "fixed_size_mode": true,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 1549,
+          "win_rate": 0.8102001291155584,
+          "total_pnl_usd": 29297.800000000705,
+          "avg_pnl_pct": 1.8914009038088724
+        },
+        "AVAXUSDT": {
+          "n_trades": 1774,
+          "win_rate": 0.7919954904171365,
+          "total_pnl_usd": 31292.800000000865,
+          "avg_pnl_pct": 1.7639684329199032
+        },
+        "BONKUSDT": {
+          "n_trades": 2188,
+          "win_rate": 0.7618829981718465,
+          "total_pnl_usd": 33983.60000000079,
+          "avg_pnl_pct": 1.5531809872028672
+        },
+        "BTCUSDT": {
+          "n_trades": 485,
+          "win_rate": 0.8309278350515464,
+          "total_pnl_usd": 9877.00000000003,
+          "avg_pnl_pct": 2.036494845360844
+        },
+        "DOGEUSDT": {
+          "n_trades": 1449,
+          "win_rate": 0.7908902691511387,
+          "total_pnl_usd": 25447.800000000676,
+          "avg_pnl_pct": 1.7562318840579552
+        },
+        "ETHUSDT": {
+          "n_trades": 1139,
+          "win_rate": 0.8516242317822651,
+          "total_pnl_usd": 24845.800000000498,
+          "avg_pnl_pct": 2.181369622475842
+        },
+        "LINKUSDT": {
+          "n_trades": 1532,
+          "win_rate": 0.8002610966057441,
+          "total_pnl_usd": 27910.400000000725,
+          "avg_pnl_pct": 1.8218276762401775
+        },
+        "PEPEUSDT": {
+          "n_trades": 2001,
+          "win_rate": 0.7586206896551724,
+          "total_pnl_usd": 30622.200000000925,
+          "avg_pnl_pct": 1.5303448275861684
+        },
+        "SHIBUSDT": {
+          "n_trades": 1433,
+          "win_rate": 0.8004187020237264,
+          "total_pnl_usd": 26122.60000000063,
+          "avg_pnl_pct": 1.8229309141660681
+        },
+        "SOLUSDT": {
+          "n_trades": 1380,
+          "win_rate": 0.8239130434782609,
+          "total_pnl_usd": 27426.000000000626,
+          "avg_pnl_pct": 1.9873913043477984
+        },
+        "WIFUSDT": {
+          "n_trades": 2460,
+          "win_rate": 0.7556910569105691,
+          "total_pnl_usd": 37142.000000000306,
+          "avg_pnl_pct": 1.5098373983739073
+        },
+        "XRPUSDT": {
+          "n_trades": 1246,
+          "win_rate": 0.8154093097913323,
+          "total_pnl_usd": 24021.200000000477,
+          "avg_pnl_pct": 1.927865168539315
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 8555,
+          "win_rate": 0.786791350087668,
+          "total_pnl_usd": 147790.99999999703,
+          "avg_pnl_pct": 1.7275394506134272
+        },
+        "5m": {
+          "n_trades": 10081,
+          "win_rate": 0.7953576034123598,
+          "total_pnl_usd": 180198.20000001506,
+          "avg_pnl_pct": 1.7875032238863442
+        }
+      },
+      "per_asset_class": {
+        "blue_chip": {
+          "n_trades": 1624,
+          "win_rate": 0.8454433497536946,
+          "total_pnl_usd": 34722.800000000476,
+          "avg_pnl_pct": 2.138103448275795
+        },
+        "large_cap": {
+          "n_trades": 2626,
+          "win_rate": 0.8198781416603199,
+          "total_pnl_usd": 51447.1999999983,
+          "avg_pnl_pct": 1.959146991622223
+        },
+        "meme": {
+          "n_trades": 9531,
+          "win_rate": 0.7698037981324101,
+          "total_pnl_usd": 153318.19999999795,
+          "avg_pnl_pct": 1.608626586926604
+        },
+        "mid_cap": {
+          "n_trades": 4855,
+          "win_rate": 0.8004119464469619,
+          "total_pnl_usd": 88500.99999999211,
+          "avg_pnl_pct": 1.822883625128775
+        }
+      },
+      "equity_curve_length": 18636
+    },
+    {
+      "threshold": 0.65,
+      "use_gate": false,
+      "max_concurrent": 5,
+      "n_trades": 28581,
+      "trades_skipped_capacity": 53911,
+      "win_rate": 0.8019313529967461,
+      "profit_factor": 3.4489391352136445,
+      "avg_net_pnl_pct": 1.8335194709772225,
+      "total_net_pnl_pct": 52403.81999999999,
+      "initial_account": 10000.0,
+      "final_account": 534038.200000198,
+      "total_return_pct": 5240.38200000198,
+      "capital_at_risk": 5000.0,
+      "return_on_capital_at_risk_pct": 10480.763999999997,
+      "total_pnl_usd": 524038.1999999999,
+      "fixed_size_mode": true,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 2355,
+          "win_rate": 0.8165605095541402,
+          "total_pnl_usd": 45590.999999999185,
+          "avg_pnl_pct": 1.9359235668789296
+        },
+        "AVAXUSDT": {
+          "n_trades": 2746,
+          "win_rate": 0.8008011653313911,
+          "total_pnl_usd": 50131.199999998214,
+          "avg_pnl_pct": 1.825608157319708
+        },
+        "BONKUSDT": {
+          "n_trades": 3316,
+          "win_rate": 0.7738238841978287,
+          "total_pnl_usd": 54275.19999999716,
+          "avg_pnl_pct": 1.636767189384789
+        },
+        "BTCUSDT": {
+          "n_trades": 763,
+          "win_rate": 0.8519003931847968,
+          "total_pnl_usd": 16658.600000000228,
+          "avg_pnl_pct": 2.1833027522936006
+        },
+        "DOGEUSDT": {
+          "n_trades": 2345,
+          "win_rate": 0.8,
+          "total_pnl_usd": 42678.9999999993,
+          "avg_pnl_pct": 1.8199999999999168
+        },
+        "ETHUSDT": {
+          "n_trades": 1765,
+          "win_rate": 0.8481586402266289,
+          "total_pnl_usd": 38073.00000000002,
+          "avg_pnl_pct": 2.1571104815863182
+        },
+        "LINKUSDT": {
+          "n_trades": 2368,
+          "win_rate": 0.8125,
+          "total_pnl_usd": 45169.59999999897,
+          "avg_pnl_pct": 1.9074999999999378
+        },
+        "PEPEUSDT": {
+          "n_trades": 3053,
+          "win_rate": 0.7743203406485424,
+          "total_pnl_usd": 50076.59999999831,
+          "avg_pnl_pct": 1.6402423845397656
+        },
+        "SHIBUSDT": {
+          "n_trades": 2267,
+          "win_rate": 0.8142920158800176,
+          "total_pnl_usd": 43527.39999999929,
+          "avg_pnl_pct": 1.9200441111600544
+        },
+        "SOLUSDT": {
+          "n_trades": 2116,
+          "win_rate": 0.8331758034026465,
+          "total_pnl_usd": 43425.19999999942,
+          "avg_pnl_pct": 2.0522306238184527
+        },
+        "WIFUSDT": {
+          "n_trades": 3647,
+          "win_rate": 0.7661091307924321,
+          "total_pnl_usd": 57723.3999999964,
+          "avg_pnl_pct": 1.5827639155470357
+        },
+        "XRPUSDT": {
+          "n_trades": 1840,
+          "win_rate": 0.825,
+          "total_pnl_usd": 36708.00000000018,
+          "avg_pnl_pct": 1.994999999999926
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 12743,
+          "win_rate": 0.7918857411912422,
+          "total_pnl_usd": 224684.60000004788,
+          "avg_pnl_pct": 1.7632001883387933
+        },
+        "5m": {
+          "n_trades": 15838,
+          "win_rate": 0.810013890642758,
+          "total_pnl_usd": 299353.6000000888,
+          "avg_pnl_pct": 1.8900972344997027
+        }
+      },
+      "per_asset_class": {
+        "blue_chip": {
+          "n_trades": 2528,
+          "win_rate": 0.8492879746835443,
+          "total_pnl_usd": 54731.59999999778,
+          "avg_pnl_pct": 2.1650158227848095
+        },
+        "large_cap": {
+          "n_trades": 3956,
+          "win_rate": 0.8293731041456016,
+          "total_pnl_usd": 80133.19999999434,
+          "avg_pnl_pct": 2.0256117290192983
+        },
+        "meme": {
+          "n_trades": 14628,
+          "win_rate": 0.7824719715613891,
+          "total_pnl_usd": 248281.60000006668,
+          "avg_pnl_pct": 1.697303800929929
+        },
+        "mid_cap": {
+          "n_trades": 7469,
+          "win_rate": 0.8094791806132012,
+          "total_pnl_usd": 140891.79999999257,
+          "avg_pnl_pct": 1.8863542642921893
+        }
+      },
+      "equity_curve_length": 28581
+    },
+    {
+      "threshold": 0.7,
+      "use_gate": true,
+      "max_concurrent": 3,
+      "n_trades": 17767,
+      "trades_skipped_capacity": 57496,
+      "win_rate": 0.8196656723138402,
+      "profit_factor": 3.8718846811855543,
+      "avg_net_pnl_pct": 1.9576597061968817,
+      "total_net_pnl_pct": 34781.74,
+      "initial_account": 10000.0,
+      "final_account": 357817.4000001209,
+      "total_return_pct": 3478.174000001209,
+      "capital_at_risk": 3000.0,
+      "return_on_capital_at_risk_pct": 11593.91333333333,
+      "total_pnl_usd": 347817.3999999999,
+      "fixed_size_mode": true,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 1405,
+          "win_rate": 0.8427046263345196,
+          "total_pnl_usd": 29771.000000000677,
+          "avg_pnl_pct": 2.1189323843415995
+        },
+        "AVAXUSDT": {
+          "n_trades": 1810,
+          "win_rate": 0.8176795580110497,
+          "total_pnl_usd": 35182.0000000004,
+          "avg_pnl_pct": 1.943756906077286
+        },
+        "BONKUSDT": {
+          "n_trades": 2033,
+          "win_rate": 0.7894736842105263,
+          "total_pnl_usd": 35502.60000000052,
+          "avg_pnl_pct": 1.7463157894736092
+        },
+        "BTCUSDT": {
+          "n_trades": 546,
+          "win_rate": 0.8663003663003663,
+          "total_pnl_usd": 12471.200000000092,
+          "avg_pnl_pct": 2.284102564102585
+        },
+        "DOGEUSDT": {
+          "n_trades": 1412,
+          "win_rate": 0.8236543909348442,
+          "total_pnl_usd": 28036.400000000674,
+          "avg_pnl_pct": 1.9855807365438713
+        },
+        "ETHUSDT": {
+          "n_trades": 1101,
+          "win_rate": 0.8628519527702089,
+          "total_pnl_usd": 24882.200000000474,
+          "avg_pnl_pct": 2.2599636693914498
+        },
+        "LINKUSDT": {
+          "n_trades": 1460,
+          "win_rate": 0.8239726027397261,
+          "total_pnl_usd": 29022.000000000717,
+          "avg_pnl_pct": 1.9878082191780393
+        },
+        "PEPEUSDT": {
+          "n_trades": 1801,
+          "win_rate": 0.7912270960577457,
+          "total_pnl_usd": 31672.200000000885,
+          "avg_pnl_pct": 1.7585896724041694
+        },
+        "SHIBUSDT": {
+          "n_trades": 1374,
+          "win_rate": 0.8245997088791849,
+          "total_pnl_usd": 27372.800000000647,
+          "avg_pnl_pct": 1.9921979621542654
+        },
+        "SOLUSDT": {
+          "n_trades": 1356,
+          "win_rate": 0.8561946902654868,
+          "total_pnl_usd": 30013.20000000068,
+          "avg_pnl_pct": 2.213362831858363
+        },
+        "WIFUSDT": {
+          "n_trades": 2287,
+          "win_rate": 0.7866200262352426,
+          "total_pnl_usd": 39481.399999999805,
+          "avg_pnl_pct": 1.7263401836466181
+        },
+        "XRPUSDT": {
+          "n_trades": 1182,
+          "win_rate": 0.8350253807106599,
+          "total_pnl_usd": 24410.400000000507,
+          "avg_pnl_pct": 2.065177664974604
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 7752,
+          "win_rate": 0.8111455108359134,
+          "total_pnl_usd": 147134.39999999668,
+          "avg_pnl_pct": 1.8980185758511394
+        },
+        "5m": {
+          "n_trades": 10015,
+          "win_rate": 0.8262606090863704,
+          "total_pnl_usd": 200683.00000002584,
+          "avg_pnl_pct": 2.003824263604542
+        }
+      },
+      "per_asset_class": {
+        "blue_chip": {
+          "n_trades": 1647,
+          "win_rate": 0.8639951426836673,
+          "total_pnl_usd": 37353.40000000014,
+          "avg_pnl_pct": 2.2679659987855936
+        },
+        "large_cap": {
+          "n_trades": 2538,
+          "win_rate": 0.8463356973995272,
+          "total_pnl_usd": 54423.59999999784,
+          "avg_pnl_pct": 2.1443498817966797
+        },
+        "meme": {
+          "n_trades": 8907,
+          "win_rate": 0.7999326372515999,
+          "total_pnl_usd": 162065.40000000372,
+          "avg_pnl_pct": 1.8195284607609081
+        },
+        "mid_cap": {
+          "n_trades": 4675,
+          "win_rate": 0.8271657754010695,
+          "total_pnl_usd": 93974.9999999919,
+          "avg_pnl_pct": 2.0101604278074814
+        }
+      },
+      "equity_curve_length": 17767
+    },
+    {
+      "threshold": 0.7,
+      "use_gate": true,
+      "max_concurrent": 5,
+      "n_trades": 27076,
+      "trades_skipped_capacity": 48187,
+      "win_rate": 0.8297015807357069,
+      "profit_factor": 4.150260648850975,
+      "avg_net_pnl_pct": 2.027911065149948,
+      "total_net_pnl_pct": 54907.719999999994,
+      "initial_account": 10000.0,
+      "final_account": 559077.2000001257,
+      "total_return_pct": 5490.772000001257,
+      "capital_at_risk": 5000.0,
+      "return_on_capital_at_risk_pct": 10981.543999999996,
+      "total_pnl_usd": 549077.1999999998,
+      "fixed_size_mode": true,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 2191,
+          "win_rate": 0.853035143769968,
+          "total_pnl_usd": 48010.19999999892,
+          "avg_pnl_pct": 2.1912460063897368
+        },
+        "AVAXUSDT": {
+          "n_trades": 2703,
+          "win_rate": 0.8298187199408065,
+          "total_pnl_usd": 54836.59999999782,
+          "avg_pnl_pct": 2.0287310395856366
+        },
+        "BONKUSDT": {
+          "n_trades": 3091,
+          "win_rate": 0.8010352636687156,
+          "total_pnl_usd": 56480.19999999705,
+          "avg_pnl_pct": 1.8272468456810114
+        },
+        "BTCUSDT": {
+          "n_trades": 782,
+          "win_rate": 0.8746803069053708,
+          "total_pnl_usd": 18320.400000000263,
+          "avg_pnl_pct": 2.3427621483376195
+        },
+        "DOGEUSDT": {
+          "n_trades": 2181,
+          "win_rate": 0.8308115543328748,
+          "total_pnl_usd": 44398.199999999095,
+          "avg_pnl_pct": 2.035680880330059
+        },
+        "ETHUSDT": {
+          "n_trades": 1731,
+          "win_rate": 0.8659734257654534,
+          "total_pnl_usd": 39498.19999999988,
+          "avg_pnl_pct": 2.281813980358091
+        },
+        "LINKUSDT": {
+          "n_trades": 2279,
+          "win_rate": 0.8376480912681,
+          "total_pnl_usd": 47483.79999999864,
+          "avg_pnl_pct": 2.0835366388766543
+        },
+        "PEPEUSDT": {
+          "n_trades": 2768,
+          "win_rate": 0.8063583815028902,
+          "total_pnl_usd": 51609.59999999813,
+          "avg_pnl_pct": 1.8645086705202059
+        },
+        "SHIBUSDT": {
+          "n_trades": 2174,
+          "win_rate": 0.8311867525298988,
+          "total_pnl_usd": 44312.79999999905,
+          "avg_pnl_pct": 2.038307267709231
+        },
+        "SOLUSDT": {
+          "n_trades": 2076,
+          "win_rate": 0.8622350674373795,
+          "total_pnl_usd": 46827.19999999903,
+          "avg_pnl_pct": 2.255645472061612
+        },
+        "WIFUSDT": {
+          "n_trades": 3331,
+          "win_rate": 0.7937556289402582,
+          "total_pnl_usd": 59168.19999999646,
+          "avg_pnl_pct": 1.776289402581824
+        },
+        "XRPUSDT": {
+          "n_trades": 1769,
+          "win_rate": 0.847936687394008,
+          "total_pnl_usd": 38131.80000000001,
+          "avg_pnl_pct": 2.155556811757973
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 11491,
+          "win_rate": 0.8197719954747194,
+          "total_pnl_usd": 225040.20000004378,
+          "avg_pnl_pct": 1.9584039683231416
+        },
+        "5m": {
+          "n_trades": 15585,
+          "win_rate": 0.83702277831248,
+          "total_pnl_usd": 324037.00000009564,
+          "avg_pnl_pct": 2.079159448187811
+        }
+      },
+      "per_asset_class": {
+        "blue_chip": {
+          "n_trades": 2513,
+          "win_rate": 0.868682849184242,
+          "total_pnl_usd": 57818.599999997576,
+          "avg_pnl_pct": 2.3007799442897063
+        },
+        "large_cap": {
+          "n_trades": 3845,
+          "win_rate": 0.8556566970091027,
+          "total_pnl_usd": 84958.99999999387,
+          "avg_pnl_pct": 2.2095968790637786
+        },
+        "meme": {
+          "n_trades": 13545,
+          "win_rate": 0.8099667774086379,
+          "total_pnl_usd": 255969.0000000653,
+          "avg_pnl_pct": 1.8897674418607113
+        },
+        "mid_cap": {
+          "n_trades": 7173,
+          "win_rate": 0.8393977415307403,
+          "total_pnl_usd": 150330.59999999814,
+          "avg_pnl_pct": 2.0957841907149226
+        }
+      },
+      "equity_curve_length": 27076
+    },
+    {
+      "threshold": 0.7,
+      "use_gate": false,
+      "max_concurrent": 3,
+      "n_trades": 17767,
+      "trades_skipped_capacity": 57496,
+      "win_rate": 0.8196656723138402,
+      "profit_factor": 3.8718846811855543,
+      "avg_net_pnl_pct": 1.9576597061968817,
+      "total_net_pnl_pct": 34781.74,
+      "initial_account": 10000.0,
+      "final_account": 357817.4000001209,
+      "total_return_pct": 3478.174000001209,
+      "capital_at_risk": 3000.0,
+      "return_on_capital_at_risk_pct": 11593.91333333333,
+      "total_pnl_usd": 347817.3999999999,
+      "fixed_size_mode": true,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 1405,
+          "win_rate": 0.8427046263345196,
+          "total_pnl_usd": 29771.000000000677,
+          "avg_pnl_pct": 2.1189323843415995
+        },
+        "AVAXUSDT": {
+          "n_trades": 1810,
+          "win_rate": 0.8176795580110497,
+          "total_pnl_usd": 35182.0000000004,
+          "avg_pnl_pct": 1.943756906077286
+        },
+        "BONKUSDT": {
+          "n_trades": 2033,
+          "win_rate": 0.7894736842105263,
+          "total_pnl_usd": 35502.60000000052,
+          "avg_pnl_pct": 1.7463157894736092
+        },
+        "BTCUSDT": {
+          "n_trades": 546,
+          "win_rate": 0.8663003663003663,
+          "total_pnl_usd": 12471.200000000092,
+          "avg_pnl_pct": 2.284102564102585
+        },
+        "DOGEUSDT": {
+          "n_trades": 1412,
+          "win_rate": 0.8236543909348442,
+          "total_pnl_usd": 28036.400000000674,
+          "avg_pnl_pct": 1.9855807365438713
+        },
+        "ETHUSDT": {
+          "n_trades": 1101,
+          "win_rate": 0.8628519527702089,
+          "total_pnl_usd": 24882.200000000474,
+          "avg_pnl_pct": 2.2599636693914498
+        },
+        "LINKUSDT": {
+          "n_trades": 1460,
+          "win_rate": 0.8239726027397261,
+          "total_pnl_usd": 29022.000000000717,
+          "avg_pnl_pct": 1.9878082191780393
+        },
+        "PEPEUSDT": {
+          "n_trades": 1801,
+          "win_rate": 0.7912270960577457,
+          "total_pnl_usd": 31672.200000000885,
+          "avg_pnl_pct": 1.7585896724041694
+        },
+        "SHIBUSDT": {
+          "n_trades": 1374,
+          "win_rate": 0.8245997088791849,
+          "total_pnl_usd": 27372.800000000647,
+          "avg_pnl_pct": 1.9921979621542654
+        },
+        "SOLUSDT": {
+          "n_trades": 1356,
+          "win_rate": 0.8561946902654868,
+          "total_pnl_usd": 30013.20000000068,
+          "avg_pnl_pct": 2.213362831858363
+        },
+        "WIFUSDT": {
+          "n_trades": 2287,
+          "win_rate": 0.7866200262352426,
+          "total_pnl_usd": 39481.399999999805,
+          "avg_pnl_pct": 1.7263401836466181
+        },
+        "XRPUSDT": {
+          "n_trades": 1182,
+          "win_rate": 0.8350253807106599,
+          "total_pnl_usd": 24410.400000000507,
+          "avg_pnl_pct": 2.065177664974604
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 7752,
+          "win_rate": 0.8111455108359134,
+          "total_pnl_usd": 147134.39999999668,
+          "avg_pnl_pct": 1.8980185758511394
+        },
+        "5m": {
+          "n_trades": 10015,
+          "win_rate": 0.8262606090863704,
+          "total_pnl_usd": 200683.00000002584,
+          "avg_pnl_pct": 2.003824263604542
+        }
+      },
+      "per_asset_class": {
+        "blue_chip": {
+          "n_trades": 1647,
+          "win_rate": 0.8639951426836673,
+          "total_pnl_usd": 37353.40000000014,
+          "avg_pnl_pct": 2.2679659987855936
+        },
+        "large_cap": {
+          "n_trades": 2538,
+          "win_rate": 0.8463356973995272,
+          "total_pnl_usd": 54423.59999999784,
+          "avg_pnl_pct": 2.1443498817966797
+        },
+        "meme": {
+          "n_trades": 8907,
+          "win_rate": 0.7999326372515999,
+          "total_pnl_usd": 162065.40000000372,
+          "avg_pnl_pct": 1.8195284607609081
+        },
+        "mid_cap": {
+          "n_trades": 4675,
+          "win_rate": 0.8271657754010695,
+          "total_pnl_usd": 93974.9999999919,
+          "avg_pnl_pct": 2.0101604278074814
+        }
+      },
+      "equity_curve_length": 17767
+    },
+    {
+      "threshold": 0.7,
+      "use_gate": false,
+      "max_concurrent": 5,
+      "n_trades": 27076,
+      "trades_skipped_capacity": 48187,
+      "win_rate": 0.8297015807357069,
+      "profit_factor": 4.150260648850975,
+      "avg_net_pnl_pct": 2.027911065149948,
+      "total_net_pnl_pct": 54907.719999999994,
+      "initial_account": 10000.0,
+      "final_account": 559077.2000001257,
+      "total_return_pct": 5490.772000001257,
+      "capital_at_risk": 5000.0,
+      "return_on_capital_at_risk_pct": 10981.543999999996,
+      "total_pnl_usd": 549077.1999999998,
+      "fixed_size_mode": true,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 2191,
+          "win_rate": 0.853035143769968,
+          "total_pnl_usd": 48010.19999999892,
+          "avg_pnl_pct": 2.1912460063897368
+        },
+        "AVAXUSDT": {
+          "n_trades": 2703,
+          "win_rate": 0.8298187199408065,
+          "total_pnl_usd": 54836.59999999782,
+          "avg_pnl_pct": 2.0287310395856366
+        },
+        "BONKUSDT": {
+          "n_trades": 3091,
+          "win_rate": 0.8010352636687156,
+          "total_pnl_usd": 56480.19999999705,
+          "avg_pnl_pct": 1.8272468456810114
+        },
+        "BTCUSDT": {
+          "n_trades": 782,
+          "win_rate": 0.8746803069053708,
+          "total_pnl_usd": 18320.400000000263,
+          "avg_pnl_pct": 2.3427621483376195
+        },
+        "DOGEUSDT": {
+          "n_trades": 2181,
+          "win_rate": 0.8308115543328748,
+          "total_pnl_usd": 44398.199999999095,
+          "avg_pnl_pct": 2.035680880330059
+        },
+        "ETHUSDT": {
+          "n_trades": 1731,
+          "win_rate": 0.8659734257654534,
+          "total_pnl_usd": 39498.19999999988,
+          "avg_pnl_pct": 2.281813980358091
+        },
+        "LINKUSDT": {
+          "n_trades": 2279,
+          "win_rate": 0.8376480912681,
+          "total_pnl_usd": 47483.79999999864,
+          "avg_pnl_pct": 2.0835366388766543
+        },
+        "PEPEUSDT": {
+          "n_trades": 2768,
+          "win_rate": 0.8063583815028902,
+          "total_pnl_usd": 51609.59999999813,
+          "avg_pnl_pct": 1.8645086705202059
+        },
+        "SHIBUSDT": {
+          "n_trades": 2174,
+          "win_rate": 0.8311867525298988,
+          "total_pnl_usd": 44312.79999999905,
+          "avg_pnl_pct": 2.038307267709231
+        },
+        "SOLUSDT": {
+          "n_trades": 2076,
+          "win_rate": 0.8622350674373795,
+          "total_pnl_usd": 46827.19999999903,
+          "avg_pnl_pct": 2.255645472061612
+        },
+        "WIFUSDT": {
+          "n_trades": 3331,
+          "win_rate": 0.7937556289402582,
+          "total_pnl_usd": 59168.19999999646,
+          "avg_pnl_pct": 1.776289402581824
+        },
+        "XRPUSDT": {
+          "n_trades": 1769,
+          "win_rate": 0.847936687394008,
+          "total_pnl_usd": 38131.80000000001,
+          "avg_pnl_pct": 2.155556811757973
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 11491,
+          "win_rate": 0.8197719954747194,
+          "total_pnl_usd": 225040.20000004378,
+          "avg_pnl_pct": 1.9584039683231416
+        },
+        "5m": {
+          "n_trades": 15585,
+          "win_rate": 0.83702277831248,
+          "total_pnl_usd": 324037.00000009564,
+          "avg_pnl_pct": 2.079159448187811
+        }
+      },
+      "per_asset_class": {
+        "blue_chip": {
+          "n_trades": 2513,
+          "win_rate": 0.868682849184242,
+          "total_pnl_usd": 57818.599999997576,
+          "avg_pnl_pct": 2.3007799442897063
+        },
+        "large_cap": {
+          "n_trades": 3845,
+          "win_rate": 0.8556566970091027,
+          "total_pnl_usd": 84958.99999999387,
+          "avg_pnl_pct": 2.2095968790637786
+        },
+        "meme": {
+          "n_trades": 13545,
+          "win_rate": 0.8099667774086379,
+          "total_pnl_usd": 255969.0000000653,
+          "avg_pnl_pct": 1.8897674418607113
+        },
+        "mid_cap": {
+          "n_trades": 7173,
+          "win_rate": 0.8393977415307403,
+          "total_pnl_usd": 150330.59999999814,
+          "avg_pnl_pct": 2.0957841907149226
+        }
+      },
+      "equity_curve_length": 27076
+    },
+    {
+      "threshold": 0.75,
+      "use_gate": true,
+      "max_concurrent": 3,
+      "n_trades": 16728,
+      "trades_skipped_capacity": 50144,
+      "win_rate": 0.8486967957914874,
+      "profit_factor": 4.778246045334153,
+      "avg_net_pnl_pct": 2.160877570540411,
+      "total_net_pnl_pct": 36147.159999999996,
+      "initial_account": 10000.0,
+      "final_account": 371471.6000001157,
+      "total_return_pct": 3614.7160000011568,
+      "capital_at_risk": 3000.0,
+      "return_on_capital_at_risk_pct": 12049.05333333333,
+      "total_pnl_usd": 361471.5999999999,
+      "fixed_size_mode": true,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 1402,
+          "win_rate": 0.8808844507845934,
+          "total_pnl_usd": 33454.400000000634,
+          "avg_pnl_pct": 2.3861911554920967
+        },
+        "AVAXUSDT": {
+          "n_trades": 1755,
+          "win_rate": 0.8660968660968661,
+          "total_pnl_usd": 40060.99999999977,
+          "avg_pnl_pct": 2.2826780626779777
+        },
+        "BONKUSDT": {
+          "n_trades": 1781,
+          "win_rate": 0.811341942728804,
+          "total_pnl_usd": 33828.20000000072,
+          "avg_pnl_pct": 1.899393599101567
+        },
+        "BTCUSDT": {
+          "n_trades": 583,
+          "win_rate": 0.8730703259005146,
+          "total_pnl_usd": 13592.600000000126,
+          "avg_pnl_pct": 2.331492281303624
+        },
+        "DOGEUSDT": {
+          "n_trades": 1307,
+          "win_rate": 0.8599846977811783,
+          "total_pnl_usd": 29275.400000000624,
+          "avg_pnl_pct": 2.2398928844682033
+        },
+        "ETHUSDT": {
+          "n_trades": 1028,
+          "win_rate": 0.8686770428015564,
+          "total_pnl_usd": 23651.60000000043,
+          "avg_pnl_pct": 2.300739299610887
+        },
+        "LINKUSDT": {
+          "n_trades": 1399,
+          "win_rate": 0.8484631879914224,
+          "total_pnl_usd": 30207.800000000705,
+          "avg_pnl_pct": 2.1592423159399075
+        },
+        "PEPEUSDT": {
+          "n_trades": 1661,
+          "win_rate": 0.8193859121011439,
+          "total_pnl_usd": 32484.200000000827,
+          "avg_pnl_pct": 1.9557013847079514
+        },
+        "SHIBUSDT": {
+          "n_trades": 1322,
+          "win_rate": 0.8472012102874432,
+          "total_pnl_usd": 28428.400000000624,
+          "avg_pnl_pct": 2.150408472012062
+        },
+        "SOLUSDT": {
+          "n_trades": 1333,
+          "win_rate": 0.8672168042010503,
+          "total_pnl_usd": 30532.60000000068,
+          "avg_pnl_pct": 2.2905176294073
+        },
+        "WIFUSDT": {
+          "n_trades": 2042,
+          "win_rate": 0.8197845249755142,
+          "total_pnl_usd": 39992.3999999998,
+          "avg_pnl_pct": 1.9584916748285206
+        },
+        "XRPUSDT": {
+          "n_trades": 1115,
+          "win_rate": 0.8726457399103139,
+          "total_pnl_usd": 25963.0000000005,
+          "avg_pnl_pct": 2.328520179372177
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 6977,
+          "win_rate": 0.8381825999713344,
+          "total_pnl_usd": 145629.39999999575,
+          "avg_pnl_pct": 2.0872781997991003
+        },
+        "5m": {
+          "n_trades": 9751,
+          "win_rate": 0.8562198748846273,
+          "total_pnl_usd": 215842.2000000321,
+          "avg_pnl_pct": 2.2135391241924274
+        }
+      },
+      "per_asset_class": {
+        "blue_chip": {
+          "n_trades": 1611,
+          "win_rate": 0.8702669149596524,
+          "total_pnl_usd": 37244.20000000009,
+          "avg_pnl_pct": 2.3118684047174876
+        },
+        "large_cap": {
+          "n_trades": 2448,
+          "win_rate": 0.8696895424836601,
+          "total_pnl_usd": 56495.59999999776,
+          "avg_pnl_pct": 2.3078267973856206
+        },
+        "meme": {
+          "n_trades": 8113,
+          "win_rate": 0.8287932947121903,
+          "total_pnl_usd": 164008.60000000446,
+          "avg_pnl_pct": 2.0215530629850456
+        },
+        "mid_cap": {
+          "n_trades": 4556,
+          "win_rate": 0.8652326602282704,
+          "total_pnl_usd": 103723.19999999157,
+          "avg_pnl_pct": 2.276628621597832
+        }
+      },
+      "equity_curve_length": 16728
+    },
+    {
+      "threshold": 0.75,
+      "use_gate": true,
+      "max_concurrent": 5,
+      "n_trades": 25270,
+      "trades_skipped_capacity": 41602,
+      "win_rate": 0.8574594380688564,
+      "profit_factor": 5.124354782322577,
+      "avg_net_pnl_pct": 2.222216066481994,
+      "total_net_pnl_pct": 56155.399999999994,
+      "initial_account": 10000.0,
+      "final_account": 571554.0000000921,
+      "total_return_pct": 5615.540000000921,
+      "capital_at_risk": 5000.0,
+      "return_on_capital_at_risk_pct": 11231.079999999998,
+      "total_pnl_usd": 561553.9999999999,
+      "fixed_size_mode": true,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 2140,
+          "win_rate": 0.8780373831775701,
+          "total_pnl_usd": 50637.999999998625,
+          "avg_pnl_pct": 2.3662616822429663
+        },
+        "AVAXUSDT": {
+          "n_trades": 2650,
+          "win_rate": 0.8637735849056604,
+          "total_pnl_usd": 60059.99999999708,
+          "avg_pnl_pct": 2.2664150943396386
+        },
+        "BONKUSDT": {
+          "n_trades": 2688,
+          "win_rate": 0.8247767857142857,
+          "total_pnl_usd": 53583.59999999779,
+          "avg_pnl_pct": 1.9934374999999847
+        },
+        "BTCUSDT": {
+          "n_trades": 807,
+          "win_rate": 0.8921933085501859,
+          "total_pnl_usd": 19895.400000000296,
+          "avg_pnl_pct": 2.4653531598513245
+        },
+        "DOGEUSDT": {
+          "n_trades": 2057,
+          "win_rate": 0.8682547399124939,
+          "total_pnl_usd": 47265.39999999885,
+          "avg_pnl_pct": 2.2977831793874137
+        },
+        "ETHUSDT": {
+          "n_trades": 1567,
+          "win_rate": 0.8800255264837269,
+          "total_pnl_usd": 37297.4000000001,
+          "avg_pnl_pct": 2.3801786853860105
+        },
+        "LINKUSDT": {
+          "n_trades": 2145,
+          "win_rate": 0.8643356643356643,
+          "total_pnl_usd": 48698.999999998625,
+          "avg_pnl_pct": 2.2703496503496123
+        },
+        "PEPEUSDT": {
+          "n_trades": 2513,
+          "win_rate": 0.8328690807799443,
+          "total_pnl_usd": 51518.59999999825,
+          "avg_pnl_pct": 2.0500835654595866
+        },
+        "SHIBUSDT": {
+          "n_trades": 2063,
+          "win_rate": 0.8589432864760058,
+          "total_pnl_usd": 46058.59999999897,
+          "avg_pnl_pct": 2.2326030053319896
+        },
+        "SOLUSDT": {
+          "n_trades": 2031,
+          "win_rate": 0.879862136878385,
+          "total_pnl_usd": 48318.19999999884,
+          "avg_pnl_pct": 2.3790349581486607
+        },
+        "WIFUSDT": {
+          "n_trades": 2980,
+          "win_rate": 0.8241610738255034,
+          "total_pnl_usd": 59275.99999999706,
+          "avg_pnl_pct": 1.9891275167785358
+        },
+        "XRPUSDT": {
+          "n_trades": 1629,
+          "win_rate": 0.8815224063842848,
+          "total_pnl_usd": 38943.8,
+          "avg_pnl_pct": 2.3906568446899126
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 10173,
+          "win_rate": 0.8474393001081294,
+          "total_pnl_usd": 218930.60000003444,
+          "avg_pnl_pct": 2.1520751007569894
+        },
+        "5m": {
+          "n_trades": 15097,
+          "win_rate": 0.8642114327349805,
+          "total_pnl_usd": 342623.4000000975,
+          "avg_pnl_pct": 2.269480029145347
+        }
+      },
+      "per_asset_class": {
+        "blue_chip": {
+          "n_trades": 2374,
+          "win_rate": 0.884161752316765,
+          "total_pnl_usd": 57192.799999997704,
+          "avg_pnl_pct": 2.409132266217365
+        },
+        "large_cap": {
+          "n_trades": 3660,
+          "win_rate": 0.8806010928961748,
+          "total_pnl_usd": 87261.99999999408,
+          "avg_pnl_pct": 2.3842076502732614
+        },
+        "meme": {
+          "n_trades": 12301,
+          "win_rate": 0.8392813592390862,
+          "total_pnl_usd": 257702.20000005842,
+          "avg_pnl_pct": 2.0949695146738474
+        },
+        "mid_cap": {
+          "n_trades": 6935,
+          "win_rate": 0.8683489545782264,
+          "total_pnl_usd": 159397.0000000026,
+          "avg_pnl_pct": 2.2984426820472983
+        }
+      },
+      "equity_curve_length": 25270
+    },
+    {
+      "threshold": 0.75,
+      "use_gate": false,
+      "max_concurrent": 3,
+      "n_trades": 16728,
+      "trades_skipped_capacity": 50144,
+      "win_rate": 0.8486967957914874,
+      "profit_factor": 4.778246045334153,
+      "avg_net_pnl_pct": 2.160877570540411,
+      "total_net_pnl_pct": 36147.159999999996,
+      "initial_account": 10000.0,
+      "final_account": 371471.6000001157,
+      "total_return_pct": 3614.7160000011568,
+      "capital_at_risk": 3000.0,
+      "return_on_capital_at_risk_pct": 12049.05333333333,
+      "total_pnl_usd": 361471.5999999999,
+      "fixed_size_mode": true,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 1402,
+          "win_rate": 0.8808844507845934,
+          "total_pnl_usd": 33454.400000000634,
+          "avg_pnl_pct": 2.3861911554920967
+        },
+        "AVAXUSDT": {
+          "n_trades": 1755,
+          "win_rate": 0.8660968660968661,
+          "total_pnl_usd": 40060.99999999977,
+          "avg_pnl_pct": 2.2826780626779777
+        },
+        "BONKUSDT": {
+          "n_trades": 1781,
+          "win_rate": 0.811341942728804,
+          "total_pnl_usd": 33828.20000000072,
+          "avg_pnl_pct": 1.899393599101567
+        },
+        "BTCUSDT": {
+          "n_trades": 583,
+          "win_rate": 0.8730703259005146,
+          "total_pnl_usd": 13592.600000000126,
+          "avg_pnl_pct": 2.331492281303624
+        },
+        "DOGEUSDT": {
+          "n_trades": 1307,
+          "win_rate": 0.8599846977811783,
+          "total_pnl_usd": 29275.400000000624,
+          "avg_pnl_pct": 2.2398928844682033
+        },
+        "ETHUSDT": {
+          "n_trades": 1028,
+          "win_rate": 0.8686770428015564,
+          "total_pnl_usd": 23651.60000000043,
+          "avg_pnl_pct": 2.300739299610887
+        },
+        "LINKUSDT": {
+          "n_trades": 1399,
+          "win_rate": 0.8484631879914224,
+          "total_pnl_usd": 30207.800000000705,
+          "avg_pnl_pct": 2.1592423159399075
+        },
+        "PEPEUSDT": {
+          "n_trades": 1661,
+          "win_rate": 0.8193859121011439,
+          "total_pnl_usd": 32484.200000000827,
+          "avg_pnl_pct": 1.9557013847079514
+        },
+        "SHIBUSDT": {
+          "n_trades": 1322,
+          "win_rate": 0.8472012102874432,
+          "total_pnl_usd": 28428.400000000624,
+          "avg_pnl_pct": 2.150408472012062
+        },
+        "SOLUSDT": {
+          "n_trades": 1333,
+          "win_rate": 0.8672168042010503,
+          "total_pnl_usd": 30532.60000000068,
+          "avg_pnl_pct": 2.2905176294073
+        },
+        "WIFUSDT": {
+          "n_trades": 2042,
+          "win_rate": 0.8197845249755142,
+          "total_pnl_usd": 39992.3999999998,
+          "avg_pnl_pct": 1.9584916748285206
+        },
+        "XRPUSDT": {
+          "n_trades": 1115,
+          "win_rate": 0.8726457399103139,
+          "total_pnl_usd": 25963.0000000005,
+          "avg_pnl_pct": 2.328520179372177
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 6977,
+          "win_rate": 0.8381825999713344,
+          "total_pnl_usd": 145629.39999999575,
+          "avg_pnl_pct": 2.0872781997991003
+        },
+        "5m": {
+          "n_trades": 9751,
+          "win_rate": 0.8562198748846273,
+          "total_pnl_usd": 215842.2000000321,
+          "avg_pnl_pct": 2.2135391241924274
+        }
+      },
+      "per_asset_class": {
+        "blue_chip": {
+          "n_trades": 1611,
+          "win_rate": 0.8702669149596524,
+          "total_pnl_usd": 37244.20000000009,
+          "avg_pnl_pct": 2.3118684047174876
+        },
+        "large_cap": {
+          "n_trades": 2448,
+          "win_rate": 0.8696895424836601,
+          "total_pnl_usd": 56495.59999999776,
+          "avg_pnl_pct": 2.3078267973856206
+        },
+        "meme": {
+          "n_trades": 8113,
+          "win_rate": 0.8287932947121903,
+          "total_pnl_usd": 164008.60000000446,
+          "avg_pnl_pct": 2.0215530629850456
+        },
+        "mid_cap": {
+          "n_trades": 4556,
+          "win_rate": 0.8652326602282704,
+          "total_pnl_usd": 103723.19999999157,
+          "avg_pnl_pct": 2.276628621597832
+        }
+      },
+      "equity_curve_length": 16728
+    },
+    {
+      "threshold": 0.75,
+      "use_gate": false,
+      "max_concurrent": 5,
+      "n_trades": 25270,
+      "trades_skipped_capacity": 41602,
+      "win_rate": 0.8574594380688564,
+      "profit_factor": 5.124354782322577,
+      "avg_net_pnl_pct": 2.222216066481994,
+      "total_net_pnl_pct": 56155.399999999994,
+      "initial_account": 10000.0,
+      "final_account": 571554.0000000921,
+      "total_return_pct": 5615.540000000921,
+      "capital_at_risk": 5000.0,
+      "return_on_capital_at_risk_pct": 11231.079999999998,
+      "total_pnl_usd": 561553.9999999999,
+      "fixed_size_mode": true,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 2140,
+          "win_rate": 0.8780373831775701,
+          "total_pnl_usd": 50637.999999998625,
+          "avg_pnl_pct": 2.3662616822429663
+        },
+        "AVAXUSDT": {
+          "n_trades": 2650,
+          "win_rate": 0.8637735849056604,
+          "total_pnl_usd": 60059.99999999708,
+          "avg_pnl_pct": 2.2664150943396386
+        },
+        "BONKUSDT": {
+          "n_trades": 2688,
+          "win_rate": 0.8247767857142857,
+          "total_pnl_usd": 53583.59999999779,
+          "avg_pnl_pct": 1.9934374999999847
+        },
+        "BTCUSDT": {
+          "n_trades": 807,
+          "win_rate": 0.8921933085501859,
+          "total_pnl_usd": 19895.400000000296,
+          "avg_pnl_pct": 2.4653531598513245
+        },
+        "DOGEUSDT": {
+          "n_trades": 2057,
+          "win_rate": 0.8682547399124939,
+          "total_pnl_usd": 47265.39999999885,
+          "avg_pnl_pct": 2.2977831793874137
+        },
+        "ETHUSDT": {
+          "n_trades": 1567,
+          "win_rate": 0.8800255264837269,
+          "total_pnl_usd": 37297.4000000001,
+          "avg_pnl_pct": 2.3801786853860105
+        },
+        "LINKUSDT": {
+          "n_trades": 2145,
+          "win_rate": 0.8643356643356643,
+          "total_pnl_usd": 48698.999999998625,
+          "avg_pnl_pct": 2.2703496503496123
+        },
+        "PEPEUSDT": {
+          "n_trades": 2513,
+          "win_rate": 0.8328690807799443,
+          "total_pnl_usd": 51518.59999999825,
+          "avg_pnl_pct": 2.0500835654595866
+        },
+        "SHIBUSDT": {
+          "n_trades": 2063,
+          "win_rate": 0.8589432864760058,
+          "total_pnl_usd": 46058.59999999897,
+          "avg_pnl_pct": 2.2326030053319896
+        },
+        "SOLUSDT": {
+          "n_trades": 2031,
+          "win_rate": 0.879862136878385,
+          "total_pnl_usd": 48318.19999999884,
+          "avg_pnl_pct": 2.3790349581486607
+        },
+        "WIFUSDT": {
+          "n_trades": 2980,
+          "win_rate": 0.8241610738255034,
+          "total_pnl_usd": 59275.99999999706,
+          "avg_pnl_pct": 1.9891275167785358
+        },
+        "XRPUSDT": {
+          "n_trades": 1629,
+          "win_rate": 0.8815224063842848,
+          "total_pnl_usd": 38943.8,
+          "avg_pnl_pct": 2.3906568446899126
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 10173,
+          "win_rate": 0.8474393001081294,
+          "total_pnl_usd": 218930.60000003444,
+          "avg_pnl_pct": 2.1520751007569894
+        },
+        "5m": {
+          "n_trades": 15097,
+          "win_rate": 0.8642114327349805,
+          "total_pnl_usd": 342623.4000000975,
+          "avg_pnl_pct": 2.269480029145347
+        }
+      },
+      "per_asset_class": {
+        "blue_chip": {
+          "n_trades": 2374,
+          "win_rate": 0.884161752316765,
+          "total_pnl_usd": 57192.799999997704,
+          "avg_pnl_pct": 2.409132266217365
+        },
+        "large_cap": {
+          "n_trades": 3660,
+          "win_rate": 0.8806010928961748,
+          "total_pnl_usd": 87261.99999999408,
+          "avg_pnl_pct": 2.3842076502732614
+        },
+        "meme": {
+          "n_trades": 12301,
+          "win_rate": 0.8392813592390862,
+          "total_pnl_usd": 257702.20000005842,
+          "avg_pnl_pct": 2.0949695146738474
+        },
+        "mid_cap": {
+          "n_trades": 6935,
+          "win_rate": 0.8683489545782264,
+          "total_pnl_usd": 159397.0000000026,
+          "avg_pnl_pct": 2.2984426820472983
+        }
+      },
+      "equity_curve_length": 25270
+    },
+    {
+      "threshold": 0.8,
+      "use_gate": true,
+      "max_concurrent": 3,
+      "n_trades": 15479,
+      "trades_skipped_capacity": 41939,
+      "win_rate": 0.8797725951288843,
+      "profit_factor": 6.2334865763130125,
+      "avg_net_pnl_pct": 2.37840816590219,
+      "total_net_pnl_pct": 36815.38,
+      "initial_account": 10000.0,
+      "final_account": 378153.80000010843,
+      "total_return_pct": 3681.538000001084,
+      "capital_at_risk": 3000.0,
+      "return_on_capital_at_risk_pct": 12271.793333333331,
+      "total_pnl_usd": 368153.79999999993,
+      "fixed_size_mode": true,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 1283,
+          "win_rate": 0.9088074824629774,
+          "total_pnl_usd": 33122.600000000595,
+          "avg_pnl_pct": 2.5816523772407804
+        },
+        "AVAXUSDT": {
+          "n_trades": 1638,
+          "win_rate": 0.8736263736263736,
+          "total_pnl_usd": 38253.60000000003,
+          "avg_pnl_pct": 2.3353846153845375
+        },
+        "BONKUSDT": {
+          "n_trades": 1591,
+          "win_rate": 0.8548082966687618,
+          "total_pnl_usd": 35060.20000000046,
+          "avg_pnl_pct": 2.2036580766812617
+        },
+        "BTCUSDT": {
+          "n_trades": 578,
+          "win_rate": 0.9013840830449827,
+          "total_pnl_usd": 14621.600000000142,
+          "avg_pnl_pct": 2.5296885813149013
+        },
+        "DOGEUSDT": {
+          "n_trades": 1208,
+          "win_rate": 0.8890728476821192,
+          "total_pnl_usd": 29517.600000000595,
+          "avg_pnl_pct": 2.443509933774785
+        },
+        "ETHUSDT": {
+          "n_trades": 946,
+          "win_rate": 0.904862579281184,
+          "total_pnl_usd": 24161.200000000394,
+          "avg_pnl_pct": 2.554038054968279
+        },
+        "LINKUSDT": {
+          "n_trades": 1350,
+          "win_rate": 0.894074074074074,
+          "total_pnl_usd": 33460.00000000059,
+          "avg_pnl_pct": 2.4785185185184564
+        },
+        "PEPEUSDT": {
+          "n_trades": 1491,
+          "win_rate": 0.8544600938967136,
+          "total_pnl_usd": 32820.20000000074,
+          "avg_pnl_pct": 2.2012206572769357
+        },
+        "SHIBUSDT": {
+          "n_trades": 1275,
+          "win_rate": 0.8862745098039215,
+          "total_pnl_usd": 30905.000000000622,
+          "avg_pnl_pct": 2.4239215686274
+        },
+        "SOLUSDT": {
+          "n_trades": 1216,
+          "win_rate": 0.897203947368421,
+          "total_pnl_usd": 30405.20000000062,
+          "avg_pnl_pct": 2.500427631578897
+        },
+        "WIFUSDT": {
+          "n_trades": 1818,
+          "win_rate": 0.845984598459846,
+          "total_pnl_usd": 38939.59999999997,
+          "avg_pnl_pct": 2.141892189218843
+        },
+        "XRPUSDT": {
+          "n_trades": 1085,
+          "win_rate": 0.8940092165898618,
+          "total_pnl_usd": 26887.000000000487,
+          "avg_pnl_pct": 2.478064516129004
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 5930,
+          "win_rate": 0.8706576728499157,
+          "total_pnl_usd": 137255.99999999176,
+          "avg_pnl_pct": 2.314603709949196
+        },
+        "5m": {
+          "n_trades": 9549,
+          "win_rate": 0.8854330296366112,
+          "total_pnl_usd": 230897.80000003695,
+          "avg_pnl_pct": 2.418031207456401
+        }
+      },
+      "per_asset_class": {
+        "blue_chip": {
+          "n_trades": 1524,
+          "win_rate": 0.9035433070866141,
+          "total_pnl_usd": 38782.79999999998,
+          "avg_pnl_pct": 2.544803149606219
+        },
+        "large_cap": {
+          "n_trades": 2301,
+          "win_rate": 0.8956975228161669,
+          "total_pnl_usd": 57292.19999999786,
+          "avg_pnl_pct": 2.4898826597131754
+        },
+        "meme": {
+          "n_trades": 7383,
+          "win_rate": 0.8636055803873764,
+          "total_pnl_usd": 167242.6000000068,
+          "avg_pnl_pct": 2.265239062711372
+        },
+        "mid_cap": {
+          "n_trades": 4271,
+          "win_rate": 0.890657925544369,
+          "total_pnl_usd": 104836.19999999212,
+          "avg_pnl_pct": 2.45460547881051
+        }
+      },
+      "equity_curve_length": 15479
+    },
+    {
+      "threshold": 0.8,
+      "use_gate": true,
+      "max_concurrent": 5,
+      "n_trades": 23077,
+      "trades_skipped_capacity": 34341,
+      "win_rate": 0.8869870433765221,
+      "profit_factor": 6.685795841854124,
+      "avg_net_pnl_pct": 2.4289093036356544,
+      "total_net_pnl_pct": 56051.939999999995,
+      "initial_account": 10000.0,
+      "final_account": 570519.4000000849,
+      "total_return_pct": 5605.194000000849,
+      "capital_at_risk": 5000.0,
+      "return_on_capital_at_risk_pct": 11210.387999999997,
+      "total_pnl_usd": 560519.3999999999,
+      "fixed_size_mode": true,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 1910,
+          "win_rate": 0.9089005235602095,
+          "total_pnl_usd": 49321.99999999875,
+          "avg_pnl_pct": 2.5823036649214415
+        },
+        "AVAXUSDT": {
+          "n_trades": 2430,
+          "win_rate": 0.8839506172839506,
+          "total_pnl_usd": 58505.99999999765,
+          "avg_pnl_pct": 2.407654320987662
+        },
+        "BONKUSDT": {
+          "n_trades": 2293,
+          "win_rate": 0.8643698211949411,
+          "total_pnl_usd": 52064.59999999824,
+          "avg_pnl_pct": 2.2705887483645704
+        },
+        "BTCUSDT": {
+          "n_trades": 777,
+          "win_rate": 0.9202059202059202,
+          "total_pnl_usd": 20679.4000000003,
+          "avg_pnl_pct": 2.6614414414414633
+        },
+        "DOGEUSDT": {
+          "n_trades": 1870,
+          "win_rate": 0.8941176470588236,
+          "total_pnl_usd": 46353.9999999991,
+          "avg_pnl_pct": 2.478823529411714
+        },
+        "ETHUSDT": {
+          "n_trades": 1467,
+          "win_rate": 0.9038854805725971,
+          "total_pnl_usd": 37367.40000000013,
+          "avg_pnl_pct": 2.547198364008104
+        },
+        "LINKUSDT": {
+          "n_trades": 2074,
+          "win_rate": 0.8972999035679846,
+          "total_pnl_usd": 51872.799999998395,
+          "avg_pnl_pct": 2.501099324975875
+        },
+        "PEPEUSDT": {
+          "n_trades": 2214,
+          "win_rate": 0.8663053297199639,
+          "total_pnl_usd": 50570.799999998475,
+          "avg_pnl_pct": 2.2841373080397225
+        },
+        "SHIBUSDT": {
+          "n_trades": 1960,
+          "win_rate": 0.8948979591836734,
+          "total_pnl_usd": 48691.99999999878,
+          "avg_pnl_pct": 2.4842857142856825
+        },
+        "SOLUSDT": {
+          "n_trades": 1848,
+          "win_rate": 0.908008658008658,
+          "total_pnl_usd": 47605.59999999898,
+          "avg_pnl_pct": 2.5760606060605657
+        },
+        "WIFUSDT": {
+          "n_trades": 2635,
+          "win_rate": 0.8455407969639469,
+          "total_pnl_usd": 56356.99999999757,
+          "avg_pnl_pct": 2.1387855787476284
+        },
+        "XRPUSDT": {
+          "n_trades": 1599,
+          "win_rate": 0.9074421513445904,
+          "total_pnl_usd": 41127.79999999972,
+          "avg_pnl_pct": 2.5720950594120477
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 8472,
+          "win_rate": 0.8765344664778093,
+          "total_pnl_usd": 199578.40000002252,
+          "avg_pnl_pct": 2.3557412653446423
+        },
+        "5m": {
+          "n_trades": 14605,
+          "win_rate": 0.8930503252310853,
+          "total_pnl_usd": 360941.0000000965,
+          "avg_pnl_pct": 2.471352276618108
+        }
+      },
+      "per_asset_class": {
+        "blue_chip": {
+          "n_trades": 2244,
+          "win_rate": 0.9095365418894831,
+          "total_pnl_usd": 58046.799999997806,
+          "avg_pnl_pct": 2.5867557932263954
+        },
+        "large_cap": {
+          "n_trades": 3447,
+          "win_rate": 0.9077458659704091,
+          "total_pnl_usd": 88733.39999999435,
+          "avg_pnl_pct": 2.574221061792884
+        },
+        "meme": {
+          "n_trades": 10972,
+          "win_rate": 0.8707619394823186,
+          "total_pnl_usd": 254038.40000005046,
+          "avg_pnl_pct": 2.315333576376463
+        },
+        "mid_cap": {
+          "n_trades": 6414,
+          "win_rate": 0.8956969130028064,
+          "total_pnl_usd": 159700.8000000026,
+          "avg_pnl_pct": 2.489878391019364
+        }
+      },
+      "equity_curve_length": 23077
+    },
+    {
+      "threshold": 0.8,
+      "use_gate": false,
+      "max_concurrent": 3,
+      "n_trades": 15479,
+      "trades_skipped_capacity": 41939,
+      "win_rate": 0.8797725951288843,
+      "profit_factor": 6.2334865763130125,
+      "avg_net_pnl_pct": 2.37840816590219,
+      "total_net_pnl_pct": 36815.38,
+      "initial_account": 10000.0,
+      "final_account": 378153.80000010843,
+      "total_return_pct": 3681.538000001084,
+      "capital_at_risk": 3000.0,
+      "return_on_capital_at_risk_pct": 12271.793333333331,
+      "total_pnl_usd": 368153.79999999993,
+      "fixed_size_mode": true,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 1283,
+          "win_rate": 0.9088074824629774,
+          "total_pnl_usd": 33122.600000000595,
+          "avg_pnl_pct": 2.5816523772407804
+        },
+        "AVAXUSDT": {
+          "n_trades": 1638,
+          "win_rate": 0.8736263736263736,
+          "total_pnl_usd": 38253.60000000003,
+          "avg_pnl_pct": 2.3353846153845375
+        },
+        "BONKUSDT": {
+          "n_trades": 1591,
+          "win_rate": 0.8548082966687618,
+          "total_pnl_usd": 35060.20000000046,
+          "avg_pnl_pct": 2.2036580766812617
+        },
+        "BTCUSDT": {
+          "n_trades": 578,
+          "win_rate": 0.9013840830449827,
+          "total_pnl_usd": 14621.600000000142,
+          "avg_pnl_pct": 2.5296885813149013
+        },
+        "DOGEUSDT": {
+          "n_trades": 1208,
+          "win_rate": 0.8890728476821192,
+          "total_pnl_usd": 29517.600000000595,
+          "avg_pnl_pct": 2.443509933774785
+        },
+        "ETHUSDT": {
+          "n_trades": 946,
+          "win_rate": 0.904862579281184,
+          "total_pnl_usd": 24161.200000000394,
+          "avg_pnl_pct": 2.554038054968279
+        },
+        "LINKUSDT": {
+          "n_trades": 1350,
+          "win_rate": 0.894074074074074,
+          "total_pnl_usd": 33460.00000000059,
+          "avg_pnl_pct": 2.4785185185184564
+        },
+        "PEPEUSDT": {
+          "n_trades": 1491,
+          "win_rate": 0.8544600938967136,
+          "total_pnl_usd": 32820.20000000074,
+          "avg_pnl_pct": 2.2012206572769357
+        },
+        "SHIBUSDT": {
+          "n_trades": 1275,
+          "win_rate": 0.8862745098039215,
+          "total_pnl_usd": 30905.000000000622,
+          "avg_pnl_pct": 2.4239215686274
+        },
+        "SOLUSDT": {
+          "n_trades": 1216,
+          "win_rate": 0.897203947368421,
+          "total_pnl_usd": 30405.20000000062,
+          "avg_pnl_pct": 2.500427631578897
+        },
+        "WIFUSDT": {
+          "n_trades": 1818,
+          "win_rate": 0.845984598459846,
+          "total_pnl_usd": 38939.59999999997,
+          "avg_pnl_pct": 2.141892189218843
+        },
+        "XRPUSDT": {
+          "n_trades": 1085,
+          "win_rate": 0.8940092165898618,
+          "total_pnl_usd": 26887.000000000487,
+          "avg_pnl_pct": 2.478064516129004
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 5930,
+          "win_rate": 0.8706576728499157,
+          "total_pnl_usd": 137255.99999999176,
+          "avg_pnl_pct": 2.314603709949196
+        },
+        "5m": {
+          "n_trades": 9549,
+          "win_rate": 0.8854330296366112,
+          "total_pnl_usd": 230897.80000003695,
+          "avg_pnl_pct": 2.418031207456401
+        }
+      },
+      "per_asset_class": {
+        "blue_chip": {
+          "n_trades": 1524,
+          "win_rate": 0.9035433070866141,
+          "total_pnl_usd": 38782.79999999998,
+          "avg_pnl_pct": 2.544803149606219
+        },
+        "large_cap": {
+          "n_trades": 2301,
+          "win_rate": 0.8956975228161669,
+          "total_pnl_usd": 57292.19999999786,
+          "avg_pnl_pct": 2.4898826597131754
+        },
+        "meme": {
+          "n_trades": 7383,
+          "win_rate": 0.8636055803873764,
+          "total_pnl_usd": 167242.6000000068,
+          "avg_pnl_pct": 2.265239062711372
+        },
+        "mid_cap": {
+          "n_trades": 4271,
+          "win_rate": 0.890657925544369,
+          "total_pnl_usd": 104836.19999999212,
+          "avg_pnl_pct": 2.45460547881051
+        }
+      },
+      "equity_curve_length": 15479
+    },
+    {
+      "threshold": 0.8,
+      "use_gate": false,
+      "max_concurrent": 5,
+      "n_trades": 23077,
+      "trades_skipped_capacity": 34341,
+      "win_rate": 0.8869870433765221,
+      "profit_factor": 6.685795841854124,
+      "avg_net_pnl_pct": 2.4289093036356544,
+      "total_net_pnl_pct": 56051.939999999995,
+      "initial_account": 10000.0,
+      "final_account": 570519.4000000849,
+      "total_return_pct": 5605.194000000849,
+      "capital_at_risk": 5000.0,
+      "return_on_capital_at_risk_pct": 11210.387999999997,
+      "total_pnl_usd": 560519.3999999999,
+      "fixed_size_mode": true,
+      "per_symbol": {
+        "ADAUSDT": {
+          "n_trades": 1910,
+          "win_rate": 0.9089005235602095,
+          "total_pnl_usd": 49321.99999999875,
+          "avg_pnl_pct": 2.5823036649214415
+        },
+        "AVAXUSDT": {
+          "n_trades": 2430,
+          "win_rate": 0.8839506172839506,
+          "total_pnl_usd": 58505.99999999765,
+          "avg_pnl_pct": 2.407654320987662
+        },
+        "BONKUSDT": {
+          "n_trades": 2293,
+          "win_rate": 0.8643698211949411,
+          "total_pnl_usd": 52064.59999999824,
+          "avg_pnl_pct": 2.2705887483645704
+        },
+        "BTCUSDT": {
+          "n_trades": 777,
+          "win_rate": 0.9202059202059202,
+          "total_pnl_usd": 20679.4000000003,
+          "avg_pnl_pct": 2.6614414414414633
+        },
+        "DOGEUSDT": {
+          "n_trades": 1870,
+          "win_rate": 0.8941176470588236,
+          "total_pnl_usd": 46353.9999999991,
+          "avg_pnl_pct": 2.478823529411714
+        },
+        "ETHUSDT": {
+          "n_trades": 1467,
+          "win_rate": 0.9038854805725971,
+          "total_pnl_usd": 37367.40000000013,
+          "avg_pnl_pct": 2.547198364008104
+        },
+        "LINKUSDT": {
+          "n_trades": 2074,
+          "win_rate": 0.8972999035679846,
+          "total_pnl_usd": 51872.799999998395,
+          "avg_pnl_pct": 2.501099324975875
+        },
+        "PEPEUSDT": {
+          "n_trades": 2214,
+          "win_rate": 0.8663053297199639,
+          "total_pnl_usd": 50570.799999998475,
+          "avg_pnl_pct": 2.2841373080397225
+        },
+        "SHIBUSDT": {
+          "n_trades": 1960,
+          "win_rate": 0.8948979591836734,
+          "total_pnl_usd": 48691.99999999878,
+          "avg_pnl_pct": 2.4842857142856825
+        },
+        "SOLUSDT": {
+          "n_trades": 1848,
+          "win_rate": 0.908008658008658,
+          "total_pnl_usd": 47605.59999999898,
+          "avg_pnl_pct": 2.5760606060605657
+        },
+        "WIFUSDT": {
+          "n_trades": 2635,
+          "win_rate": 0.8455407969639469,
+          "total_pnl_usd": 56356.99999999757,
+          "avg_pnl_pct": 2.1387855787476284
+        },
+        "XRPUSDT": {
+          "n_trades": 1599,
+          "win_rate": 0.9074421513445904,
+          "total_pnl_usd": 41127.79999999972,
+          "avg_pnl_pct": 2.5720950594120477
+        }
+      },
+      "per_timeframe": {
+        "15m": {
+          "n_trades": 8472,
+          "win_rate": 0.8765344664778093,
+          "total_pnl_usd": 199578.40000002252,
+          "avg_pnl_pct": 2.3557412653446423
+        },
+        "5m": {
+          "n_trades": 14605,
+          "win_rate": 0.8930503252310853,
+          "total_pnl_usd": 360941.0000000965,
+          "avg_pnl_pct": 2.471352276618108
+        }
+      },
+      "per_asset_class": {
+        "blue_chip": {
+          "n_trades": 2244,
+          "win_rate": 0.9095365418894831,
+          "total_pnl_usd": 58046.799999997806,
+          "avg_pnl_pct": 2.5867557932263954
+        },
+        "large_cap": {
+          "n_trades": 3447,
+          "win_rate": 0.9077458659704091,
+          "total_pnl_usd": 88733.39999999435,
+          "avg_pnl_pct": 2.574221061792884
+        },
+        "meme": {
+          "n_trades": 10972,
+          "win_rate": 0.8707619394823186,
+          "total_pnl_usd": 254038.40000005046,
+          "avg_pnl_pct": 2.315333576376463
+        },
+        "mid_cap": {
+          "n_trades": 6414,
+          "win_rate": 0.8956969130028064,
+          "total_pnl_usd": 159700.8000000026,
+          "avg_pnl_pct": 2.489878391019364
+        }
+      },
+      "equity_curve_length": 23077
+    }
+  ],
+  "best_config": {
+    "thresh": 0.8,
+    "use_gate": true,
+    "max_concurrent": 3,
+    "n_trades": 15479,
+    "trades_skipped_capacity": 41939,
+    "win_rate": 0.8797725951288843,
+    "profit_factor": 6.2334865763130125,
+    "avg_net_pnl_pct": 2.37840816590219,
+    "total_net_pnl_pct": 36815.38,
+    "initial_account": 10000.0,
+    "final_account": 378153.80000010843,
+    "total_return_pct": 3681.538000001084,
+    "capital_at_risk": 3000.0,
+    "return_on_capital_at_risk_pct": 12271.793333333331,
+    "total_pnl_usd": 368153.79999999993,
+    "fixed_size_mode": true,
+    "per_symbol": {
+      "ADAUSDT": {
+        "n_trades": 1283,
+        "win_rate": 0.9088074824629774,
+        "total_pnl_usd": 33122.600000000595,
+        "avg_pnl_pct": 2.5816523772407804
+      },
+      "AVAXUSDT": {
+        "n_trades": 1638,
+        "win_rate": 0.8736263736263736,
+        "total_pnl_usd": 38253.60000000003,
+        "avg_pnl_pct": 2.3353846153845375
+      },
+      "BONKUSDT": {
+        "n_trades": 1591,
+        "win_rate": 0.8548082966687618,
+        "total_pnl_usd": 35060.20000000046,
+        "avg_pnl_pct": 2.2036580766812617
+      },
+      "BTCUSDT": {
+        "n_trades": 578,
+        "win_rate": 0.9013840830449827,
+        "total_pnl_usd": 14621.600000000142,
+        "avg_pnl_pct": 2.5296885813149013
+      },
+      "DOGEUSDT": {
+        "n_trades": 1208,
+        "win_rate": 0.8890728476821192,
+        "total_pnl_usd": 29517.600000000595,
+        "avg_pnl_pct": 2.443509933774785
+      },
+      "ETHUSDT": {
+        "n_trades": 946,
+        "win_rate": 0.904862579281184,
+        "total_pnl_usd": 24161.200000000394,
+        "avg_pnl_pct": 2.554038054968279
+      },
+      "LINKUSDT": {
+        "n_trades": 1350,
+        "win_rate": 0.894074074074074,
+        "total_pnl_usd": 33460.00000000059,
+        "avg_pnl_pct": 2.4785185185184564
+      },
+      "PEPEUSDT": {
+        "n_trades": 1491,
+        "win_rate": 0.8544600938967136,
+        "total_pnl_usd": 32820.20000000074,
+        "avg_pnl_pct": 2.2012206572769357
+      },
+      "SHIBUSDT": {
+        "n_trades": 1275,
+        "win_rate": 0.8862745098039215,
+        "total_pnl_usd": 30905.000000000622,
+        "avg_pnl_pct": 2.4239215686274
+      },
+      "SOLUSDT": {
+        "n_trades": 1216,
+        "win_rate": 0.897203947368421,
+        "total_pnl_usd": 30405.20000000062,
+        "avg_pnl_pct": 2.500427631578897
+      },
+      "WIFUSDT": {
+        "n_trades": 1818,
+        "win_rate": 0.845984598459846,
+        "total_pnl_usd": 38939.59999999997,
+        "avg_pnl_pct": 2.141892189218843
+      },
+      "XRPUSDT": {
+        "n_trades": 1085,
+        "win_rate": 0.8940092165898618,
+        "total_pnl_usd": 26887.000000000487,
+        "avg_pnl_pct": 2.478064516129004
+      }
+    },
+    "per_timeframe": {
+      "15m": {
+        "n_trades": 5930,
+        "win_rate": 0.8706576728499157,
+        "total_pnl_usd": 137255.99999999176,
+        "avg_pnl_pct": 2.314603709949196
+      },
+      "5m": {
+        "n_trades": 9549,
+        "win_rate": 0.8854330296366112,
+        "total_pnl_usd": 230897.80000003695,
+        "avg_pnl_pct": 2.418031207456401
+      }
+    },
+    "per_asset_class": {
+      "blue_chip": {
+        "n_trades": 1524,
+        "win_rate": 0.9035433070866141,
+        "total_pnl_usd": 38782.79999999998,
+        "avg_pnl_pct": 2.544803149606219
+      },
+      "large_cap": {
+        "n_trades": 2301,
+        "win_rate": 0.8956975228161669,
+        "total_pnl_usd": 57292.19999999786,
+        "avg_pnl_pct": 2.4898826597131754
+      },
+      "meme": {
+        "n_trades": 7383,
+        "win_rate": 0.8636055803873764,
+        "total_pnl_usd": 167242.6000000068,
+        "avg_pnl_pct": 2.265239062711372
+      },
+      "mid_cap": {
+        "n_trades": 4271,
+        "win_rate": 0.890657925544369,
+        "total_pnl_usd": 104836.19999999212,
+        "avg_pnl_pct": 2.45460547881051
+      }
+    },
+    "equity_curve_length": 15479
+  },
+  "best_return": 12271.793333333331
+}

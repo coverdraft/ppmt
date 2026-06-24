@@ -78,10 +78,17 @@ class DecisionV5Cb:
 
 
 # Hours where trader's wins concentrated (Asia session UTC)
+# Step 7 finding: Asia hours are only +0.5% better than non-Asia on cb_v2 OOS.
+# The boost is effectively a no-op — kept for backward compatibility but reduced to 1.0.
 ASIA_HOURS_UTC = {0, 1, 2, 18, 19, 20, 21, 22, 23}
+ASIA_HOURS_BOOST = 1.00  # was 1.15 — Step 7 hourly analysis showed only +0.5% delta
 
 # Hours where trader lost disproportionately (UTC): 4, 5, 9, 12, 16
-BAD_HOURS_UTC = {4, 5, 9, 12, 16}
+# Step 7 finding: ALL 5 of these hours are profitable on cb_v2 OOS
+# (PF 5.83-8.20, avg PnL +2.33% to +2.56%). NO hours have negative PnL or PF<1.5.
+# The rule came from v1 Binance trader history and does not apply to cb_v2.
+# Set to empty set to disable the rule entirely.
+BAD_HOURS_UTC: set[int] = set()  # was {4, 5, 9, 12, 16} — Step 7 removed
 
 # Hard caps (cb_v2 tuned)
 MAX_LEVERAGE = 7   # lowered from 10 → 7
@@ -111,10 +118,10 @@ def evaluate_signal_cb_v2(sig: SignalV5Cb) -> DecisionV5Cb:
 
     # ── HARD RULES ──
 
-    # Rule 1: BLOCK BAD hours (behavioral rule from trader history)
-    if sig.hour_utc in BAD_HOURS_UTC:
-        dec.reason = f"BLOCKED: bad hour UTC={sig.hour_utc}"
-        return dec
+    # Rule 1: BLOCK BAD hours — DISABLED in Step 7 (no hours have negative PnL on cb_v2 OOS)
+    # if sig.hour_utc in BAD_HOURS_UTC:
+    #     dec.reason = f"BLOCKED: bad hour UTC={sig.hour_utc}"
+    #     return dec
 
     # Rule 2: BLOCK if LGBM confidence < MIN_CONFIDENCE
     if sig.confidence < MIN_CONFIDENCE:
@@ -129,10 +136,10 @@ def evaluate_signal_cb_v2(sig: SignalV5Cb) -> DecisionV5Cb:
 
     boost = 1.0
 
-    # Asia hours BOOST
-    if sig.hour_utc in ASIA_HOURS_UTC:
-        boost *= 1.15
-        dec.reason += "Asia_hours_boost×1.15; "
+    # Asia hours BOOST — DISABLED in Step 7 (only +0.5% delta, not material)
+    if sig.hour_utc in ASIA_HOURS_UTC and ASIA_HOURS_BOOST != 1.0:
+        boost *= ASIA_HOURS_BOOST
+        dec.reason += f"Asia_hours_boost×{ASIA_HOURS_BOOST}; "
 
     # Asset class boost (cb_v2 tuned — INVERTED vs original)
     # Blue chips now BOOSTED (92% precision in cb_v2 OOS)
