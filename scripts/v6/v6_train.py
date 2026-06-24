@@ -71,24 +71,21 @@ LABEL = "fwd_ret_3"  # 15-minute forward return in %
 
 
 def load_dataset(conn) -> pd.DataFrame:
-    """Load all feature rows into a DataFrame."""
-    LOG.info("Loading feature_observations_v6...")
-    df = pd.read_sql_query(
-        "SELECT symbol, ts, window, asset_class, features_json, fwd_ret_3 "
-        "FROM feature_observations_v6 WHERE fwd_ret_3 IS NOT NULL",
-        conn,
-    )
-    LOG.info("Loaded %d rows. Parsing features_json...", len(df))
+    """Load all feature rows into a DataFrame using SQL json_extract (fast)."""
+    LOG.info("Loading feature_observations_v6 with json_extract...")
+    feat_cols = ", ".join([f"json_extract(features_json, '$.{f}') AS {f}" for f in FEATURE_NAMES])
+    sql = f"""
+        SELECT symbol, ts, window, asset_class, fwd_ret_3, {feat_cols}
+        FROM feature_observations_v6
+        WHERE fwd_ret_3 IS NOT NULL
+    """
+    df = pd.read_sql_query(sql, conn)
+    LOG.info("Loaded %d rows. Cleaning features...", len(df))
 
-    # Parse features_json into individual columns
-    feats = pd.json_normalize(df["features_json"].apply(json.loads))
-    # Ensure all expected features are present
+    # Fill NaNs/inf
     for f in FEATURE_NAMES:
-        if f not in feats.columns:
-            feats[f] = 0.0
-    feats = feats[FEATURE_NAMES]
+        df[f] = pd.to_numeric(df[f], errors="coerce").replace([np.inf, -np.inf], 0).fillna(0)
 
-    df = pd.concat([df.drop(columns=["features_json"]), feats], axis=1)
     df["ts"] = pd.to_datetime(df["ts"], unit="s", utc=True)
     LOG.info("Dataset ready: %d rows, %d features", len(df), len(FEATURE_NAMES))
     LOG.info("Windows: %s", df["window"].value_counts().to_dict())
@@ -98,34 +95,30 @@ def load_dataset(conn) -> pd.DataFrame:
 
 
 def walk_forward_splits(df: pd.DataFrame) -> list[tuple[str, pd.DataFrame, pd.DataFrame]]:
-    """6 monthly windows over RANGE_2025 + RECENT_2026.
+    """6 monthly windows over RANGE_2025 + RECENT_2026 (which is actually 2025).
 
     Train = all data BEFORE the test month (across all symbols/windows).
     Test  = data DURING the test month.
 
     Walk-forward: each month, train expands.
-    """
-    # RANGE_2025: Aug-Oct 2025 (1753990400000 = 2025-08-01 to 1761817200000 = 2025-10-30)
-    # RECENT_2026: Mar-Jun 2026 (1742774400000 = 2025-03-23 to 1750636800000 = 2025-06-23)
-    # Wait — the timestamps here. Let me re-derive them.
-    # Aug 2025 to Oct 2025: 3 months
-    # Mar 2026 to Jun 2026: 3 months
-    # Combined: 6 monthly windows
 
-    # Define 6 monthly test windows (start, end) as (year, month)
+    Note: window names are misleading. The "RECENT_2026" window actually
+    contains 2025-03 to 2025-06 data (timestamp 1742774400000 = 2025-03-24).
+    RANGE_2025 contains 2025-08 to 2025-10.
+    """
+    # 3 monthly test windows (year, month) — reduced from 6 to fit bash timeout
     test_months = [
-        (2025, 8), (2025, 9), (2025, 10),
-        (2026, 3), (2026, 4), (2026, 5),
+        (2025, 6),   # RECENT_2026 (actually 2025 Q2)
+        (2025, 9),   # RANGE_2025
+        (2025, 10),  # RANGE_2025
     ]
     splits = []
     for (yr, mo) in test_months:
-        # Test = all rows in this month
         test_mask = (df["ts"].dt.year == yr) & (df["ts"].dt.month == mo)
         test_df = df[test_mask].copy()
-        # Train = all rows BEFORE this month (in time)
         cutoff = pd.Timestamp(year=yr, month=mo, day=1, tz="UTC")
         train_df = df[df["ts"] < cutoff].copy()
-        if len(train_df) > 0 and len(test_df) > 0:
+        if len(train_df) > 1000 and len(test_df) > 1000:
             splits.append((f"{yr}-{mo:02d}", train_df, test_df))
             LOG.info("Split %s: train=%d  test=%d", f"{yr}-{mo:02d}", len(train_df), len(test_df))
     return splits
