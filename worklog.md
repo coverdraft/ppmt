@@ -621,3 +621,81 @@ Stage Summary:
 
 Next: F4 — Features extras (funding rate from Binance/Bybit API, OI, sector one-hot, higher-TF context).
       Adds 6 new features to bring total from 59 to 65 (before trie features push to 72+).
+
+
+---
+Task ID: v7-f4-features-extras
+Agent: super-z (main)
+Task: F4 — Add 6 new features: funding_rate, funding_rate_z, oi_change_1h, oi_change_4h, sector_one_hot, day_of_week_sin/cos. Source: Binance Futures public API (no auth).
+
+Work Log:
+- Read PPMT_v7_MASTER_PLAN.md §3 (6 new features list), §11.4 (funding_z > 1.5 SHORT gate)
+- Verified Binance Futures API endpoints (no auth needed):
+  * GET /fapi/v1/fundingRate?symbol=BTCUSDT&limit=1000 (8h interval, ~333 days per page)
+  * GET /futures/data/openInterestHist?symbol=BTCUSDT&period=5m&limit=500 (5m interval, ~1.7 days per page)
+- Discovered Binance uses "1000X" prefix for low-priced tokens (< $0.01):
+  * SHIBUSDT → 1000SHIBUSDT
+  * PEPEUSDT → 1000PEPEUSDT
+  * BONKUSDT → 1000BONKUSDT
+  * All other 9 tokens use the same name on both sides
+- Created scripts/v7/v7_features_extras.py (~620 LOC):
+  * to_binance_symbol(symbol) — maps internal symbol to Binance API symbol
+  * encode_sector_one_hot(symbol) — returns 5 features:
+    sector_blue_chip, sector_large_cap, sector_old_meme, sector_new_meme (4 binaries)
+    sector_idx (0-3 categorical for LightGBM native handling)
+  * encode_day_of_week(timestamp) — returns 3 features:
+    day_of_week_sin = sin(2*pi*dow/7)
+    day_of_week_cos = cos(2*pi*dow/7)
+    day_of_week (0-6 integer, 0=Monday)
+  * BinanceFundingFetcher dataclass:
+    - SQLite cache: data/v7_cache/funding_cache.db
+    - Schema: (symbol, funding_time, funding_rate, mark_price, fetched_at) PK(symbol,funding_time)
+    - fetch_and_cache(symbol, start_ms, end_ms, max_pages=50) — paginated fetch
+    - get_last_settled_rate(symbol, ts) — ANTI-LEAKAGE: returns rate where funding_time <= ts
+      (next upcoming rate is NEVER used — would be lookahead)
+    - get_history(symbol, end_ts, lookback_seconds=30d) — for z-score computation
+    - compute_funding_z(symbol, ts, window=90) — z-score vs last 90 settled rates (30d at 8h)
+      Returns 0.0 if insufficient history (< 10 rates)
+  * BinanceOIFetcher dataclass:
+    - SQLite cache: data/v7_cache/oi_cache.db
+    - Schema: (symbol, timestamp, open_interest, open_interest_value, fetched_at)
+    - fetch_and_cache(symbol, start_ms, end_ms, max_pages=100) — paginated, 500/page
+    - get_oi_at(symbol, ts) — returns largest OI snapshot <= ts (anti-leakage)
+    - compute_oi_change(symbol, ts, lookback_seconds) — % change vs N seconds ago
+  * FeaturesExtrasExtractor dataclass:
+    - Combined interface for all 12 F4 features
+    - prefetch_symbol(symbol, start_ts, end_ts) — one-time cache population
+    - extract(symbol, ts) — returns dict with all 12 features (safe 0.0 defaults)
+    - extract_batch(symbol, timestamps) — for backtest efficiency
+    - FEATURE_NAMES = 12 features total
+- Created scripts/v7/v7_prefetch_extras.py — one-time cache population for all 12 symbols
+- Ran prefetch: fetched 15,330 funding rates + 6,012 OI snapshots (12/12 symbols OK)
+- Cache size: 2.1MB total (gitignored under data/)
+- Created tests/v7/test_features_extras.py (~640 LOC, 23 tests):
+  0.  to_binance_symbol low-priced (1000X) + passthrough
+  1-2. sector one-hot all 9 sectors + unknown raises
+  3-5. day_of_week sin/cos + Sunday + range [-1,1]
+  6-10. funding cache creation, manual insert+query, anti-leakage (CRITICAL),
+        z-score computation, insufficient history
+  11-15. OI cache creation, manual insert+query, change_1h, missing data, anti-leakage
+  16-19. extractor feature_names (12), extract_all_keys_present, extract_with_cached_data,
+         extract_batch (7 days)
+  20-21. live API smoke tests (funding + OI) — REAL API calls to Binance, fetched 200+500 records
+  -> All 23 tests PASS (including live API smoke tests)
+- Sample extraction (BTCUSDT, ts=now):
+  funding_rate=2.7e-07 (0.000027% per 8h — near neutral)
+  funding_rate_z=-0.71 (slightly below 30d average — longs slightly less leveraged)
+  oi_change_1h=+0.61% (OI up 0.6% in last hour)
+  oi_change_4h=+5.74% (OI up 5.7% in last 4h — significant positioning change)
+  sector_idx=0 (blue_chip) ✓
+  day_of_week=2 (Wednesday) ✓
+
+Stage Summary:
+- F4 COMPLETE: 12 new features ready for F5 (LightGBM dual expert) and F7 (backtest)
+- v6 had 59 features; v7 now has 59 + 12 = 71 numeric features (plus 25 trie features from F3 = 96 total)
+- All Binance API data cached locally in SQLite — no API calls during inference
+- Anti-leakage: get_last_settled_rate and get_oi_at both enforce <= ts (no future data)
+- Funding z-score requires 30d history; for first 30d of any new symbol, returns 0.0 (safe)
+- SHORT gate ready: funding_rate_z > 1.5 means longs overleveraged (good time to SHORT)
+
+Next: F5a — LightGBM-LONG expert (retrain with labels>0 only, sample_weight 2x drops + 2x BEAR_2022).
