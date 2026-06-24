@@ -42,6 +42,20 @@ logging.basicConfig(
 DB_PATH = os.environ.get("PPMT_DB_PATH", "/home/z/my-project/data/ppmt.db")
 STATE_FILE = Path("/home/z/my-project/data/v6_extract_state.json")
 
+# Per-timeframe config: (label horizons, primary label column, table name)
+# - 5m TF: keep v6 original behavior (horizons 3,6,12 = 15m/30m/60m forward, primary=fwd_ret_3)
+# - 15m TF (Fase 3): use horizons 1,2,3 = 15m/30m/45m forward, primary=fwd_ret_1
+#   This matches the 5m primary label wall-clock (15m forward) so SHORT expert v2
+#   gets a fair comparison between TFs.
+TF_HORIZONS = {
+    "5m":  (3, 6, 12),
+    "15m": (1, 2, 3),
+}
+TF_PRIMARY_LABEL = {
+    "5m":  "fwd_ret_3",   # 3 bars × 5m = 15m forward
+    "15m": "fwd_ret_1",   # 1 bar  × 15m = 15m forward
+}
+
 TOKEN_CLASS = {
     "BTCUSDT": "blue_chip", "ETHUSDT": "blue_chip",
     "SOLUSDT": "large_cap", "XRPUSDT": "large_cap",
@@ -376,76 +390,124 @@ def validate_feature_ranges(df: pd.DataFrame) -> None:
 # DB
 # ----------------------------------------------------------------------------
 
-def ensure_table(conn):
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS feature_observations_v6 (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            symbol TEXT NOT NULL,
-            timeframe TEXT NOT NULL,
-            ts INTEGER NOT NULL,
-            window TEXT NOT NULL,
-            asset_class TEXT,
-            features_json TEXT,
-            fwd_ret_3 REAL,         -- primary regression label (= fwd_ret_15m)
-            fwd_ret_6 REAL,
-            fwd_ret_12 REAL,
-            fwd_mfe_3 REAL,
-            fwd_mae_3 REAL,
-            fwd_tp_first_3 INTEGER,
-            fwd_tp_first_6 INTEGER,
-            fwd_tp_first_12 INTEGER,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(symbol, timeframe, ts, window)
-        )
-    """)
-    conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_fov6_sym_win
-        ON feature_observations_v6(symbol, window, ts)
-    """)
+def ensure_table(conn, timeframe: str = "5m"):
+    """Create the features table for the given timeframe.
+
+    For 5m TF, uses the original `feature_observations_v6` table (unchanged).
+    For 15m TF (Fase 3), uses a NEW `feature_observations_v6_15m` table so the
+    existing 5m dataset is untouched (safe rollback if experiment fails).
+
+    Schema mirrors the 5m table, plus additional fwd_ret_1/fwd_ret_2/fwd_mae_1/
+    fwd_mfe_1/fwd_tp_first_1/fwd_tp_first_2 columns for the finer-grained labels
+    used at 15m TF (where fwd_ret_3 = 45m forward, not 15m).
+    """
+    if timeframe == "5m":
+        table = "feature_observations_v6"
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS feature_observations_v6 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                timeframe TEXT NOT NULL,
+                ts INTEGER NOT NULL,
+                window TEXT NOT NULL,
+                asset_class TEXT,
+                features_json TEXT,
+                fwd_ret_3 REAL,         -- primary regression label (= fwd_ret_15m)
+                fwd_ret_6 REAL,
+                fwd_ret_12 REAL,
+                fwd_mfe_3 REAL,
+                fwd_mae_3 REAL,
+                fwd_tp_first_3 INTEGER,
+                fwd_tp_first_6 INTEGER,
+                fwd_tp_first_12 INTEGER,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(symbol, timeframe, ts, window)
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_fov6_sym_win
+            ON feature_observations_v6(symbol, window, ts)
+        """)
+    else:
+        # 15m TF: separate table with fwd_ret_1/2 + fwd_mae_1 + fwd_mfe_1 + fwd_tp_first_1/2
+        table = "feature_observations_v6_15m"
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS {table} (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                timeframe TEXT NOT NULL,
+                ts INTEGER NOT NULL,
+                window TEXT NOT NULL,
+                asset_class TEXT,
+                features_json TEXT,
+                fwd_ret_1 REAL,         -- primary regression label at 15m TF (= 15m forward)
+                fwd_ret_2 REAL,
+                fwd_ret_3 REAL,
+                fwd_mfe_1 REAL,
+                fwd_mae_1 REAL,
+                fwd_mfe_2 REAL,
+                fwd_mae_2 REAL,
+                fwd_mfe_3 REAL,
+                fwd_mae_3 REAL,
+                fwd_tp_first_1 INTEGER,
+                fwd_tp_first_2 INTEGER,
+                fwd_tp_first_3 INTEGER,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(symbol, timeframe, ts, window)
+            )
+        """)
+        conn.execute(f"""
+            CREATE INDEX IF NOT EXISTS idx_fov6_15m_sym_win
+            ON {table}(symbol, window, ts)
+        """)
     conn.commit()
+    return table
 
 
 # ----------------------------------------------------------------------------
 # Per-symbol extraction
 # ----------------------------------------------------------------------------
 
-def fetch_ohlcv(conn, symbol: str, window: str) -> pd.DataFrame:
+def fetch_ohlcv(conn, symbol: str, window: str, timeframe: str = "5m") -> pd.DataFrame:
     rows = conn.execute(
         "SELECT timestamp, open, high, low, close, volume FROM ohlcv_v6 "
-        "WHERE symbol = ? AND timeframe = '5m' AND window = ? ORDER BY timestamp ASC",
-        (symbol, window),
+        "WHERE symbol = ? AND timeframe = ? AND window = ? ORDER BY timestamp ASC",
+        (symbol, timeframe, window),
     ).fetchall()
     if not rows:
         return pd.DataFrame()
     return pd.DataFrame(rows, columns=["timestamp", "open", "high", "low", "close", "volume"])
 
 
-def fetch_btc_eth_full(conn, window: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+def fetch_btc_eth_full(conn, window: str, timeframe: str = "5m") -> tuple[pd.DataFrame, pd.DataFrame]:
     """Fetch full BTC and ETH OHLCV for the window (for multi-TF features)."""
     btc_rows = conn.execute(
         "SELECT timestamp, open, high, low, close, volume FROM ohlcv_v6 "
-        "WHERE symbol = 'BTCUSDT' AND timeframe = '5m' AND window = ? ORDER BY timestamp ASC",
-        (window,),
+        "WHERE symbol = 'BTCUSDT' AND timeframe = ? AND window = ? ORDER BY timestamp ASC",
+        (timeframe, window),
     ).fetchall()
     eth_rows = conn.execute(
         "SELECT timestamp, open, high, low, close, volume FROM ohlcv_v6 "
-        "WHERE symbol = 'ETHUSDT' AND timeframe = '5m' AND window = ? ORDER BY timestamp ASC",
-        (window,),
+        "WHERE symbol = 'ETHUSDT' AND timeframe = ? AND window = ? ORDER BY timestamp ASC",
+        (timeframe, window),
     ).fetchall()
     btc_df = pd.DataFrame(btc_rows, columns=["timestamp", "open", "high", "low", "close", "volume"]) if btc_rows else pd.DataFrame()
     eth_df = pd.DataFrame(eth_rows, columns=["timestamp", "open", "high", "low", "close", "volume"]) if eth_rows else pd.DataFrame()
     return btc_df, eth_df
 
 
-def extract_one(conn, symbol: str, asset_class: str, window: str, btc_df: pd.DataFrame, eth_df: pd.DataFrame) -> int:
-    df = fetch_ohlcv(conn, symbol, window)
+def extract_one(conn, symbol: str, asset_class: str, window: str,
+                btc_df: pd.DataFrame, eth_df: pd.DataFrame,
+                timeframe: str = "5m") -> int:
+    df = fetch_ohlcv(conn, symbol, window, timeframe=timeframe)
     if len(df) < 200:
         LOG.warning("  Skipping %s %s: only %d rows", symbol, window, len(df))
         return 0
 
     df = compute_indicators_v5(df)
     df = compute_indicators_v6_new(df, btc_df, eth_df)
-    df = make_labels(df, horizons=(3, 6, 12))
+    horizons = TF_HORIZONS[timeframe]
+    df = make_labels(df, horizons=horizons)
 
     # Drop rows with NaN in critical features (warmup period for indicators)
     critical = ["ret_10", "atr_pct", "rsi_14", "ema_20_50_cross", "vol_z",
@@ -470,60 +532,85 @@ def extract_one(conn, symbol: str, asset_class: str, window: str, btc_df: pd.Dat
     # Build feature dicts and insert
     feat_arrays = {k: df[k].values for k in FEATURE_NAMES}
     ts_arr = df["timestamp"].values.astype(int)
-    fwd_ret_3 = df["fwd_ret_3"].values
-    fwd_ret_6 = df["fwd_ret_6"].values
-    fwd_ret_12 = df["fwd_ret_12"].values
-    fwd_mfe_3 = df["fwd_mfe_3"].values
-    fwd_mae_3 = df["fwd_mae_3"].values
-    fwd_tp_3 = df["fwd_tp_first_3"].values
-    fwd_tp_6 = df["fwd_tp_first_6"].values
-    fwd_tp_12 = df["fwd_tp_first_12"].values
+    primary_label = TF_PRIMARY_LABEL[timeframe]
+    primary = df[primary_label].values
 
     batch = []
     BATCH_SIZE = 500
     inserted = 0
     n = len(df)
     for i in range(n):
-        # Skip rows where fwd_ret_3 is NaN (last 3 bars — no label)
-        if np.isnan(fwd_ret_3[i]):
+        # Skip rows where primary label is NaN (last H bars — no label)
+        if np.isnan(primary[i]):
             continue
         features = {k: float(feat_arrays[k][i]) for k in FEATURE_NAMES}
-        batch.append((
-            symbol, "5m", int(ts_arr[i]), window, asset_class,
+        row = (
+            symbol, timeframe, int(ts_arr[i]), window, asset_class,
             json.dumps(features, default=str),
-            float(fwd_ret_3[i]) if not np.isnan(fwd_ret_3[i]) else None,
-            float(fwd_ret_6[i]) if not np.isnan(fwd_ret_6[i]) else None,
-            float(fwd_ret_12[i]) if not np.isnan(fwd_ret_12[i]) else None,
-            float(fwd_mfe_3[i]) if not np.isnan(fwd_mfe_3[i]) else None,
-            float(fwd_mae_3[i]) if not np.isnan(fwd_mae_3[i]) else None,
-            int(fwd_tp_3[i]) if not np.isnan(fwd_tp_3[i]) else None,
-            int(fwd_tp_6[i]) if not np.isnan(fwd_tp_6[i]) else None,
-            int(fwd_tp_12[i]) if not np.isnan(fwd_tp_12[i]) else None,
-        ))
+        )
+        # Append forward-looking labels in same order as DB schema for this TF
+        if timeframe == "5m":
+            row = row + (
+                float(df["fwd_ret_3"].iloc[i]) if not np.isnan(df["fwd_ret_3"].iloc[i]) else None,
+                float(df["fwd_ret_6"].iloc[i]) if not np.isnan(df["fwd_ret_6"].iloc[i]) else None,
+                float(df["fwd_ret_12"].iloc[i]) if not np.isnan(df["fwd_ret_12"].iloc[i]) else None,
+                float(df["fwd_mfe_3"].iloc[i]) if not np.isnan(df["fwd_mfe_3"].iloc[i]) else None,
+                float(df["fwd_mae_3"].iloc[i]) if not np.isnan(df["fwd_mae_3"].iloc[i]) else None,
+                int(df["fwd_tp_first_3"].iloc[i]) if not np.isnan(df["fwd_tp_first_3"].iloc[i]) else None,
+                int(df["fwd_tp_first_6"].iloc[i]) if not np.isnan(df["fwd_tp_first_6"].iloc[i]) else None,
+                int(df["fwd_tp_first_12"].iloc[i]) if not np.isnan(df["fwd_tp_first_12"].iloc[i]) else None,
+            )
+        else:  # 15m TF
+            row = row + (
+                float(df["fwd_ret_1"].iloc[i]) if not np.isnan(df["fwd_ret_1"].iloc[i]) else None,
+                float(df["fwd_ret_2"].iloc[i]) if not np.isnan(df["fwd_ret_2"].iloc[i]) else None,
+                float(df["fwd_ret_3"].iloc[i]) if not np.isnan(df["fwd_ret_3"].iloc[i]) else None,
+                float(df["fwd_mfe_1"].iloc[i]) if not np.isnan(df["fwd_mfe_1"].iloc[i]) else None,
+                float(df["fwd_mae_1"].iloc[i]) if not np.isnan(df["fwd_mae_1"].iloc[i]) else None,
+                float(df["fwd_mfe_2"].iloc[i]) if not np.isnan(df["fwd_mfe_2"].iloc[i]) else None,
+                float(df["fwd_mae_2"].iloc[i]) if not np.isnan(df["fwd_mae_2"].iloc[i]) else None,
+                float(df["fwd_mfe_3"].iloc[i]) if not np.isnan(df["fwd_mfe_3"].iloc[i]) else None,
+                float(df["fwd_mae_3"].iloc[i]) if not np.isnan(df["fwd_mae_3"].iloc[i]) else None,
+                int(df["fwd_tp_first_1"].iloc[i]) if not np.isnan(df["fwd_tp_first_1"].iloc[i]) else None,
+                int(df["fwd_tp_first_2"].iloc[i]) if not np.isnan(df["fwd_tp_first_2"].iloc[i]) else None,
+                int(df["fwd_tp_first_3"].iloc[i]) if not np.isnan(df["fwd_tp_first_3"].iloc[i]) else None,
+            )
+        batch.append(row)
         if len(batch) >= BATCH_SIZE:
-            _flush_batch(conn, batch)
+            _flush_batch(conn, batch, timeframe=timeframe)
             inserted += len(batch)
             batch = []
     if batch:
-        _flush_batch(conn, batch)
+        _flush_batch(conn, batch, timeframe=timeframe)
         inserted += len(batch)
     return inserted
 
 
-def _flush_batch(conn, batch: list) -> None:
-    placeholders = ",".join(["(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"] * len(batch))
+def _flush_batch(conn, batch: list, timeframe: str = "5m") -> None:
+    if timeframe == "5m":
+        # 14 columns per row: (sym, tf, ts, win, cls, json, ret3, ret6, ret12, mfe3, mae3, tp3, tp6, tp12)
+        placeholders = ",".join(["(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"] * len(batch))
+        sql = f"""
+            INSERT OR REPLACE INTO feature_observations_v6
+                (symbol, timeframe, ts, window, asset_class, features_json,
+                 fwd_ret_3, fwd_ret_6, fwd_ret_12,
+                 fwd_mfe_3, fwd_mae_3,
+                 fwd_tp_first_3, fwd_tp_first_6, fwd_tp_first_12)
+            VALUES {placeholders}
+        """
+    else:  # 15m TF — 18 columns
+        # (sym, tf, ts, win, cls, json, ret1, ret2, ret3, mfe1, mae1, mfe2, mae2, mfe3, mae3, tp1, tp2, tp3)
+        placeholders = ",".join(["(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"] * len(batch))
+        sql = f"""
+            INSERT OR REPLACE INTO feature_observations_v6_15m
+                (symbol, timeframe, ts, window, asset_class, features_json,
+                 fwd_ret_1, fwd_ret_2, fwd_ret_3,
+                 fwd_mfe_1, fwd_mae_1, fwd_mfe_2, fwd_mae_2, fwd_mfe_3, fwd_mae_3,
+                 fwd_tp_first_1, fwd_tp_first_2, fwd_tp_first_3)
+            VALUES {placeholders}
+        """
     flat = [v for row in batch for v in row]
-    conn.execute(
-        f"""
-        INSERT OR REPLACE INTO feature_observations_v6
-            (symbol, timeframe, ts, window, asset_class, features_json,
-             fwd_ret_3, fwd_ret_6, fwd_ret_12,
-             fwd_mfe_3, fwd_mae_3,
-             fwd_tp_first_3, fwd_tp_first_6, fwd_tp_first_12)
-        VALUES {placeholders}
-        """,
-        flat,
-    )
+    conn.execute(sql, flat)
     conn.commit()
 
 
@@ -545,6 +632,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--symbols", nargs="+", default=None)
     parser.add_argument("--windows", nargs="+", default=None)
+    parser.add_argument("--timeframe", default="5m", choices=list(TF_HORIZONS.keys()),
+                        help="5m (default) or 15m (Fase 3 SHORT experiment)")
     parser.add_argument("--max-seconds", type=int, default=110)
     args = parser.parse_args()
 
@@ -554,11 +643,14 @@ def main():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
-    ensure_table(conn)
+    table = ensure_table(conn, timeframe=args.timeframe)
+    LOG.info("Using features table: %s (timeframe=%s, primary label=%s)",
+             table, args.timeframe, TF_PRIMARY_LABEL[args.timeframe])
 
-    # Discover available combos
+    # Discover available combos for this timeframe
     rows = conn.execute(
-        "SELECT DISTINCT symbol, window FROM ohlcv_v6 ORDER BY symbol, window"
+        "SELECT DISTINCT symbol, window FROM ohlcv_v6 WHERE timeframe = ? ORDER BY symbol, window",
+        (args.timeframe,)
     ).fetchall()
     available = []
     for sym, win in rows:
@@ -573,20 +665,21 @@ def main():
     LOG.info("Found %d (symbol, window) combos to extract", len(available))
 
     state = load_state()
-    done_keys = {f"{r['sym']}|{r['window']}" for r in state["completed"]}
+    # Per-timeframe resume key (5m completions don't block 15m)
+    done_keys = {f"{r['sym']}|{r['window']}|{r.get('timeframe', '5m')}" for r in state["completed"]}
     for r in state.get("failed", []):
         if r.get("status", "").startswith("error"):
-            done_keys.add(f"{r['sym']}|{r['window']}")
+            done_keys.add(f"{r['sym']}|{r['window']}|{r.get('timeframe', '5m')}")
 
-    remaining = [(s, w) for (s, w) in available if f"{s}|{w}" not in done_keys]
+    remaining = [(s, w) for (s, w) in available if f"{s}|{w}|{args.timeframe}" not in done_keys]
     LOG.info("Remaining: %d (after progress filter)", len(remaining))
 
     if not remaining:
-        LOG.info("All done. ✓")
+        LOG.info("All done for [%s]. ✓", args.timeframe)
         cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM feature_observations_v6")
-        print(f"\nTotal feature_observations_v6 rows: {cur.fetchone()[0]:,}")
-        cur.execute("SELECT symbol, COUNT(*) FROM feature_observations_v6 GROUP BY symbol ORDER BY symbol")
+        cur.execute(f"SELECT COUNT(*) FROM {table}")
+        print(f"\nTotal {table} rows: {cur.fetchone()[0]:,}")
+        cur.execute(f"SELECT symbol, COUNT(*) FROM {table} GROUP BY symbol ORDER BY symbol")
         for s, n in cur.fetchall():
             print(f"  {s:10} {n:>6,}")
         return
@@ -596,7 +689,7 @@ def main():
     btc_cache = {}
     eth_cache = {}
     for w in windows_needed:
-        btc_cache[w], eth_cache[w] = fetch_btc_eth_full(conn, w)
+        btc_cache[w], eth_cache[w] = fetch_btc_eth_full(conn, w, timeframe=args.timeframe)
 
     t_start = time.time()
     n_processed = 0
@@ -607,14 +700,21 @@ def main():
         cls = TOKEN_CLASS.get(sym, "default")
         t0 = time.time()
         try:
-            n = extract_one(conn, sym, cls, win, btc_cache.get(win, pd.DataFrame()), eth_cache.get(win, pd.DataFrame()))
+            n = extract_one(conn, sym, cls, win,
+                            btc_cache.get(win, pd.DataFrame()),
+                            eth_cache.get(win, pd.DataFrame()),
+                            timeframe=args.timeframe)
             elapsed = time.time() - t0
             LOG.info("[%d/%d] %s %s: %d feature rows in %.1fs",
                      i, len(remaining), sym, win, n, elapsed)
-            state["completed"].append({"sym": sym, "window": win, "rows": n})
+            state["completed"].append({
+                "sym": sym, "window": win, "timeframe": args.timeframe, "rows": n,
+            })
         except Exception as e:
             LOG.exception("FAILED %s %s: %s", sym, win, e)
-            state["failed"].append({"sym": sym, "window": win, "error": str(e)})
+            state["failed"].append({
+                "sym": sym, "window": win, "timeframe": args.timeframe, "error": str(e),
+            })
         save_state(state)
         n_processed += 1
 
