@@ -56,3 +56,5 @@ node_modules/
 next-env.d.ts
 
 *.egg-info/
+upload/
+data/personal/
