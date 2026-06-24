@@ -1,0 +1,426 @@
+{
+  "config": {
+    "test_window": "2025-10",
+    "labels": [
+      "fwd_ret_3",
+      "fwd_ret_6",
+      "fwd_ret_12"
+    ],
+    "threshold": 0.3,
+    "round_trip_cost_pct": 0.14,
+    "position_notional": 700.0
+  },
+  "results": [
+    {
+      "label": "fwd_ret_3",
+      "horizon_min": 15,
+      "test_window": "2025-10",
+      "n_train": 914156,
+      "n_val": 101572,
+      "n_test": 100237,
+      "best_iteration": 300,
+      "rmse_test": 0.6748381811340026,
+      "rmse_train": 0.5598858670611958,
+      "mae_test": 0.3224892260887786,
+      "corr_test": 0.10944263900751909,
+      "corr_train": 0.3687100613193124,
+      "dir_acc_test": 0.511966639065415,
+      "dir_baseline": 0.46758183106038687,
+      "rmse_mean_baseline": 0.6776541471481323,
+      "rmse_zero_baseline": 0.6776420474052429,
+      "label_mean": -0.004711433779448271,
+      "label_std": 0.6776256561279297,
+      "top_feat_pct": 0.07398662110222656,
+      "top_feat_name": "btc_vol_z",
+      "top_20_features": [
+        {
+          "name": "btc_vol_z",
+          "gain": 20766.499763965607,
+          "pct": 7.398662110222657
+        },
+        {
+          "name": "btc_ret_5m",
+          "gain": 17793.994932174683,
+          "pct": 6.339621871309252
+        },
+        {
+          "name": "btc_ret_15m",
+          "gain": 17600.160665035248,
+          "pct": 6.270562845269832
+        },
+        {
+          "name": "hour_cos",
+          "gain": 15837.83931350708,
+          "pct": 5.642685236727778
+        },
+        {
+          "name": "hour_sin",
+          "gain": 14286.521074771881,
+          "pct": 5.089983548706973
+        },
+        {
+          "name": "dow",
+          "gain": 13648.431307315826,
+          "pct": 4.862645738336547
+        },
+        {
+          "name": "btc_ret_1m",
+          "gain": 13598.118345737457,
+          "pct": 4.8447203004094055
+        },
+        {
+          "name": "ema_20_50_cross",
+          "gain": 11968.458144903183,
+          "pct": 4.264107037823265
+        },
+        {
+          "name": "atr_pct",
+          "gain": 9985.211482524872,
+          "pct": 3.557518440662301
+        },
+        {
+          "name": "btc_volatility_regime",
+          "gain": 8582.970355987549,
+          "pct": 3.0579297564724883
+        },
+        {
+          "name": "last_3_range_sum",
+          "gain": 8304.228155136108,
+          "pct": 2.9586198398567762
+        },
+        {
+          "name": "eth_corr_30",
+          "gain": 7976.35063791275,
+          "pct": 2.841804055249506
+        },
+        {
+          "name": "range_expansion_3",
+          "gain": 7711.263915061951,
+          "pct": 2.7473592949590615
+        },
+        {
+          "name": "dist_to_low_20",
+          "gain": 6348.914116382599,
+          "pct": 2.261983042296173
+        },
+        {
+          "name": "range_pct",
+          "gain": 6168.963032245636,
+          "pct": 2.1978702990303147
+        },
+        {
+          "name": "wick_imbalance_3",
+          "gain": 5601.1865339279175,
+          "pct": 1.9955836107138043
+        },
+        {
+          "name": "rsi_14",
+          "gain": 5233.924691200256,
+          "pct": 1.8647360287330068
+        },
+        {
+          "name": "atr_percentile_50",
+          "gain": 5152.251842498779,
+          "pct": 1.835637730127572
+        },
+        {
+          "name": "momentum_dispersion",
+          "gain": 5002.627951622009,
+          "pct": 1.7823299206846457
+        },
+        {
+          "name": "vol_std_10",
+          "gain": 4830.279851436615,
+          "pct": 1.720925958866141
+        }
+      ],
+      "backtest_thr_030": {
+        "n_trades": 496,
+        "wr": 0.5241935483870968,
+        "pf": 1.1166708371571266,
+        "avg_pnl_pct": 0.18910786509513855,
+        "tot_pnl_pct": 93.79750061035156,
+        "tot_dollars": 656.5825042724609
+      },
+      "guards": {
+        "top_feat_under_30pct": true,
+        "train_corr_under_0_85": true
+      },
+      "model_path": "/home/z/my-project/data/v6_models/alt_label/pilot_fwd_ret_3.txt"
+    },
+    {
+      "label": "fwd_ret_6",
+      "horizon_min": 30,
+      "test_window": "2025-10",
+      "n_train": 914156,
+      "n_val": 101572,
+      "n_test": 100237,
+      "best_iteration": 300,
+      "rmse_test": 0.90129539960177,
+      "rmse_train": 0.7780580537495434,
+      "mae_test": 0.4456543634610819,
+      "corr_test": 0.09959149965477491,
+      "corr_train": 0.3842876199721301,
+      "dir_acc_test": 0.5005836168281174,
+      "dir_baseline": 0.4745952093538314,
+      "rmse_mean_baseline": 0.9032168388366699,
+      "rmse_zero_baseline": 0.9031782150268555,
+      "label_mean": -0.009989354759454727,
+      "label_std": 0.9031229615211487,
+      "top_feat_pct": 0.08575544618695498,
+      "top_feat_name": "hour_cos",
+      "top_20_features": [
+        {
+          "name": "hour_cos",
+          "gain": 52653.89748430252,
+          "pct": 8.575544618695497
+        },
+        {
+          "name": "hour_sin",
+          "gain": 45315.15043258667,
+          "pct": 7.380310157541478
+        },
+        {
+          "name": "dow",
+          "gain": 39934.05870914459,
+          "pct": 6.503911744956202
+        },
+        {
+          "name": "btc_vol_z",
+          "gain": 33897.525537490845,
+          "pct": 5.520764019354596
+        },
+        {
+          "name": "btc_ret_15m",
+          "gain": 33388.16638660431,
+          "pct": 5.4378065872543315
+        },
+        {
+          "name": "atr_pct",
+          "gain": 31896.080370903015,
+          "pct": 5.194796082544919
+        },
+        {
+          "name": "btc_ret_5m",
+          "gain": 29915.39782810211,
+          "pct": 4.872209677116446
+        },
+        {
+          "name": "ema_20_50_cross",
+          "gain": 28778.141465187073,
+          "pct": 4.686988959391215
+        },
+        {
+          "name": "eth_corr_30",
+          "gain": 23862.632931232452,
+          "pct": 3.8864183507468444
+        },
+        {
+          "name": "atr_percentile_50",
+          "gain": 18887.258366584778,
+          "pct": 3.0760975841487253
+        },
+        {
+          "name": "last_3_range_sum",
+          "gain": 18550.547869682312,
+          "pct": 3.0212587967516273
+        },
+        {
+          "name": "price_vs_ema50",
+          "gain": 17339.734360694885,
+          "pct": 2.824058099987699
+        },
+        {
+          "name": "btc_ret_1m",
+          "gain": 16861.43951702118,
+          "pct": 2.7461599961666345
+        },
+        {
+          "name": "btc_volatility_regime",
+          "gain": 16493.644647598267,
+          "pct": 2.686258612528248
+        },
+        {
+          "name": "range_expansion_3",
+          "gain": 12837.48080253601,
+          "pct": 2.0907927935745807
+        },
+        {
+          "name": "dist_to_low_20",
+          "gain": 11417.877275466919,
+          "pct": 1.859587242440064
+        },
+        {
+          "name": "alt_lead_5m",
+          "gain": 11169.48657989502,
+          "pct": 1.8191327728847826
+        },
+        {
+          "name": "trend_strength_50",
+          "gain": 10709.408455848694,
+          "pct": 1.7442015584951693
+        },
+        {
+          "name": "vol_std_10",
+          "gain": 10238.709167480469,
+          "pct": 1.6675405145412374
+        },
+        {
+          "name": "momentum_dispersion",
+          "gain": 10043.452123641968,
+          "pct": 1.6357397253964103
+        }
+      ],
+      "backtest_thr_030": {
+        "n_trades": 747,
+        "wr": 0.5180722891566265,
+        "pf": 1.0445181968141233,
+        "avg_pnl_pct": 0.06961990892887115,
+        "tot_pnl_pct": 52.006072998046875,
+        "tot_dollars": 364.04251098632807
+      },
+      "guards": {
+        "top_feat_under_30pct": true,
+        "train_corr_under_0_85": true
+      },
+      "model_path": "/home/z/my-project/data/v6_models/alt_label/pilot_fwd_ret_6.txt"
+    },
+    {
+      "label": "fwd_ret_12",
+      "horizon_min": 60,
+      "test_window": "2025-10",
+      "n_train": 914156,
+      "n_val": 101572,
+      "n_test": 100237,
+      "best_iteration": 300,
+      "rmse_test": 1.1419836070662948,
+      "rmse_train": 1.070266109146195,
+      "mae_test": 0.6340985957059796,
+      "corr_test": -0.00932677140436547,
+      "corr_train": 0.4121517266847748,
+      "dir_acc_test": 0.5005935931841535,
+      "dir_baseline": 0.4856789409100432,
+      "rmse_mean_baseline": 1.1170918941497803,
+      "rmse_zero_baseline": 1.1169698238372803,
+      "label_mean": -0.021945195272564888,
+      "label_std": 1.1167542934417725,
+      "top_feat_pct": 0.1034865184980596,
+      "top_feat_name": "hour_cos",
+      "top_20_features": [
+        {
+          "name": "hour_cos",
+          "gain": 142011.93349456787,
+          "pct": 10.34865184980596
+        },
+        {
+          "name": "dow",
+          "gain": 135752.776140213,
+          "pct": 9.892536375990172
+        },
+        {
+          "name": "hour_sin",
+          "gain": 113113.7234916687,
+          "pct": 8.242789989865697
+        },
+        {
+          "name": "atr_pct",
+          "gain": 95829.27268791199,
+          "pct": 6.983242574506979
+        },
+        {
+          "name": "btc_ret_15m",
+          "gain": 83785.82998085022,
+          "pct": 6.105616359712613
+        },
+        {
+          "name": "ema_20_50_cross",
+          "gain": 73552.99221038818,
+          "pct": 5.35993201533245
+        },
+        {
+          "name": "eth_corr_30",
+          "gain": 59472.17958545685,
+          "pct": 4.3338391791037205
+        },
+        {
+          "name": "btc_vol_z",
+          "gain": 49314.49069786072,
+          "pct": 3.593631062013363
+        },
+        {
+          "name": "atr_percentile_50",
+          "gain": 49126.59767341614,
+          "pct": 3.5799389767981555
+        },
+        {
+          "name": "btc_ret_5m",
+          "gain": 45823.96108055115,
+          "pct": 3.3392702143571706
+        },
+        {
+          "name": "btc_volatility_regime",
+          "gain": 37869.02621650696,
+          "pct": 2.7595805406085505
+        },
+        {
+          "name": "trend_strength_50",
+          "gain": 31098.212368011475,
+          "pct": 2.26617978523749
+        },
+        {
+          "name": "dist_to_low_20",
+          "gain": 29607.1181640625,
+          "pct": 2.1575212069601806
+        },
+        {
+          "name": "last_3_range_sum",
+          "gain": 29419.329456329346,
+          "pct": 2.143836723481687
+        },
+        {
+          "name": "vol_std_10",
+          "gain": 27341.60588645935,
+          "pct": 1.9924294625873549
+        },
+        {
+          "name": "dist_to_high_20",
+          "gain": 27192.026678085327,
+          "pct": 1.9815293705081807
+        },
+        {
+          "name": "price_vs_ema50",
+          "gain": 24659.390966415405,
+          "pct": 1.7969718858129942
+        },
+        {
+          "name": "ema_9_20_cross",
+          "gain": 22736.548831939697,
+          "pct": 1.6568510993257937
+        },
+        {
+          "name": "momentum_dispersion",
+          "gain": 21604.504999160767,
+          "pct": 1.574357134094363
+        },
+        {
+          "name": "btc_alt_spread_15m",
+          "gain": 20854.756189346313,
+          "pct": 1.519721659337779
+        }
+      ],
+      "backtest_thr_030": {
+        "n_trades": 1325,
+        "wr": 0.49660377358490565,
+        "pf": 0.7459140611786041,
+        "avg_pnl_pct": -0.40024882555007935,
+        "tot_pnl_pct": -530.3297119140625,
+        "tot_dollars": -3712.3079833984375
+      },
+      "guards": {
+        "top_feat_under_30pct": true,
+        "train_corr_under_0_85": true
+      },
+      "model_path": "/home/z/my-project/data/v6_models/alt_label/pilot_fwd_ret_12.txt"
+    }
+  ]
+}

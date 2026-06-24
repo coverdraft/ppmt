@@ -1,0 +1,63 @@
+==============================================================================================================
+v6 ALT-LABEL PILOT — fwd_ret_3 vs fwd_ret_6 vs fwd_ret_12
+==============================================================================================================
+Test window: 2025-10 (most recent)
+Labels: ['fwd_ret_3', 'fwd_ret_6', 'fwd_ret_12'] (15m / 30m / 60m forward)
+Backtest: thr=0.3%, cost=0.14%, notional=$700.0
+
+Loading all features from DB (one-shot)...
+  loaded 1,115,965 rows in 47.9s
+
+--- Training pilot for label=fwd_ret_3 (horizon=15m) ---
+  train: 1,015,728  test: 100,237
+  trained in 9.8s, best_iter=300
+
+  Label: fwd_ret_3 (15m horizon)
+  RMSE test: 0.6748  (mean baseline: 0.6777)
+  Corr  test: +0.1094  (train: +0.3687)
+  Dir   test: 0.5120  (baseline always-up: 0.4676)
+  Top feat:  btc_vol_z (7.4% of gain)
+  Backtest @ thr=0.30%: trades=496, WR=0.524, PF=1.12, tot=$+656.58
+  Guards: top_feat<30%=True, train_corr<0.85=True
+
+--- Training pilot for label=fwd_ret_6 (horizon=30m) ---
+  train: 1,015,728  test: 100,237
+  trained in 9.5s, best_iter=300
+
+  Label: fwd_ret_6 (30m horizon)
+  RMSE test: 0.9013  (mean baseline: 0.9032)
+  Corr  test: +0.0996  (train: +0.3843)
+  Dir   test: 0.5006  (baseline always-up: 0.4746)
+  Top feat:  hour_cos (8.6% of gain)
+  Backtest @ thr=0.30%: trades=747, WR=0.518, PF=1.04, tot=$+364.04
+  Guards: top_feat<30%=True, train_corr<0.85=True
+
+--- Training pilot for label=fwd_ret_12 (horizon=60m) ---
+  train: 1,015,728  test: 100,237
+  trained in 9.6s, best_iter=300
+
+  Label: fwd_ret_12 (60m horizon)
+  RMSE test: 1.1420  (mean baseline: 1.1171)
+  Corr  test: -0.0093  (train: +0.4122)
+  Dir   test: 0.5006  (baseline always-up: 0.4857)
+  Top feat:  hour_cos (10.3% of gain)
+  Backtest @ thr=0.30%: trades=1325, WR=0.497, PF=0.75, tot=$-3712.31
+  Guards: top_feat<30%=True, train_corr<0.85=True
+
+==============================================================================================================
+COMPARISON TABLE
+==============================================================================================================
+  label         horizon     RMSE     Corr     Dir  DirBase  top_feat%  trades     WR     PF      tot_$
+  fwd_ret_3         15m   0.6748  +0.1094  0.5120   0.4676       7.4%     496  0.524   1.12    +656.58
+  fwd_ret_6         30m   0.9013  +0.0996  0.5006   0.4746       8.6%     747  0.518   1.04    +364.04
+  fwd_ret_12        60m   1.1420  -0.0093  0.5006   0.4857      10.3%    1325  0.497   0.75   -3712.31
+
+==============================================================================================================
+VERDICT
+==============================================================================================================
+  Best label by $ PnL: fwd_ret_3 (15m horizon)
+    tot_$+656.58, WR=0.524, PF=1.12
+    corr_test=+0.1094, dir_acc=0.5120
+  → RECOMMENDATION: keep fwd_ret_3 (longer horizons do not help)
+
+Saved: /home/z/my-project/data/v6_models/alt_label/pilot_alt_label_results.json
