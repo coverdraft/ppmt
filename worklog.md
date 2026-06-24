@@ -230,3 +230,29 @@ Stage Summary:
 - Production recommendation: monitor per-hour PnL weekly, re-introduce blocks
   only if any hour shows negative PnL for 2+ consecutive weeks
 - Next: live paper-trading setup OR size scaling study
+
+---
+Task ID: option-c-finalize
+Agent: super-z (main)
+Task: Option C — re-apply fwd_ret_ fix (already committed), wipe contaminated DB, sync working copy, push to GitHub.
+
+Work Log:
+- Verified commit b99da5f exists locally: "fix(v5_cb_v2): rename fwd_ret_{H} to prevent feature/label name collision"
+  - 8 fwd_ references in scripts/v5/v5_extract_features_cb.py (confirmed applied)
+  - docs/v5_cb_v2/v5_leakage_postmortem.md (created)
+  - docs/v5_cb_v2/v6_design.md (created)
+- Checked DB state at /tmp/my-project/data/ppmt.db (6.9GB, 271K contaminated rows)
+- Attempted DELETE FROM feature_observations_cb — failed: sqlite3.DatabaseError "database disk image is malformed"
+- Ran PRAGMA integrity_check: failed catastrophically (freelist size mismatch, btreeInitPage errors on hundreds of pages, page double-references). Root cause: environment was reset mid-extraction, leaving the DB corrupt.
+- Deleted /tmp/my-project/data/ppmt.db outright. Will be recreated from scratch when v6 work resumes (re-download OHLCV from Coinbase, then extract features with fixed code).
+- Synced fixed scripts/v5/v5_extract_features_cb.py from git repo -> /tmp/my-project/scripts/v5_extract_features_cb.py (the working directory copy was the pre-fix version)
+- Wrote scripts/wipe_contaminated_db.py — idempotent DELETE + sqlite_sequence reset + VACUUM. (Included for the record even though the actual wipe ended up being an rm due to corruption.)
+- Committed wipe script: ae46de2 "ops(v5_cb_v2): add DB wipe script for contaminated feature_observations_cb"
+- Attempted `git push origin main` — failed: no GH_TOKEN / credential helper / gh CLI available in this environment. User needs to push from their own machine.
+
+Stage Summary:
+- Local git state: 2 commits ahead of origin/main (b99da5f + ae46de2)
+- Push to GitHub: PENDING — blocked on missing auth in this env. User must run `git push origin main` from a machine with GitHub credentials.
+- DB: deleted (was corrupted + contaminated). Will be rebuilt from scratch when v6 begins.
+- Working directory at /tmp/my-project/ now has the fixed extractor (8 fwd_ references confirmed).
+- v5_cb_v2 is officially dead. When work resumes, start at v6_design.md STEP 1: build v6 extractor with regression label + 59 features, then walk-forward validate before any paper trading.
