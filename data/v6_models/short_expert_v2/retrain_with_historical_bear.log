@@ -1,0 +1,42 @@
+=== Retraining SHORT-expert v2 for 2025-04 (now with historical bear data) ===
+============================================================
+Train: 734,353  Test: 102,991
+  drops: 396,143  BEAR_2022: 207,100  BEAR+drops: 100,935
+RMSE test: 0.5594  Corr: +0.0247  Dir: 0.5219
+SHORT @ thr=-0.30%:  2113 signals, WR=0.457, PF=0.71, tot=$-2311.02
+LONG  @ thr=+0.30%:    95 signals, WR=0.621, PF=2.83, tot=$+355.72 (sanity)
+Top feat: atr_pct (8.4%)  guard: True
+
+Saved: /home/z/my-project/data/v6_models/short_expert_v2/v6_short_expert_v2_2025-04.txt
+Saved: /home/z/my-project/data/v6_models/short_expert_v2/v6_short_expert_v2_2025-04_results.json
+
+=== Retraining SHORT-expert v2 for 2025-05 (now with historical bear data) ===
+==============================================================================================================
+v6 SHORT EXPERT v2 — sample_weight (drops x2.0, BEAR_2022 x2.0)
+==============================================================================================================
+Loading all features from DB...
+
+=== Retraining SHORT-expert v2 for 2025-06 (now with historical bear data) ===
+============================================================
+Train: 923,423  Test: 76,001
+  drops: 497,012  BEAR_2022: 207,100  BEAR+drops: 100,935
+RMSE test: 0.4510  Corr: +0.0225  Dir: 0.5278
+SHORT @ thr=-0.30%:   453 signals, WR=0.402, PF=0.79, tot=$-270.33
+LONG  @ thr=+0.30%:    19 signals, WR=0.789, PF=6.88, tot=$+73.26 (sanity)
+Top feat: atr_pct (9.5%)  guard: True
+
+Saved: /home/z/my-project/data/v6_models/short_expert_v2/v6_short_expert_v2_2025-06.txt
+Saved: /home/z/my-project/data/v6_models/short_expert_v2/v6_short_expert_v2_2025-06_results.json
+
+=== Retraining SHORT-expert v2 for 2025-09 (now with historical bear data) ===
+==============================================================================================================
+v6 SHORT EXPERT v2 — sample_weight (drops x2.0, BEAR_2022 x2.0)
+==============================================================================================================
+Loading all features from DB...
+
+=== Retraining SHORT-expert v2 for 2025-10 (now with historical bear data) ===
+==============================================================================================================
+v6 SHORT EXPERT v2 — sample_weight (drops x2.0, BEAR_2022 x2.0)
+==============================================================================================================
+Loading all features from DB...
+
