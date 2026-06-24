@@ -11611,3 +11611,99 @@ ETH/USDT 90d 5m+15m añadido a DB (antes no estaba). Total: 5 tokens ×
 ```
 fix(v2.2): LONG/SHORT bug + grid search + ATR SL/TP + reverse-direction test
 ```
+
+---
+
+## v5_cb_v2 — LEAKAGE INCIDENT + v6 DESIGN (24 jun 2026)
+
+### Resumen del incidente
+
+**Bug crítico descubierto en v5_cb_v2:** data-leakage por colisión de nombres
+entre feature y label. El modelo entero estaba contaminado — AUC 0.94 era
+ilusorio. AUC real (sin leakage): **0.54 — esencialmente random**.
+
+### Cronología
+
+1. **Step 8 (paper trader) deployado** a las 04:00 UTC. Tras 30 min, 0 trades abiertos.
+2. **Diagnóstico:** todas las probabilidades en vivo eran 0.10–0.19 (esperado: 0.50–0.90). Umbral 0.80 → 0 señales aprobadas.
+3. **Investigación:** comparé `compute_features()` del paper trader vs `compute_indicators()` del extractor original — idénticos. El bug no estaba en la matemática.
+4. **Prueba directa:** tomé una fila histórica de `feature_observations_cb` (lo que el modelo vio en entrenamiento) y la comparé feature-por-feature con una fila recalculada sobre la misma vela. 31/38 features EXACT match. Los 7 divergentes contaban la historia:
+   - `ret_3`: stored=`-0.41` (rango ±27%), recomputed=`-0.0013` (rango ±0.005)
+5. **Causa raíz:** en `v5_extract_features_cb.py`, `make_labels()` creaba columnas `ret_3`, `ret_6`, `ret_12` para retornos forward-looking. El caso H=3 **sobreescribía** silenciosamente la columna feature `ret_3` con el retorno forward a 3 barras (en %) — básicamente la etiqueta disfrazada.
+6. **Verificación:** script `sanity_check_ret3_leakage.py` parcheó SOLO `ret_3` (de forward-% a backward-fraction) y reentrenó con los mismos hiperparámetros. AUC cayó de 0.94 → 0.54. **Leakage confirmado al 100%.**
+7. **Feature importance con leakage:** `ret_3` dominaba con gain 829K (13× el segundo feature). Era literalmente la etiqueta.
+8. **Feature importance sin leakage:** `atr_pct` top con gain 5.7K. Todos los features tienen gains chiquitos — señal real marginal.
+
+### Por qué walk-forward no lo detectó
+
+Walk-forward valida generalización temporal, no independencia feature-label. El
+leakage estaba presente en todos los 6 windows por igual, así que AUC 0.9341 ±
+0.0075 parecía "estable". Alta AUC + baja varianza en 5m crypto debería haber
+sido bandera roja — real alpha en 5m vive en microestructura, no en
+indicadores clásicos.
+
+### Lecciones
+
+1. **Nunca colisionar nombres feature/label.** Toda columna forward-looking lleva prefijo `fwd_`.
+2. **Walk-forward no detecta leakage.** Requiere chequeos explícitos de independencia.
+3. **AUC > 0.85 en 5m crypto = casi siempre leakage.** Desconfiar.
+4. **Feature importance debe inspeccionarse.** Si 1 feature tiene >30% del gain total, investigar.
+5. **El paper trader negándose a operar era el sistema avisando.** Casi lo racionalizamos como "régimen bajista".
+
+### Fix aplicado
+
+En `scripts/v5/v5_extract_features_cb.py`:
+- `df[f"ret_{H}"]` → `df[f"fwd_ret_{H}"]`
+- `df[f"mfe_{H}"]` → `df[f"fwd_mfe_{H}"]`
+- `df[f"mae_{H}"]` → `df[f"fwd_mae_{H}"]`
+- `df[f"tp_first_{H}"]` → `df[f"fwd_tp_first_{H}"]`
+- Actualizadas las referencias en `extract_one()` a los nuevos nombres
+
+### Acciones tomadas
+
+1. ✅ Fix aplicado al extractor
+2. ✅ Wipe parcial de `feature_observations_cb` (DB local corrupta por reset del ambiente — la tabla quedó inaccesible, que es lo queríamos)
+3. ✅ Postmortem escrito: `docs/v5_cb_v2/v5_leakage_postmortem.md`
+4. ✅ Diseño v6 escrito: `docs/v5_cb_v2/v6_design.md`
+5. ⏳ Pendiente al retomar:
+   - En la Mac del usuario: `git pull` para traer el fix
+   - Wipe local de `feature_observations_cb`
+   - Re-extracción con el extractor fixeado (~30 min)
+   - Implementar v6 (59 features, label regresión, walk-forward)
+   - Validar AUC real de v6; si edge > 0.60 AUC → paper trader v6
+
+### Commits
+
+```
+fix(extract-cb): rename fwd_ret_{H} to prevent feature/label name collision
+
+The previous code created label columns `ret_3`, `mfe_3`, etc. which silently
+overwrote the backward-looking feature column `ret_3` (computed by
+compute_indicators). The model trained on this contaminated data achieved
+AUC 0.94 by reading the label as a feature. Real AUC without leakage: 0.54.
+
+See docs/v5_cb_v2/v5_leakage_postmortem.md for full analysis.
+```
+
+### Archivos creados / modificados
+
+- `scripts/v5/v5_extract_features_cb.py` — fix aplicado (rename fwd_)
+- `docs/v5_cb_v2/v5_leakage_postmortem.md` — análisis completo del incidente
+- `docs/v5_cb_v2/v6_design.md` — diseño del sucesor (regresión, 59 features)
+- `TRAZABILIDAD.md` — esta entrada
+
+### Próximo paso al retomar
+
+```bash
+# En la Mac del usuario:
+cd ~/ppmt
+git pull
+# Wipe tabla contaminada
+sqlite3 data/ppmt.db "DROP TABLE IF EXISTS feature_observations_cb;"
+# Re-extraer
+PYTHONPATH=ppmt/src python scripts/v5/v5_extract_features_cb.py --timeframes 5m --max-seconds 3600
+# Entrenar v5 saneado para confirmar AUC 0.54
+python scripts/v5/v5_train_lgbm_cb_v2.py
+# → AUC debería ser ~0.54 (no 0.94)
+# Luego construir v6 según docs/v5_cb_v2/v6_design.md
+```

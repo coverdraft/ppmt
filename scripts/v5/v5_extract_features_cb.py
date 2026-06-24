@@ -142,6 +142,14 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def make_labels(df: pd.DataFrame, horizons=(3, 6, 12)) -> pd.DataFrame:
+    """Compute forward-looking labels.
+
+    IMPORTANT: column names use the prefix `fwd_` to AVOID COLLISION with the
+    backward-looking feature columns `ret_3`, `ret_5`, `ret_10` produced by
+    `compute_indicators`. The previous version used `ret_{H}` here, which
+    silently overwrote the `ret_3` feature column for H=3 — a data-leakage bug
+    that inflated AUC from ~0.54 to ~0.94. See docs/v5_leakage_postmortem.md.
+    """
     df = df.copy()
     c = df["close"].values
     h = df["high"].values
@@ -173,10 +181,10 @@ def make_labels(df: pd.DataFrame, horizons=(3, 6, 12)) -> pd.DataFrame:
                 if h[i + j] >= tp_price:
                     tp_first[i] = 1; break
 
-        df[f"ret_{H}"] = ret
-        df[f"mfe_{H}"] = mfe
-        df[f"mae_{H}"] = mae
-        df[f"tp_first_{H}"] = tp_first
+        df[f"fwd_ret_{H}"] = ret
+        df[f"fwd_mfe_{H}"] = mfe
+        df[f"fwd_mae_{H}"] = mae
+        df[f"fwd_tp_first_{H}"] = tp_first
     return df
 
 
@@ -224,10 +232,10 @@ def extract_one(conn, symbol: str, asset_class: str, timeframe: str, window: str
     sax_paths = compute_sax_paths(df, cfg["window"], cfg["alpha"], cfg["pl"])
 
     H_PRIMARY = 6
-    label_col_win = f"tp_first_{H_PRIMARY}"
-    label_col_pnl = f"ret_{H_PRIMARY}"
-    label_col_fav = f"mfe_{H_PRIMARY}"
-    label_col_adv = f"mae_{H_PRIMARY}"
+    label_col_win = f"fwd_tp_first_{H_PRIMARY}"
+    label_col_pnl = f"fwd_ret_{H_PRIMARY}"
+    label_col_fav = f"fwd_mfe_{H_PRIMARY}"
+    label_col_adv = f"fwd_mae_{H_PRIMARY}"
 
     atr_median = df["atr_pct"].rolling(50, min_periods=5).median()
     trend_sign = df["trend_50"]
