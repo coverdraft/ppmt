@@ -159,3 +159,34 @@ Stage Summary:
 - Annualized +49,769% is mathematical — real forward returns will be lower due to
   regime drift, market impact, and operational overhead.
 - Next: walk-forward validation, live paper-trading on Coinbase Advanced, BAD_HOURS re-tune.
+
+---
+Task ID: v5_cb_v2-step6
+Agent: main
+Task: Paso 6 — Walk-forward validation (verify model edge is stable over time, not OOS artifact)
+
+Work Log:
+- Read v5_train_lgbm_cb_v2.py to understand model setup
+- Designed 6 monthly walk-forward windows covering RANGE_2025 + RECENT_2026 (180 days total)
+- Wrote scripts/v5/v5_walkforward_cb_v2.py (~300 lines):
+  * For each window: train fresh LGBM on all data BEFORE window start
+  * Use last 20% of pre-window data as valid set for early stopping
+  * Predict on window, compute AUC, precision@0.70, PF, total PnL
+  * Same LGBM params as v5_train_lgbm_cb_v2.py (num_leaves=15, lr=0.1, etc.)
+- Ran walk-forward inline — completed in ~30s total (6 retrains × ~5s each)
+- All 6 windows profitable, AUC stable
+- Wrote STEP6_walkforward.md analysis
+- Committed + pushed: f8bfe12
+
+Stage Summary:
+- AUC mean ± std: 0.9341 ± 0.0075 (Δ=0.022, well below 0.05 alarm threshold)
+- AUC W1→W6 actually IMPROVED by 0.0123 (model gets better with more data)
+- Precision mean ± std: 0.8874 ± 0.0069
+- PF range [6.13, 7.67] — every window PF > 5 (excellent)
+- 6/6 windows profitable — no regime produced net losses
+- Total PnL across 6 windows: +339,636% of margin
+- Interesting: walk-forward revealed RECENT_2026 ts are EARLIER than RANGE_2025
+  (just naming artifact; walk-forward uses ts for ordering, not regime label)
+- Verdict: model is READY for paper-trading deployment
+- Recommended cadence: monthly retrain + alert if 7-day rolling AUC drops >0.05
+- Next: live paper-trading on Coinbase Advanced with $100/trade for 1 week
