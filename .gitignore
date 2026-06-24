@@ -65,3 +65,15 @@ agent-ctx/
 terminal-v2/
 _backup_pre_cleanup/
 tool-results/
+.zscripts/
+mini-services/
+prisma/
+models/
+Caddyfile
+start.sh
+setup_fresh.sh
+groups_config.json
+ARCHITECTURE_V1.md
+HANDOFF.md
+TRAZABILIDAD.md
+OPTIMIZATION_v2.*.md
