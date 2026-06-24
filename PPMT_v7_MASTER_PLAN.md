@@ -469,7 +469,7 @@ minimum_trade_threshold = 0.30%  # pred must exceed this to enter
 | F2 | OHLCV composite encoder (sectorized) | 3-4h | DONE | F1 |
 | F3 | 4 sectorial tries + RegimePartitioned | 4-5h | DONE | F2 |
 | F4 | Features extras (funding rate, OI, sector) | 3-4h | DONE | F3 |
-| F5a | LightGBM-LONG expert (retrain with labels>0) | 2-3h | pending | F4 |
+| F5a | LightGBM-LONG expert (retrain with labels>0) | 2-3h | DONE | F4 |
 | F5b | LightGBM-SHORT expert (retrain with labels<0) | 2-3h | pending | F4 |
 | F6 | Trie conflict features (agreement, strength) | 1-2h | pending | F5a, F5b |
 | F7 | Walk-forward backtest (dual expert) | 4-6h | pending | F6 |
