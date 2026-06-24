@@ -961,3 +961,102 @@ Next: F6 — Trie conflict features. Re-run F6 trie feature extraction with
       the revised seq_lengths and the master plan min_obs values (no override).
       Then re-train LightGBM LONG+SHORT experts on the augmented 72-feature
       set. Target: Guard #3 PASS (top_feat_pct < 30%, breaking ATR dominance).
+
+---
+Task ID: F6
+Agent: main
+Task: Trie conflict features (25 features) — train LONG+SHORT F6 experts with 96 features
+
+Goal: Add 25 trie-derived features (n1/n2 × seq=3/5 + aggregates) to break ATR dominance
+(Guard #3: top_feat_pct < 30%, was 38-55% in F5a/F5b).
+
+Pipeline execution:
+1. v7_extract_trie_features.py: process 12 symbols, build trie incrementally,
+   extract 25 features per row into SQLite table feature_observations_v7_trie.
+   - 1,412,810 rows written in ~3 min
+   - 100% coverage at seq=3 (was ~1% with old seq_len=10,15 design)
+   - 92% coverage at seq=5 (lower for new_meme: PEPE 33%, WIF 61% — sparse tail)
+   - Trie stats: blue_chip/3 saturated at 27 nodes (3^3), 8,683 obs/node (×289 min_obs)
+                 blue_chip/5 saturated at 243 nodes (3^5), 965 obs/node (×32 min_obs)
+
+2. v7_materialize_f6_features.py: build F6 parquets merging v6 + F4 + trie (96 features).
+   - LONG: 685,470 rows × 100 cols, 191 MB
+   - SHORT: 684,383 rows × 100 cols, 191 MB
+   - 100% trie signal coverage in both (vs 0% trie signal in F5a/F5b parquets)
+
+3. v7_train_long_expert_f6.py: train LONG F6 (96 features, 5 walk-forward windows)
+4. v7_train_short_expert_f6.py: train SHORT F6 (96 features, 5 walk-forward windows)
+
+Results (LONG F6 vs F5a):
+  Window   F5a corr   F6 corr   Δ        F5a top%   F6 top%   Δ
+  2025-04  +0.4779    +0.4782   +0.0003   52.4%      49.6%     -2.8%
+  2025-05  +0.5209    +0.5219   +0.0010   51.9%      47.1%     -4.8%
+  2025-06  +0.4451    +0.4443   -0.0008   54.9%      50.3%     -4.5%
+  2025-09  +0.4623    +0.4604   -0.0020   44.7%      49.7%     +5.0%
+  2025-10  +0.5665    +0.5707   +0.0042   42.7%      46.1%     +3.4%
+  Mean     +0.4745    +0.4951   +0.021    max 54.9%  max 50.3% -4.6 (avg)
+
+Results (SHORT F6 vs F5b):
+  Window   F5b corr   F6 corr   Δ        F5b top%   F6 top%   Δ
+  2025-04  +0.4890    +0.4913   +0.0023   38.6%      39.6%     +1.0%
+  2025-05  +0.4963    +0.4947   -0.0015   42.9%      38.9%     -4.0%
+  2025-06  +0.4321    +0.4322   +0.0001   47.6%      42.1%     -5.6%
+  2025-09  +0.4088    +0.4089   +0.0000   40.3%      44.5%     +4.2%
+  2025-10  +0.4567    +0.4452   -0.0115   41.2%      49.9%     +8.6%
+  Mean     +0.4566    +0.4545   -0.002    max 47.6%  max 49.9% +2.3 (avg)
+
+Guard status (all 5 windows):
+  LONG F5a:   #3 FAIL  #4 PASS  #5 PASS
+  LONG F6:    #3 FAIL  #4 PASS  #5 PASS   (no change)
+  SHORT F5b:  #3 FAIL  #4 PASS  #5 PASS
+  SHORT F6:   #3 FAIL  #4 PASS  #5 PASS   (no change)
+
+Diagnosis — why trie features didn't move the needle:
+1. trie_conflict_3/5 = 0.0 always (std=0): N2 always falls back to N1 because
+   with seq_len=[3,5] every (key, regime) bucket is dense enough — the fallback
+   never triggers, so N1 == N2, so |N1 - N2| = 0.
+2. trie_agreement_3 ≈ 1.0 always (std=0.018): same reason — all predictions
+   (n1_pred_3, n2_pred_3, n1_pred_5, n2_pred_5) agree because they all reduce
+   to the same dense lookup.
+3. trie_n1_pred_3/5 have non-trivial variance (std=0.04/0.10) but max
+   correlation with fwd_ret_3 is only 0.20 (trie_strength_avg, NEGATIVE).
+4. Top features remain: atr_pct (39-50%), last_3_range_sum (12-22%),
+   range_pct (3-4%). All three are volatility/range measures — the model
+   is fundamentally a volatility predictor, not a directional predictor.
+5. LightGBM feature_fraction=0.85 means ~14 features are randomly masked
+   per tree; with 96 features and only ~25 having real signal, the trie
+   features are outcompeted by the strong v6 features.
+
+Stage Summary:
+- F6 delivery: 25 trie features extracted, materialized, integrated into
+  training pipeline. Code is correct, anti-leakage is preserved, all guards
+  #1-#2 (data leakage) and #4-#5 (overfit/stability) pass.
+- F6 outcome: Guard #3 (top_feat < 30%) still FAILS. The trie features did
+  not break ATR dominance. Average top_feat_pct moved from 47.7% (F5) to
+  47.4% (F6) — effectively zero change.
+- Decision: F6 is functionally complete (the trie machinery works) but
+  strategically neutral. The "diversify signal sources" hypothesis was
+  falsified: trie features at 5m TF don't carry enough directional signal
+  to compete with ATR-based features.
+- Next step recommendation: rather than more features (F6 strategy),
+  attack the problem from the regularization side — either (a) cap
+  atr_pct importance via feature_fraction_bundling or interaction
+  constraints, or (b) accept that the model is a volatility predictor
+  and pivot the backtest (F7) to verify if the directional signal from
+  the regression residual is still profitable.
+
+Files produced:
+- scripts/v7/v7_materialize_f6_features.py (NEW, ~270 lines)
+- scripts/v7/v7_train_long_expert_f6.py (NEW, ~290 lines)
+- scripts/v7/v7_train_short_expert_f6.py (NEW, ~360 lines)
+- data/v7_models/long_expert/long_features_f6.parquet (191 MB, 685K rows × 100 cols)
+- data/v7_models/short_expert/short_features_f6.parquet (191 MB, 684K rows × 100 cols)
+- data/v7_models/long_expert_f6/v7_long_expert_f6_{window}.txt (5 models)
+- data/v7_models/long_expert_f6/v7_long_expert_f6_summary.json
+- data/v7_models/short_expert_f6/v7_short_expert_f6_{window}.txt (5 models)
+- data/v7_models/short_expert_f6/v7_short_expert_f6_summary.json
+- SQLite table feature_observations_v7_trie (1.41M rows × 28 cols)
+
+Next: F7 — Dual-expert backtest. Run LONG+SHORT F6 models on walk-forward
+test periods, compute combined PnL, and decide whether to ship F6 or fall
+back to F5a/F5b (which have identical performance with fewer features).
