@@ -128,10 +128,19 @@ LOG = logging.getLogger("v5_paper_trader")
 
 # ── CONSTANTS ───────────────────────────────────────────────────────────────
 
-# Model + paths
-MODEL_PATH = Path("/home/z/my-project/download/v5_lgbm_model_cb_v2.txt")
-STATE_PATH = Path("/home/z/my-project/state/v5_cb_v2/paper_trader_state.json")
-LOG_DIR = Path("/home/z/my-project/logs")
+# Model + paths — portable: resolve relative to the repo root (parent.parent
+# of this file: scripts/v5/v5_paper_trader_cb_v2.py → ppmt/). Override with env
+# vars PPMT_MODEL_PATH / PPMT_STATE_PATH / PPMT_LOG_DIR if needed.
+_REPO_ROOT = _HERE.parent.parent                  # .../ppmt/
+MODEL_PATH = Path(os.environ.get(
+    "PPMT_MODEL_PATH",
+    str(_REPO_ROOT / "models" / "v5_cb_v2" / "v5_lgbm_model_cb_v2.txt"),
+))
+STATE_PATH = Path(os.environ.get(
+    "PPMT_STATE_PATH",
+    str(_REPO_ROOT / "state" / "v5_cb_v2" / "paper_trader_state.json"),
+))
+LOG_DIR = Path(os.environ.get("PPMT_LOG_DIR", str(_REPO_ROOT / "logs")))
 TRADES_LOG = LOG_DIR / "v5_paper_trader_trades.jsonl"
 MAIN_LOG = LOG_DIR / "v5_paper_trader.log"
 
@@ -435,6 +444,7 @@ class PaperTrader:
     def save_state(self) -> None:
         if self.state_path is None:
             return
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
         state = {
             "account_usd": self.account,
             "open_positions": [asdict(p) for p in self.open_positions],
