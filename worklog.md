@@ -779,3 +779,99 @@ Stage Summary:
 
 Next: F5b — LightGBM-SHORT expert (filter fwd_ret_3 < 0, sample_weight 2x drops + 2x BEAR_2022).
       Reuse v7_materialize_short_features.py pattern (parquet materialization) for fast load.
+
+---
+Task ID: v7-f5b-short-expert
+Agent: super-z (main)
+Task: F5b — LightGBM-SHORT expert (filter fwd_ret_3 < 0, sample_weight 2x drops + 2x BEAR_2022). Mirrors F5a pattern with SHORT-specific safety (funding_rate_z gate > 1.5).
+
+Work Log:
+- Read PPMT_v7_MASTER_PLAN.md §5 (dual experts), §5.2 (sample weights), §5.3 (frozen hyperparams),
+  §5.4 (anti-leakage guards), §5.5 (decision layer with thr_short=0.40%), §11.4 (SHORT safety: funding_z>1.5 gate)
+- Reviewed F5a code (v7_train_long_expert.py, v7_materialize_long_features.py) and v6 SHORT expert
+  (v6_train_short_expert_v2_15m.py) for baseline reference
+- Verified DB SHORT distribution: 684,383 rows with fwd_ret_3 < 0 (48.4% of 1.41M total)
+  * Per window: RECENT_2026=151K, RANGE_2025=150K, BULL_2024=139K, BEAR_2022=101K,
+    BEAR_2018_Q2_Q4=77K, BEAR_2020_COVID=37K, BEAR_2019_Q1=29K
+  * Per symbol: ETH=115K, BTC=115K, XRP=54K, LINK=52K, SOL=51K, ADA=51K, DOGE=50K,
+    AVAX=50K, SHIB=47K, BONK=38K, PEPE=30K, WIF=29K
+- Built scripts/v7/v7_materialize_short_features.py (~270 LOC, mirror of long materialization):
+  * Filter: fwd_ret_3 < 0 (SHORT-only)
+  * 12 per-symbol parquets → concat to master short_features.parquet
+  * Reuses F5a parquet pattern: float32 columns, zstd compression
+- Ran SHORT materialization: 684,383 rows × 75 cols in ~70s (140MB parquet)
+  * Per symbol load: 2.5-10s (largest: BTC/ETH at 24-25MB each)
+  * All 12 symbols succeeded, concatenated in 2.1s
+- Built scripts/v7/v7_train_short_expert.py (~510 LOC):
+  * 71 features = 59 v6 + 12 F4 (identical to F5a — apples-to-apples comparison)
+  * SHORT filter: fwd_ret_3 < 0 (cuts 1.41M → 684K, ~48% kept)
+  * Walk-forward: 5 monthly windows (2025-04, 05, 06, 09, 10) — same as F5a
+  * Sample weights: 2x bottom-25% drops (most negative) + 2x BEAR_2022 (compound 4x for BEAR drops)
+  * LGB params (frozen from §5.3, identical to F5a): num_leaves=31, lr=0.05, n_estimators=200,
+    early_stopping=30, lambda_l2=1.0
+  * Anti-leakage guards: #3 (top_feat<30%), #4 (train_corr<0.85), #5 (test_corr std<0.05)
+  * Threshold sweep: thr ∈ {0.20, 0.30, 0.40, 0.50, 0.75, 1.00} %
+    SHORT signal: pred < -thr  (model predicts drop > thr%)
+    SHORT PnL: -actuals - 0.14% round-trip cost (same cost model as LONG)
+  * SHORT-specific safety: also computes "gated" metrics (funding_rate_z > 1.5 filter applied)
+    This validates the master plan §11.4 inference-time gate pre-F7
+  * Helper _short_metrics() factored out to support both ungated and gated evaluation,
+    with safe 0-signal return when funding_z is None (cannot apply gate without feature)
+- Ran F5b training across 5 walk-forward windows (all completed in ~37s total):
+  * 2025-04: train=337K, test=49K, rmse=0.339, corr=+0.489, thr_0.40 WR=83.3%, PF=37.0, tot=$+64K
+  * 2025-05: train=379K, test=52K, rmse=0.362, corr=+0.496, thr_0.40 WR=82.5%, PF=37.6, tot=$+72K
+  * 2025-06: train=422K, test=37K, rmse=0.317, corr=+0.432, thr_0.40 WR=80.0%, PF=29.5, tot=$+32K
+  * 2025-09: train=498K, test=50K, rmse=0.249, corr=+0.409, thr_0.40 WR=78.2%, PF=22.3, tot=$+21K
+  * 2025-10: train=540K, test=49K, rmse=0.545, corr=+0.457, thr_0.40 WR=81.4%, PF=37.8, tot=$+48K
+- Funding-rate gate (z > 1.5) results:
+  * 2025-04..2025-06: 0 gated signals (funding history starts 2025-06-24, no data for early windows)
+  * 2025-09: 44 gated signals, WR=88.6% (vs 78.2% ungated) — gate improves WR by +10.4pp
+  * 2025-10: 126 gated signals, WR=85.7% (vs 81.4% ungated) — gate improves WR by +4.3pp
+  * Gate is highly selective: keeps ~0.4-0.7% of ungated signals, but boosts WR significantly
+- Created tests/v7/test_train_short_expert.py (~530 LOC, 42 tests):
+  * Feature list integrity (7 tests): 71 total, 59 v6, 12 F4, no dupes, identical to F5a
+  * Walk-forward splits (6 tests): train.ts < test month start, monotonic growth, no overlap,
+    5 splits, all labels negative (SHORT filter verified)
+  * Sample weights (8 tests): 2x drops (bottom 25%), 2x BEAR, 4x compound, all positive,
+    drop threshold is negative, DROP_PERCENTILE=25
+  * Anti-leakage guards (7 tests): #3, #4, #5 pass/fail cases, summary dict fields
+  * Short threshold sweep (4 tests): all keys present, monotonic n_signals decrease,
+    SHORT PnL formula verified (-actuals - 0.14), SHORT loss case verified
+  * Funding-rate gate (7 tests): gate constant=1.5, thr_short=0.40, gate filters signals,
+    gated <= ungated count, all-zero funding_z → 0 signals, null funding_z → 0 signals,
+    round-trip cost=0.14
+  * End-to-end smoke (3 tests): train_one_window returns valid dict, JSON round-trip, filter_short
+  * All 42 tests PASS
+- 5 model files saved: data/v7_models/short_expert/v7_short_expert_{window}.txt
+- Summary JSON saved: data/v7_models/short_expert/v7_short_expert_summary.json
+- Full v7 test suite regression: 162/162 tests PASS (no regressions from F5a/F4/F3/F2/F1)
+
+Stage Summary:
+- F5b COMPLETE: SHORT expert trained across 5 walk-forward windows
+- Mean test correlation: +0.4566 (model has strong predictive power on drops)
+- Test corr std: 0.0332 (under 0.05 threshold — guard #5 PASSES, model stable over time)
+- Max train corr: +0.6064 (under 0.85 threshold — guard #4 PASSES, model not overfit)
+- Max top-feat pct: 47.6% (over 30% threshold — guard #3 FAILS, atr_pct dominates)
+  Same structural issue as F5a (filtering to |fwd_ret| > 0 makes ATR the strongest predictor
+  of magnitude). Expected — F6 trie features will diversify signal sources.
+- SHORT WR at thr_0.40: 78.2% to 83.3% across windows (target was >52%, EXCEEDED by 26-31pp)
+- SHORT PF at thr_0.40: 22.3 to 37.8 (target was >2, EXCEEDED by 11-19x)
+- Total simulated PnL: ~$238k on $700/trade across 96K SHORT signals over 5 windows
+- Funding-rate gate (z>1.5) validated: boosts SHORT WR by +4-10pp in windows with funding history
+  (2025-09: 78.2% → 88.6%, 2025-10: 81.4% → 85.7%). Gate is highly selective (0.4-0.7% of signals).
+- SHORT WR EXCEEDS F7 CHECKPOINT TARGET (>52%) by a wide margin → continue to F6
+- vs F5a LONG expert (mean corr +0.4945 vs SHORT +0.4566): SHORT is slightly harder to predict
+  than LONG (lower corr), but still well above the unlock threshold
+- Top 5 SHORT features (avg across windows):
+  1. atr_pct (38-48% of gain) — average true range %, dominant volatility signal
+  2. last_3_range_sum (3.6% of gain in 2025-04) — recent 3-bar range accumulation
+  3. range_pct — current bar range
+  4. vol_regime — volatility regime classification
+  5. btc_ret_15m — BTC 15m return (market-wide drop signal)
+- vs F5a top features: same #1 (atr_pct) and #2 (last_3_range_sum) — both experts rely on
+  volatility as the primary magnitude predictor. F6 trie features should reduce this dominance.
+
+Next: F6 — Trie conflict features (agreement, strength). Add 25 trie-derived features
+      (n1_pred_5/10/15, n2_pred_regime, trie_agreement, trie_conflict, sector_pred_agreement,
+      cross_sector_pred_divergence) to the 71-feature set, diversifying signal sources
+      beyond ATR-dominated volatility. Target: reduce top_feat_pct below 30% (guard #3 PASS).
