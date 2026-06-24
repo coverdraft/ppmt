@@ -73,6 +73,11 @@ TOKENS = [
 # Same windows as v5_cb_v2 used (consistency).
 # (name, start_ms, end_ms, description)
 WINDOWS = [
+    # Historical bears (added for SHORT expert — needs more bear data)
+    ("BEAR_2018_Q2_Q4", 1522540800000, 1546300800000, "Apr-Dec 2018 crypto bear (post-Dec 2017 peak)"),
+    ("BEAR_2019_Q1",    1546300800000, 1554076800000, "Jan-Mar 2019 continuation of bear"),
+    ("BEAR_2020_COVID", 1580515200000, 1588291200000, "Feb-Apr 2020 COVID crash"),
+    # Original v6 windows
     ("BEAR_2022",   1651363200000, 1659139200000, "May-Jul 2022 LUNA/3AC crash"),
     ("BULL_2024",   1727740800000, 1735516800000, "Oct-Dec 2024 BTC pump to 100k"),
     ("RANGE_2025",  1753990400000, 1761817200000, "Aug-Oct 2025 consolidation"),
@@ -84,8 +89,8 @@ EARLIEST_MS = {
     "BTC-USD":   0,
     "ETH-USD":   0,
     "SOL-USD":   1_609_459_200_000,   # 2021-01
-    "XRP-USD":   1_546_300_800_000,   # 2019-01 (gaps during SEC delisting)
-    "ADA-USD":   1_533_590_400_000,   # 2018-08
+    "XRP-USD":   1_519_776_000_000,   # 2018-02-28 (Coinbase Pro listing; gaps during SEC delisting Dec 2020)
+    "ADA-USD":   1_616_015_200_000,   # 2021-03-18 (ADA-USD pair launch on Coinbase Pro)
     "AVAX-USD":  1_633_977_600_000,   # 2021-10
     "LINK-USD":  1_581_408_000_000,   # 2020-02
     "DOGE-USD":  1_620_000_000_000,   # 2021-05
