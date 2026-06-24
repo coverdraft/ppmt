@@ -41,6 +41,7 @@ Thumbs.db
 
 # Config overrides
 config/local.yaml
+config/github_token.txt
 .env
 
 # Jupyter
