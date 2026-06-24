@@ -430,3 +430,61 @@ Commits:
   4fd9b1d feat(v6/fase3): add 15m TF support to v6_extract_features.py
   fc51522 exp(v6/fase3): 15m TF reduces SHORT losses by 98% — first POSITIVE combined result
   6b41dcd exp(v6/fase3): 15m filtered backtest — combined LONG+SHORT +$230, but 5m LONG still wins
+
+---
+Task ID: v7-f1-trie-metadata
+Agent: super-z (main)
+Task: F1 — Design and implement TrieNodeV6Metadata (8 fields, no SAX/LONG-SHORT).
+
+Work Log:
+- Read PPMT_v7_MASTER_PLAN.md §4.3 (TrieNodeV6Metadata spec)
+- Reviewed audit findings from subagent (27 fields → 8 fields, drop SAX/LONG-SHORT/SL-TP)
+- Created scripts/v7/v7_trie_metadata.py:
+  * RegimeStatsV6 dataclass: per-regime count, sum, sum_sq, last_obs_time
+    - Welford's online variance (numerically stable)
+    - prediction property: mean if count >= 3 else 0.0
+    - confidence property: count_factor * var_factor (in [0,1])
+  * TrieNodeV6Metadata dataclass with 8 stored fields:
+    1. historical_count
+    2. sum_fwd_ret_15m (for global mean)
+    3. sum_sq_fwd_ret_15m (for global variance)
+    4. last_observation_time (epoch seconds)
+    5. vol_regime_distribution: dict[int, int]
+    6. vol_regime_stats: dict[int, RegimeStatsV6]
+    7. node_type: "independent" or "dependent"
+    8. trading_observations (live trading decision count)
+  * Derived properties (not stored):
+    - mean_fwd_ret_15m, variance_fwd_ret_15m, std_fwd_ret_15m
+    - prediction (mean if count >= 3 else 0.0)
+    - prediction_for_regime(vol_regime) — N2 lookup
+    - confidence (count_factor * var_factor)
+    - freshness_decay (exponential, 24h half-life)
+    - is_trustworthy (count + freshness + trading_obs gate)
+    - dominant_regime, regime_concentration
+  * update_from_observation(fwd_ret, vol_regime, ts, is_trading_obs)
+    - CRITICAL: enforces no temporal logic; caller must respect
+      INSERT-AFTER-PREDICT rule (see PPMT_v7_MASTER_PLAN.md §11.1)
+  * to_dict / from_dict (JSON-serializable, supports serialization)
+- Created tests/v7/test_trie_metadata.py with 12 tests:
+  1. test_basic_update
+  2. test_welford_variance (numerical stability with 100 obs)
+  3. test_per_regime_predictions (independence between regimes)
+  4. test_min_observations_gate (count < 3 → prediction = 0)
+  5. test_freshness_decay (24h half-life)
+  6. test_node_type_transition (dependent → independent at count=10)
+  7. test_trustworthy_gate (count + freshness + trading_obs)
+  8. test_serialization_roundtrip (JSON compatibility)
+  9. test_regime_stats_v6 (RegimeStatsV6 direct)
+  10. test_anti_leakage_contract (documents INSERT-AFTER-PREDICT rule)
+  11. test_repr
+  12. test_dominant_regime
+- All 12 tests PASS
+
+Stage Summary:
+- TrieNodeV6Metadata ready: 8 stored fields, ~10 derived properties
+- Anti-leakage: metadata structure supports temporal ordering (caller enforces)
+- Memory efficient: ~200 bytes per node (vs ~2KB for old 27-field version)
+- JSON-serializable for persistence
+- Foundation ready for F2 (OHLCV composite encoder)
+
+Next: F2 — OHLCV composite encoder with sectorized quantization.
