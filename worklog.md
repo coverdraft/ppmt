@@ -390,3 +390,43 @@ Stage Summary:
 
 - Awaiting user direction on which option to pursue.
 
+
+---
+Task ID: v6-fase3-15m-tf
+Agent: super-z (main)
+Task: Fase 3 — Re-download OHLCV at 15m TF, retrain SHORT-expert v2, walk-forward backtest. Hypothesis: 5m is too noisy for SHORT, 15m should reduce noise by sqrt(3) and let SHORT edge emerge.
+
+Work Log:
+- Modified scripts/v6/v6_download_ohlcv.py: added --timeframe flag (5m default, 15m new), TF_CONFIG dict, per-timeframe state tracking
+- Downloaded 479,986 rows of 15m OHLCV across 7 windows (BEAR_2018_Q2_Q4 to RECENT_2026) for 12 tokens
+- Modified scripts/v6/v6_extract_features.py: added --timeframe flag, TF_HORIZONS dict (5m uses 3,6,12; 15m uses 1,2,3 = 15m/30m/45m forward), TF_PRIMARY_LABEL (5m -> fwd_ret_3, 15m -> fwd_ret_1, both = 15m wall-clock forward)
+- Created NEW table feature_observations_v6_15m (separate from 5m feature_observations_v6 for safe rollback)
+- Extracted 477,891 15m features across 52 (symbol, window) combos, all anti-leakage guards PASS
+- Label stats: mean +0.0005%, std 0.58%, drops 48.5% (matches 5m characteristics)
+- Created scripts/v6/v6_train_short_expert_v2_15m.py: same as v2 but on 15m TF, label=fwd_ret_1, tests thr=0.30% and 0.50%
+- Trained 5 walk-forward windows (2025-04, 05, 06, 09, 10), all guards PASS
+- Created scripts/v6/v6_aggregate_short_15m.py: comparison report 5m vs 15m
+- Created scripts/v6/v6_backtest_filtered_15m.py: walk-forward backtest with k-hours filter per-side, 3 threshold configs
+- All commits local (no GitHub push — no creds in env, same as previous session)
+
+Stage Summary:
+- HEADLINE: 15m TF reduces SHORT losses by 98% (-$6,510 -> -$109) and combined LONG+SHORT crosses zero for first time (+$230)
+- Per-window trend: Apr -$437 -> Oct +$758 (model learning over time)
+- October 2025 SHORT alone = +$492 (WR 51.8%, PF 1.67) — first profitable SHORT month ever
+- BUT 5m LONG-only (+$1,139) still beats 15m combined (+$230) in 2025 bull regime
+- k-hours filter doesn't help at 15m (was tuned for 5m density — needs k=4 or k=6 for 15m)
+- Best 15m config: LONG@0.30% + SHORT@0.50%, no hour filter
+- The 15m strategy is a hedge: sacrifices bull upside for bear protection
+- If 2026 turns bearish, 15m combined will likely outperform 5m LONG-only
+
+DECISION POINT (next options):
+  A. ACCEPT 5m LONG-only as production strategy (+27% annualized)
+  B. Deploy 15m combined as parallel hedge (lower return, lower drawdown)
+  C. Fase 4: add funding rate feature — might push 15m SHORT into standalone profitability
+  D. Re-tune k-hours filter for 15m density (k=4 or k=6 instead of k=12)
+
+Commits:
+  bfc33d5 feat(v6/fase3): add 15m TF support to v6_download_ohlcv.py
+  4fd9b1d feat(v6/fase3): add 15m TF support to v6_extract_features.py
+  fc51522 exp(v6/fase3): 15m TF reduces SHORT losses by 98% — first POSITIVE combined result
+  6b41dcd exp(v6/fase3): 15m filtered backtest — combined LONG+SHORT +$230, but 5m LONG still wins
