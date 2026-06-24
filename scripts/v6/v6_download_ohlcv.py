@@ -100,8 +100,12 @@ EARLIEST_MS = {
     "BONK-USD":  1_704_067_200_000,   # 2024-01
 }
 
-# v6 design: 5m only. (granularity_seconds, ms_per_candle)
-TF_5M = (300, 300_000)
+# v6 design: 5m + 15m (Fase 3 added 15m for SHORT expert experiment).
+# (granularity_seconds, ms_per_candle)
+TF_CONFIG = {
+    "5m":  (300,   300_000),
+    "15m": (900,   900_000),
+}
 PAGE_CANDLES = 300  # Coinbase hard cap
 
 # ----------------------------------------------------------------------------
@@ -147,13 +151,14 @@ def fetch_candles_paginated(
     pair: str,
     start_ms: int,
     end_ms: int,
+    timeframe: str = "5m",
     max_retries: int = 5,
 ) -> list[list]:
-    """Fetch all 5m candles between [start_ms, end_ms] for pair.
+    """Fetch all `timeframe` candles between [start_ms, end_ms] for pair.
 
     Returns ASC-ordered list of normalized rows: [time_sec, low, high, open, close, volume]
     """
-    granularity, ms_per_candle = TF_5M
+    granularity, ms_per_candle = TF_CONFIG[timeframe]
 
     earliest = EARLIEST_MS.get(pair, 0)
     if end_ms < earliest:
@@ -224,7 +229,7 @@ def fetch_candles_paginated(
     return all_rows
 
 
-def store_rows(symbol: str, window: str, rows: list[list]) -> int:
+def store_rows(symbol: str, window: str, rows: list[list], timeframe: str = "5m") -> int:
     if not rows:
         return 0
     conn = _DB_CONN
@@ -233,7 +238,7 @@ def store_rows(symbol: str, window: str, rows: list[list]) -> int:
     for r in rows:
         time_sec = r[0]
         low, high, opn, close, vol = r[1], r[2], r[3], r[4], r[5]
-        batch.append((symbol, "5m", time_sec, window,
+        batch.append((symbol, timeframe, time_sec, window,
                       float(opn), float(high), float(low), float(close), float(vol)))
     CHUNK = 500
     for i in range(0, len(batch), CHUNK):
@@ -273,11 +278,12 @@ def save_state(state: dict) -> None:
 # Driver
 # ----------------------------------------------------------------------------
 
-def download_one(binance_symbol: str, pair: str, window_name: str, start_ms: int, end_ms: int) -> dict:
+def download_one(binance_symbol: str, pair: str, window_name: str, start_ms: int, end_ms: int,
+                 timeframe: str = "5m") -> dict:
     t0 = time.time()
     try:
-        rows = fetch_candles_paginated(pair, start_ms, end_ms)
-        n = store_rows(binance_symbol, window_name, rows)
+        rows = fetch_candles_paginated(pair, start_ms, end_ms, timeframe=timeframe)
+        n = store_rows(binance_symbol, window_name, rows, timeframe=timeframe)
         return {
             "symbol": binance_symbol, "pair": pair, "window": window_name,
             "rows": n, "elapsed_s": round(time.time() - t0, 1), "status": "ok" if n else "empty",
@@ -295,6 +301,8 @@ def main() -> int:
                         help="Subset of binance symbols (e.g. BTCUSDT PEPEUSDT)")
     parser.add_argument("--windows", nargs="+", default=None,
                         help="Subset of windows (e.g. BULL_2024 BEAR_2022)")
+    parser.add_argument("--timeframe", default="5m", choices=list(TF_CONFIG.keys()),
+                        help="5m (default) or 15m (Fase 3 SHORT experiment)")
     parser.add_argument("--workers", type=int, default=6)
     parser.add_argument("--max-seconds", type=int, default=110,
                         help="Soft time budget for this invocation (env rotation aware)")
@@ -306,34 +314,36 @@ def main() -> int:
     tokens = [t for t in TOKENS if args.tokens is None or t[0] in args.tokens]
     windows = [w for w in WINDOWS if args.windows is None or w[0] in args.windows]
 
-    LOG.info("v6 OHLCV downloader: %d tokens x %d windows = %d jobs",
-             len(tokens), len(windows), len(tokens) * len(windows))
+    LOG.info("v6 OHLCV downloader [%s]: %d tokens x %d windows = %d jobs",
+             args.timeframe, len(tokens), len(windows), len(tokens) * len(windows))
 
     state = load_state()
-    done_keys = {f"{r['symbol']}|{r['window']}" for r in state["completed"]}
-    # Failed jobs are retried (not permanently marked failed)
-    done_keys |= {f"{r['symbol']}|{r['window']}" for r in state.get("failed", []) if r.get("status", "").startswith("error")}
+    # Resume filter is per-timeframe: include timeframe in the key so 5m
+    # completions don't block 15m re-downloads.
+    done_keys = {f"{r['symbol']}|{r['window']}|{r.get('timeframe', '5m')}" for r in state["completed"]}
+    done_keys |= {f"{r['symbol']}|{r['window']}|{r.get('timeframe', '5m')}" for r in state.get("failed", []) if r.get("status", "").startswith("error")}
 
     jobs = []
     for sym, pair, _cls in tokens:
         for w_name, w_start, w_end, _desc in windows:
-            key = f"{sym}|{w_name}"
+            key = f"{sym}|{w_name}|{args.timeframe}"
             if key in done_keys:
                 continue
-            jobs.append((sym, pair, w_name, w_start, w_end))
+            jobs.append((sym, pair, w_name, w_start, w_end, args.timeframe))
 
     LOG.info("Remaining jobs: %d (after resume filter)", len(jobs))
     if not jobs:
         # Final summary
         cur = _DB_CONN.cursor()
-        cur.execute("SELECT COUNT(*) FROM ohlcv_v6")
-        total = cur.fetchone()[0]
-        cur.execute("SELECT symbol, window, COUNT(*) FROM ohlcv_v6 GROUP BY symbol, window ORDER BY symbol, window")
+        cur.execute("SELECT timeframe, COUNT(*) FROM ohlcv_v6 GROUP BY timeframe")
+        print(f"\n=== v6 OHLCV FINAL (per timeframe) ===")
+        for tf, n in cur.fetchall():
+            print(f"  {tf:6} {n:>10,}")
+        cur.execute("SELECT symbol, window, timeframe, COUNT(*) FROM ohlcv_v6 GROUP BY symbol, window, timeframe ORDER BY symbol, window, timeframe")
         per = cur.fetchall()
-        print(f"\n=== v6 OHLCV FINAL ===")
-        print(f"Total rows: {total:,}")
-        for sym, win, n in per:
-            print(f"  {sym:10} {win:12} {n:>6,}")
+        print(f"\nTotal rows: {sum(r[3] for r in per):,}")
+        for sym, win, tf, n in per:
+            print(f"  {sym:10} {win:18} {tf:4} {n:>6,}")
         return 0
 
     t_start = time.time()
@@ -354,23 +364,27 @@ def main() -> int:
                      res["rows"], res["elapsed_s"], res["status"])
             if res["status"] == "ok" or res["status"] == "empty":
                 state["completed"].append({
-                    "symbol": res["symbol"], "window": res["window"], "rows": res["rows"],
+                    "symbol": res["symbol"], "window": res["window"],
+                    "timeframe": args.timeframe, "rows": res["rows"],
                 })
             else:
                 state["failed"].append({
-                    "symbol": res["symbol"], "window": res["window"], "status": res["status"],
+                    "symbol": res["symbol"], "window": res["window"],
+                    "timeframe": args.timeframe, "status": res["status"],
                 })
             save_state(state)
 
     LOG.info("Processed %d/%d jobs in %.1fs", n_done, len(jobs), time.time() - t_start)
 
     cur = _DB_CONN.cursor()
-    cur.execute("SELECT COUNT(*) FROM ohlcv_v6")
-    print(f"\n=== v6 OHLCV progress ===")
-    print(f"Total rows so far: {cur.fetchone()[0]:,}")
-    cur.execute("SELECT window, COUNT(*) FROM ohlcv_v6 GROUP BY window ORDER BY window")
-    for w, n in cur.fetchall():
-        print(f"  {w:12} {n:>8,}")
+    cur.execute("SELECT timeframe, COUNT(*) FROM ohlcv_v6 GROUP BY timeframe")
+    print(f"\n=== v6 OHLCV progress (per timeframe) ===")
+    for tf, n in cur.fetchall():
+        print(f"  {tf:6} {n:>10,}")
+    cur.execute("SELECT window, timeframe, COUNT(*) FROM ohlcv_v6 WHERE timeframe = ? GROUP BY window ORDER BY window", (args.timeframe,))
+    print(f"\n[{args.timeframe}] per window:")
+    for w, tf, n in cur.fetchall():
+        print(f"  {w:18} {n:>8,}")
     return 0 if n_done == len(jobs) else 2  # 2 = partial
 
 
