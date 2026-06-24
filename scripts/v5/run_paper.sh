@@ -3,9 +3,11 @@
 # Uso:  ./scripts/v5/run_paper.sh              # 7 días, thr=0.80
 #        ./scripts/v5/run_paper.sh --days 1    # 1 día, thr=0.80
 #        ./scripts/v5/run_paper.sh --threshold 0.70 --days 7
+#        ./scripts/v5/run_paper.sh --dashboard # lanzar dashboard TUI (read-only)
 #
 # Después de arrancar:
-#   tail -f logs/v5_paper_trader.log        # ver progreso
+#   tail -f logs/v5_paper_trader.log        # ver progreso (texto plano)
+#   ./scripts/v5/run_paper.sh --dashboard   # ver progreso (TUI con colores)
 #   pgrep -f v5_paper_trader                # ver PID
 #   kill <PID>                              # frenar
 #   ./scripts/v5/run_paper.sh               # resumir (sin --fresh-state)
@@ -20,6 +22,16 @@ cd "$(dirname "$0")/../.."
 # Activar venv si existe, sino usar python3 del sistema
 if [ -f .venv/bin/activate ]; then
     source .venv/bin/activate
+fi
+
+# Modo dashboard: solo lanzar el dashboard TUI (read-only), no arrancar trader
+if [[ "$1" == "--dashboard" ]]; then
+    if ! python3 -c "import rich" 2>/dev/null; then
+        echo "Instalando rich para el dashboard..."
+        pip install rich
+    fi
+    shift
+    exec python3 scripts/v5/v5_paper_dashboard.py "$@"
 fi
 
 # Crear dirs necesarios
