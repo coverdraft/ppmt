@@ -1,0 +1,126 @@
+{
+  "window": "2025-06",
+  "model_type": "short_expert",
+  "n_train_full": 729576,
+  "n_train_drops_only": 354002,
+  "n_train_bear_2022": 100935,
+  "n_test": 76001,
+  "best_iteration": 300,
+  "rmse_test_all": 0.5555763060579071,
+  "corr_test_all": 0.007145784350047316,
+  "short_thr_030": {
+    "n_signals": 35764,
+    "wr": 0.3811933788166872,
+    "pf": 0.5353096110434129,
+    "avg_pnl_pct": -0.12815044820308685,
+    "tot_dollars": -32082.2109375
+  },
+  "top_feat_pct": 0.46258848632328636,
+  "top_feat_name": "atr_pct",
+  "top_20_features": [
+    {
+      "name": "atr_pct",
+      "gain": 161795.23407125473,
+      "pct": 46.258848632328636
+    },
+    {
+      "name": "last_3_range_sum",
+      "gain": 50427.81773304939,
+      "pct": 14.4178090335124
+    },
+    {
+      "name": "range_pct",
+      "gain": 8569.441098690033,
+      "pct": 2.4500874881974455
+    },
+    {
+      "name": "btc_ret_15m",
+      "gain": 8234.949528694153,
+      "pct": 2.3544530587035895
+    },
+    {
+      "name": "hour_cos",
+      "gain": 8096.270628094673,
+      "pct": 2.314803397153584
+    },
+    {
+      "name": "btc_vol_z",
+      "gain": 8061.625429153442,
+      "pct": 2.3048979940503416
+    },
+    {
+      "name": "btc_ret_5m",
+      "gain": 7697.961253643036,
+      "pct": 2.2009228297353793
+    },
+    {
+      "name": "btc_ret_1m",
+      "gain": 5487.176969528198,
+      "pct": 1.5688378604552564
+    },
+    {
+      "name": "vol_regime",
+      "gain": 5367.0936279296875,
+      "pct": 1.5345048521058058
+    },
+    {
+      "name": "hour_sin",
+      "gain": 5302.690304279327,
+      "pct": 1.5160913084853007
+    },
+    {
+      "name": "price_vs_ema50",
+      "gain": 5261.895600557327,
+      "pct": 1.5044277014865581
+    },
+    {
+      "name": "atr_percentile_50",
+      "gain": 4255.39825463295,
+      "pct": 1.216660211663888
+    },
+    {
+      "name": "dow",
+      "gain": 4156.1218802928925,
+      "pct": 1.1882761198843947
+    },
+    {
+      "name": "btc_alt_spread_15m",
+      "gain": 4018.123154401779,
+      "pct": 1.1488209269728418
+    },
+    {
+      "name": "range_expansion_3",
+      "gain": 4001.155606508255,
+      "pct": 1.1439697381589449
+    },
+    {
+      "name": "eth_corr_30",
+      "gain": 3558.8404483795166,
+      "pct": 1.017507484402751
+    },
+    {
+      "name": "ema_20_50_cross",
+      "gain": 3422.4524970054626,
+      "pct": 0.9785128277671468
+    },
+    {
+      "name": "dist_to_low_20",
+      "gain": 3045.39675116539,
+      "pct": 0.8707088817925442
+    },
+    {
+      "name": "momentum_dispersion",
+      "gain": 2930.735486984253,
+      "pct": 0.8379260987013519
+    },
+    {
+      "name": "wick_imbalance_3",
+      "gain": 2929.061077594757,
+      "pct": 0.8374473685895419
+    }
+  ],
+  "guards": {
+    "top_feat_under_30pct": false
+  },
+  "model_path": "/home/z/my-project/data/v6_models/short_expert/v6_short_expert_2025-06.txt"
+}
