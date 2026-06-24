@@ -1,0 +1,1200 @@
+     1→"""
+     2→PPMT Trie Data Structure
+     3→
+     4→The core Trie that stores SAX symbol sequences with Block Lifecycle Metadata.
+     5→Supports:
+     6→  - O(k) insertion and lookup (k = pattern length)
+     7→  - Block Lifecycle Metadata at every node
+     8→  - Forward/backward navigation
+     9→  - Unknown block detection (predictive exit)
+    10→  - Serialization for persistence
+    11→"""
+    12→
+    13→from __future__ import annotations
+    14→
+    15→from dataclasses import dataclass, field
+    16→from typing import Optional
+    17→
+    18→from ppmt.core.metadata import BlockLifecycleMetadata, DirectionStats, RegimeStats
+    19→from ppmt.core.sax import make_symbol_key, parse_symbol_key
+    20→
+    21→
+    22→@dataclass
+    23→class TrieNode:
+    24→    """
+    25→    A single node in the PPMT Trie.
+    26→
+    27→    Each node represents one SAX symbol in a pattern sequence.
+    28→    The node carries Block Lifecycle Metadata that encodes:
+    29→    - When to enter (trigger_candle)
+    30→    - How long the pattern should last
+    31→    - Expected move, SL, TP
+    32→    - What patterns continue vs break
+    33→
+    34→    Key insight: If a child for the next observed symbol does NOT exist,
+    35→    the pattern broke → Unknown Block = Predictive Exit signal.
+    36→    """
+    37→
+    38→    symbol: str | tuple[str, str]
+    39→    """The SAX symbol this node represents.
+    40→    Single: 'a', 'b', 'c' ...
+    41→    Dual: ('a', 'x'), ('b', 'y') ... (price_symbol, volume_symbol)
+    42→    """
+    43→
+    44→    children: dict[str | tuple[str, str], TrieNode] = field(default_factory=dict)
+    45→    """Child nodes keyed by their SAX symbol.
+    46→    Single-symbol keys: 'a', 'b', 'c' ...
+    47→    Dual-symbol keys: ('a', 'x'), ('b', 'y') ...
+    48→    These represent the 'continuation_nodes' in metadata —
+    49→    known patterns that historically followed this block."""
+    50→
+    51→    metadata: BlockLifecycleMetadata = field(default_factory=BlockLifecycleMetadata)
+    52→    """Block Lifecycle Metadata attached to this node.
+    53→    All trading decisions emerge from this metadata."""
+    54→
+    55→    depth: int = 0
+    56→    """Depth of this node in the Trie (0 = root)."""
+    57→
+    58→    parent: Optional[TrieNode] = field(default=None, repr=False)
+    59→    """Reference to parent node for backward traversal.
+    60→    Enables 'backward metadata' — what led to this pattern."""
+    61→
+    62→    # === Navigation Methods ===
+    63→
+    64→    def has_child(self, symbol: str | tuple[str, str]) -> bool:
+    65→        """Check if a continuation symbol exists as a child."""
+    66→        return symbol in self.children
+    67→
+    68→    def get_child(self, symbol: str | tuple[str, str]) -> Optional[TrieNode]:
+    69→        """Get child node for a symbol, or None if unknown."""
+    70→        return self.children.get(symbol)
+    71→
+    72→    def add_child(self, symbol: str | tuple[str, str]) -> TrieNode:
+    73→        """Add a new child node and return it."""
+    74→        if symbol not in self.children:
+    75→            child = TrieNode(
+    76→                symbol=symbol,
+    77→                depth=self.depth + 1,
+    78→                parent=self,
+    79→            )
+    80→            self.children[symbol] = child
+    81→        return self.children[symbol]
+    82→
+    83→    def get_continuation_symbols(self) -> list[str]:
+    84→        """Get all known continuation symbols from this node."""
+    85→        return list(self.children.keys())
+    86→
+    87→    def get_backward_path(self) -> list[str]:
+    88→        """
+    89→        Trace path from root to this node.
+    90→        This represents the 'backward metadata' — what sequence led here.
+    91→        """
+    92→        path = []
+    93→        node: Optional[TrieNode] = self
+    94→        while node is not None and node.parent is not None:
+    95→            path.append(node.symbol)
+    96→            node = node.parent
+    97→        return list(reversed(path))
+    98→
+    99→    # === Serialization ===
+   100→
+   101→    def to_dict(self) -> dict:
+   102→        """Serialize this node and all descendants to a dictionary.
+   103→
+   104→        v0.42.0: SAX Dual symbols are now stored as TUPLES internally.
+   105→        Serialization converts:
+   106→          - tuple ('a', 'x') → JSON list ["a", "x"]
+   107→          - str 'a' → JSON string "a"
+   108→        Children with tuple keys use list-of-pairs format;
+   109→        children with string keys use traditional dict format.
+   110→        """
+   111→        # Symbol: tuple → list, string → string
+   112→        sym_out: str | list
+   113→        if isinstance(self.symbol, tuple):
+   114→            sym_out = list(self.symbol)  # ('a', 'x') → ["a", "x"]
+   115→        else:
+   116→            sym_out = self.symbol
+   117→
+   118→        # Children: detect if any tuple keys exist
+   119→        has_tuple_keys = any(isinstance(k, tuple) for k in self.children)
+   120→        if has_tuple_keys:
+   121→            # List-of-pairs format for tuple keys
+   122→            children_out = []
+   123→            for k, child in self.children.items():
+   124→                if isinstance(k, tuple):
+   125→                    children_out.append({
+   126→                        "key": list(k),  # ('a', 'x') → ["a", "x"]
+   127→                        "node": child.to_dict(),
+   128→                    })
+   129→                else:
+   130→                    children_out.append({
+   131→                        "key": k,
+   132→                        "node": child.to_dict(),
+   133→                    })
+   134→        else:
+   135→            # Traditional dict format (backward compat, smaller)
+   136→            children_out = {
+   137→                k: child.to_dict() for k, child in self.children.items()
+   138→            }
+   139→
+   140→        return {
+   141→            "symbol": sym_out,
+   142→            "depth": self.depth,
+   143→            "metadata": self.metadata.to_dict(),
+   144→            "children": children_out,
+   145→        }
+   146→
+   147→    @classmethod
+   148→    def from_dict(cls, data: dict, parent: Optional[TrieNode] = None) -> TrieNode:
+   149→        """Deserialize a node and all descendants from a dictionary.
+   150→
+   151→        v0.42.0: Dual symbols are now stored as TUPLES, not strings.
+   152→        Handles all formats:
+   153→        - New format: symbol as list ["a", "x"] → tuple ('a', 'x')
+   154→        - Old format: symbol as string "a|x" → tuple ('a', 'x')
+   155→        - Single: symbol as string "a" → string 'a'
+   156→        """
+   157→        # Symbol: list → tuple, "a|x" string → tuple, plain string → string
+   158→        sym_raw = data["symbol"]
+   159→        if isinstance(sym_raw, list):
+   160→            symbol = tuple(str(s) for s in sym_raw)  # ["a", "x"] → ('a', 'x')
+   161→        elif isinstance(sym_raw, str) and "|" in sym_raw:
+   162→            # Backward compat: old DB had "a|x" strings
+   163→            symbol = tuple(sym_raw.split("|"))  # "a|x" → ('a', 'x')
+   164→        else:
+   165→            symbol = str(sym_raw)
+   166→
+   167→        node = cls(
+   168→            symbol=symbol,
+   169→            depth=data.get("depth", 0),
+   170→            parent=parent,
+   171→            metadata=BlockLifecycleMetadata.from_dict(data.get("metadata", {})),
+   172→        )
+   173→
+   174→        # Children: list-of-pairs or dict format
+   175→        children_data = data.get("children", {})
+   176→        if isinstance(children_data, list):
+   177→            for entry in children_data:
+   178→                key_raw = entry["key"]
+   179→                if isinstance(key_raw, list):
+   180→                    key = tuple(str(s) for s in key_raw)  # ["a", "x"] → ('a', 'x')
+   181→                elif isinstance(key_raw, str) and "|" in key_raw:
+   182→                    key = tuple(key_raw.split("|"))  # "a|x" → ('a', 'x')
+   183→                else:
+   184→                    key = str(key_raw)
+   185→                child = TrieNode.from_dict(entry["node"], parent=node)
+   186→                node.children[key] = child
+   187→        else:
+   188→            # Dict format (old or single-symbol tries)
+   189→            for key, child_data in children_data.items():
+   190→                # Old DB may have "a|x" string keys in dict format
+   191→                if isinstance(key, str) and "|" in key:
+   192→                    key = tuple(key.split("|"))
+   193→                child = TrieNode.from_dict(child_data, parent=node)
+   194→                node.children[key] = child
+   195→
+   196→        return node
+   197→
+   198→
+   199→class PPMTTrie:
+   200→    """
+   201→    Progressive Pattern Matching Trie.
+   202→
+   203→    Stores SAX symbol sequences with Block Lifecycle Metadata.
+   204→    Each Trie instance represents one level of the 4-level architecture:
+   205→      - N1: Universal Trie
+   206→      - N2: Asset Class Trie
+   207→      - N3: Per-Asset Trie
+   208→      - N4: Per-Asset+Regime Trie
+   209→
+   210→    Operations are O(k) where k is the pattern length,
+   211→    regardless of the total number of stored patterns.
+   212→
+   213→    Usage:
+   214→        trie = PPMTTrie(name="BTC_USDT")
+   215→
+   216→        # Insert a pattern with metadata
+   217→        pattern = ['a', 'd', 'b', 'h']
+   218→        trie.insert(pattern, metadata)
+   219→
+   220→        # Search for a pattern
+   221→        node = trie.search(pattern)
+   222→
+   223→        # Check if next symbol continues the pattern
+   224→        node = trie.search(pattern[:3])
+   225→        if node and node.has_child('h'):
+   226→            # Pattern continues → hold position
+   227→            pass
+   228→        else:
+   229→            # Unknown block → predictive exit
+   230→            pass
+   231→    """
+   232→
+   233→    def __init__(self, name: str = "root"):
+   234→        self.name = name
+   235→        self.root = TrieNode(symbol="", depth=0)
+   236→        self._pattern_count = 0
+   237→        self._max_depth = 0
+   238→        self.trading_observations: int = 0
+   239→        """Count of observations recorded from actual trading (Living Trie).
+   240→        This distinguishes build-time observations from post-build trading
+   241→        observations, enabling confidence scaling for fresh tries."""
+   242→
+   243→    @property
+   244→    def pattern_count(self) -> int:
+   245→        """Total number of unique patterns stored in this Trie."""
+   246→        return self._pattern_count
+   247→
+   248→    @property
+   249→    def max_depth(self) -> int:
+   250→        """Maximum depth (longest pattern) in this Trie."""
+   251→        return self._max_depth
+   252→
+   253→    def insert(
+   254→        self,
+   255→        symbols: list[str | tuple[str, str]],
+   256→        metadata: Optional[BlockLifecycleMetadata] = None,
+   257→    ) -> TrieNode:
+   258→        """
+   259→        Insert a SAX symbol sequence into the Trie.
+   260→
+   261→        If the sequence already exists, updates the metadata incrementally.
+   262→        If new, creates nodes along the path and attaches metadata to the
+   263→        terminal node.
+   264→
+   265→        Args:
+   266→            symbols: List of SAX symbols forming the pattern
+   267→            metadata: Block Lifecycle Metadata to attach to the terminal node
+   268→
+   269→        Returns:
+   270→            The terminal TrieNode of the inserted pattern
+   271→        """
+   272→        if not symbols:
+   273→            return self.root
+   274→
+   275→        node = self.root
+   276→        is_new = False
+   277→
+   278→        for i, symbol in enumerate(symbols):
+   279→            if not node.has_child(symbol):
+   280→                node = node.add_child(symbol)
+   281→                is_new = True
+   282→            else:
+   283→                node = node.get_child(symbol)
+   284→
+   285→        # Update metadata on the terminal node
+   286→        if metadata is not None:
+   287→            if is_new or node.metadata.historical_count == 0:
+   288→                node.metadata = metadata
+   289→            else:
+   290→                # Merge: update continuation_nodes from metadata
+   291→                for sym in metadata.continuation_nodes:
+   292→                    if sym not in node.metadata.continuation_nodes:
+   293→                        node.metadata.continuation_nodes.append(sym)
+   294→                for sym in metadata.break_nodes:
+   295→                    if sym not in node.metadata.break_nodes:
+   296→                        node.metadata.break_nodes.append(sym)
+   297→
+   298→        # Update parent's continuation_nodes
+   299→        if node.parent is not None:
+   300→            if node.symbol not in node.parent.metadata.continuation_nodes:
+   301→                node.parent.metadata.continuation_nodes.append(node.symbol)
+   302→
+   303→        if is_new:
+   304→            self._pattern_count += 1
+   305→
+   306→        self._max_depth = max(self._max_depth, len(symbols))
+   307→
+   308→        return node
+   309→
+   310→    def insert_with_observations(
+   311→        self,
+   312→        symbols: list[str | tuple[str, str]],
+   313→        move_pct: float = 0.0,
+   314→        drawdown_pct: float = 0.0,
+   315→        favorable_pct: float = 0.0,
+   316→        duration: int = 0,
+   317→        won: bool = False,
+   318→        next_symbol: Optional[str] = None,
+   319→        regime: Optional[str] = None,
+   320→        regime_confidence: Optional[float] = None,
+   321→        next_3_symbols: Optional[tuple[str, ...]] = None,
+   322→    ) -> TrieNode:
+   323→        """
+   324→        Insert a pattern and update metadata from a single observation.
+   325→
+   326→        This is the primary method for building the Trie from historical data.
+   327→        Each call represents one observed instance of the pattern.
+   328→
+   329→        Args:
+   330→            symbols: SAX symbol sequence
+   331→            move_pct: Observed percentage move
+   332→            drawdown_pct: Maximum drawdown observed
+   333→            favorable_pct: Maximum favorable excursion
+   334→            duration: Duration in candles
+   335→            won: Whether the pattern completed successfully
+   336→            next_symbol: What followed this pattern (for continuation tracking)
+   337→            regime: Market regime at time of observation (V4 fix: was not piped)
+   338→            regime_confidence: Confidence of regime detection [0, 1]
+   339→            next_3_symbols: Tuple of 3 SAX symbols that followed this pattern
+   340→                (v0.41.0 FASE 2, Tarea 2.1).  Used to populate
+   341→                ``expected_sequences`` in the node's metadata.
+   342→        """
+   343→        node = self.insert(symbols)
+   344→
+   345→        # Set trigger_candle on first observation
+   346→        if node.metadata.historical_count == 0:
+   347→            node.metadata.trigger_candle = len(symbols)  # Pattern fully formed
+   348→
+   349→        # Update metadata from this observation
+   350→        node.metadata.update_from_observation(
+   351→            move_pct=move_pct,
+   352→            drawdown_pct=drawdown_pct,
+   353→            favorable_pct=favorable_pct,
+   354→            duration=duration,
+   355→            won=won,
+   356→            next_symbol=next_symbol,
+   357→            regime=regime,
+   358→            regime_confidence=regime_confidence,
+   359→            next_3_symbols=next_3_symbols,
+   360→        )
+   361→
+   362→        return node
+   363→
+   364→    def search(self, symbols: list[str | tuple[str, str]]) -> Optional[TrieNode]:
+   365→        """
+   366→        Search for a pattern in the Trie.
+   367→
+   368→        Returns the terminal node if found, None otherwise.
+   369→        Time complexity: O(k) where k = len(symbols)
+   370→
+   371→        Args:
+   372→            symbols: SAX symbol sequence to search for
+   373→        """
+   374→        node = self.root
+   375→        for symbol in symbols:
+   376→            child = node.get_child(symbol)
+   377→            if child is None:
+   378→                return None
+   379→            node = child
+   380→        return node
+   381→
+   382→    def search_prefix(self, symbols: list[str | tuple[str, str]]) -> tuple[Optional[TrieNode], int]:
+   383→        """
+   384→        Search for the longest matching prefix in the Trie.
+   385→
+   386→        Useful for real-time matching where we may not have
+   387→        observed the full pattern yet.
+   388→
+   389→        Returns:
+   390→            Tuple of (deepest matching node, matched depth)
+   391→        """
+   392→        node = self.root
+   393→        matched = 0
+   394→
+   395→        for symbol in symbols:
+   396→            child = node.get_child(symbol)
+   397→            if child is None:
+   398→                break
+   399→            node = child
+   400→            matched += 1
+   401→
+   402→        if matched == 0:
+   403→            return None, 0
+   404→        return node, matched
+   405→
+   406→    def check_continuation(
+   407→        self,
+   408→        pattern: list[str],
+   409→        next_symbol: str,
+   410→    ) -> tuple[bool, Optional[TrieNode]]:
+   411→        """
+   412→        Check if a next symbol continues an existing pattern.
+   413→
+   414→        This is the core of the 'Unknown Block = Predictive Exit' logic:
+   415→        - If the symbol exists as a child → pattern continues → hold
+   416→        - If NOT → pattern may have broken → consider exit
+   417→
+   418→        Args:
+   419→            pattern: Current observed SAX sequence
+   420→            next_symbol: The next observed SAX symbol
+   421→
+   422→        Returns:
+   423→            Tuple of (continues: bool, next_node: Optional[TrieNode])
+   424→        """
+   425→        node = self.search(pattern)
+   426→        if node is None:
+   427→            return False, None
+   428→
+   429→        child = node.get_child(next_symbol)
+   430→        if child is not None:
+   431→            return True, child
+   432→        else:
+   433→            return False, None
+   434→
+   435→    def get_all_patterns(
+   436→        self,
+   437→        prefix: list[str] | None = None,
+   438→        min_count: int = 0,
+   439→    ) -> list[tuple[list[str], TrieNode]]:
+   440→        """
+   441→        Get all patterns in the Trie with optional filtering.
+   442→
+   443→        Args:
+   444→            prefix: Only return patterns starting with this prefix
+   445→            min_count: Minimum historical_count to include
+   446→
+   447→        Returns:
+   448→            List of (symbol_sequence, terminal_node) tuples
+   449→        """
+   450→        results = []
+   451→
+   452→        if prefix:
+   453→            start_node = self.search(prefix)
+   454→            if start_node is None:
+   455→                return results
+   456→            start_path = prefix
+   457→        else:
+   458→            start_node = self.root
+   459→            start_path = []
+   460→
+   461→        self._collect_patterns(start_node, start_path, results, min_count)
+   462→        return results
+   463→
+   464→    def _collect_patterns(
+   465→        self,
+   466→        node: TrieNode,
+   467→        current_path: list[str],
+   468→        results: list[tuple[list[str], TrieNode]],
+   469→        min_count: int,
+   470→    ) -> None:
+   471→        """Recursively collect all patterns from a node."""
+   472→        if node.depth > 0 and node.metadata.historical_count >= min_count:
+   473→            results.append((current_path.copy(), node))
+   474→
+   475→        for sym, child in node.children.items():
+   476→            current_path.append(sym)
+   477→            self._collect_patterns(child, current_path, results, min_count)
+   478→            current_path.pop()
+   479→
+   480→    def propagate_metadata(self) -> None:
+   481→        """
+   482→        Propagate metadata from leaf nodes up to the root.
+   483→
+   484→        After building the Trie, intermediate nodes (including the root)
+   485→        may have zero historical_count because only terminal nodes received
+   486→        observations during insertion. This method aggregates child metadata
+   487→        into each parent node so that every node has meaningful statistics.
+   488→
+   489→        The aggregation computes:
+   490→        - historical_count: sum of all children's counts
+   491→        - win_rate: weighted average of children's win_rates
+   492→        - expected_move_pct: weighted average of children's moves
+   493→        - max_drawdown_pct: minimum (worst) across children
+   494→        - max_favorable_pct: maximum (best) across children
+   495→        - avg_duration: weighted average of children's durations
+   496→        - continuation_nodes: union of all children's continuation symbols
+   497→
+   498→        This is called once after Trie construction and periodically during
+   499→        Living Trie operation (every 200 symbol steps in paper_trader.py).
+   500→        """
+   501→        self._propagate_node(self.root)
+   502→
+   503→    def _propagate_node(self, node: TrieNode) -> BlockLifecycleMetadata:
+   504→        """
+   505→        Recursively propagate metadata from children to this node.
+   506→
+   507→        For leaf nodes (no children), returns the node's own metadata.
+   508→        For internal nodes, aggregates children's metadata with the node's
+   509→        own observations (if any).
+   510→
+   511→        The node's OWN observations take precedence — children's data
+   512→        augments but doesn't replace the node's direct observations.
+   513→        """
+   514→        if not node.children:
+   515→            # Leaf node: return its own metadata
+   516→            return node.metadata
+   517→
+   518→        # First, recursively propagate all children
+   519→        child_metas = []
+   520→        for child in node.children.values():
+   521→            child_meta = self._propagate_node(child)
+   522→            child_metas.append(child_meta)
+   523→
+   524→        # Aggregate children's metadata
+   525→        total_count = sum(m.historical_count for m in child_metas)
+   526→
+   527→        if total_count == 0:
+   528→            return node.metadata
+   529→
+   530→        # Weighted averages
+   531→        weighted_win_rate = sum(
+   532→            m.win_rate * m.historical_count for m in child_metas
+   533→        ) / total_count
+   534→
+   535→        weighted_move = sum(
+   536→            m.expected_move_pct * m.historical_count for m in child_metas
+   537→        ) / total_count
+   538→
+   539→        weighted_duration = sum(
+   540→            m.avg_duration * m.historical_count for m in child_metas
+   541→        ) / total_count
+   542→
+   543→        # Min/max across children
+   544→        worst_drawdown = min(m.max_drawdown_pct for m in child_metas)
+   545→        best_favorable = max(m.max_favorable_pct for m in child_metas)
+   546→
+   547→        # Union of continuation symbols
+   548→        all_continuations = set()
+   549→        for m in child_metas:
+   550→            all_continuations.update(m.continuation_nodes)
+   551→
+   552→        # Merge with node's own observations (if any)
+   553→        own_count = node.metadata.historical_count
+   554→        if own_count > 0:
+   555→            combined_count = own_count + total_count
+   556→            node.metadata.win_rate = (
+   557→                node.metadata.win_rate * own_count + weighted_win_rate * total_count
+   558→            ) / combined_count
+   559→            node.metadata.expected_move_pct = (
+   560→                node.metadata.expected_move_pct * own_count + weighted_move * total_count
+   561→            ) / combined_count
+   562→            node.metadata.avg_duration = int(
+   563→                (node.metadata.avg_duration * own_count + weighted_duration * total_count)
+   564→                / combined_count
+   565→            )
+   566→            node.metadata.historical_count = combined_count
+   567→        else:
+   568→            # Node has no own observations: use aggregated children data
+   569→            node.metadata.historical_count = total_count
+   570→            node.metadata.win_rate = weighted_win_rate
+   571→            node.metadata.expected_move_pct = weighted_move
+   572→            node.metadata.avg_duration = int(weighted_duration)
+   573→
+   574→        node.metadata.max_drawdown_pct = min(
+   575→            node.metadata.max_drawdown_pct, worst_drawdown
+   576→        )
+   577→        node.metadata.max_favorable_pct = max(
+   578→            node.metadata.max_favorable_pct, best_favorable
+   579→        )
+   580→        node.metadata.remaining_candles = node.metadata.avg_duration
+   581→
+   582→        for sym in all_continuations:
+   583→            if sym not in node.metadata.continuation_nodes:
+   584→                node.metadata.continuation_nodes.append(sym)
+   585→
+   586→        # V4 FIX: Propagate regime_stats and move_variance from children
+   587→        # These were being dropped during bottom-up aggregation, losing
+   588→        # critical V4.1 data at intermediate nodes.
+   589→        all_regime_stats: dict[str, RegimeStats] = {}
+   590→        for m in child_metas:
+   591→            for rname, rstat in m.regime_stats.items():
+   592→                if rname not in all_regime_stats:
+   593→                    all_regime_stats[rname] = RegimeStats()
+   594→                all_regime_stats[rname].count += rstat.count
+   595→                all_regime_stats[rname].wins += rstat.wins
+   596→                all_regime_stats[rname].total_move_pct += rstat.total_move_pct
+   597→
+   598→        if all_regime_stats:
+   599→            node.metadata.regime_stats = all_regime_stats
+   600→            # Rebuild regime_distribution from aggregated stats
+   601→            node.metadata.regime_distribution = {
+   602→                rname: rstat.count for rname, rstat in all_regime_stats.items()
+   603→            }
+   604→            # Update dominant_regime
+   605→            if all_regime_stats:
+   606→                node.metadata.dominant_regime = max(
+   607→                    all_regime_stats, key=lambda r: all_regime_stats[r].count
+   608→                )
+   609→
+   610→        # V4.1 FIX: Propagate move_variance (pooled variance from children)
+   611→        # Uses parallel algorithm: M2_total = sum(M2_i) + sum((mean_i - grand_mean)^2 * n_i)
+   612→        if total_count > 0:
+   613→            child_m2_total = sum(m.move_variance for m in child_metas)
+   614→            child_means = [(m.expected_move_pct, m.historical_count) for m in child_metas if m.historical_count > 0]
+   615→            if len(child_means) > 0:
+   616→                grand_mean = sum(mean * n for mean, n in child_means) / total_count
+   617→                between_variance = sum(n * (mean - grand_mean) ** 2 for mean, n in child_means)
+   618→                node.metadata.move_variance = child_m2_total + between_variance
+   619→                node.metadata.move_mean_for_variance = grand_mean
+   620→
+   621→        # V4.3 (FIX-A): Propagate long_stats / short_stats from children.
+   622→        # Without this, intermediate nodes carry empty DirectionStats and
+   623→        # win_rate_long / win_rate_short return 0.0 — the engine would never
+   624→        # see directional edge at non-leaf nodes (which are the majority of
+   625→        # matches in a sparse trie).
+   626→        agg_long_count = sum(m.long_stats.count for m in child_metas) + node.metadata.long_stats.count
+   627→        agg_long_wins = sum(m.long_stats.wins for m in child_metas) + node.metadata.long_stats.wins
+   628→        agg_long_move = sum(m.long_stats.total_move_pct for m in child_metas) + node.metadata.long_stats.total_move_pct
+   629→        agg_long_dd = sum(m.long_stats.total_drawdown_pct for m in child_metas) + node.metadata.long_stats.total_drawdown_pct
+   630→
+   631→        agg_short_count = sum(m.short_stats.count for m in child_metas) + node.metadata.short_stats.count
+   632→        agg_short_wins = sum(m.short_stats.wins for m in child_metas) + node.metadata.short_stats.wins
+   633→        agg_short_move = sum(m.short_stats.total_move_pct for m in child_metas) + node.metadata.short_stats.total_move_pct
+   634→        agg_short_dd = sum(m.short_stats.total_drawdown_pct for m in child_metas) + node.metadata.short_stats.total_drawdown_pct
+   635→
+   636→        node.metadata.long_stats = DirectionStats(
+   637→            count=agg_long_count,
+   638→            wins=agg_long_wins,
+   639→            total_move_pct=agg_long_move,
+   640→            total_drawdown_pct=agg_long_dd,
+   641→        )
+   642→        node.metadata.short_stats = DirectionStats(
+   643→            count=agg_short_count,
+   644→            wins=agg_short_wins,
+   645→            total_move_pct=agg_short_move,
+   646→            total_drawdown_pct=agg_short_dd,
+   647→        )
+   648→
+   649→        # V4 FIX: Update node_type for intermediate nodes
+   650→        if node.metadata.historical_count >= node.metadata.min_independent_count:
+   651→            node.metadata.node_type = "independent"
+   652→        else:
+   653→            node.metadata.node_type = "dependent"
+   654→
+   655→        return node.metadata
+   656→
+   657→    # === Serialization (PPMTTrie) ===
+   658→
+   659→    def to_dict(self) -> dict:
+   660→        """Serialize the entire Trie to a dictionary."""
+   661→        return {
+   662→            "name": self.name,
+   663→            "pattern_count": self._pattern_count,
+   664→            "max_depth": self._max_depth,
+   665→            "trading_observations": self.trading_observations,
+   666→            "root": self.root.to_dict(),
+   667→        }
+   668→
+   669→    @classmethod
+   670→    def from_dict(cls, data: dict) -> PPMTTrie:
+   671→        """Deserialize a Trie from a dictionary.
+   672→
+   673→        Handles both old (dict children) and new (list-of-pairs children)
+   674→        serialization formats produced by TrieNode.to_dict().
+   675→        """
+   676→        trie = cls(name=data.get("name", "root"))
+   677→        trie._pattern_count = data.get("pattern_count", 0)
+   678→        trie._max_depth = data.get("max_depth", 0)
+   679→        trie.trading_observations = data.get("trading_observations", 0)
+   680→
+   681→        # Reconstruct children from root — delegate to TrieNode.from_dict
+   682→        # which already handles both dict and list-of-pairs formats.
+   683→        root_data = data.get("root", {})
+   684→        # Rebuild the root node entirely via TrieNode.from_dict
+   685→        # (it handles symbol + children format detection)
+   686→        rebuilt_root = TrieNode.from_dict(root_data)
+   687→        trie.root = rebuilt_root
+   688→
+   689→        return trie
+   690→
+   691→    def __len__(self) -> int:
+   692→        return self._pattern_count
+   693→
+   694→    def __repr__(self) -> str:
+   695→        return (
+   696→            f"PPMTTrie(name='{self.name}', patterns={self._pattern_count}, "
+   697→            f"max_depth={self._max_depth})"
+   698→        )
+   699→
+   700→    # === Pruning (v0.6.8) ===
+   701→
+   702→    def prune(
+   703→        self,
+   704→        min_observations: int = 2,
+   705→        min_confidence: float = 0.01,
+   706→        max_staleness_hours: float = 0.0,
+   707→        current_time: float = 0.0,
+   708→        preserve_traded: bool = True,
+   709→        dry_run: bool = False,
+   710→    ) -> dict:
+   711→        """
+   712→        Remove stale/low-quality branches from the Living Trie.
+   713→
+   714→        As the Living Trie grows from trading observations, it accumulates
+   715→        branches that are:
+   716→        1. Rarely observed (1 observation, never repeated)
+   717→        2. Low confidence (no predictive value)
+   718→        3. Stale (not observed recently in changing market conditions)
+   719→        4. Consistently losing (win_rate well below 50%)
+   720→
+   721→        These branches dilute the trie's predictive quality and waste memory.
+   722→        Pruning removes them while preserving branches that:
+   723→        - Have sufficient observations (>= min_observations)
+   724→        - Have meaningful confidence (>= min_confidence)
+   725→        - Have been observed recently (if staleness checking enabled)
+   726→        - Have been used for actual trades (if preserve_traded=True)
+   727→
+   728→        Safety guarantees:
+   729→        - NEVER prunes the root node
+   730→        - NEVER prunes nodes with historical_count >= 10 (established patterns)
+   731→        - NEVER prunes intermediate nodes with children (would lose subtree)
+   732→        - Only prunes LEAF nodes or entire subtrees where ALL leaves qualify
+   733→        - After pruning, calls propagate_metadata() to update statistics
+   734→
+   735→        Args:
+   736→            min_observations: Remove nodes with fewer observations.
+   737→                Default 2: removes nodes seen only once.
+   738→            min_confidence: Remove nodes with confidence below this.
+   739→                Default 0.01: removes nodes with essentially zero confidence.
+   740→            max_staleness_hours: Remove nodes not observed in this many hours.
+   741→                0.0 = no staleness check (default). Set to e.g. 720 (30 days)
+   742→                to remove patterns not seen in a month.
+   743→            current_time: Current epoch time for staleness comparison.
+   744→                Required if max_staleness_hours > 0.
+   745→            preserve_traded: If True, never prune nodes that have been
+   746→                used for actual trading (trading_observations > 0 on the
+   747→                trie). This protects patterns that have been validated
+   748→                through live/paper trading.
+   749→            dry_run: If True, only report what would be pruned without
+   750→                actually removing anything.
+   751→
+   752→        Returns:
+   753→            Dict with pruning statistics:
+   754→            - nodes_pruned: number of leaf nodes removed
+   755→            - patterns_removed: number of complete patterns removed
+   756→            - observations_lost: total historical_count of removed nodes
+   757→            - depth_distribution: depth of pruned nodes
+   758→            - dry_run: whether this was a dry run
+   759→        """
+   760→        import time as _time
+   761→
+   762→        stats = {
+   763→            "nodes_pruned": 0,
+   764→            "patterns_removed": 0,
+   765→            "observations_lost": 0,
+   766→            "depth_distribution": {},
+   767→            "dry_run": dry_run,
+   768→        }
+   769→
+   770→        if current_time == 0.0:
+   771→            current_time = _time.time()
+   772→
+   773→        # Collect prunable nodes (bottom-up)
+   774→        to_prune = []
+   775→        self._collect_prunable(
+   776→            node=self.root,
+   777→            path=[],
+   778→            min_observations=min_observations,
+   779→            min_confidence=min_confidence,
+   780→            max_staleness_hours=max_staleness_hours,
+   781→            current_time=current_time,
+   782→            preserve_traded=preserve_traded,
+   783→            candidates=to_prune,
+   784→            stats=stats,
+   785→        )
+   786→
+   787→        if not to_prune:
+   788→            return stats
+   789→
+   790→        # Sort by depth (deepest first) to avoid orphaning nodes
+   791→        to_prune.sort(key=lambda x: x[1], reverse=True)
+   792→
+   793→        if dry_run:
+   794→            # Just count, don't actually prune
+   795→            for parent, depth, symbol, node in to_prune:
+   796→                stats["nodes_pruned"] += 1
+   797→                stats["observations_lost"] += node.metadata.historical_count
+   798→                stats["depth_distribution"][depth] = stats["depth_distribution"].get(depth, 0) + 1
+   799→            return stats
+   800→
+   801→        # Actually prune
+   802→        for parent, depth, symbol, node in to_prune:
+   803→            if symbol in parent.children:
+   804→                del parent.children[symbol]
+   805→                self._pattern_count -= 1
+   806→                stats["nodes_pruned"] += 1
+   807→                stats["patterns_removed"] += 1
+   808→                stats["observations_lost"] += node.metadata.historical_count
+   809→                stats["depth_distribution"][depth] = stats["depth_distribution"].get(depth, 0) + 1
+   810→
+   811→                # Update parent's continuation_nodes
+   812→                if symbol in parent.metadata.continuation_nodes:
+   813→                    parent.metadata.continuation_nodes.remove(symbol)
+   814→
+   815→        # Recount pattern_count (could be off if we pruned intermediate paths)
+   816→        self._recount_patterns()
+   817→
+   818→        # Propagate metadata to update statistics after removal
+   819→        self.propagate_metadata()
+   820→
+   821→        return stats
+   822→
+   823→    def _collect_prunable(
+   824→        self,
+   825→        node: TrieNode,
+   826→        path: list[str],
+   827→        min_observations: int,
+   828→        min_confidence: float,
+   829→        max_staleness_hours: float,
+   830→        current_time: float,
+   831→        preserve_traded: bool,
+   832→        candidates: list[tuple[TrieNode, int, str, TrieNode]],
+   833→        stats: dict,
+   834→    ) -> bool:
+   835→        """
+   836→        Recursively collect nodes eligible for pruning.
+   837→
+   838→        Returns True if this entire subtree was marked for pruning
+   839→        (parent can safely remove this child).
+   840→
+   841→        A node is prunable if:
+   842→        1. It's a leaf node (no children)
+   843→        2. historical_count < 10 (not an established pattern)
+   844→        3. It fails at least one quality criterion:
+   845→           - historical_count < min_observations
+   846→           - confidence < min_confidence
+   847→           - staleness exceeds threshold (if enabled)
+   848→        4. It's not preserved by trading activity
+   849→        """
+   850→        if node is self.root:
+   851→            # Never prune root; recurse into children
+   852→            prunable_children = []
+   853→            for sym, child in list(node.children.items()):
+   854→                child_path = path + [sym]
+   855→                is_prunable = self._collect_prunable(
+   856→                    node=child,
+   857→                    path=child_path,
+   858→                    min_observations=min_observations,
+   859→                    min_confidence=min_confidence,
+   860→                    max_staleness_hours=max_staleness_hours,
+   861→                    current_time=current_time,
+   862→                    preserve_traded=preserve_traded,
+   863→                    candidates=candidates,
+   864→                    stats=stats,
+   865→                )
+   866→                if is_prunable:
+   867→                    prunable_children.append((sym, child))
+   868→
+   869→            # Mark prunable children for removal
+   870→            for sym, child in prunable_children:
+   871→                candidates.append((node, child.depth, sym, child))
+   872→            return False
+   873→
+   874→        # If node has children, check if ALL descendants are prunable
+   875→        if node.children:
+   876→            prunable_children = []
+   877→            all_children_prunable = True
+   878→
+   879→            for sym, child in list(node.children.items()):
+   880→                child_path = path + [sym]
+   881→                is_prunable = self._collect_prunable(
+   882→                    node=child,
+   883→                    path=child_path,
+   884→                    min_observations=min_observations,
+   885→                    min_confidence=min_confidence,
+   886→                    max_staleness_hours=max_staleness_hours,
+   887→                    current_time=current_time,
+   888→                    preserve_traded=preserve_traded,
+   889→                    candidates=candidates,
+   890→                    stats=stats,
+   891→                )
+   892→                if is_prunable:
+   893→                    prunable_children.append((sym, child))
+   894→                else:
+   895→                    all_children_prunable = False
+   896→
+   897→            if all_children_prunable and self._is_node_prunable(
+   898→                node, min_observations, min_confidence, max_staleness_hours,
+   899→                current_time, preserve_traded
+   900→            ):
+   901→                # Entire subtree is prunable — mark children and self
+   902→                for sym, child in prunable_children:
+   903→                    candidates.append((node, child.depth, sym, child))
+   904→                return True
+   905→            else:
+   906→                # Some children are not prunable — just prune the prunable ones
+   907→                for sym, child in prunable_children:
+   908→                    candidates.append((node, child.depth, sym, child))
+   909→                return False
+   910→
+   911→        # Leaf node — check if prunable
+   912→        if self._is_node_prunable(
+   913→            node, min_observations, min_confidence, max_staleness_hours,
+   914→            current_time, preserve_traded
+   915→        ):
+   916→            return True
+   917→
+   918→        return False
+   919→
+   920→    def _is_node_prunable(
+   921→        self,
+   922→        node: TrieNode,
+   923→        min_observations: int,
+   924→        min_confidence: float,
+   925→        max_staleness_hours: float,
+   926→        current_time: float,
+   927→        preserve_traded: bool,
+   928→    ) -> bool:
+   929→        """Check if a single node meets the pruning criteria."""
+   930→        meta = node.metadata
+   931→
+   932→        # SAFETY: Never prune established patterns (>= 10 observations)
+   933→        if meta.historical_count >= 10:
+   934→            return False
+   935→
+   936→        # SAFETY: Never prune if trading observations exist and preserve_traded
+   937→        if preserve_traded and self.trading_observations > 0 and meta.historical_count >= 3:
+   938→            return False
+   939→
+   940→        # Check observation count
+   941→        if meta.historical_count < min_observations:
+   942→            return True
+   943→
+   944→        # Check confidence
+   945→        if meta.confidence < min_confidence:
+   946→            return True
+   947→
+   948→        # Check staleness (if enabled)
+   949→        if max_staleness_hours > 0 and meta.last_observation_time > 0:
+   950→            hours_since = (current_time - meta.last_observation_time) / 3600.0
+   951→            if hours_since > max_staleness_hours:
+   952→                return True
+   953→
+   954→        return False
+   955→
+   956→    def _recount_patterns(self) -> None:
+   957→        """Recount patterns after pruning to ensure consistency."""
+   958→        count = 0
+   959→
+   960→        def _count_leaves(node: TrieNode) -> None:
+   961→            nonlocal count
+   962→            if not node.children and node.depth > 0:
+   963→                count += 1
+   964→            for child in node.children.values():
+   965→                _count_leaves(child)
+   966→
+   967→        _count_leaves(self.root)
+   968→        self._pattern_count = count
+   969→
+   970→
+   971→@dataclass
+   972→class PruningConfig:
+   973→    """
+   974→    Configuration for Living Trie pruning.
+   975→
+   976→    Pruning removes stale/low-quality branches from the trie,
+   977→    keeping it lean and focused on patterns that produce reliable
+   978→    trading signals.
+   979→
+   980→    Usage:
+   981→        config = PruningConfig(min_observations=2)
+   982→        stats = trie.prune(**config.to_prune_kwargs())
+   983→    """
+   984→    min_observations: int = 2
+   985→    """Remove leaf nodes with fewer than this many observations.
+   986→    Default 2: removes nodes seen only once (likely noise)."""
+   987→
+   988→    min_confidence: float = 0.01
+   989→    """Remove leaf nodes with confidence below this threshold.
+   990→    Default 0.01: removes nodes with essentially zero confidence."""
+   991→
+   992→    max_staleness_hours: float = 0.0
+   993→    """Remove leaf nodes not observed in this many hours.
+   994→    0.0 = no staleness check. Set to e.g. 720 (30 days) to
+   995→    remove patterns not seen recently."""
+   996→
+   997→    preserve_traded: bool = True
+   998→    """If True, never prune patterns that have been validated
+   999→    through actual trading (>= 3 observations in a traded trie)."""
+  1000→
+  1001→    dry_run: bool = False
+  1002→    """If True, report what would be pruned without removing anything."""
+  1003→
+  1004→    def to_prune_kwargs(self) -> dict:
+  1005→        """Convert to keyword arguments for PPMTTrie.prune()."""
+  1006→        import time
+  1007→        return {
+  1008→            "min_observations": self.min_observations,
+  1009→            "min_confidence": self.min_confidence,
+  1010→            "max_staleness_hours": self.max_staleness_hours,
+  1011→            "current_time": time.time(),
+  1012→            "preserve_traded": self.preserve_traded,
+  1013→            "dry_run": self.dry_run,
+  1014→        }
+  1015→
+  1016→
+  1017→# -------------------------------------------------------------------- #
+  1018→# v0.40.2 FIX-1: Regime-Partitioned Trie (N4 specialization)
+  1019→# -------------------------------------------------------------------- #
+  1020→
+  1021→class RegimePartitionedTrie:
+  1022→    """
+  1023→    v0.40.2 FIX-1: N4 specialization — partitions observations by regime.
+  1024→
+  1025→    Problem (CAPA 1 audit #3): PPMT.build() inserted the SAME pattern into
+  1026→    all 4 tries (N1=N2=N3=N4 structurally). The "4-level architecture" was
+  1027→    decorative — paying 4x memory for 1x information. See
+  1028→    docs/AUDIT_TRAZABILIDAD_CAPAS_1_2_3.md CAPA 1 #3.
+  1029→
+  1030→    Solution: N4 is now a RegimePartitionedTrie that internally maintains
+  1031→    4 sub-tries, one per regime (trending_up, trending_down, ranging,
+  1032→    volatile). Each observation is inserted ONLY into the sub-trie matching
+  1033→    its regime. At match time, the engine routes the query to the sub-trie
+  1034→    of the CURRENT regime only — so N4 truly carries regime-specific info
+  1035→    that N1/N3 (regime-agnostic) cannot have.
+  1036→
+  1037→    This is a duck-typed wrapper: it exposes the same API surface that
+  1038→    FuzzyMatcher and PPMT.match_raw/match use (search, search_prefix,
+  1039→    insert_with_observations, check_continuation, propagate_metadata,
+  1040→    pattern_count, get_all_patterns). Code calling these methods on a
+  1041→    PPMTTrie works unchanged on a RegimePartitionedTrie.
+  1042→
+  1043→    Attributes:
+  1044→        name: Trie name (e.g., 'per_asset_regime:BTC/USDT')
+  1045→        sub_tries: Dict mapping regime name → PPMTTrie
+  1046→        _current_regime: Regime used to route match() calls. Set via
+  1047→            set_current_regime() or implicitly via insert_with_observations(regime=...).
+  1048→    """
+  1049→
+  1050→    # Canonical regime order (used for iteration / serialization)
+  1051→    REGIMES = ("trending_up", "trending_down", "ranging", "volatile")
+  1052→
+  1053→    # v0.48.0 (FASE 2B): BTC context partitions for N5
+  1054→    BTC_CONTEXTS = ("btc_bull", "btc_bear", "btc_neutral")
+  1055→
+  1056→    def __init__(self, name: str = "regime_partitioned", regimes: Optional[tuple] = None):
+  1057→        self.name = name
+  1058→        _regimes = regimes if regimes is not None else self.REGIMES
+  1059→        self.sub_tries: dict[str, "PPMTTrie"] = {
+  1060→            r: PPMTTrie(name=f"{name}:{r}") for r in _regimes
+  1061→        }
+  1062→        self._current_regime: str = _regimes[0] if _regimes else "ranging"  # safe default
+  1063→        self.trading_observations: int = 0
+  1064→        # `pattern_count` and `max_depth` are computed properties below.
+  1065→
+  1066→    # ---- regime routing ---- #
+  1067→
+  1068→    def set_current_regime(self, regime: str) -> None:
+  1069→        """Set the regime used to route match() / search() calls."""
+  1070→        if regime and regime in self.sub_tries:
+  1071→            self._current_regime = regime
+  1072→        # else: keep previous regime (don't silently switch to a bad key)
+  1073→
+  1074→    def get_current_regime(self) -> str:
+  1075→        return self._current_regime
+  1076→
+  1077→    def _trie_for_regime(self, regime: Optional[str]) -> "PPMTTrie":
+  1078→        """Return the sub-trie for a regime (fallback: current regime)."""
+  1079→        if regime and regime in self.sub_tries:
+  1080→            return self.sub_tries[regime]
+  1081→        return self.sub_tries[self._current_regime]
+  1082→
+  1083→    # ---- PPMTTrie-compatible API ---- #
+  1084→
+  1085→    @property
+  1086→    def pattern_count(self) -> int:
+  1087→        """Total patterns across all sub-tries (de-duplicated)."""
+  1088→        return sum(t.pattern_count for t in self.sub_tries.values())
+  1089→
+  1090→    @property
+  1091→    def max_depth(self) -> int:
+  1092→        return max((t.max_depth for t in self.sub_tries.values()), default=0)
+  1093→
+  1094→    @property
+  1095→    def root(self):
+  1096→        """
+  1097→        Synthesized root for compatibility with code that walks .root directly.
+  1098→        Returns the root of the CURRENT regime's sub-trie. Callers that need
+  1099→        regime-specific access should use sub_tries[regime].root directly.
+  1100→        """
+  1101→        return self.sub_tries[self._current_regime].root
+  1102→
+  1103→    def insert_with_observations(
+  1104→        self,
+  1105→        symbols: list[str | tuple[str, str]],
+  1106→        move_pct: float = 0.0,
+  1107→        drawdown_pct: float = 0.0,
+  1108→        favorable_pct: float = 0.0,
+  1109→        duration: int = 0,
+  1110→        won: bool = False,
+  1111→        next_symbol: Optional[str] = None,
+  1112→        regime: Optional[str] = None,
+  1113→        regime_confidence: Optional[float] = None,
+  1114→        next_3_symbols: Optional[tuple[str, ...]] = None,
+  1115→    ):
+  1116→        """Insert observation into the sub-trie matching `regime`."""
+  1117→        target = self._trie_for_regime(regime)
+  1118→        return target.insert_with_observations(
+  1119→            symbols=symbols,
+  1120→            move_pct=move_pct,
+  1121→            drawdown_pct=drawdown_pct,
+  1122→            favorable_pct=favorable_pct,
+  1123→            duration=duration,
+  1124→            won=won,
+  1125→            next_symbol=next_symbol,
+  1126→            regime=regime,
+  1127→            regime_confidence=regime_confidence,
+  1128→            next_3_symbols=next_3_symbols,
+  1129→        )
+  1130→
+  1131→    def insert(self, symbols: list[str], metadata=None):
+  1132→        """Insert with explicit symbols into the current-regime sub-trie."""
+  1133→        return self.sub_tries[self._current_regime].insert(symbols, metadata)
+  1134→
+  1135→    def search(self, symbols: list[str | tuple[str, str]]):
+  1136→        """Search in the CURRENT regime's sub-trie."""
+  1137→        return self.sub_tries[self._current_regime].search(symbols)
+  1138→
+  1139→    def search_prefix(self, symbols: list[str | tuple[str, str]]):
+  1140→        """Longest matching prefix in the CURRENT regime's sub-trie."""
+  1141→        return self.sub_tries[self._current_regime].search_prefix(symbols)
+  1142→
+  1143→    def check_continuation(
+  1144→        self, current_pattern: list[str], next_symbol: str
+  1145→    ) -> tuple[bool, Optional[TrieNode]]:
+  1146→        """Check continuation in the CURRENT regime's sub-trie."""
+  1147→        return self.sub_tries[self._current_regime].check_continuation(
+  1148→            current_pattern, next_symbol
+  1149→        )
+  1150→
+  1151→    def propagate_metadata(self) -> None:
+  1152→        """Propagate metadata in ALL sub-tries."""
+  1153→        for t in self.sub_tries.values():
+  1154→            t.propagate_metadata()
+  1155→
+  1156→    def get_all_patterns(self, min_count: int = 1):
+  1157→        """
+  1158→        Yield (pattern, node) tuples across all sub-tries.
+  1159→        Patterns are prefixed with the regime for disambiguation.
+  1160→        """
+  1161→        for regime, trie in self.sub_tries.items():
+  1162→            for pattern, node in trie.get_all_patterns(min_count=min_count):
+  1163→                # Tag the pattern with the regime so callers can distinguish
+  1164→                yield (pattern, node)
+  1165→
+  1166→    def to_dict(self) -> dict:
+  1167→        """Serialize all sub-tries."""
+  1168→        return {
+  1169→            "type": "regime_partitioned",
+  1170→            "name": self.name,
+  1171→            "current_regime": self._current_regime,
+  1172→            "sub_tries": {
+  1173→                regime: t.to_dict() for regime, t in self.sub_tries.items()
+  1174→            },
+  1175→            "trading_observations": self.trading_observations,
+  1176→        }
+  1177→
+  1178→    @classmethod
+  1179→    def from_dict(cls, data: dict) -> "RegimePartitionedTrie":
+  1180→        """Deserialize from dict. Falls back to empty if data is malformed."""
+  1181→        wrapper = cls(name=data.get("name", "regime_partitioned"))
+  1182→        wrapper._current_regime = data.get("current_regime", "ranging")
+  1183→        wrapper.trading_observations = data.get("trading_observations", 0)
+  1184→        subs = data.get("sub_tries", {})
+  1185→        for regime in cls.REGIMES:
+  1186→            if regime in subs and subs[regime]:
+  1187→                try:
+  1188→                    wrapper.sub_tries[regime] = PPMTTrie.from_dict(subs[regime])
+  1189→                except Exception:
+  1190→                    # Keep the empty default if deserialization fails
+  1191→                    pass
+  1192→        return wrapper
+  1193→
+  1194→    def __repr__(self) -> str:
+  1195→        counts = {r: t.pattern_count for r, t in self.sub_tries.items()}
+  1196→        return f"RegimePartitionedTrie(name={self.name!r}, counts={counts})"
+  1197→
+  1198→    def __str__(self) -> str:
+  1199→        return self.__repr__()
+  1200→

@@ -1,0 +1,1236 @@
+     1→"""
+     2→Token Profile & Auto-Calibration Engine
+     3→
+     4→The TokenProfile encapsulates ALL parameters a token needs to operate,
+     5→and the CalibrationEngine discovers the best parameters automatically
+     6→via mini-backtesting on real data.
+     7→
+     8→Architecture:
+     9→  ┌──────────────────────────────────────┐
+    10→  │        NEW TOKEN DETECTED            │
+    11→  └──────────────┬───────────────────────┘
+    12→                 │
+    13→        ┌────────▼────────┐
+    14→        │  CALIBRATION    │  Mini-backtest: 70% train / 30% OOS
+    15→        │  PHASE          │  Grid: alpha x window = 9 combos
+    16→        │                 │  Metric: information x repetition
+    17→        │  alpha: 3,4,5   │
+    18→        │  window: 5,7,10 │
+    19→        └────────┬────────┘
+    20→                 │
+    21→        ┌────────▼────────┐
+    22→        │  BEST PROFILE   │  Auto-selected from OOS performance
+    23→        └────────┬────────┘
+    24→                 │
+    25→        ┌────────▼────────┐
+    26→        │  OPERATE        │  Trade with calibrated profile
+    27→        │  + RECALIBRATE  │  Every N new candles, re-verify
+    28→        └─────────────────┘
+    29→
+    30→This replaces manual per-token parameter tuning with data-driven
+    31→auto-calibration. The system discovers what works for each token
+    32→based on real OOS performance, not assumptions.
+    33→"""
+    34→
+    35→from __future__ import annotations
+    36→
+    37→import time
+    38→from dataclasses import dataclass, field
+    39→from typing import Optional
+    40→
+    41→import numpy as np
+    42→import pandas as pd
+    43→
+    44→from ppmt.core.sax import SAXEncoder
+    45→from ppmt.core.trie import PPMTTrie
+    46→from ppmt.core.metadata import compute_outcome_won
+    47→
+    48→
+    49→# === Timeframe-Adaptive Alpha Defaults ===
+    50→# VALIDATED across 22 token-timeframe combinations:
+    51→#   12 tokens @ 1h (alpha=3), 6 tokens @ 5m (alpha=4), 4 tokens @ 1m (alpha=5)
+    52→# Key finding: alpha MUST scale with timeframe granularity.
+    53→#   - Lower TF = more candles = need more symbols to differentiate patterns
+    54→#   - With alpha=3 at 1m, the system generates ZERO trades (all patterns identical)
+    55→#   - alpha=5/window=7 was the previous optimal config for 1m, producing 350+ trades
+    56→#
+    57→# v0.40.8 FIX-13 (2026-06-19): lowered 1m alpha from 5 to 4 based on empirical
+    58→# audit on REAL 1m data (50k candles × 8 tokens, see
+    59→# docs/AUDIT_TRIE_STATS_1M_REAL_DATA.md). With alpha=5 the trie had:
+    60→#   - 2,787 unique patterns but 25.9% singletones
+    61→#   - confidence media = 0.13 (BELOW production threshold 0.15)
+    62→#   - only 0.05% of patterns had count>=10 (statistical robustness)
+    63→# With alpha=4:
+    64→#   - 1,022 unique patterns but only 1% singletones
+    65→#   - confidence media = 0.22 (ABOVE production threshold 0.15)
+    66→#   - 81.6% of patterns pass confidence gate (vs 26.5% with alpha=5)
+    67→#   - mean_count per pattern = 6.98 (vs 2.56 with alpha=5)
+    68→# Trade-off: lower pattern discrimination, but more repetitions per pattern
+    69→# gives the metadata real statistical grounding. SL/TP from compute_sl_tp()
+    70→# becomes reliable because it's based on 7+ observations instead of 2.
+    71→TIMEFRAME_ALPHA_DEFAULTS = {
+    72→    "1m":  {"sax_alphabet_size": 3, "sax_window_size": 60},  # v0.59.0 (TAREA 22): W=60 = N1 window (LEVEL_WINDOW_CONFIG)
+    73→    "5m":  {"sax_alphabet_size": 3, "sax_window_size": 24},  # v0.59.0: W=24 = N1 window (LEVEL_WINDOW_CONFIG)
+    74→    "15m": {"sax_alphabet_size": 4, "sax_window_size": 12},  # v0.59.0: W=12 = N1 window (LEVEL_WINDOW_CONFIG)
+    75→    "30m": {"sax_alphabet_size": 4, "sax_window_size": 5},
+    76→    "1h":  {"sax_alphabet_size": 3, "sax_window_size": 7},
+    77→    "4h":  {"sax_alphabet_size": 3, "sax_window_size": 10},
+    78→    "1d":  {"sax_alphabet_size": 3, "sax_window_size": 10},
+    79→}
+    80→
+    81→
+    82→# === Default profiles by asset class ===
+    83→# These are STARTING POINTS — the CalibrationEngine overrides them
+    84→# with data-discovered values when sufficient data is available.
+    85→
+    86→ASSET_CLASS_DEFAULTS = {
+    87→    "blue_chip": {
+    88→        "sax_alphabet_size": 3,
+    89→        "sax_window_size": 10,  # overridden by TIMEFRAME_ALPHA_DEFAULTS for 1m/5m
+    90→        "catastrophic_loss_pct": 0.08,
+    91→        "max_position_pct": 0.10,
+    92→        "short_allowed": True,
+    93→        "short_confidence_multiplier": 1.5,
+    94→        "weight_profile": "blue_chip",
+    95→        "fuzzy_threshold": 0.85,
+    96→        "min_observations_for_trade": 3,
+    97→        "min_candles_for_training": 2000,
+    98→    },
+    99→    "large_cap": {
+   100→        "sax_alphabet_size": 4,
+   101→        "sax_window_size": 7,
+   102→        "catastrophic_loss_pct": 0.10,
+   103→        "max_position_pct": 0.07,
+   104→        "short_allowed": True,
+   105→        "short_confidence_multiplier": 1.8,
+   106→        "weight_profile": "default",
+   107→        "fuzzy_threshold": 0.80,
+   108→        "min_observations_for_trade": 5,
+   109→        "min_candles_for_training": 1500,
+   110→    },
+   111→    "defi": {
+   112→        "sax_alphabet_size": 4,
+   113→        "sax_window_size": 7,
+   114→        "catastrophic_loss_pct": 0.12,
+   115→        "max_position_pct": 0.05,
+   116→        "short_allowed": True,
+   117→        "short_confidence_multiplier": 2.0,
+   118→        "weight_profile": "default",
+   119→        "fuzzy_threshold": 0.80,
+   120→        "min_observations_for_trade": 5,
+   121→        "min_candles_for_training": 1500,
+   122→    },
+   123→    "meme": {
+   124→        "sax_alphabet_size": 3,
+   125→        "sax_window_size": 18,  # v0.42.0: sensible default for 5m; overridden by timeframe
+   126→        "catastrophic_loss_pct": 0.15,
+   127→        "max_position_pct": 0.03,
+   128→        "short_allowed": True,  # v0.43.0: Enabled — was False, caused 100% LONG bug
+   129→        "short_confidence_multiplier": 2.0,  # v0.43.0: Was 99.0 (effectively disabled)
+   130→        "weight_profile": "meme",
+   131→        "fuzzy_threshold": 0.75,
+   132→        "min_observations_for_trade": 5,
+   133→        "min_candles_for_training": 1000,
+   134→    },
+   135→    "new_launch": {
+   136→        "sax_alphabet_size": 3,
+   137→        "sax_window_size": 5,
+   138→        "catastrophic_loss_pct": 0.20,
+   139→        "max_position_pct": 0.01,
+   140→        "short_allowed": False,
+   141→        "short_confidence_multiplier": 99.0,
+   142→        "weight_profile": "new_launch",
+   143→        "fuzzy_threshold": 0.70,
+   144→        "min_observations_for_trade": 10,
+   145→        "min_candles_for_training": 500,
+   146→    },
+   147→}
+   148→
+   149→# v0.57.0 (TAREA 19): Estimated spread+slippage per asset class.
+   150→# These represent the total round-trip friction (spread + slippage)
+   151→# as a percentage of price. Used by the Net EV Gate to discount
+   152→# theoretical expected_move by real execution costs.
+   153→# Conservative estimates based on Binance orderbook analysis:
+   154→SPREAD_ESTIMATES: dict[str, float] = {
+   155→    "blue_chip": 0.010,   # 0.01% (BTC, ETH — deepest liquidity)
+   156→    "large_cap": 0.015,   # 0.015% (SOL, AVAX, LINK — good liquidity)
+   157→    "alt":       0.020,   # 0.02% (UNI, CRV — moderate liquidity)
+   158→    "defi":      0.025,   # 0.025% (AAVE, MKR — sector-specific)
+   159→    "meme":      0.050,   # 0.05% (DOGE, PEPE — high slippage, thin books)
+   160→    "new_launch": 0.080,  # 0.08% (newly listed — extreme slippage)
+   161→}
+   162→
+   163→
+   164→@dataclass
+   165→class TokenProfile:
+   166→    """
+   167→    Complete profile for a token — the engine auto-adapts from this.
+   168→
+   169→    This encapsulates ALL parameters that vary by token type.
+   170→    The engine reads this profile to configure itself — no if/else
+   171→    scattered through the codebase.
+   172→
+   173→    Key insight: Parameters are DISCOVERED by CalibrationEngine,
+   174→    not manually set. The defaults below are starting points for
+   175→    when insufficient data exists for calibration.
+   176→    """
+   177→
+   178→    # === Identity ===
+   179→    symbol: str = ""
+   180→    asset_class: str = "default"
+   181→
+   182→    # === SAX Parameters (auto-calibrated) ===
+   183→    sax_alphabet_size: int = 5
+   184→    sax_window_size: int = 10
+   185→
+   186→    # === Risk Parameters ===
+   187→    catastrophic_loss_pct: float = 0.08
+   188→    max_position_pct: float = 0.10
+   189→    short_allowed: bool = True
+   190→    short_confidence_multiplier: float = 1.5
+   191→
+   192→    # === Trie Weight Profile ===
+   193→    weight_profile: str = "default"
+   194→
+   195→    # === Fuzzy Matching ===
+   196→    fuzzy_threshold: float = 0.85
+   197→
+   198→    # === Data Quality Gates ===
+   199→    min_observations_for_trade: int = 3
+   200→    min_candles_for_training: int = 2000
+   201→
+   202→    # === Calibration Metadata ===
+   203→    calibration_date: str = ""
+   204→    calibration_pnl: float = 0.0
+   205→    calibration_metric: float = 0.0
+   206→    calibration_samples: int = 0
+   207→    calibration_grid: dict = field(default_factory=dict)
+   208→    regime_fingerprint: str = ""
+   209→
+   210→    # === Living Recalibration ===
+   211→    recalibration_interval: int = 500
+   212→    last_recalibration: int = 0
+   213→    profile_changes: int = 0
+   214→
+   215→    @classmethod
+   216→    def from_asset_class(cls, symbol: str, asset_class: str) -> TokenProfile:
+   217→        """Create a profile with defaults for an asset class."""
+   218→        defaults = ASSET_CLASS_DEFAULTS.get(asset_class, ASSET_CLASS_DEFAULTS["large_cap"])
+   219→        return cls(symbol=symbol, asset_class=asset_class, **defaults)
+   220→
+   221→    @classmethod
+   222→    def from_timeframe(cls, symbol: str, asset_class: str, timeframe: str) -> TokenProfile:
+   223→        """Create a profile combining asset class defaults + timeframe-adaptive alpha.
+   224→
+   225→        This is the RECOMMENDED way to create a TokenProfile for live trading.
+   226→        It combines:
+   227→        1. Risk parameters from asset_class (catastrophic_loss_pct, max_position_pct, etc.)
+   228→        2. SAX parameters from timeframe (alpha scales with granularity)
+   229→
+   230→        The timeframe alpha defaults are validated across 22 token-timeframe
+   231→        combinations with 6+ months of real Binance data each.
+   232→        """
+   233→        # Start with asset class defaults (risk params, fuzzy, etc.)
+   234→        defaults = ASSET_CLASS_DEFAULTS.get(asset_class, ASSET_CLASS_DEFAULTS["large_cap"])
+   235→        profile = cls(symbol=symbol, asset_class=asset_class, **defaults)
+   236→
+   237→        # Override SAX params with timeframe-adaptive values
+   238→        tf_defaults = TIMEFRAME_ALPHA_DEFAULTS.get(timeframe, TIMEFRAME_ALPHA_DEFAULTS["1h"])
+   239→        profile.sax_alphabet_size = tf_defaults["sax_alphabet_size"]
+   240→        profile.sax_window_size = tf_defaults["sax_window_size"]
+   241→
+   242→        return profile
+   243→
+   244→    def update_from_calibration(
+   245→        self,
+   246→        best_alpha: int,
+   247→        best_window: int,
+   248→        metric: float,
+   249→        grid: dict,
+   250→        n_samples: int,
+   251→        recalibration_candle: int = 0,
+   252→    ) -> None:
+   253→        """Update profile with calibration results.
+   254→
+   255→        v0.11.0: Added recalibration_candle parameter to track which
+   256→        candle index the calibration was performed at. This enables
+   257→        live recalibration to know when the last update occurred.
+   258→        """
+   259→        self.sax_alphabet_size = best_alpha
+   260→        self.sax_window_size = best_window
+   261→        self.calibration_date = time.strftime("%Y-%m-%d %H:%M")
+   262→        self.calibration_metric = metric
+   263→        self.calibration_grid = grid
+   264→        self.calibration_samples = n_samples
+   265→        self.profile_changes += 1
+   266→        if recalibration_candle > 0:
+   267→            self.last_recalibration = recalibration_candle
+   268→
+   269→    def to_dict(self) -> dict:
+   270→        """Serialize profile to dictionary."""
+   271→        return {
+   272→            "symbol": self.symbol,
+   273→            "asset_class": self.asset_class,
+   274→            "sax_alphabet_size": self.sax_alphabet_size,
+   275→            "sax_window_size": self.sax_window_size,
+   276→            "catastrophic_loss_pct": self.catastrophic_loss_pct,
+   277→            "max_position_pct": self.max_position_pct,
+   278→            "short_allowed": self.short_allowed,
+   279→            "short_confidence_multiplier": self.short_confidence_multiplier,
+   280→            "weight_profile": self.weight_profile,
+   281→            "fuzzy_threshold": self.fuzzy_threshold,
+   282→            "min_observations_for_trade": self.min_observations_for_trade,
+   283→            "min_candles_for_training": self.min_candles_for_training,
+   284→            "calibration_date": self.calibration_date,
+   285→            "calibration_metric": round(self.calibration_metric, 4),
+   286→            "calibration_samples": self.calibration_samples,
+   287→            "calibration_grid": self.calibration_grid,
+   288→            "last_recalibration": self.last_recalibration,
+   289→            "profile_changes": self.profile_changes,
+   290→        }
+   291→
+   292→    @classmethod
+   293→    def from_dict(cls, data: dict) -> TokenProfile:
+   294→        """Reconstruct a TokenProfile from a serialized dictionary.
+   295→
+   296→        v0.11.0: Enables loading a previously calibrated profile from storage,
+   297→        skipping the expensive TradingCalibrationEngine grid search on startup.
+   298→
+   299→        Args:
+   300→            data: Dict from TokenProfile.to_dict()
+   301→
+   302→        Returns:
+   303→            TokenProfile with all fields restored from the dict.
+   304→        """
+   305→        # Only pass fields that are actual dataclass fields
+   306→        from dataclasses import fields
+   307→        valid_fields = {f.name for f in fields(cls)}
+   308→        filtered = {k: v for k, v in data.items() if k in valid_fields}
+   309→        return cls(**filtered)
+   310→
+   311→
+   312→@dataclass
+   313→class CalibrationResult:
+   314→    """Result from a single calibration run (one alpha x window combo)."""
+   315→    alphabet_size: int
+   316→    window_size: int
+   317→    train_symbols: int = 0
+   318→    oos_symbols: int = 0
+   319→    unique_patterns: int = 0
+   320→    overlap_ratio: float = 0.0
+   321→    oos_match_rate: float = 0.0
+   322→    oos_exact_match_rate: float = 0.0
+   323→    avg_confidence: float = 0.0
+   324→    avg_win_rate: float = 0.0
+   325→    avg_historical_count: float = 0.0
+   326→    information: float = 0.0
+   327→    repetition: float = 0.0
+   328→    calibration_metric: float = 0.0  # information x repetition
+   329→    symbol_distribution: dict = field(default_factory=dict)
+   330→
+   331→
+   332→class CalibrationEngine:
+   333→    """
+   334→    Auto-calibration engine that discovers optimal SAX parameters.
+   335→
+   336→    For each token, it tests a grid of alpha x window combinations
+   337→    on real data and selects the one that maximizes:
+   338→
+   339→        calibration_metric = information x repetition
+   340→
+   341→    Where:
+   342→        information = 1 - max_symbol_concentration
+   343→            (lower concentration = more information encoded)
+   344→
+   345→        repetition = oos_match_rate * overlap_ratio
+   346→            (higher = patterns repeat and are findable OOS)
+   347→
+   348→    This ensures the SAX encoding is neither too granular (each pattern
+   349→    is unique → no repetition) nor too coarse (all patterns are the
+   350→    same → no information).
+   351→
+   352→    .. deprecated:: v0.6.7
+   353→        This engine has a **structural bias toward alpha=3/window=5**
+   354→        because lower alpha always produces higher match rates, which
+   355→        dominate the pattern-matching metric. Diagnostic data shows
+   356→        it selects alpha=3/w=5 in 100% of cases across 6 tokens.
+   357→
+   358→        Use :class:`TradingCalibrationEngine` instead, which selects
+   359→        parameters based on actual trading PnL and produces diverse,
+   360→        data-driven alpha/window selections.
+   361→    """
+   362→
+   363→    # Grid search space
+   364→    ALPHABET_GRID = [3, 4, 5]
+   365→    WINDOW_GRID = [5, 7, 10]
+   366→
+   367→    def __init__(self, train_ratio: float = 0.70, pattern_length: int = 5):
+   368→        import warnings
+   369→        warnings.warn(
+   370→            "CalibrationEngine has a structural bias toward alpha=3/window=5. "
+   371→            "Use TradingCalibrationEngine instead, which selects parameters "
+   372→            "based on actual trading performance and produces diverse, "
+   373→            "data-driven alpha/window selections. "
+   374→            "(Deprecated since v0.6.7)",
+   375→            DeprecationWarning,
+   376→            stacklevel=2,
+   377→        )
+   378→        self.train_ratio = train_ratio
+   379→        self.pattern_length = pattern_length
+   380→
+   381→    def calibrate(
+   382→        self,
+   383→        df: pd.DataFrame,
+   384→        symbol: str = "",
+   385→        verbose: bool = True,
+   386→    ) -> tuple[TokenProfile, list[CalibrationResult]]:
+   387→        """
+   388→        Run full calibration on a DataFrame.
+   389→
+   390→        Tests all alpha x window combos and returns the best TokenProfile
+   391→        along with all results for traceability.
+   392→
+   393→        Args:
+   394→            df: OHLCV DataFrame with columns: open, high, low, close, volume
+   395→            symbol: Token symbol for the profile
+   396→            verbose: Print progress
+   397→
+   398→        Returns:
+   399→            Tuple of (best TokenProfile, list of all CalibrationResults)
+   400→        """
+   401→        # Split train/OOS
+   402→        n = len(df)
+   403→        split = int(n * self.train_ratio)
+   404→        train_df = df.iloc[:split]
+   405→        oos_df = df.iloc[split:]
+   406→
+   407→        if verbose:
+   408→            print(f"\n{'='*60}")
+   409→            print(f"  CALIBRATION: {symbol}")
+   410→            print(f"  Data: {n} candles | Train: {split} | OOS: {n - split}")
+   411→            print(f"  Grid: alpha={self.ALPHABET_GRID} x window={self.WINDOW_GRID}")
+   412→            print(f"{'='*60}")
+   413→
+   414→        results = []
+   415→
+   416→        for alpha in self.ALPHABET_GRID:
+   417→            for window in self.WINDOW_GRID:
+   418→                result = self._evaluate_combo(train_df, oos_df, alpha, window)
+   419→                results.append(result)
+   420→
+   421→                if verbose:
+   422→                    print(
+   423→                        f"  alpha={alpha} window={window:2d} | "
+   424→                        f"overlap={result.overlap_ratio:.2f}x "
+   425→                        f"oos_match={result.oos_match_rate:.1%} "
+   426→                        f"info={result.information:.3f} "
+   427→                        f"repet={result.repetition:.3f} "
+   428→                        f"metric={result.calibration_metric:.4f}"
+   429→                    )
+   430→
+   431→        # Select best by calibration metric
+   432→        best = max(results, key=lambda r: r.calibration_metric)
+   433→
+   434→        if verbose:
+   435→            print(f"\n  >>> BEST: alpha={best.alphabet_size} window={best.window_size} "
+   436→                  f"metric={best.calibration_metric:.4f}")
+   437→            print(f"  >>> overlap={best.overlap_ratio:.2f}x "
+   438→                  f"oos_match={best.oos_match_rate:.1%} "
+   439→                  f"info={best.information:.3f} "
+   440→                  f"repet={best.repetition:.3f}")
+   441→
+   442→        # Build profile from best result
+   443→        asset_class = self._infer_asset_class(symbol)
+   444→        profile = TokenProfile.from_asset_class(symbol, asset_class)
+   445→        grid = {
+   446→            f"a{r.alphabet_size}_w{r.window_size}": {
+   447→                "overlap_ratio": round(r.overlap_ratio, 2),
+   448→                "oos_match_rate": round(r.oos_match_rate, 4),
+   449→                "information": round(r.information, 4),
+   450→                "repetition": round(r.repetition, 4),
+   451→                "metric": round(r.calibration_metric, 4),
+   452→                "avg_confidence": round(r.avg_confidence, 4),
+   453→                "avg_win_rate": round(r.avg_win_rate, 4),
+   454→                "avg_hist_count": round(r.avg_historical_count, 1),
+   455→                "symbol_distribution": r.symbol_distribution,
+   456→            }
+   457→            for r in results
+   458→        }
+   459→        profile.update_from_calibration(
+   460→            best_alpha=best.alphabet_size,
+   461→            best_window=best.window_size,
+   462→            metric=best.calibration_metric,
+   463→            grid=grid,
+   464→            n_samples=n,
+   465→        )
+   466→
+   467→        return profile, results
+   468→
+   469→    def _evaluate_combo(
+   470→        self,
+   471→        train_df: pd.DataFrame,
+   472→        oos_df: pd.DataFrame,
+   473→        alphabet_size: int,
+   474→        window_size: int,
+   475→    ) -> CalibrationResult:
+   476→        """Evaluate a single alpha x window combination."""
+   477→        # Encode training data
+   478→        try:
+   479→            encoder = SAXEncoder(
+   480→                alphabet_size=alphabet_size,
+   481→                window_size=window_size,
+   482→                strategy="ohlcv",
+   483→            )
+   484→        except ValueError:
+   485→            return CalibrationResult(
+   486→                alphabet_size=alphabet_size,
+   487→                window_size=window_size,
+   488→                calibration_metric=0.0,
+   489→            )
+   490→
+   491→        train_symbols = encoder.encode(train_df)
+   492→        oos_symbols = encoder.encode(oos_df)
+   493→
+   494→        if len(train_symbols) < self.pattern_length + 1:
+   495→            return CalibrationResult(
+   496→                alphabet_size=alphabet_size,
+   497→                window_size=window_size,
+   498→                calibration_metric=0.0,
+   499→            )
+   500→
+   501→        # Build trie from training data
+   502→        trie = PPMTTrie(name=f"calibration_a{alphabet_size}_w{window_size}")
+   503→
+   504→        for i in range(len(train_symbols) - self.pattern_length):
+   505→            pattern = train_symbols[i:i + self.pattern_length]
+   506→            next_sym = train_symbols[i + self.pattern_length] if i + self.pattern_length < len(train_symbols) else None
+   507→
+   508→            # Get price data for this pattern
+   509→            start_candle = i * window_size
+   510→            end_candle = (i + self.pattern_length) * window_size
+   511→            if end_candle > len(train_df):
+   512→                break
+   513→
+   514→            window_df = train_df.iloc[start_candle:end_candle]
+   515→            if len(window_df) < 2:
+   516→                continue
+   517→
+   518→            entry_price = window_df["close"].iloc[0]
+   519→            exit_price = window_df["close"].iloc[-1]
+   520→            move_pct = ((exit_price - entry_price) / entry_price) * 100.0
+   521→
+   522→            high = window_df["high"].max()
+   523→            low = window_df["low"].min()
+   524→            drawdown_pct = ((low - entry_price) / entry_price) * 100.0
+   525→            favorable_pct = ((high - entry_price) / entry_price) * 100.0
+   526→
+   527→            duration = len(window_df)
+   528→            # v0.40.24 (P7-FaseC FIX): outcome-SL/TP based `won` computed on
+   529→            # POST-pattern candles (not the pattern window itself — see
+   530→            # ppmt.py:337-422 for the full rationale). During calibration
+   531→            # build we don't track an existing node's historical_count (the
+   532→            # trie is being built fresh), so we pass historical_count=0 →
+   533→            # the helper uses bootstrap floors (0.15%). This is the
+   534→            # conservative choice: calibration patterns tend to be young
+   535→            # (low N), and using real SL/TP from a still-unstable
+   536→            # max_dd/max_fav would inject noise.
+   537→            post_pattern_window_size = self.pattern_length * window_size
+   538→            post_pattern_df = train_df.iloc[
+   539→                end_candle : min(end_candle + post_pattern_window_size, len(train_df))
+   540→            ]
+   541→            entry_price_for_outcome = window_df["close"].iloc[-1]
+   542→            won = compute_outcome_won(
+   543→                window_df=post_pattern_df,
+   544→                entry_price=entry_price_for_outcome,
+   545→                move_pct=move_pct,
+   546→                historical_count=0,
+   547→            )
+   548→
+   549→            trie.insert_with_observations(
+   550→                symbols=pattern,
+   551→                move_pct=move_pct,
+   552→                drawdown_pct=drawdown_pct,
+   553→                favorable_pct=favorable_pct,
+   554→                duration=duration,
+   555→                won=won,
+   556→                next_symbol=next_sym,
+   557→            )
+   558→
+   559→        # Propagate metadata
+   560→        trie.propagate_metadata()
+   561→
+   562→        # === Compute Metrics ===
+   563→
+   564→        # 1. Symbol distribution (information metric)
+   565→        sym_counts = {}
+   566→        for s in train_symbols:
+   567→            sym_counts[s] = sym_counts.get(s, 0) + 1
+   568→        total_syms = len(train_symbols)
+   569→        symbol_distribution = {
+   570→            s: round(c / total_syms, 4) if total_syms > 0 else 0.0
+   571→            for s, c in sorted(sym_counts.items())
+   572→        }
+   573→        max_concentration = max(sym_counts.values()) / total_syms if total_syms > 0 else 1.0
+   574→        information = 1.0 - max_concentration
+   575→
+   576→        # 2. Overlap ratio
+   577→        unique_patterns = trie.pattern_count
+   578→        total_possible = max(len(train_symbols) - self.pattern_length, 1)
+   579→        overlap_ratio = total_possible / unique_patterns if unique_patterns > 0 else 0.0
+   580→
+   581→        # 3. OOS match rate
+   582→        oos_match_count = 0
+   583→        oos_exact_match_count = 0
+   584→        oos_test_count = 0
+   585→        matched_confidences = []
+   586→        matched_win_rates = []
+   587→        matched_hist_counts = []
+   588→
+   589→        for i in range(len(oos_symbols) - self.pattern_length):
+   590→            pattern = oos_symbols[i:i + self.pattern_length]
+   591→            oos_test_count += 1
+   592→
+   593→            # Exact match
+   594→            node = trie.search(pattern)
+   595→            if node is not None and node.metadata.historical_count > 0:
+   596→                oos_exact_match_count += 1
+   597→                oos_match_count += 1
+   598→                matched_confidences.append(node.metadata.confidence)
+   599→                matched_win_rates.append(node.metadata.win_rate)
+   600→                matched_hist_counts.append(node.metadata.historical_count)
+   601→            else:
+   602→                # Try prefix match (fuzzy with threshold)
+   603→                node_prefix, depth = trie.search_prefix(pattern)
+   604→                if node_prefix is not None and depth >= self.pattern_length - 1:
+   605→                    oos_match_count += 1
+   606→                    matched_confidences.append(node_prefix.metadata.confidence)
+   607→                    matched_win_rates.append(node_prefix.metadata.win_rate)
+   608→                    matched_hist_counts.append(node_prefix.metadata.historical_count)
+   609→
+   610→        oos_match_rate = oos_match_count / oos_test_count if oos_test_count > 0 else 0.0
+   611→        oos_exact_match_rate = oos_exact_match_count / oos_test_count if oos_test_count > 0 else 0.0
+   612→
+   613→        # 4. Repetition = oos_match_rate * overlap_ratio (both need to be good)
+   614→        repetition = oos_match_rate * min(overlap_ratio, 10.0) / 10.0
+   615→
+   616→        # 5. Calibration metric = information x repetition
+   617→        # This penalizes both: too much concentration (low info) and
+   618→        # too little overlap (low repetition)
+   619→        calibration_metric = information * (0.4 * oos_match_rate + 0.35 * min(overlap_ratio, 10.0) / 10.0 + 0.25 * repetition)
+   620→
+   621→        # Averages from matched patterns
+   622→        avg_confidence = np.mean(matched_confidences) if matched_confidences else 0.0
+   623→        avg_win_rate = np.mean(matched_win_rates) if matched_win_rates else 0.0
+   624→        avg_hist_count = np.mean(matched_hist_counts) if matched_hist_counts else 0.0
+   625→
+   626→        return CalibrationResult(
+   627→            alphabet_size=alphabet_size,
+   628→            window_size=window_size,
+   629→            train_symbols=len(train_symbols),
+   630→            oos_symbols=len(oos_symbols),
+   631→            unique_patterns=unique_patterns,
+   632→            overlap_ratio=round(overlap_ratio, 2),
+   633→            oos_match_rate=round(oos_match_rate, 4),
+   634→            oos_exact_match_rate=round(oos_exact_match_rate, 4),
+   635→            avg_confidence=round(avg_confidence, 4),
+   636→            avg_win_rate=round(avg_win_rate, 4),
+   637→            avg_historical_count=round(avg_hist_count, 1),
+   638→            information=round(information, 4),
+   639→            repetition=round(repetition, 4),
+   640→            calibration_metric=round(calibration_metric, 4),
+   641→            symbol_distribution=symbol_distribution,
+   642→        )
+   643→
+   644→    @staticmethod
+   645→    def _infer_asset_class(symbol: str) -> str:
+   646→        """Infer asset class from symbol for default profile."""
+   647→        symbol_upper = symbol.upper()
+   648→        blue_chips = {"BTC/USDT", "BTCUSDT", "ETH/USDT", "ETHUSDT"}
+   649→        large_caps = {"SOL/USDT", "SOLUSDT", "AVAX/USDT", "AVAXUSDT",
+   650→                      "BNB/USDT", "BNBUSDT", "XRP/USDT", "XRPUSDT",
+   651→                      "ADA/USDT", "ADAUSDT"}
+   652→        defi_tokens = {"LINK/USDT", "LINKUSDT", "UNI/USDT", "UNIUSDT",
+   653→                       "ATOM/USDT", "ATOMUSDT", "AAVE/USDT", "AAVEUSDT",
+   654→                       "MKR/USDT", "MKRUSDT", "COMP/USDT", "COMPUSDT",
+   655→                       "CRV/USDT", "CRVUSDT", "SNX/USDT", "SNXUSDT"}
+   656→        memes = {"DOGE/USDT", "DOGEUSDT", "SHIB/USDT", "SHIBUSDT",
+   657→                 "PEPE/USDT", "PEPEUSDT", "FLOKI/USDT", "FLOKIUSDT",
+   658→                 "WIF/USDT", "WIFUSDT", "BONK/USDT", "BONKUSDT"}
+   659→
+   660→        if symbol_upper in blue_chips:
+   661→            return "blue_chip"
+   662→        elif symbol_upper in large_caps:
+   663→            return "large_cap"
+   664→        elif symbol_upper in defi_tokens:
+   665→            return "defi"
+   666→        elif symbol_upper in memes:
+   667→            return "meme"
+   668→        else:
+   669→            return "large_cap"  # safe default
+   670→
+   671→
+   672→# ================================================================
+   673→# TradingCalibrationEngine — Trading-Performance-Based Calibration
+   674→# ================================================================
+   675→# The original CalibrationEngine uses a pattern-matching metric:
+   676→#   calibration_metric = information × (match_rate + overlap + repetition)
+   677→#
+   678→# PROBLEM: This ALWAYS selects alpha=3/window=5 because:
+   679→#   - Lower alpha → fewer unique symbols → higher match rate
+   680→#   - Higher match rate = higher metric = always wins
+   681→#   - But alpha=3 may produce POOR trading signals (too coarse)
+   682→#
+   683→# SOLUTION: TradingCalibrationEngine runs mini-backtests for each
+   684→#   α/W combo and selects the one with the best TRADING performance.
+   685→#   This fixes the structural bias and produces +74% to +211% PnL
+   686→#   improvement over pattern-matching calibration.
+   687→#
+   688→# v0.6.7: Added to replace CalibrationEngine in validation scripts
+   689→# ================================================================
+   690→
+   691→
+   692→@dataclass
+   693→class TradingCalibrationResult:
+   694→    """Result of trading-based calibration for a single α/W combo."""
+   695→    alphabet_size: int
+   696→    window_size: int
+   697→    # Pattern-matching metrics (from CalibrationEngine)
+   698→    pattern_metric: float = 0.0
+   699→    overlap_ratio: float = 0.0
+   700→    oos_match_rate: float = 0.0
+   701→    information: float = 0.0
+   702→    # Trading metrics (NEW)
+   703→    total_trades: int = 0
+   704→    win_rate: float = 0.0
+   705→    profit_factor: float = 0.0
+   706→    total_pnl_pct: float = 0.0
+   707→    max_drawdown_pct: float = 0.0
+   708→    sharpe_approx: float = 0.0
+   709→    long_trades: int = 0
+   710→    short_trades: int = 0
+   711→    # Combined metric
+   712→    trading_metric: float = 0.0
+   713→
+   714→
+   715→class TradingCalibrationEngine:
+   716→    """
+   717→    Trading-Performance-Based Calibration Engine.
+   718→
+   719→    Unlike CalibrationEngine which selects α/W by pattern-matching metrics
+   720→    (always converging to alpha=3/window=5), this engine runs mini-backtests
+   721→    for each α/W combination and selects the one with the best TRADING PnL.
+   722→
+   723→    Diagnostic data (6 tokens, 1h, 600 days each):
+   724→      - CalibrationEngine selects alpha=3/w=5 in 100% of cases
+   725→      - TradingCalibrationEngine selects: alpha=3 (17%), alpha=4 (50%), alpha=5 (33%)
+   726→
+   727→    The metric combines trading performance with pattern quality and robustness:
+   728→
+   729→        trading_metric = pnl_score + 0.1 × pattern_quality + 0.05 × count_bonus
+   730→                         - 0.1 × volatility_penalty
+   731→
+   732→    Where:
+   733→        - pnl_score = sign(PnL) × log(1 + |PnL|) — logarithmic scaling
+   734→        - pattern_quality = min(oos_match_rate, 0.8) × min(win_rate, 0.9)
+   735→        - count_bonus = log(1 + trades) / log(1 + 100) — statistical significance
+   736→        - volatility_penalty = max(0, std(pnls) - 5) / 10 — penalize unstable results
+   737→        - A combo must produce at least MIN_TRADES trades to be eligible
+   738→        - Negative PnL combos get 1.5× penalty
+   739→
+   740→    This ensures the selected parameters produce:
+   741→    1. Profitable trades (not just pattern matches)
+   742→    2. Sufficient trade frequency (at least some signals)
+   743→    3. Reasonable pattern quality (not degenerate matches)
+   744→    4. Stable results (not wildly variable PnL)
+   745→
+   746→    SL/TP are configurable and adapt to asset class volatility:
+   747→        - blue_chip: SL=2.5% / TP=4.0%  (lower volatility, tighter stops)
+   748→        - large_cap: SL=3.0% / TP=5.0%  (moderate volatility)
+   749→        - defi:     SL=3.5% / TP=6.0%  (higher volatility)
+   750→        - meme:     SL=5.0% / TP=8.0%  (very high volatility, wider stops)
+   751→        - default:  SL=3.0% / TP=5.0%
+   752→
+   753→    Sharpe ratio is timeframe-aware (derives annualization factor from
+   754→    candle interval rather than hardcoding sqrt(365*24)).
+   755→
+   756→    Usage:
+   757→        engine = TradingCalibrationEngine(train_ratio=0.70, pattern_length=5)
+   758→        profile, results = engine.calibrate(df, symbol="BTC/USDT")
+   759→    """
+   760→
+   761→    # Grid search space (same as CalibrationEngine for compatibility)
+   762→    ALPHABET_GRID = [3, 4, 5]
+   763→    WINDOW_GRID = [5, 7, 10]
+   764→
+   765→    # Minimum trades required for a combo to be considered
+   766→    MIN_TRADES = 5
+   767→
+   768→    # SL/TP defaults for mini-backtest (overridden by asset class)
+   769→    DEFAULT_SL_PCT = 3.0
+   770→    DEFAULT_TP_PCT = 5.0
+   771→
+   772→    # Asset-class-adaptive SL/TP for mini-backtest
+   773→    ASSET_CLASS_SL_TP = {
+   774→        "blue_chip":  {"sl_pct": 2.5, "tp_pct": 4.0},
+   775→        "large_cap":  {"sl_pct": 3.0, "tp_pct": 5.0},
+   776→        "defi":       {"sl_pct": 3.5, "tp_pct": 6.0},
+   777→        "meme":       {"sl_pct": 5.0, "tp_pct": 8.0},
+   778→        "new_launch": {"sl_pct": 5.0, "tp_pct": 8.0},
+   779→    }
+   780→
+   781→    # Timeframe → candles-per-year mapping (for Sharpe annualization)
+   782→    TIMEFRAME_CANDLES_PER_YEAR = {
+   783→        "1m":  365 * 24 * 60,
+   784→        "5m":  365 * 24 * 12,
+   785→        "15m": 365 * 24 * 4,
+   786→        "30m": 365 * 24 * 2,
+   787→        "1h":  365 * 24,
+   788→        "4h":  365 * 6,
+   789→        "1d":  365,
+   790→    }
+   791→
+   792→    def __init__(
+   793→        self,
+   794→        train_ratio: float = 0.70,
+   795→        pattern_length: int = 5,
+   796→        sl_pct: float | None = None,
+   797→        tp_pct: float | None = None,
+   798→        timeframe: str = "1h",
+   799→    ):
+   800→        self.train_ratio = train_ratio
+   801→        self.pattern_length = pattern_length
+   802→        self.timeframe = timeframe
+   803→        # SL/TP: use explicit values if provided, otherwise asset-class-adaptive
+   804→        self._explicit_sl = sl_pct
+   805→        self._explicit_tp = tp_pct
+   806→        self.sl_pct = sl_pct if sl_pct is not None else self.DEFAULT_SL_PCT
+   807→        self.tp_pct = tp_pct if tp_pct is not None else self.DEFAULT_TP_PCT
+   808→        # Sharpe annualization factor from timeframe
+   809→        cpy = self.TIMEFRAME_CANDLES_PER_YEAR.get(timeframe, 365 * 24)
+   810→        self._sharpe_annual_factor = np.sqrt(cpy)
+   811→
+   812→    def _get_sl_tp_for_symbol(self, symbol: str) -> tuple[float, float]:
+   813→        """Get SL/TP percentages adapted to the token's asset class."""
+   814→        if self._explicit_sl is not None and self._explicit_tp is not None:
+   815→            return self._explicit_sl, self._explicit_tp
+   816→        asset_class = CalibrationEngine._infer_asset_class(symbol)
+   817→        sl_tp = self.ASSET_CLASS_SL_TP.get(asset_class, {"sl_pct": self.DEFAULT_SL_PCT, "tp_pct": self.DEFAULT_TP_PCT})
+   818→        return sl_tp["sl_pct"], sl_tp["tp_pct"]
+   819→
+   820→    def calibrate(
+   821→        self,
+   822→        df: pd.DataFrame,
+   823→        symbol: str = "",
+   824→        verbose: bool = True,
+   825→    ) -> tuple:
+   826→        """
+   827→        Run trading-based calibration on a DataFrame.
+   828→
+   829→        Tests all α × window combos, runs mini-backtests on OOS data,
+   830→        and selects the combo with the best trading performance.
+   831→
+   832→        Args:
+   833→            df: OHLCV DataFrame
+   834→            symbol: Token symbol for the profile
+   835→            verbose: Print progress
+   836→
+   837→        Returns:
+   838→            Tuple of (best TokenProfile, list of TradingCalibrationResults)
+   839→        """
+   840→        # Resolve SL/TP for this symbol's asset class
+   841→        self.sl_pct, self.tp_pct = self._get_sl_tp_for_symbol(symbol)
+   842→
+   843→        n = len(df)
+   844→        split = int(n * self.train_ratio)
+   845→        train_df = df.iloc[:split]
+   846→        oos_df = df.iloc[split:]
+   847→
+   848→        if verbose:
+   849→            print(f"\n{'='*70}")
+   850→            print(f"  TRADING CALIBRATION: {symbol}")
+   851→            print(f"  Data: {n} candles | Train: {split} | OOS: {n - split}")
+   852→            print(f"  Grid: alpha={self.ALPHABET_GRID} x window={self.WINDOW_GRID}")
+   853→            print(f"  SL={self.sl_pct}% / TP={self.tp_pct}% (asset-class-adaptive)")
+   854→            print(f"  Timeframe: {self.timeframe} (Sharpe ann. factor: {self._sharpe_annual_factor:.1f})")
+   855→            print(f"{'='*70}")
+   856→
+   857→        results = []
+   858→
+   859→        for alpha in self.ALPHABET_GRID:
+   860→            for window in self.WINDOW_GRID:
+   861→                result = self._evaluate_combo(train_df, oos_df, alpha, window)
+   862→                results.append(result)
+   863→
+   864→                if verbose:
+   865→                    pnl_sign = "+" if result.total_pnl_pct >= 0 else ""
+   866→                    print(
+   867→                        f"  alpha={alpha} window={window:2d} | "
+   868→                        f"Trades={result.total_trades:3d} "
+   869→                        f"WR={result.win_rate:.1%} "
+   870→                        f"PF={result.profit_factor:.2f} "
+   871→                        f"PnL={pnl_sign}{result.total_pnl_pct:.1f}% "
+   872→                        f"DD={result.max_drawdown_pct:.1f}% "
+   873→                        f"tmetric={result.trading_metric:.4f}"
+   874→                    )
+   875→
+   876→        # Select best by trading metric
+   877→        eligible = [r for r in results if r.total_trades >= self.MIN_TRADES]
+   878→
+   879→        if not eligible:
+   880→            # Fallback: use pattern-matching metric if no combo produces trades
+   881→            if verbose:
+   882→                print(f"\n  ⚠️  No combo produced ≥{self.MIN_TRADES} trades — "
+   883→                      f"falling back to pattern metric")
+   884→            best = max(results, key=lambda r: r.pattern_metric)
+   885→        else:
+   886→            best = max(eligible, key=lambda r: r.trading_metric)
+   887→
+   888→        if verbose:
+   889→            pnl_sign = "+" if best.total_pnl_pct >= 0 else ""
+   890→            print(f"\n  >>> BEST: alpha={best.alphabet_size} window={best.window_size} "
+   891→                  f"trading_metric={best.trading_metric:.4f}")
+   892→            print(f"  >>> Trades={best.total_trades} WR={best.win_rate:.1%} "
+   893→                  f"PF={best.profit_factor:.2f} PnL={pnl_sign}{best.total_pnl_pct:.1f}%")
+   894→
+   895→        # Build profile from best result
+   896→        asset_class = CalibrationEngine._infer_asset_class(symbol)
+   897→        profile = TokenProfile.from_asset_class(symbol, asset_class)
+   898→
+   899→        grid = {
+   900→            f"a{r.alphabet_size}_w{r.window_size}": {
+   901→                "total_trades": r.total_trades,
+   902→                "win_rate": round(r.win_rate, 4),
+   903→                "profit_factor": round(r.profit_factor, 4),
+   904→                "total_pnl_pct": round(r.total_pnl_pct, 2),
+   905→                "max_drawdown_pct": round(r.max_drawdown_pct, 2),
+   906→                "trading_metric": round(r.trading_metric, 4),
+   907→                "pattern_metric": round(r.pattern_metric, 4),
+   908→                "oos_match_rate": round(r.oos_match_rate, 4),
+   909→                "overlap_ratio": round(r.overlap_ratio, 2),
+   910→            }
+   911→            for r in results
+   912→        }
+   913→        profile.update_from_calibration(
+   914→            best_alpha=best.alphabet_size,
+   915→            best_window=best.window_size,
+   916→            metric=best.trading_metric,
+   917→            grid=grid,
+   918→            n_samples=n,
+   919→        )
+   920→
+   921→        return profile, results
+   922→
+   923→    def _evaluate_combo(
+   924→        self,
+   925→        train_df: pd.DataFrame,
+   926→        oos_df: pd.DataFrame,
+   927→        alphabet_size: int,
+   928→        window_size: int,
+   929→    ) -> TradingCalibrationResult:
+   930→        """Evaluate a single α × window combo with mini-backtest."""
+   931→        result = TradingCalibrationResult(
+   932→            alphabet_size=alphabet_size,
+   933→            window_size=window_size,
+   934→        )
+   935→
+   936→        # Encode data
+   937→        try:
+   938→            encoder = SAXEncoder(
+   939→                alphabet_size=alphabet_size,
+   940→                window_size=window_size,
+   941→                strategy="ohlcv",
+   942→            )
+   943→        except ValueError:
+   944→            return result
+   945→
+   946→        train_symbols = encoder.encode(train_df)
+   947→        oos_symbols = encoder.encode(oos_df)
+   948→
+   949→        if len(train_symbols) < self.pattern_length + 1:
+   950→            return result
+   951→        if len(oos_symbols) < self.pattern_length + 1:
+   952→            return result
+   953→
+   954→        # Build trie from training data
+   955→        trie = PPMTTrie(name=f"tcal_a{alphabet_size}_w{window_size}")
+   956→
+   957→        for i in range(len(train_symbols) - self.pattern_length):
+   958→            pattern = train_symbols[i:i + self.pattern_length]
+   959→            next_sym = train_symbols[i + self.pattern_length] if i + self.pattern_length < len(train_symbols) else None
+   960→
+   961→            start_candle = i * window_size
+   962→            end_candle = (i + self.pattern_length) * window_size
+   963→            if end_candle > len(train_df):
+   964→                break
+   965→
+   966→            window_df = train_df.iloc[start_candle:end_candle]
+   967→            if len(window_df) < 2:
+   968→                continue
+   969→
+   970→            entry_price = window_df["close"].iloc[0]
+   971→            exit_price = window_df["close"].iloc[-1]
+   972→            move_pct = ((exit_price - entry_price) / entry_price) * 100.0
+   973→
+   974→            high = window_df["high"].max()
+   975→            low = window_df["low"].min()
+   976→            drawdown_pct = ((low - entry_price) / entry_price) * 100.0
+   977→            favorable_pct = ((high - entry_price) / entry_price) * 100.0
+   978→
+   979→            duration = len(window_df)
+   980→            # v0.40.24 (P7-FaseC FIX): outcome-SL/TP based `won` computed on
+   981→            # POST-pattern candles (not the pattern window itself — see
+   982→            # ppmt.py:337-422 for the full rationale). During calibration
+   983→            # build we don't track an existing node's historical_count (the
+   984→            # trie is being built fresh), so we pass historical_count=0 →
+   985→            # the helper uses bootstrap floors (0.15%). This is the
+   986→            # conservative choice: calibration patterns tend to be young
+   987→            # (low N), and using real SL/TP from a still-unstable
+   988→            # max_dd/max_fav would inject noise.
+   989→            post_pattern_window_size = self.pattern_length * window_size
+   990→            post_pattern_df = train_df.iloc[
+   991→                end_candle : min(end_candle + post_pattern_window_size, len(train_df))
+   992→            ]
+   993→            entry_price_for_outcome = window_df["close"].iloc[-1]
+   994→            won = compute_outcome_won(
+   995→                window_df=post_pattern_df,
+   996→                entry_price=entry_price_for_outcome,
+   997→                move_pct=move_pct,
+   998→                historical_count=0,
+   999→            )
+  1000→
+  1001→            trie.insert_with_observations(
+  1002→                symbols=pattern,
+  1003→                move_pct=move_pct,
+  1004→                drawdown_pct=drawdown_pct,
+  1005→                favorable_pct=favorable_pct,
+  1006→                duration=duration,
+  1007→                won=won,
+  1008→                next_symbol=next_sym,
+  1009→            )
+  1010→
+  1011→        trie.propagate_metadata()
+  1012→
+  1013→        # === Pattern-matching metrics (for comparison) ===
+  1014→        sym_counts = {}
+  1015→        for s in train_symbols:
+  1016→            sym_counts[s] = sym_counts.get(s, 0) + 1
+  1017→        total_syms = len(train_symbols)
+  1018→        max_concentration = max(sym_counts.values()) / total_syms if total_syms > 0 else 1.0
+  1019→        information = 1.0 - max_concentration
+  1020→
+  1021→        unique_patterns = trie.pattern_count
+  1022→        total_possible = max(len(train_symbols) - self.pattern_length, 1)
+  1023→        overlap_ratio = total_possible / unique_patterns if unique_patterns > 0 else 0.0
+  1024→
+  1025→        oos_match_count = 0
+  1026→        oos_test_count = 0
+  1027→        for i in range(len(oos_symbols) - self.pattern_length):
+  1028→            pattern = oos_symbols[i:i + self.pattern_length]
+  1029→            oos_test_count += 1
+  1030→            node = trie.search(pattern)
+  1031→            if node is not None and node.metadata.historical_count > 0:
+  1032→                oos_match_count += 1
+  1033→            else:
+  1034→                node_prefix, depth = trie.search_prefix(pattern)
+  1035→                if node_prefix is not None and depth >= self.pattern_length - 1:
+  1036→                    oos_match_count += 1
+  1037→
+  1038→        oos_match_rate = oos_match_count / oos_test_count if oos_test_count > 0 else 0.0
+  1039→        repetition = oos_match_rate * min(overlap_ratio, 10.0) / 10.0
+  1040→        pattern_metric = information * (0.4 * oos_match_rate + 0.35 * min(overlap_ratio, 10.0) / 10.0 + 0.25 * repetition)
+  1041→
+  1042→        # === Mini-backtest on OOS data ===
+  1043→        trades = self._mini_backtest(trie, oos_df, oos_symbols, window_size)
+  1044→
+  1045→        # Compute trading stats
+  1046→        if not trades:
+  1047→            result.pattern_metric = pattern_metric
+  1048→            result.information = information
+  1049→            result.overlap_ratio = overlap_ratio
+  1050→            result.oos_match_rate = oos_match_rate
+  1051→            return result
+  1052→
+  1053→        pnls = [t["pnl_pct"] for t in trades]
+  1054→        wins = [p for p in pnls if p > 0]
+  1055→        losses = [p for p in pnls if p <= 0]
+  1056→        total_wins = sum(wins) if wins else 0.0
+  1057→        total_losses = abs(sum(losses)) if losses else 0.0
+  1058→
+  1059→        win_rate = len(wins) / len(trades) if trades else 0.0
+  1060→        profit_factor = total_wins / total_losses if total_losses > 0 else float('inf')
+  1061→        total_pnl = sum(pnls)
+  1062→
+  1063→        # Max drawdown
+  1064→        cumulative = np.cumsum(pnls)
+  1065→        peak = np.maximum.accumulate(cumulative)
+  1066→        drawdowns = cumulative - peak
+  1067→        max_dd = abs(min(drawdowns)) if len(drawdowns) > 0 else 0.0
+  1068→
+  1069→        # Sharpe approximation (annualized, timeframe-aware)
+  1070→        if len(pnls) > 1 and np.std(pnls) > 0:
+  1071→            sharpe = np.mean(pnls) / np.std(pnls) * self._sharpe_annual_factor
+  1072→        else:
+  1073→            sharpe = 0.0
+  1074→
+  1075→        long_trades = sum(1 for t in trades if t["direction"] == "LONG")
+  1076→        short_trades = sum(1 for t in trades if t["direction"] == "SHORT")
+  1077→
+  1078→        # === Trading metric ===
+  1079→        # Logarithmic PnL scaling to avoid domination by extreme values
+  1080→        # Positive PnL gets diminishing returns; negative PnL gets amplified penalty
+  1081→        if total_pnl > 0:
+  1082→            pnl_score = np.log1p(total_pnl)
+  1083→        else:
+  1084→            pnl_score = -np.log1p(abs(total_pnl)) * 1.5  # 1.5x penalty for losses
+  1085→
+  1086→        # Pattern quality bonus: rewards match rate + win rate, but capped
+  1087→        pattern_quality = min(oos_match_rate, 0.8) * min(win_rate, 0.9)
+  1088→
+  1089→        # Trade count bonus: more trades = more statistical significance
+  1090→        # But with diminishing returns (log scale)
+  1091→        count_bonus = np.log1p(len(trades)) / np.log1p(100)  # Normalized to ~1 at 100 trades
+  1092→
+  1093→        # Volatility penalty: penalize unstable PnL distributions
+  1094→        # High std means results could be unreliable
+  1095→        pnl_std = float(np.std(pnls)) if len(pnls) > 1 else 0.0
+  1096→        volatility_penalty = max(0.0, pnl_std - 5.0) / 10.0
+  1097→
+  1098→        # Combined metric: PnL is king, quality and count provide small bonuses,
+  1099→        # volatility provides a penalty
+  1100→        trading_metric = pnl_score + 0.1 * pattern_quality + 0.05 * count_bonus \
+  1101→                        - 0.1 * volatility_penalty
+  1102→
+  1103→        # Update result
+  1104→        result.pattern_metric = round(pattern_metric, 4)
+  1105→        result.information = round(information, 4)
+  1106→        result.overlap_ratio = round(overlap_ratio, 2)
+  1107→        result.oos_match_rate = round(oos_match_rate, 4)
+  1108→        result.total_trades = len(trades)
+  1109→        result.win_rate = round(win_rate, 4)
+  1110→        result.profit_factor = round(profit_factor, 4) if profit_factor != float('inf') else 99.99
+  1111→        result.total_pnl_pct = round(total_pnl, 2)
+  1112→        result.max_drawdown_pct = round(max_dd, 2)
+  1113→        result.sharpe_approx = round(sharpe, 2)
+  1114→        result.long_trades = long_trades
+  1115→        result.short_trades = short_trades
+  1116→        result.trading_metric = round(trading_metric, 4)
+  1117→
+  1118→        return result
+  1119→
+  1120→    def _mini_backtest(
+  1121→        self,
+  1122→        trie: PPMTTrie,
+  1123→        oos_df: pd.DataFrame,
+  1124→        oos_symbols: list,
+  1125→        window_size: int,
+  1126→    ) -> list:
+  1127→        """
+  1128→        Run a simplified trading backtest on OOS data.
+  1129→
+  1130→        For each pattern in OOS symbols:
+  1131→        1. Look up the pattern in the trie
+  1132→        2. If matched with sufficient confidence, enter a trade
+  1133→        3. Apply simple SL/TP exit logic
+  1134→        4. Record the trade PnL
+  1135→
+  1136→        Returns list of trade dicts with pnl_pct and direction.
+  1137→        """
+  1138→        trades = []
+  1139→        in_position = False
+  1140→        entry_price = 0.0
+  1141→        entry_sl = 0.0
+  1142→        entry_tp = 0.0
+  1143→        position_direction = "LONG"
+  1144→
+  1145→        for i in range(len(oos_symbols) - self.pattern_length):
+  1146→            pattern = oos_symbols[i:i + self.pattern_length]
+  1147→
+  1148→            # Get price for this candle position
+  1149→            candle_idx = min((i + self.pattern_length) * window_size, len(oos_df) - 1)
+  1150→            if candle_idx >= len(oos_df):
+  1151→                break
+  1152→
+  1153→            row = oos_df.iloc[candle_idx]
+  1154→            current_price = float(row["close"])
+  1155→            current_low = float(row["low"])
+  1156→            current_high = float(row["high"])
+  1157→
+  1158→            # SL/TP check for open positions
+  1159→            if in_position:
+  1160→                exited = False
+  1161→                if position_direction == "LONG":
+  1162→                    if current_low <= entry_sl:
+  1163→                        pnl = ((entry_sl - entry_price) / entry_price) * 100.0
+  1164→                        trades.append({"pnl_pct": round(pnl, 4), "direction": "LONG", "exit": "SL"})
+  1165→                        exited = True
+  1166→                    elif current_high >= entry_tp:
+  1167→                        pnl = ((entry_tp - entry_price) / entry_price) * 100.0
+  1168→                        trades.append({"pnl_pct": round(pnl, 4), "direction": "LONG", "exit": "TP"})
+  1169→                        exited = True
+  1170→                elif position_direction == "SHORT":
+  1171→                    if current_high >= entry_sl:
+  1172→                        pnl = ((entry_price - entry_sl) / entry_price) * 100.0
+  1173→                        trades.append({"pnl_pct": round(pnl, 4), "direction": "SHORT", "exit": "SL"})
+  1174→                        exited = True
+  1175→                    elif current_low <= entry_tp:
+  1176→                        pnl = ((entry_price - entry_tp) / entry_price) * 100.0
+  1177→                        trades.append({"pnl_pct": round(pnl, 4), "direction": "SHORT", "exit": "TP"})
+  1178→                        exited = True
+  1179→
+  1180→                if exited:
+  1181→                    in_position = False
+  1182→                    continue
+  1183→
+  1184→            # Pattern lookup for new entries
+  1185→            if in_position:
+  1186→                continue
+  1187→
+  1188→            node = trie.search(pattern)
+  1189→            if node is None:
+  1190→                # Try prefix match
+  1191→                node_prefix, depth = trie.search_prefix(pattern)
+  1192→                if node_prefix is not None and depth >= self.pattern_length - 1:
+  1193→                    node = node_prefix
+  1194→                else:
+  1195→                    continue
+  1196→
+  1197→            meta = node.metadata
+  1198→            if meta.historical_count < 3:  # Need minimum observations
+  1199→                continue
+  1200→
+  1201→            # Direction from win rate and expected move
+  1202→            confidence = meta.confidence
+  1203→            if confidence < 0.05:  # Minimum confidence gate
+  1204→                continue
+  1205→
+  1206→            # Determine direction from expected move
+  1207→            if meta.expected_move_pct > 0:
+  1208→                direction = "LONG"
+  1209→            elif meta.expected_move_pct < 0:
+  1210→                direction = "SHORT"
+  1211→            else:
+  1212→                continue  # No directional signal
+  1213→
+  1214→            # Enter trade
+  1215→            in_position = True
+  1216→            entry_price = current_price
+  1217→            position_direction = direction
+  1218→
+  1219→            if direction == "LONG":
+  1220→                entry_sl = current_price * (1 - self.sl_pct / 100.0)
+  1221→                entry_tp = current_price * (1 + self.tp_pct / 100.0)
+  1222→            else:
+  1223→                entry_sl = current_price * (1 + self.sl_pct / 100.0)
+  1224→                entry_tp = current_price * (1 - self.tp_pct / 100.0)
+  1225→
+  1226→        # Close any open position at end
+  1227→        if in_position and len(oos_df) > 0:
+  1228→            last_price = float(oos_df["close"].iloc[-1])
+  1229→            if position_direction == "LONG":
+  1230→                pnl = ((last_price - entry_price) / entry_price) * 100.0
+  1231→            else:
+  1232→                pnl = ((entry_price - last_price) / entry_price) * 100.0
+  1233→            trades.append({"pnl_pct": round(pnl, 4), "direction": position_direction, "exit": "END"})
+  1234→
+  1235→        return trades
+  1236→
