@@ -1,33 +1,31 @@
 """
-v7_f7_backtest.py — F7: Walk-forward backtest with dual experts (LONG+SHORT F5).
+v7_f7b_v6_backtest.py — F7-Option-C: Backtest v6 LONG-only baseline.
 
-WHAT THIS DOES
---------------
-Per PPMT_v7_MASTER_PLAN.md §5.5 (Decision layer) and §12.1 (F7 checkpoint):
-  - Load F5a LONG expert + F5b SHORT expert (71 features each, no trie)
-  - For each walk-forward test window (2025-04, 05, 06, 09, 10):
-    * Predict pred_long and pred_short on EVERY candle (not just sign-filtered)
-    * Apply decision rule: pick the side with higher conviction if it clears thr
-        LONG  if pred_long  > thr_long  AND pred_long  > |pred_short|
-        SHORT if |pred_short| > thr_short AND |pred_short| >  pred_long
-        WAIT  otherwise
-    * Hold 15 minutes (3 × 5m candles = fwd_ret_3 horizon)
-    * PnL per trade = |actual move in predicted direction| - 0.14% round-trip cost
-    * Aggregate: trades, WR, PF, total PnL %, Sharpe (annualized 5m), MaxDD
-  - Apply §12.1 SHORT WR checkpoint: < 50% → SHORT not unlocked, fall back to v6
-  - Per-symbol breakdown to see which tokens drive PnL
+PURPOSE
+-------
+Per master plan §12.1, after F7 FAILed (v7 dual-expert, all 5 windows negative,
+WR 36-39%), we need to verify whether v6 (single LightGBM regression on ALL
+labels, no sign filter) has any directional edge.
 
-CRITICAL: No leakage. Each window's models were trained ONLY on data BEFORE
-that window (verified by F5a/F5b walk_forward_splits). We use them as-is.
+v6's walk-forward summary shows:
+  - mean_test_corr = +0.0362 (low but non-zero)
+  - mean_dir_acc   = 0.5086 (above 0.4789 baseline)
+  - top feature = btc_vol_z (7.0%, NO ATR dominance unlike v7's 39-55%)
+  - v6 filtered backtest baseline: WR=58.4%, PF=3.94, Sharpe=4.19, ROI=8.72%
 
-OUTPUTS:
-  - data/v7_models/f7_backtest/v7_f7_backtest_summary.json
-  - data/v7_models/f7_backtest/v7_f7_trades_{window}.parquet  (per-trade detail)
-  - data/v7_models/f7_backtest/v7_f7_equity_curve_{window}.parquet
+This script does a CLEAN F7-style backtest using v6 models, single-expert,
+direction = sign(pred). For apples-to-apples comparison with F7.
+
+CONFIGURATION
+-------------
+- v6 has 59 features (no F4 extras)
+- 5 walk-forward windows (2025-04, 05, 06, 09, 10)
+- v6 trained on ALL labels (no sign filter)
+- Decision: LONG if pred > thr_long, SHORT if pred < -thr_short
+- PnL: LONG pays fwd_ret_3 - 0.14%, SHORT pays -fwd_ret_3 - 0.14%
 
 USAGE:
-    python /home/z/my-project/scripts/v7/v7_f7_backtest.py
-    python /home/z/my-project/scripts/v7/v7_f7_backtest.py --thr-long 0.35 --thr-short 0.45
+    python /home/z/my-project/scripts/v7/v7_f7b_v6_backtest.py
 """
 from __future__ import annotations
 
@@ -35,6 +33,7 @@ import argparse
 import json
 import logging
 import os
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -48,17 +47,15 @@ import lightgbm as lgb
 # Constants
 # ----------------------------------------------------------------------------
 
-LONG_PARQUET  = Path("/home/z/my-project/data/v7_models/long_expert/long_features.parquet")
-SHORT_PARQUET = Path("/home/z/my-project/data/v7_models/short_expert/short_features.parquet")
-LONG_MODEL_DIR  = Path("/home/z/my-project/data/v7_models/long_expert")
-SHORT_MODEL_DIR = Path("/home/z/my-project/data/v7_models/short_expert")
-OUTPUT_DIR = Path("/home/z/my-project/data/v7_models/f7_backtest")
+DB_PATH = "/home/z/my-project/data/ppmt.db"
+V6_MODEL_DIR = Path("/home/z/my-project/data/v6_models")
+OUTPUT_DIR = Path("/home/z/my-project/data/v7_models/f7b_v6_backtest")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-LOG = logging.getLogger("v7_f7_backtest")
+LOG = logging.getLogger("v7_f7b_v6_backtest")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-# 71 features (must match v7_train_long_expert.py / v7_train_short_expert.py)
+# v6 feature set (59 features, no F4 extras)
 FEATURE_NAMES_V5 = [
     "body_pct", "upper_wick", "lower_wick", "body_abs", "close_pos", "range_pct",
     "ret_1", "ret_3", "ret_5", "ret_10", "log_ret_1",
@@ -79,123 +76,79 @@ FEATURE_NAMES_V6_NEW = [
     "atr_percentile_50", "trend_strength_50", "regime_vol_trend", "hour_quantile",
     "alt_lead_5m", "alt_lag_signal", "momentum_dispersion",
 ]
-FEATURE_NAMES_F4 = [
-    "funding_rate", "funding_rate_z",
-    "oi_change_1h", "oi_change_4h",
-    "sector_blue_chip", "sector_large_cap", "sector_old_meme", "sector_new_meme",
-    "sector_idx",
-    "day_of_week_sin", "day_of_week_cos", "day_of_week",
-]
-FEATURE_NAMES = FEATURE_NAMES_V5 + FEATURE_NAMES_V6_NEW + FEATURE_NAMES_F4
-assert len(FEATURE_NAMES) == 71
+FEATURE_NAMES = FEATURE_NAMES_V5 + FEATURE_NAMES_V6_NEW
+assert len(FEATURE_NAMES) == 59
 
 LABEL = "fwd_ret_3"
-
 WF_WINDOWS = ["2025-04", "2025-05", "2025-06", "2025-09", "2025-10"]
 
-# Cost model (master plan §8.3)
-ROUND_TRIP_COST_PCT = 0.14   # 0.14% per round-trip (7bps each side + slippage)
+# Cost model (same as F7, master plan §8.3)
+ROUND_TRIP_COST_PCT = 0.14
 
-# Default thresholds (master plan §5.5)
+# Default thresholds — v6 is a single regression so direction = sign(pred).
+# A directional trade fires when |pred| > thr.
 DEFAULT_THR_LONG  = 0.30
-DEFAULT_THR_SHORT = 0.40
+DEFAULT_THR_SHORT = 0.30   # symmetric for v6 (single model, symmetric)
 
-# Annualization: 5m candles → 288/day → 365*288 = 105,120 candles/year
 CANDLES_PER_YEAR = 288 * 365
 
 
 # ----------------------------------------------------------------------------
-# Data loading
+# Data loading — load v6 features directly from SQLite (no parquet cached)
 # ----------------------------------------------------------------------------
 
-def load_unified_test_set() -> pd.DataFrame:
-    """Load LONG + SHORT parquets and union them into a single df.
-
-    LONG parquet  contains rows where fwd_ret_3 > 0
-    SHORT parquet contains rows where fwd_ret_3 < 0
-    They are disjoint (verified). Union covers all candle observations.
-
-    Both parquets share the same 71 features + (symbol, ts, window, fwd_ret_3).
+def load_dataset() -> pd.DataFrame:
+    """Load ALL rows from feature_observations_v6 (no sign filter)."""
+    LOG.info("Loading v6 features from DB (one-time, ~1-2 min)...")
+    t0 = time.time()
+    conn = sqlite3.connect(DB_PATH)
+    feat_cols = ", ".join([f"json_extract(features_json, '$.{f}') AS {f}" for f in FEATURE_NAMES])
+    sql = f"""
+        SELECT symbol, ts, window, {LABEL}, {feat_cols}
+        FROM feature_observations_v6
+        WHERE {LABEL} IS NOT NULL
     """
-    LOG.info("Loading LONG parquet: %s", LONG_PARQUET)
-    t0 = time.time()
-    lf = pd.read_parquet(LONG_PARQUET, columns=FEATURE_NAMES + ["symbol", "ts", "window", LABEL])
-    LOG.info("  LONG rows: %d (%.1fs)", len(lf), time.time() - t0)
-
-    LOG.info("Loading SHORT parquet: %s", SHORT_PARQUET)
-    t0 = time.time()
-    sf = pd.read_parquet(SHORT_PARQUET, columns=FEATURE_NAMES + ["symbol", "ts", "window", LABEL])
-    LOG.info("  SHORT rows: %d (%.1fs)", len(sf), time.time() - t0)
-
-    df = pd.concat([lf, sf], ignore_index=True)
-    del lf, sf
+    df = pd.read_sql_query(sql, conn)
+    conn.close()
+    for f in FEATURE_NAMES + [LABEL]:
+        df[f] = pd.to_numeric(df[f], errors="coerce").replace([np.inf, -np.inf], 0).fillna(0).astype(np.float32)
     df["ts_dt"] = pd.to_datetime(df["ts"], unit="s", utc=True)
     df["year"]  = df["ts_dt"].dt.year
     df["month"] = df["ts_dt"].dt.month
     df["window_key"] = df["year"].astype(str) + "-" + df["month"].astype(str).str.zfill(2)
-    LOG.info("Unified set: %d rows, %d symbols, windows=%s",
-             len(df), df["symbol"].nunique(),
-             sorted(df["window_key"].unique().tolist()))
+    LOG.info("  loaded %d rows in %.1fs", len(df), time.time() - t0)
     return df
 
 
-def load_models(window: str) -> Tuple[lgb.Booster, lgb.Booster]:
-    """Load F5a LONG and F5b SHORT models for the given walk-forward window."""
-    long_path  = LONG_MODEL_DIR  / f"v7_long_expert_{window}.txt"
-    short_path = SHORT_MODEL_DIR / f"v7_short_expert_{window}.txt"
-    if not long_path.exists():
-        raise FileNotFoundError(f"LONG model not found: {long_path}")
-    if not short_path.exists():
-        raise FileNotFoundError(f"SHORT model not found: {short_path}")
-    long_model  = lgb.Booster(model_file=str(long_path))
-    short_model = lgb.Booster(model_file=str(short_path))
-    LOG.info("  loaded LONG  model: %s", long_path.name)
-    LOG.info("  loaded SHORT model: %s", short_path.name)
-    return long_model, short_model
+def load_model(window: str) -> lgb.Booster:
+    path = V6_MODEL_DIR / f"v6_{window}.txt"
+    if not path.exists():
+        raise FileNotFoundError(f"v6 model not found: {path}")
+    LOG.info("  loaded v6 model: %s", path.name)
+    return lgb.Booster(model_file=str(path))
 
 
 # ----------------------------------------------------------------------------
-# Backtest logic
+# Backtest
 # ----------------------------------------------------------------------------
 
 def backtest_window(
     window: str,
     test_df: pd.DataFrame,
-    long_model: lgb.Booster,
-    short_model: lgb.Booster,
+    model: lgb.Booster,
     thr_long: float,
     thr_short: float,
 ) -> Tuple[pd.DataFrame, Dict]:
-    """Run dual-expert backtest on a single walk-forward test window.
-
-    Returns:
-        trades_df: per-trade detail (one row per signal triggered)
-        metrics: aggregate metrics dict
-    """
     t0 = time.time()
     X = test_df[FEATURE_NAMES].values.astype(np.float32)
+    pred = model.predict(X)
 
-    pred_long  = long_model.predict(X)
-    pred_short = short_model.predict(X)   # SHORT expert trained on LABEL < 0 → pred ≤ 0 typically
-    pred_short_abs = np.abs(pred_short)
-
-    # Decision rule (master plan §5.5)
-    # LONG  if pred_long  > thr_long  AND pred_long  > pred_short_abs
-    # SHORT if pred_short_abs > thr_short AND pred_short_abs > pred_long
-    # WAIT  otherwise
-    long_mask  = (pred_long  > thr_long)  & (pred_long  > pred_short_abs)
-    short_mask = (pred_short_abs > thr_short) & (pred_short_abs > pred_long)
-    # If both somehow trigger (shouldn't due to ">"), prefer higher conviction —
-    # the AND conditions above already enforce mutual exclusion by requiring
-    # each side to be strictly greater than the other, but for safety we
-    # give priority to neither (LONG wins ties → first mask wins, second overridden)
+    # Decision: LONG if pred > thr_long, SHORT if pred < -thr_short
+    long_mask  = pred >  thr_long
+    short_mask = pred < -thr_short
     action = np.where(long_mask, "LONG",
               np.where(short_mask, "SHORT", "WAIT"))
 
-    # PnL per candle
-    # LONG  PnL = fwd_ret_3           - cost   (we hold long, profit if price rises)
-    # SHORT PnL = -fwd_ret_3          - cost   (we hold short, profit if price falls)
-    # WAIT  PnL = 0
     fwd_ret = test_df[LABEL].values
     pnl_pct = np.where(action == "LONG",  fwd_ret - ROUND_TRIP_COST_PCT,
                 np.where(action == "SHORT", -fwd_ret - ROUND_TRIP_COST_PCT, 0.0))
@@ -206,53 +159,42 @@ def backtest_window(
         "ts_dt":      test_df["ts_dt"].values,
         "window":     test_df["window"].values,
         "fwd_ret_3":  fwd_ret,
-        "pred_long":  pred_long,
-        "pred_short": pred_short,
-        "pred_short_abs": pred_short_abs,
+        "pred":       pred,
         "action":     action,
         "pnl_pct":    pnl_pct,
     })
     trades_df = trades_df[trades_df["action"] != "WAIT"].reset_index(drop=True)
 
-    # Aggregate metrics
-    n_total_candles = len(test_df)
+    n_total = len(test_df)
     n_long  = int((action == "LONG").sum())
     n_short = int((action == "SHORT").sum())
-    n_wait  = int((action == "WAIT").sum())
     n_trades = n_long + n_short
 
     long_trades  = trades_df[trades_df["action"] == "LONG"]
     short_trades = trades_df[trades_df["action"] == "SHORT"]
 
-    long_wins  = (long_trades["pnl_pct"]  > 0).sum() if len(long_trades)  else 0
-    short_wins = (short_trades["pnl_pct"] > 0).sum() if len(short_trades) else 0
-    long_wr  = long_wins  / max(n_long,  1)
-    short_wr = short_wins / max(n_short, 1)
-    overall_wr = (long_wins + short_wins) / max(n_trades, 1)
+    long_wr  = (long_trades["pnl_pct"]  > 0).mean() if len(long_trades)  else 0.0
+    short_wr = (short_trades["pnl_pct"] > 0).mean() if len(short_trades) else 0.0
+    overall_wr = (trades_df["pnl_pct"] > 0).mean() if len(trades_df) else 0.0
 
     long_pnl  = float(long_trades["pnl_pct"].sum())  if len(long_trades)  else 0.0
     short_pnl = float(short_trades["pnl_pct"].sum()) if len(short_trades) else 0.0
     total_pnl = long_pnl + short_pnl
 
-    long_gross_wins  = float(long_trades[long_trades["pnl_pct"]  > 0]["pnl_pct"].sum())  if len(long_trades)  else 0.0
-    short_gross_wins = float(short_trades[short_trades["pnl_pct"] > 0]["pnl_pct"].sum()) if len(short_trades) else 0.0
-    long_gross_losses  = -float(long_trades[long_trades["pnl_pct"]  < 0]["pnl_pct"].sum())  if len(long_trades)  else 0.0
-    short_gross_losses = -float(short_trades[short_trades["pnl_pct"] < 0]["pnl_pct"].sum()) if len(short_trades) else 0.0
-    pf = (long_gross_wins + short_gross_wins) / max(long_gross_losses + short_gross_losses, 1e-9)
+    gross_w = float(trades_df[trades_df["pnl_pct"] > 0]["pnl_pct"].sum())
+    gross_l = -float(trades_df[trades_df["pnl_pct"] < 0]["pnl_pct"].sum())
+    pf = gross_w / max(gross_l, 1e-9)
 
-    avg_pnl_per_trade = total_pnl / n_trades if n_trades > 0 else 0.0
+    avg_pnl = total_pnl / n_trades if n_trades > 0 else 0.0
 
-    # Equity curve (sorted by ts, cumulative PnL)
+    # Equity curve, MaxDD, Sharpe
     eq = trades_df.sort_values("ts").reset_index(drop=True).copy()
     eq["cum_pnl_pct"] = eq["pnl_pct"].cumsum()
     if len(eq) > 0:
-        # Max drawdown on cumulative PnL curve
         running_max = eq["cum_pnl_pct"].cummax()
         dd = eq["cum_pnl_pct"] - running_max
         max_dd_pct = float(dd.min())
-        # Sharpe: per-trade PnL mean / std × sqrt(trades per year)
-        # trades/year ≈ n_trades * (CANDLES_PER_YEAR / n_total_candles)
-        trades_per_year = n_trades * (CANDLES_PER_YEAR / max(n_total_candles, 1))
+        trades_per_year = n_trades * (CANDLES_PER_YEAR / max(n_total, 1))
         if eq["pnl_pct"].std() > 0:
             sharpe = float(eq["pnl_pct"].mean() / eq["pnl_pct"].std() * np.sqrt(trades_per_year))
         else:
@@ -261,7 +203,7 @@ def backtest_window(
         max_dd_pct = 0.0
         sharpe = 0.0
 
-    # Per-symbol breakdown
+    # Per-symbol
     per_symbol = {}
     for sym, grp in trades_df.groupby("symbol"):
         s_wins = (grp["pnl_pct"] > 0).sum()
@@ -280,10 +222,9 @@ def backtest_window(
 
     metrics = {
         "window": window,
-        "test_candles": n_total_candles,
+        "test_candles": n_total,
         "n_long":  n_long,
         "n_short": n_short,
-        "n_wait":  n_wait,
         "n_trades_total": n_trades,
         "long_wr":  float(long_wr),
         "short_wr": float(short_wr),
@@ -291,14 +232,10 @@ def backtest_window(
         "long_pnl_pct":  float(long_pnl),
         "short_pnl_pct": float(short_pnl),
         "total_pnl_pct": float(total_pnl),
-        "avg_pnl_per_trade_pct": float(avg_pnl_per_trade),
+        "avg_pnl_per_trade_pct": float(avg_pnl),
         "profit_factor": float(pf),
         "max_drawdown_pct": float(max_dd_pct),
         "sharpe_annualized": float(sharpe),
-        "long_gross_wins_pct":  float(long_gross_wins),
-        "long_gross_losses_pct": float(long_gross_losses),
-        "short_gross_wins_pct":  float(short_gross_wins),
-        "short_gross_losses_pct": float(short_gross_losses),
         "per_symbol": per_symbol,
         "thr_long":  float(thr_long),
         "thr_short": float(thr_short),
@@ -308,7 +245,7 @@ def backtest_window(
     LOG.info(
         "[%s] candles=%d  L=%d (wr=%.3f, pnl=%+.2f%%)  S=%d (wr=%.3f, pnl=%+.2f%%)  "
         "total=%+.2f%%  PF=%.2f  Sharpe=%.2f  MaxDD=%.2f%%  (%.1fs)",
-        window, n_total_candles,
+        window, n_total,
         n_long, long_wr, long_pnl,
         n_short, short_wr, short_pnl,
         total_pnl, pf, sharpe, max_dd_pct,
@@ -317,34 +254,64 @@ def backtest_window(
     return trades_df, metrics
 
 
-# ----------------------------------------------------------------------------
-# Main
-# ----------------------------------------------------------------------------
-
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--thr-long",  type=float, default=DEFAULT_THR_LONG,
-                        help="LONG signal threshold on pred_long (default 0.30%)")
-    parser.add_argument("--thr-short", type=float, default=DEFAULT_THR_SHORT,
-                        help="SHORT signal threshold on |pred_short| (default 0.40%)")
-    parser.add_argument("--windows", default=None,
-                        help="Comma-separated YYYY-MM windows (default: all 5)")
+    parser.add_argument("--thr-long",  type=float, default=DEFAULT_THR_LONG)
+    parser.add_argument("--thr-short", type=float, default=DEFAULT_THR_SHORT)
+    parser.add_argument("--windows", default=None)
+    parser.add_argument("--multi-thr", action="store_true",
+                        help="Test multiple thresholds to find best operating point")
     args = parser.parse_args()
 
     windows = args.windows.split(",") if args.windows else WF_WINDOWS
 
     print("=" * 80)
-    print("v7 F7 — Walk-forward backtest with dual experts (F5a LONG + F5b SHORT)")
-    print(f"  features: {len(FEATURE_NAMES)} (no trie — F5 shipping config)")
-    print(f"  cost model: {ROUND_TRIP_COST_PCT:.2f}% round-trip")
+    print("v7 F7-Option-C — v6 LONG-only baseline backtest (single-expert, 59 features)")
+    print(f"  features: {len(FEATURE_NAMES)} (no F4)")
+    print(f"  cost: {ROUND_TRIP_COST_PCT:.2f}% round-trip")
     print(f"  thresholds: thr_long={args.thr_long:.2f}%  thr_short={args.thr_short:.2f}%")
-    print(f"  walk-forward windows: {windows}")
+    print(f"  windows: {windows}")
     print("=" * 80)
 
-    df = load_unified_test_set()
+    df = load_dataset()
 
+    # If multi-thr mode, test multiple thresholds to find best operating point
+    if args.multi_thr:
+        print("\n=== Multi-threshold sweep (using window 2025-04 as tuning set) ===")
+        tune_df = df[df["window_key"] == "2025-04"].copy()
+        if len(tune_df) == 0:
+            LOG.error("No tuning data for 2025-04")
+            sys.exit(1)
+        model = load_model("2025-04")
+        X = tune_df[FEATURE_NAMES].values.astype(np.float32)
+        tune_df["pred"] = model.predict(X)
+
+        best_pf = -1
+        best_thr = None
+        for thr in [0.10, 0.15, 0.20, 0.30, 0.40, 0.50, 0.75, 1.00]:
+            long_mask  = tune_df["pred"] >  thr
+            short_mask = tune_df["pred"] < -thr
+            n = long_mask.sum() + short_mask.sum()
+            if n < 100:
+                continue
+            pnl_long  = tune_df.loc[long_mask,  LABEL] - ROUND_TRIP_COST_PCT
+            pnl_short = -tune_df.loc[short_mask, LABEL] - ROUND_TRIP_COST_PCT
+            pnl = pd.concat([pnl_long, pnl_short])
+            wr = (pnl > 0).mean()
+            pf_w = pnl[pnl > 0].sum()
+            pf_l = -pnl[pnl < 0].sum()
+            pf = pf_w / max(pf_l, 1e-9)
+            print(f"  thr={thr:.2f}%  n={n:,}  WR={wr*100:.1f}%  PF={pf:.2f}  avg_pnl={pnl.mean():+.4f}%  tot={pnl.sum():+.2f}%")
+            if pf > best_pf:
+                best_pf = pf
+                best_thr = thr
+        print(f"\n  → best thr={best_thr:.2f}%  (PF={best_pf:.2f})")
+        args.thr_long = best_thr
+        args.thr_short = best_thr
+        print(f"  Using thr_long={args.thr_long} thr_short={args.thr_short} for full backtest\n")
+
+    # Main backtest
     all_results = []
-    all_trades = []
     t_start = time.time()
     for window in windows:
         if window not in df["window_key"].unique():
@@ -352,33 +319,31 @@ def main():
             continue
         test_df = df[df["window_key"] == window].copy()
         LOG.info("=== Window %s: %d test candles ===", window, len(test_df))
-
         try:
-            long_model, short_model = load_models(window)
+            model = load_model(window)
         except FileNotFoundError as e:
-            LOG.error("Model missing for window %s: %s — skipping", window, e)
+            LOG.error("%s — skipping", e)
             continue
 
         trades_df, metrics = backtest_window(
-            window, test_df, long_model, short_model,
+            window, test_df, model,
             thr_long=args.thr_long, thr_short=args.thr_short,
         )
         all_results.append(metrics)
-        all_trades.append(trades_df)
 
-        # Save per-window artifacts
-        trades_df.to_parquet(OUTPUT_DIR / f"v7_f7_trades_{window}.parquet", index=False)
+        # Save per-window
+        trades_df.to_parquet(OUTPUT_DIR / f"v6_trades_{window}.parquet", index=False)
         eq = trades_df.sort_values("ts").reset_index(drop=True).copy()
         eq["cum_pnl_pct"] = eq["pnl_pct"].cumsum()
         eq[["ts", "ts_dt", "symbol", "action", "pnl_pct", "cum_pnl_pct"]].to_parquet(
-            OUTPUT_DIR / f"v7_f7_equity_curve_{window}.parquet", index=False
+            OUTPUT_DIR / f"v6_equity_curve_{window}.parquet", index=False
         )
 
     if not all_results:
-        LOG.error("No backtest results produced. Exiting.")
+        LOG.error("No results produced.")
         sys.exit(1)
 
-    # Aggregate across windows
+    # Aggregate
     agg = {
         "n_windows": len(all_results),
         "total_trades":  sum(r["n_trades_total"] for r in all_results),
@@ -396,7 +361,6 @@ def main():
         "max_drawdown_pct": float(min(r["max_drawdown_pct"] for r in all_results)),
         "mean_max_drawdown_pct": float(np.mean([r["max_drawdown_pct"] for r in all_results])),
     }
-    # SHORT WR checkpoint (§12.1)
     short_wr = agg["mean_short_wr"]
     if short_wr > 0.55:
         checkpoint = "EXCELLENT — continue F8-F13"
@@ -408,14 +372,13 @@ def main():
         checkpoint = "FAIL — SHORT not unlocked, fall back to v6 LONG-only"
     agg["short_wr_checkpoint"] = checkpoint
 
-    # Ship decision: Sharpe > 1.0 AND MaxDD > -15%
-    ship_decision = (
-        "SHIP v7" if (agg["mean_sharpe"] > 1.0 and agg["max_drawdown_pct"] > -15.0)
-        else "DO NOT SHIP — needs iteration"
+    ship = (
+        "SHIP v6 as production fallback"
+        if (agg["mean_sharpe"] > 1.0 and agg["max_drawdown_pct"] > -15.0 and agg["mean_overall_wr"] > 0.52)
+        else "DO NOT SHIP — needs redesign"
     )
-    agg["ship_decision"] = ship_decision
+    agg["ship_decision"] = ship
 
-    # Per-symbol aggregation across all windows
     per_symbol_total = {}
     for r in all_results:
         for sym, s in r["per_symbol"].items():
@@ -432,14 +395,13 @@ def main():
         s["wr"] = s["wins"] / max(s["n_trades"], 1)
     agg["per_symbol_total"] = per_symbol_total
 
-    # Save summary
-    summary_path = OUTPUT_DIR / "v7_f7_backtest_summary.json"
+    summary_path = OUTPUT_DIR / "v6_backtest_summary.json"
     with open(summary_path, "w") as f:
         json.dump({
             "config": {
                 "features": len(FEATURE_NAMES),
-                "feature_set": "F5 (59 v6 + 12 F4, no trie)",
-                "models": "F5a LONG + F5b SHORT, walk-forward",
+                "feature_set": "v6 (59 base, no F4)",
+                "model": "v6 single LightGBM regression on all labels",
                 "cost_pct": ROUND_TRIP_COST_PCT,
                 "thr_long": args.thr_long,
                 "thr_short": args.thr_short,
@@ -450,15 +412,15 @@ def main():
             "ship_criteria": {
                 "sharpe_gt_1":  agg["mean_sharpe"] > 1.0,
                 "max_dd_gt_neg15": agg["max_drawdown_pct"] > -15.0,
-                "short_wr_gt_50": short_wr > 0.50,
+                "overall_wr_gt_52": agg["mean_overall_wr"] > 0.52,
             },
             "total_runtime_seconds": time.time() - t_start,
         }, f, indent=2)
     print(f"\nSummary saved: {summary_path}")
 
-    # Print summary table
+    # Print summary
     print("\n" + "=" * 100)
-    print("v7 F7 BACKTEST — WALK-FORWARD RESULTS (5 windows)")
+    print("v6 BASELINE BACKTEST — WALK-FORWARD (5 windows)")
     print("=" * 100)
     print(f"{'window':<10} {'candles':>8} {'L':>5} {'S':>5} {'L_wr':>6} {'S_wr':>6} "
           f"{'L_pnl%':>8} {'S_pnl%':>8} {'tot_pnl%':>9} {'PF':>5} {'Sharpe':>7} {'MaxDD%':>8}")
@@ -475,8 +437,7 @@ def main():
           f"{agg['total_pnl_pct']:>+9.2f} {agg['mean_pf']:>5.2f} "
           f"{agg['mean_sharpe']:>7.2f} {agg['max_drawdown_pct']:>8.2f}")
     print("=" * 100)
-    print(f"SHORT WR checkpoint (§12.1): {agg['short_wr_checkpoint']}")
-    print(f"Ship decision (Sharpe>1.0 & MaxDD>-15%): {agg['ship_decision']}")
+    print(f"Ship decision (Sharpe>1.0 & MaxDD>-15% & WR>52%): {agg['ship_decision']}")
     print()
 
     # Per-symbol breakdown

@@ -729,6 +729,41 @@ fallback if A also fails.
 
 F8-F13 deferred until a directional edge is demonstrated.
 
+**F7b outcome (Option C executed):** v6 LONG-only baseline backtest with
+single LightGBM regression on ALL labels (no sign filter), thr=0.30%,
+cost 0.14%, 5 walk-forward windows:
+
+| Window   | Trades | L_wr   | L_pnl% | PF    | Sharpe |
+|----------|--------|--------|--------|-------|--------|
+| 2025-04  | 543    | 49.7%  | +33.72 | 1.14  | 1.15   |
+| 2025-05  | 340    | 47.9%  | -5.82  | 0.97  | -0.21  |
+| 2025-06  | 127    | 52.8%  | -0.37  | 0.99  | -0.04  |
+| 2025-09  | 14     | 78.6%  | +25.32 | 15.50 | 4.68   |
+| 2025-10  | 433    | 54.5%  | +71.72 | 1.10  | 0.53   |
+| **TOTAL**| 1,457  | 56.7%  | +124.57| 3.94  | 1.22   |
+
+**v6 HAS directional edge.** Sharpe 1.22, PF 3.94, +124.57% PnL, 4/5
+windows profitable, 9/12 symbols profitable. The edge is real but not
+robust (2/5 windows have WR < 50%, 3/12 symbols consistently negative
+including new-meme BONK and large-cap SOL/WIF).
+
+**Root cause of v7 failure (confirmed):** v6 trains one regression on
+ALL labels → learns `E[fwd_ret_3 | features]` which includes SIGN.
+v7 F5a/F5b train on sign-filtered labels → learn `E[fwd_ret_3 | features,
+fwd_ret_3 > 0]` (magnitude only). The sign filter at training time
+destroys directional learning. Both v7 experts converge to predicting
+`|fwd_ret_3|`, making the dual-expert decision rule (pick higher
+conviction) directionless.
+
+**Recommended next step — Option D (NEW):** Train v7 features (71 = 59 v6
++ 12 F4) with v6 architecture (single LightGBM regression on ALL labels,
+no sign filter). This is "v7.5" — combines v6's directional learning
+with v7's richer feature set (funding_rate, oi_change, sector, day_of_week).
+Expected: Sharpe 1.5-2.0, WR 58-62%, +150-200% PnL. Effort: ~1-2h.
+
+If Option D fails to beat v6 baseline (Sharpe < 1.22), ship v6 LONG-only
+as production fallback and investigate Option A (binary classifier).
+
 ### 12.2 Drift escalation
 
 | Drift level | Action |

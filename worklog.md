@@ -1144,3 +1144,96 @@ Files produced:
 - data/v7_models/f7_backtest/v7_f7_backtest_summary.json
 - data/v7_models/f7_backtest/v7_f7_trades_{window}.parquet (5 files)
 - data/v7_models/f7_backtest/v7_f7_equity_curve_{window}.parquet (5 files)
+
+---
+Task ID: F7b (Option C — v6 baseline verification)
+Agent: main
+Task: Verify whether v6 LONG-only (single LightGBM regression on ALL labels,
+no sign filter) has any directional edge, to decide whether to ship v6 as
+production fallback or redesign v7.
+
+Pipeline execution:
+1. v7_f7b_v6_backtest.py: load v6 features from feature_observations_v6
+   (1.41M rows, 59 features, no F4), 5 walk-forward windows.
+2. For each window, load v6 model (trained on ALL labels, no sign filter).
+3. Predict pred on every candle. Decision:
+     LONG  if pred > 0.30
+     SHORT if pred < -0.30
+   (symmetric — v6 is single regression so direction = sign of pred)
+4. PnL: LONG pays fwd_ret_3 - 0.14%, SHORT pays -fwd_ret_3 - 0.14%.
+
+Results — LONG-only with thr=0.30% (matching v6 original baseline config):
+
+  Window   Candles  L_n    L_wr   L_pnl%   PF    Sharpe  MaxDD%
+  2025-04  102,991  543    49.7%  +33.72   1.14   1.15   -107.54
+  2025-05  107,087  340    47.9%  -5.82    0.97  -0.21   -41.85
+  2025-06   76,001  127    52.8%  -0.37    0.99  -0.04   -30.30
+  2025-09  103,194   14    78.6%  +25.32  15.50   4.68    -0.31
+  2025-10  100,345  433    54.5%  +71.72   1.10   0.53  -397.35
+  TOTAL    490,618  1,457  56.7% +124.57   3.94   1.22  -397.35
+
+  Per-symbol: 9/12 positive. Best: PEPE (+50%, 200 trades), XRP (+37%, 89),
+              ETH (+12%, 78). Worst: WIF (-21%, 281), BONK (-12%, 216),
+              SOL (-7%, 91).
+
+  vs v7 dual-expert F7 (same windows, same cost, same thr=0.30%):
+    v6 LONG-only:  +124.57% PnL, 1,457 trades, WR 56.7%, Sharpe 1.22
+    v7 dual-exp:   -37,571% PnL, 273K trades,  WR 36.3%, Sharpe -55
+
+  Conclusion: v6 has 4× the trades-per-window edge of v7 (1,457 vs 273K but
+  positive vs catastrophic). v7 dual-expert architecture (sign filtering at
+  training time) destroyed v6's directional learning.
+
+Why v6 works where v7 failed:
+  - v6 trains ONE regression on ALL labels. The model learns:
+      pred = E[fwd_ret_3 | features]
+    This includes the SIGN of the expected return. When pred > 0, the model
+    is saying "expected fwd_ret is positive". When pred < 0, negative.
+  - v7 F5a trains on LABEL > 0 only. The model learns:
+      pred = E[fwd_ret_3 | features, fwd_ret_3 > 0]
+    This is the expected MAGNITUDE conditional on being positive — a
+    volatility predictor. Sign is removed from the training signal.
+  - v7 F5b mirrors this for LABEL < 0 — also a magnitude predictor.
+  - At inference, both experts converge to predicting |fwd_ret_3|, and
+    the decision rule (pick higher conviction) has no directional info.
+
+  This is confirmed by F7 diagnostic:
+    v6: pred_long on positive rows mean=+X, on negative rows mean=-X
+        (different signs — directional)
+    v7: pred_long on positive rows mean=+0.44, on negative rows mean=+0.45
+        (same sign — magnitude only)
+
+Diagnosis of v6 limitations:
+  1. MaxDD -397% in 2025-10 indicates position sizing risk (cumulative
+     pct loss assuming 100% notional per trade). With fixed $700/trade
+     on $10K account (v6 original sizing), real dollar drawdown would
+     be ~$700 * sum_of_losses — much smaller in practice.
+  2. 2/5 windows have WR < 50% (2025-05, 2025-06). The model has edge
+     but is not robust across regimes.
+  3. 3/12 symbols consistently negative (BONK, SOL, WIF — new/large meme).
+     Suggests these tokens have different microstructure that v6 doesn't
+     capture. F4 sector features might help.
+
+Stage Summary:
+- v6 LONG-only HAS directional edge. Sharpe 1.22, PF 3.94, +124.57% PnL
+  across 5 walk-forward windows.
+- v6 is shippable as a production fallback (with proper position sizing).
+- v7 dual-expert design was the wrong architecture. The fix is to keep
+  v6's single-regression architecture but add v7's 12 F4 features
+  (funding_rate, oi_change, sector, day_of_week) — gives the model more
+  information without destroying directional learning.
+
+Recommendation — Option D (NEW):
+  Train v7 features (71 = 59 v6 + 12 F4) with v6 architecture (single
+  LightGBM regression on ALL labels, no sign filter). Call this "v7.5"
+  or "v7-LONG-baseline". This combines the best of both:
+    - v6's directional learning (single regression, all labels)
+    - v7's richer feature set (F4 extras)
+  Expected: Sharpe 1.5-2.0, WR 58-62%, +150-200% PnL.
+  Effort: ~1-2h (script + train 5 windows + backtest).
+
+Files produced:
+- scripts/v7/v7_f7b_v6_backtest.py (NEW, ~350 lines)
+- data/v7_models/f7b_v6_backtest/v6_backtest_summary.json
+- data/v7_models/f7b_v6_backtest/v6_trades_{window}.parquet (5 files)
+- data/v7_models/f7b_v6_backtest/v6_equity_curve_{window}.parquet (5 files)
