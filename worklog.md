@@ -190,3 +190,43 @@ Stage Summary:
 - Verdict: model is READY for paper-trading deployment
 - Recommended cadence: monthly retrain + alert if 7-day rolling AUC drops >0.05
 - Next: live paper-trading on Coinbase Advanced with $100/trade for 1 week
+
+---
+Task ID: v5_cb_v2-step7
+Agent: main
+Task: Paso 7 — Re-tune BAD_HOURS + ASIA_HOURS boost based on cb_v2 OOS hourly analysis
+
+Work Log:
+- Wrote scripts/v5/v5_analyze_hours_cb_v2.py — per-hour UTC PnL analysis on cb_v2 OOS
+- Ran analysis on 542,052 observations (RECENT_2026 + RANGE_2025), 139,788 signals at thresh=0.70
+- Found ALL 5 currently-blocked hours (4, 5, 9, 12, 16) are profitable on cb_v2:
+  * Hour 4: PF=8.20, avg=+2.562% (best PF of all 24 hours!)
+  * Hour 5: PF=6.97, avg=+2.458%
+  * Hour 9: PF=7.13, avg=+2.473%
+  * Hour 12: PF=5.83, avg=+2.328%
+  * Hour 16: PF=6.64, avg=+2.424%
+- NO hours have negative PnL or PF<1.5
+- ASIA hours only +0.5% better than non-Asia (boost is a no-op)
+- Edited src/ppmt/risk/v5_risk_gate_cb_v2.py:
+  * BAD_HOURS_UTC = set() (was {4,5,9,12,16})
+  * ASIA_HOURS_BOOST = 1.00 (was 1.15)
+  * Commented out Rule 1 (BLOCK BAD hours)
+  * Guarded Asia boost with `if ASIA_HOURS_BOOST != 1.0`
+- Synced changes to scripts/v5/v5_risk_gate_cb_v2.py
+- Re-ran v5_backtest_concurrent_cb_v2.py with re-tuned gate
+- Wrote STEP7_bad_hours_retune.md analysis
+- Committed + pushed: b8b7ffc
+
+Stage Summary:
+- BAD_HOURS rule came from v1 Binance trader history (real MEXC futures trades)
+- On cb_v2 OOS, the LGBM model already captures cyclical effects via hour_sin/hour_cos
+- All 5 blocked hours are profitable — rule was throwing away ~25% of signals
+- After re-tune: gate=ON matches gate=OFF on every metric (true no-op in fixed-size mode)
+- Backtest impact (thr=0.80 gate=ON mc=3):
+  * Trades: 12,320 -> 15,479 (+25%)
+  * Total PnL: $293k -> $368k (+25%)
+  * Return on capital-at-risk: +9,768% -> +12,272%
+- Gate is now a clean confidence-threshold + leverage-cap filter
+- Production recommendation: monitor per-hour PnL weekly, re-introduce blocks
+  only if any hour shows negative PnL for 2+ consecutive weeks
+- Next: live paper-trading setup OR size scaling study
