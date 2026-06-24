@@ -276,6 +276,51 @@ All sectors now exceed `min_obs` by ≥3× at seq=3 and ≥1.2× at seq=5. The N
 (regime-filtered) tier degrades gracefully via its existing N1 fallback when
 a specific (key, regime) bucket is sparse — no silent min_obs override needed.
 
+**F6 outcome (post-execution audit):** Trie features were extracted
+(`feature_observations_v7_trie`, 1.41M rows × 28 cols), integrated into
+materialized F6 parquets (96 features), and used to retrain LONG and SHORT
+experts across 5 walk-forward windows. Results vs F5 baseline:
+
+| Expert | Window   | F5 corr | F6 corr | Δ       | F5 top% | F6 top% | Δ       |
+|--------|----------|---------|---------|---------|---------|---------|---------|
+| LONG   | 2025-04  | +0.4779 | +0.4782 | +0.0003 | 52.4%   | 49.6%   | -2.8%   |
+| LONG   | 2025-05  | +0.5209 | +0.5219 | +0.0010 | 51.9%   | 47.1%   | -4.8%   |
+| LONG   | 2025-06  | +0.4451 | +0.4443 | -0.0008 | 54.9%   | 50.3%   | -4.5%   |
+| LONG   | 2025-09  | +0.4623 | +0.4604 | -0.0020 | 44.7%   | 49.7%   | +5.0%   |
+| LONG   | 2025-10  | +0.5665 | +0.5707 | +0.0042 | 42.7%   | 46.1%   | +3.4%   |
+| LONG   | **Mean** | +0.4745 | +0.4951 | +0.021  | max 55% | max 50% | -4.6    |
+| SHORT  | 2025-04  | +0.4890 | +0.4913 | +0.0023 | 38.6%   | 39.6%   | +1.0%   |
+| SHORT  | 2025-05  | +0.4963 | +0.4947 | -0.0015 | 42.9%   | 38.9%   | -4.0%   |
+| SHORT  | 2025-06  | +0.4321 | +0.4322 | +0.0001 | 47.6%   | 42.1%   | -5.6%   |
+| SHORT  | 2025-09  | +0.4088 | +0.4089 | +0.0000 | 40.3%   | 44.5%   | +4.2%   |
+| SHORT  | 2025-10  | +0.4567 | +0.4452 | -0.0115 | 41.2%   | 49.9%   | +8.6%   |
+| SHORT  | **Mean** | +0.4566 | +0.4545 | -0.002  | max 48% | max 50% | +2.3    |
+
+**Diagnosis (why F6 was neutral):**
+1. `trie_conflict_3/5 = 0.0` always (std=0): N2 always falls back to N1 because
+   with seq_len=[3,5] every (key, regime) bucket is dense enough — the
+   fallback never triggers, so N1 == N2, so `|N1 - N2| = 0`.
+2. `trie_agreement_3 ≈ 1.0` always (std=0.018): same cause — all four
+   predictions (n1_pred_3/5, n2_pred_3/5) reduce to the same dense lookup.
+3. `trie_n1_pred_3/5` have non-trivial variance (std=0.04/0.10) but max
+   correlation with `fwd_ret_3` is only 0.20 (and NEGATIVE for
+   `trie_strength_avg`).
+4. Top features remain `atr_pct` (39–50%), `last_3_range_sum` (12–22%),
+   `range_pct` (3–4%). All three are volatility/range measures — the model
+   is fundamentally a volatility predictor, not a directional predictor.
+5. LightGBM `feature_fraction=0.85` masks ~14 features per tree; with 96
+   features and only ~25 carrying real signal, trie features are outcompeted
+   by strong v6 features.
+
+**Decision: v7 final = F5 (71 features, no trie).** The trie machinery
+(`v7_trie_conflict.py`, `v7_extract_trie_features.py`, sector tries, encoders)
+is **kept as production-ready infrastructure** for future research, but is
+**not loaded into the v7 shipping model**. F7 backtest will use F5a/F5b
+models. Guard #3 (top_feat < 30%) remains a documented limitation — the
+"diversify signal sources" hypothesis was falsified, and the alternative
+(regularize ATR via feature_fraction_bundling or interaction constraints)
+is deferred to a possible post-F7 iteration if backtest PnL is insufficient.
+
 **Why [3, 5] is the right length:**
 1. LightGBM already captures longer horizons via `ret_5`, `ret_10`, `ret_15`,
    `log_ret_5/10` features — trie must complement, not duplicate.
@@ -513,9 +558,9 @@ minimum_trade_threshold = 0.30%  # pred must exceed this to enter
 | F3 | 4 sectorial tries + RegimePartitioned | 4-5h | DONE | F2 |
 | F4 | Features extras (funding rate, OI, sector) | 3-4h | DONE | F3 |
 | F5a | LightGBM-LONG expert (retrain with labels>0) | 2-3h | DONE | F4 |
-| F5b | LightGBM-SHORT expert (retrain with labels<0) | 2-3h | pending | F4 |
-| F6 | Trie conflict features (agreement, strength) | 1-2h | pending | F5a, F5b |
-| F7 | Walk-forward backtest (dual expert) | 4-6h | pending | F6 |
+| F5b | LightGBM-SHORT expert (retrain with labels<0) | 2-3h | DONE | F4 |
+| F6 | Trie conflict features (agreement, strength) | 1-2h | DONE (neutral) | F5a, F5b |
+| F7 | Walk-forward backtest (dual expert) | 4-6h | DONE — FAIL | F5 (F6 dropped) |
 | **CHECKPOINT** | If SHORT WR > 52%: continue. If < 50%: re-evaluate. | — | — | F7 |
 | F8 | Layer 1: Trie online (insert-after-predict) | 3-4h | pending | F7 |
 | F9 | Layer 2: Rolling retrain every 6h | 3-4h | pending | F8 |
@@ -652,6 +697,37 @@ After F7 (walk-forward backtest with dual experts):
 | 52-55% | ✅ Acceptable. Continue but monitor in F11. |
 | 50-52% | ⚠ Marginal. Investigate per-sector, per-window. May need F4 funding rate tuning. |
 | < 50% | ❌ SHORT not unlocked. Fall back to v6 LONG-only + 15m hedge. Document and stop. |
+
+**F7 outcome (post-execution):** SHORT WR = 38.5% (mean across 5 windows).
+LONG WR = 36.3%. Total PnL = -37,571% across 273K trades. Sharpe = -55.
+All 12 symbols negative, all 5 windows negative.
+
+**Verdict: ❌ SHORT not unlocked. LONG also fails.** Both experts are
+magnitude predictors with zero directional discriminative power. The
+"excellent" F5a/F5b WRs (79-83%) were artifacts of sign-filtered
+evaluation. In a real backtest, WR collapses to ~38% (below the ~52%
+breakeven required by the 0.14% round-trip cost).
+
+This invalidates the §5 dual-expert design (separate regressions on
+LABEL > 0 and LABEL < 0). The architectural fix is one of:
+
+- **Option A — Binary classifier:** single LightGBM, target =
+  `1 if fwd_ret_3 > 0.14 else 0`. Forces the model to learn direction,
+  not magnitude. Reuses all 71 v7 features.
+- **Option B — Straddle strategy:** accept that the model is a volatility
+  predictor. Enter LONG+SHORT simultaneously (delta-neutral). Profit when
+  `|fwd_ret_3| > 2 * cost = 0.28%`. Trades on `pred_long + |pred_short|`
+  (combined magnitude) instead of difference.
+- **Option C — v6 LONG-only baseline:** before redesigning, verify whether
+  v6's single regression on all labels has any directional edge. v6 was
+  trained without sign filtering, so it may have learned some direction.
+  1-2h to verify. If v6 has Sharpe > 0.5, ship v6 as production fallback.
+
+**Recommended next step:** Option C first (verify v6 baseline). If v6 also
+fails → Option A (binary classifier redesign). Option B (straddle) is a
+fallback if A also fails.
+
+F8-F13 deferred until a directional edge is demonstrated.
 
 ### 12.2 Drift escalation
 

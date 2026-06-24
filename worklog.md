@@ -1060,3 +1060,87 @@ Files produced:
 Next: F7 — Dual-expert backtest. Run LONG+SHORT F6 models on walk-forward
 test periods, compute combined PnL, and decide whether to ship F6 or fall
 back to F5a/F5b (which have identical performance with fewer features).
+
+---
+Task ID: F7
+Agent: main
+Task: Walk-forward backtest with dual experts (LONG F5a + SHORT F5b, 71 features)
+
+Goal: Validate v7 dual-expert design with real walk-forward backtest. Ship criteria:
+Sharpe > 1.0 AND MaxDD > -15% AND SHORT WR > 50% (§12.1).
+
+Pipeline execution:
+1. v7_f7_backtest.py: load LONG+SHORT F5 parquets (1.37M rows union, disjoint
+   on fwd_ret_3 sign), 5 walk-forward windows.
+2. For each window, load F5a LONG model + F5b SHORT model (trained on data
+   BEFORE that window — no leakage).
+3. Predict pred_long and pred_short on EVERY candle (positive+negative rows).
+4. Decision rule: LONG if pred_long>thr_long AND pred_long>|pred_short|,
+   SHORT if |pred_short|>thr_short AND |pred_short|>pred_long, WAIT otherwise.
+5. PnL: LONG pays fwd_ret_3 - 0.14%, SHORT pays -fwd_ret_3 - 0.14%.
+
+Results (5 walk-forward windows):
+  Window   Candles  L_n    S_n    L_wr   S_wr   L_pnl%   S_pnl%  tot_pnl%  PF   Sharpe  MaxDD%
+  2025-04  98,624   35,892 30,406 37.8%  39.1%  -4522    -4479   -9001    0.56 -55.89  -9002
+  2025-05  104,367  39,919 30,405 38.6%  38.4%  -5244    -4465   -9710    0.56 -56.36  -9721
+  2025-06  73,200   23,016 17,446 35.3%  38.5%  -3410    -2271   -5680    0.50 -61.62  -5714
+  2025-09  98,597   30,750 12,177 34.0%  36.4%  -4420    -1902   -6322    0.43 -67.35  -6333
+  2025-10  95,384   34,949 18,850 36.0%  40.3%  -4806    -2052   -6858    0.56 -34.87  -6884
+  TOTAL    470,172  164,526109,284 36.3% 38.5%  -22,402  -15,169 -37,571  0.52 -55.22  -9721
+
+  Per-symbol: ALL 12 tokens negative. BTC "least bad" (-528%, 3,957 trades).
+              WIF "best WR" (44.0%) but still -4,361% PnL.
+
+Verdict: SHIP DECISION = DO NOT SHIP. SHORT WR checkpoint = FAIL (<50%).
+
+Diagnosis — why F5 dual-expert fails catastrophically:
+  The F5 models have ZERO directional discriminative power. Prediction
+  distributions are essentially identical on positive-return rows vs
+  negative-return rows:
+
+    pred_long on positive rows: mean=+0.4414
+    pred_long on negative rows: mean=+0.4468  (Δ < 0.005, indistinguishable)
+    |pred_short| on positive rows: mean=+0.4484
+    |pred_short| on negative rows: mean=+0.4479 (Δ < 0.001, indistinguishable)
+
+  The "excellent" F5a WR of 79.9% was an ARTIFACT of sign-filtered evaluation:
+  testing the LONG expert only on rows where fwd_ret_3 > 0 measures
+  P(fwd_ret_3 > 0.14% | fwd_ret_3 > 0) which is high by construction, not by
+  prediction quality. In a real backtest where the sign is unknown ex-ante,
+  WR collapses to ~38% (below random, because cost 0.14% pushes breakeven
+  to ~52%).
+
+  Root cause: training LightGBM on LABEL > 0 only (LONG expert) makes the
+  model learn "expected magnitude of fwd_ret_3 conditional on it being
+  positive" — i.e., a volatility predictor. The model has no incentive to
+  distinguish sign because it never sees negative labels. Same for SHORT
+  expert. Both experts converge to predicting the same thing: |fwd_ret_3|.
+
+  This is consistent with F6's finding that atr_pct dominates feature
+  importance (39-55%). ATR is a volatility measure. The model is a
+  volatility predictor dressed up as a directional predictor.
+
+Stage Summary:
+- F7 delivery: complete. Backtest machinery works, per-trade and equity
+  curve parquets saved, summary JSON saved.
+- F7 outcome: v7 dual-expert design FAILS walk-forward backtest. -37,571%
+  total PnL, Sharpe -55, all 12 symbols negative, all 5 windows negative.
+- Decision: per §12.1, SHORT WR < 50% mandates "fall back to v6 LONG-only".
+  BUT v6 may have the same issue (single regression on all labels, likely
+  also magnitude-dominated). The real fix is to redesign the target:
+    Option A: Train a binary classifier (target = 1 if fwd_ret_3 > cost
+              threshold else 0). Forces directional learning.
+    Option B: Accept magnitude predictor, pivot to straddle strategy
+              (LONG+SHORT simultaneously, profit when |fwd_ret| > 2*cost).
+    Option C: Fall back to v6 LONG-only backtest first to see if v6 has
+              any directional edge (it trained on all labels, might be
+              marginally directional).
+  Recommend Option C first (1-2h to verify v6 baseline) before deciding
+  between A and B.
+
+Files produced:
+- scripts/v7/v7_f7_backtest.py (NEW, ~490 lines)
+- scripts/v7/v7_f7_debug.py (NEW, diagnostic, kept for reference)
+- data/v7_models/f7_backtest/v7_f7_backtest_summary.json
+- data/v7_models/f7_backtest/v7_f7_trades_{window}.parquet (5 files)
+- data/v7_models/f7_backtest/v7_f7_equity_curve_{window}.parquet (5 files)
