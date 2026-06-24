@@ -114,15 +114,32 @@ import numpy as np
 import pandas as pd
 import requests
 
-# Make ppmt package importable
+# Locate the repo root and the v5_risk_gate_cb_v2.py module file.
+# We load it DIRECTLY via importlib (bypassing ppmt.risk.__init__) so that
+# the paper trader doesn't pull in rich/yaml/sqlalchemy/etc. — only stdlib.
 _HERE = Path(__file__).resolve().parent
-for candidate in [_HERE.parent / "src", _HERE.parent.parent / "src", _HERE.parent / "ppmt" / "src"]:
-    if (candidate / "ppmt" / "risk" / "v5_risk_gate_cb_v2.py").exists():
-        sys.path.insert(0, str(candidate))
-        break
+_REPO_ROOT = _HERE.parent.parent
+_GATE_FILE = _REPO_ROOT / "src" / "ppmt" / "risk" / "v5_risk_gate_cb_v2.py"
+if not _GATE_FILE.exists():
+    # Fallback: try other candidate locations
+    for candidate in [_HERE.parent / "src" / "ppmt" / "risk" / "v5_risk_gate_cb_v2.py",
+                      _HERE.parent.parent / "src" / "ppmt" / "risk" / "v5_risk_gate_cb_v2.py"]:
+        if candidate.exists():
+            _GATE_FILE = candidate
+            break
+if not _GATE_FILE.exists():
+    raise FileNotFoundError(f"Could not find v5_risk_gate_cb_v2.py relative to {_HERE}")
+
+import importlib.util  # noqa: E402
+_spec = importlib.util.spec_from_file_location("v5_risk_gate_cb_v2", _GATE_FILE)
+_gate_mod = importlib.util.module_from_spec(_spec)
+# Register in sys.modules BEFORE exec so dataclasses can resolve their __module__
+sys.modules["v5_risk_gate_cb_v2"] = _gate_mod
+_spec.loader.exec_module(_gate_mod)
+SignalV5Cb = _gate_mod.SignalV5Cb
+evaluate_signal_cb_v2 = _gate_mod.evaluate_signal_cb_v2
 
 import lightgbm as lgb  # noqa: E402
-from ppmt.risk.v5_risk_gate_cb_v2 import SignalV5Cb, evaluate_signal_cb_v2  # type: ignore # noqa: E402
 
 LOG = logging.getLogger("v5_paper_trader")
 
