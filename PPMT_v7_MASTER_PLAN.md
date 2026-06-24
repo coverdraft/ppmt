@@ -467,7 +467,7 @@ minimum_trade_threshold = 0.30%  # pred must exceed this to enter
 | F0 | Cleanup repo + write master plan | 1h | DONE | None |
 | F1 | TrieNodeV6Metadata (8 fields, no SAX) | 1h | DONE | F0 |
 | F2 | OHLCV composite encoder (sectorized) | 3-4h | DONE | F1 |
-| F3 | 4 sectorial tries + RegimePartitioned | 4-5h | pending | F2 |
+| F3 | 4 sectorial tries + RegimePartitioned | 4-5h | DONE | F2 |
 | F4 | Features extras (funding rate, OI, sector) | 3-4h | pending | F3 |
 | F5a | LightGBM-LONG expert (retrain with labels>0) | 2-3h | pending | F4 |
 | F5b | LightGBM-SHORT expert (retrain with labels<0) | 2-3h | pending | F4 |

@@ -547,3 +547,77 @@ Stage Summary:
 - No SAX dependency, no scipy dependency (Acklam's algorithm for normal quantile)
 
 Next: F3 — 4 sectorial tries + RegimePartitionedTrie (use encoder keys as trie insertion keys, TrieNodeV6Metadata as node values).
+
+
+---
+Task ID: v7-f3-sector-tries
+Agent: super-z (main)
+Task: F3 — 4 sectorial tries + RegimePartitionedTrie (N1/N2 levels, fallback, prune, LRU, persistence).
+
+Work Log:
+- Read PPMT_v7_MASTER_PLAN.md §4.4 (N1/N2 only, no N3/N4), §4.5 (4 sectorial tries), §4.6 (asset classification)
+- Reviewed F1 TrieNodeV6Metadata API (prediction, prediction_for_regime, confidence, freshness_decay, is_trustworthy)
+- Reviewed F2 OHLCVCompositeEncoder API (encode_sequence, quantize, persistence)
+- Created scripts/v7/v7_sector_tries.py (~440 LOC):
+  * RegimePartitionedTrie dataclass (one per sector × seq_len):
+    - global_trie: dict[key -> TrieNodeV6Metadata] (N1 source, unconditional mean)
+    - regime_tries: dict[vol_regime 0-3 -> dict[key -> TrieNodeV6Metadata]] (N2 source, regime-conditional mean)
+    - insert(key, fwd_ret_15m, vol_regime, timestamp, is_trading_observation)
+      -> Updates BOTH global_trie AND regime_tries[vol_regime] (separate stats)
+      -> Periodic prune every 1000 inserts (PRUNE_EVERY_N_INSERTS)
+    - query_n1(key) -> (prediction, confidence, count)
+      Returns 0.0 if count < min_observations (default 3)
+    - query_n2(key, vol_regime, fallback_to_n1=True) -> (pred, conf, count, source)
+      source: 'n2' (regime-conditional) | 'n1_fallback' (regime node sparse, use N1) | 'n2_empty' (no data)
+      Lesson from v2.1 Config F: sparse N2/N4 hurts more than helps → always fallback by default
+    - query_all(key, vol_regime) -> dict with n1/n2 features + agreement/conflict/strength:
+      * agreement = 1 - |n1-n2| / (|n1|+|n2|+eps)  in [0,1]
+      * conflict = sign-difference scaled by magnitude (handles 0 vs nonzero as partial conflict)
+      * strength = avg(n1_conf, n2_conf) if N2 active, else n1_conf * 0.7 (penalize fallback)
+    - prune(min_count) -> removes nodes below threshold from global_trie + all regime_tries
+    - evict_lru(target_size) -> LRU eviction by last_observation_time when over max_nodes (100K)
+    - stats() -> node counts, total obs, avg/median/max per node, insert/prune counts
+    - to_dict/from_dict/to_json/from_json (JSON-serializable persistence)
+  * SectorTrieContainer dataclass:
+    - tries[sector][seq_len] = RegimePartitionedTrie (auto-initialized for all 4 sectors × allowed seq_lengths)
+    - SECTOR_MIN_OBS: blue_chip=30, large_cap=20, old_meme=15, new_meme=10 (from config/v7.yaml)
+    - insert_observation(symbol, candles, encoder, fwd_ret_15m, vol_regime, timestamp, is_trading_obs)
+      -> Routes to correct sector via symbol_to_sector()
+      -> Inserts into ALL allowed seq_lengths for that sector
+    - extract_features(symbol, candles, encoder, vol_regime) -> flat dict with 25 features:
+      Per seq_len: trie_n1_pred_{L}, trie_n1_conf_{L}, trie_n1_count_{L},
+                   trie_n2_pred_{L}, trie_n2_conf_{L}, trie_n2_count_{L}, trie_n2_source_{L},
+                   trie_agreement_{L}, trie_conflict_{L}, trie_strength_{L}
+      Aggregates: trie_n1_pred_avg, trie_n2_pred_avg, trie_agreement_avg, trie_strength_avg, trie_any_signal
+    - save_all(base_dir) / load_all(base_dir) -> writes/reads {sector}_{seq_len}.json files
+  * compute_vol_regime(atr_percentile, breakpoints=(25,50,75)) -> 0/1/2/3 (low/normal/high/extreme)
+- Created tests/v7/test_sector_tries.py (~770 LOC, 28 tests):
+  1-3.   RegimePartitionedTrie construction + invalid inputs
+  4-6.   insert + query_n1 (basic, below min_obs, missing key)
+  7-9.   query_n2 regime-conditional + fallback + fallback disable
+  10-12. query_all agreement/conflict/missing
+  13-14. prune + LRU eviction
+  15-17. SectorTrieContainer construction + insert + sector routing (12 symbols)
+  18-20. extract_features keys + empty + insufficient candles
+  21-23. persistence (dict + JSON file + container save/load all)
+  24-25. compute_vol_regime quartiles + custom breakpoints
+  26.    anti-leakage contract (insert doesn't retroactively change query)
+  27.    stats fields
+  28.    real_db_sanity_check: builds trie on 10000 BTC 5m candles
+         -> 965 nodes seq_len=10 (8.3 obs/node), 975 nodes seq_len=15 (8.2 obs/node)
+         -> 39 test-period matches at seq_len=10 (2% match rate, expected for 3^10=59049 key space)
+         -> 0 matches at seq_len=15 (3^15=14M key space too sparse, will improve with F4 data)
+  -> All 28 tests PASS
+
+Stage Summary:
+- F3 COMPLETE: SectorTrieContainer ready for F4 (features extras) and F6 (trie conflict features)
+- Trie architecture: 4 sectors × 2-3 seq_lengths × 4 vol_regimes = 24-32 sub-tries (manageable)
+- N2 fallback policy: when N2 node has < min_observations_regime, return N1 prediction
+  (avoids sparse N2 noise — lesson from v2.1 Config F "N4=0%")
+- 25 trie features per (symbol, candles, vol_regime) ready for LightGBM input
+- Anti-leakage: trie storage is stateless w.r.t. query timing; caller enforces INSERT-AFTER-PREDICT (§11.1)
+- Real DB sanity check: pipeline works end-to-end on BTC 5m data; coverage will improve
+  significantly in F4 when we add 6 months × 12 tokens × 5m candles (~500K obs, ~8x density)
+
+Next: F4 — Features extras (funding rate from Binance/Bybit API, OI, sector one-hot, higher-TF context).
+      Adds 6 new features to bring total from 59 to 65 (before trie features push to 72+).
