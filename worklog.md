@@ -129,3 +129,33 @@ Stage Summary:
 - 5m TF dominates (43,777 trades, WR=89.4%, PF=7.19) over 15m (16,474 trades, WR=84.2%, PF=4.53)
 - Compounded growth at 100 sequential trades = 10.49× account (+949%)
 - Next: concurrent backtest with capital allocation, walk-forward validation, live paper-trading
+
+---
+Task ID: v5_cb_v2-step5
+Agent: main
+Task: Paso 5 — Concurrent backtest with capital allocation (validate cb_v2 gate in realistic trading)
+
+Work Log:
+- Read existing scripts/v5/v5_backtest_concurrent_cb_v2.py
+- Verified it was already correctly wired (commit 4311133): uses SignalV5Cb/evaluate_signal_cb_v2, direction="LONG", expected_move=0.0
+- No code changes needed — just re-run
+- Loaded 291,650 RECENT_2026 observations, generated predictions, ran 16-config sweep
+- Sweep: thresh ∈ {0.65, 0.70, 0.75, 0.80} × gate ∈ {ON, OFF} × max_concurrent ∈ {3, 5}
+- Best config: thr=0.80 gate=OFF mc=3 → 15,479 trades, WR=88.0%, PF=6.23, +12,272% on capital-at-risk
+- Total PnL $368k on $3k capital-at-risk over 90 days
+- Wrote STEP5_concurrent_backtest.md analysis doc
+- Committed + pushed: 89894cf
+
+Stage Summary:
+- Concurrent backtest confirms cb_v2 gate works correctly under capacity constraints
+- Per-trade metrics IDENTICAL to sequential backtest (WR=88%, PF=6.23, avg=+2.378%)
+- 41,939 trades skipped on capacity (27% utilization) — room to grow with higher max_concurrent
+- KEY FINDING: gate=ON vs gate=OFF have identical per-trade quality. The BAD_HOURS rule
+  (from v1 Binance trader history) blocks 21% of signals without improving quality.
+  LGBM cb_v2 doesn't benefit from hour-of-day filtering — hour_sin/hour_cos features
+  already capture cyclical effects.
+- All 12 tokens profitable. BTC: 578 trades, WR=90.1%, avg=+2.530% (best per-trade quality).
+- 5m TF dominates 15m TF (more trades AND better per-trade quality).
+- Annualized +49,769% is mathematical — real forward returns will be lower due to
+  regime drift, market impact, and operational overhead.
+- Next: walk-forward validation, live paper-trading on Coinbase Advanced, BAD_HOURS re-tune.
