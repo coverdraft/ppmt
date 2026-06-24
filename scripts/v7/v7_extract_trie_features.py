@@ -6,12 +6,12 @@ For each row in feature_observations_v6 (1.41M rows × 12 symbols):
   2. Insert this row's outcome (fwd_ret_3) into trie
   3. Store 25 trie features in new SQLite table feature_observations_v7_trie
 
-PIPELINE:
+PIPELINE (post §4.5 revision: all sectors use seq_len=[3, 5]):
   - For each of 12 symbols (chronological order):
     - For each row (sorted by ts):
-      - Load last 15 candles from ohlcv_v6 ending at row.ts
-      - Encode with sector encoder → key per seq_len
-      - Query trie → 25 features (or 15 for new_meme which only has seq_len=5)
+      - Load last 5 candles (MAX_SEQ_LEN) from ohlcv_v6 ending at row.ts
+      - Encode with sector encoder → key per seq_len (3 and 5)
+      - Query trie → 25 features (10 per seq_len × 2 + 5 aggregates)
       - Insert (key, fwd_ret_3, vol_regime, ts) into trie (INSERT-AFTER-PREDICT)
   - Concat all per-symbol results → write to SQLite table
 
@@ -83,7 +83,7 @@ def get_completed_symbols() -> Set[str]:
 
 
 def create_table_if_not_exists(conn: sqlite3.Connection, sector_features: Dict[str, List[str]]) -> None:
-    """Create the trie features table with all union features (35 columns)."""
+    """Create the trie features table with all union features (25 columns post §4.5)."""
     # Use the UNION of all sector features so the table schema is uniform
     all_features = list(TRIE_FEATURE_NAMES)
     cols_sql = ",\n            ".join([f"{f} REAL" for f in all_features])
@@ -106,7 +106,7 @@ def create_table_if_not_exists(conn: sqlite3.Connection, sector_features: Dict[s
 
 def insert_symbol_rows(conn: sqlite3.Connection, df: pd.DataFrame, all_features: List[str]) -> int:
     """Insert one symbol's trie features into the SQLite table."""
-    # Build column list dynamically (sector may not produce all 35 features)
+    # Build column list dynamically (post §4.5 all sectors produce all 25 features)
     cols_present = [c for c in all_features if c in df.columns]
     n_cols = len(cols_present) + 3  # +3 for symbol, ts, vol_regime
     placeholders = ", ".join(["?"] * n_cols)
@@ -142,7 +142,7 @@ def main():
     print("v7 EXTRACT TRIE FEATURES (F6)")
     print(f"  source: ohlcv_v6 + feature_observations_v6 + encoders/")
     print(f"  output: SQLite table {TABLE_NAME} in {DB_PATH}")
-    print(f"  features: up to 35 (per-sector subset varies)")
+    print(f"  features: 25 (post §4.5: all sectors use seq_len=[3, 5])")
     print(f"  anti-leakage: INSERT-AFTER-PREDICT, trie grows incrementally")
     if args.symbol:
         print(f"  mode: SINGLE SYMBOL ({args.symbol})")

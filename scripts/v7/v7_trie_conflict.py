@@ -407,5 +407,5 @@ def get_trie_feature_names_for_symbol(symbol: str) -> List[str]:
 
 
 def get_all_possible_trie_feature_names() -> List[str]:
-    """Return the union of all trie feature names across all sectors (35 total)."""
+    """Return the union of all trie feature names across all sectors (25 total post §4.5)."""
     return list(TRIE_FEATURE_NAMES)
