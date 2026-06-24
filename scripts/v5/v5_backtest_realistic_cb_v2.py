@@ -35,10 +35,10 @@ except ImportError:
 # Make the ppmt package importable (try both layouts)
 _HERE = Path(__file__).resolve().parent
 for candidate in [_HERE.parent / "ppmt" / "src", _HERE.parent / "src", _HERE.parent.parent / "src"]:
-    if (candidate / "ppmt" / "risk" / "v5_risk_gate.py").exists():
+    if (candidate / "ppmt" / "risk" / "v5_risk_gate_cb_v2.py").exists():
         sys.path.insert(0, str(candidate))
         break
-from ppmt.risk.v5_risk_gate import SignalV5, evaluate_signal  # type: ignore
+from ppmt.risk.v5_risk_gate_cb_v2 import SignalV5Cb, evaluate_signal_cb_v2  # type: ignore
 
 LOG = logging.getLogger("v5_backtest_cb_v2")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -189,20 +189,20 @@ def run_backtest(df: pd.DataFrame, thresh: float, use_gate: bool,
     for idx, row in sig.iterrows():
         if use_gate:
             asset_class = TOKEN_CLASS.get(row["symbol"], row["asset_class"])
-            s = SignalV5(
+            s = SignalV5Cb(
                 symbol=row["symbol"],
                 asset_class=asset_class,
                 timeframe=row["timeframe"],
-                direction=row["direction"],
+                direction="LONG",  # cb_v2 label is LONG-directional
                 entry_price=100.0,
-                expected_move_pct=row["prior_expected_move"],
-                win_rate=row["prior_win_rate"],
+                expected_move_pct=0.0,    # not used by cb_v2 gate
+                win_rate=0.0,             # not used by cb_v2 gate
                 confidence=row["proba"],
                 hour_utc=int(row["hour_utc"]),
                 leverage=base_lev,
                 size_usd=base_size,
             )
-            d = evaluate_signal(s)
+            d = evaluate_signal_cb_v2(s)
             if d.approved:
                 approved_idx.append(idx)
                 leverages.append(d.adjusted_leverage)
@@ -223,7 +223,7 @@ def run_backtest(df: pd.DataFrame, thresh: float, use_gate: bool,
             label_hit_tp_first=row["label_hit_tp_first"],
             label_pnl=row["label_pnl"],
             leverage=int(row["lev"]),
-            direction=row["direction"],
+            direction="LONG",  # cb_v2 label is LONG-directional by construction
         )
         sim_results.append(sim)
     appr["gross_pnl_pct"] = [s["gross_pnl_pct"] for s in sim_results]
@@ -319,7 +319,9 @@ def main():
     # Load model and predict
     model = lgb.Booster(model_file=str(MODEL_PATH))
     df["proba"] = model.predict(df[feature_cols].values)
-    df["direction"] = np.where(df["prior_expected_move"] > 0, "LONG", "SHORT")
+    # cb_v2 label is LONG-directional by construction (label_hit_tp_first = 1 means
+    # price hit +0.6% TP before -0.4% SL on a LONG). All signals are LONG.
+    df["direction"] = "LONG"
     LOG.info("Predictions generated. Proba stats: min=%.3f mean=%.3f max=%.3f",
              df["proba"].min(), df["proba"].mean(), df["proba"].max())
 

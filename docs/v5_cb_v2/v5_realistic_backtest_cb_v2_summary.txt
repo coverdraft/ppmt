@@ -3,32 +3,32 @@ V5 REALISTIC BACKTEST — cb_v2 model (SL=-0.4% TP=+0.6% bar-level, fees 0.05%*2
 ====================================================================================================
 Config                                            Trades     WR       PF    NetPnL%   AvgPnL
 ----------------------------------------------------------------------------------------------------
-thresh=0.50 gate=Y RECENT_2026      20086  0.846     4.69   43060.92    2.144
-thresh=0.50 gate=Y RANGE_2025       17387  0.847     4.72   37373.14    2.149
+thresh=0.50 gate=Y RECENT_2026      71323  0.844     4.61  151778.06    2.128
+thresh=0.50 gate=Y RANGE_2025       59310  0.863     5.37  134110.20    2.261
 thresh=0.50 gate=N RECENT_2026     101475  0.809     3.62  191376.50    1.886
 thresh=0.50 gate=N RANGE_2025       83743  0.829     4.14  169601.46    2.025
-thresh=0.55 gate=Y RECENT_2026      20086  0.846     4.69   43060.92    2.144
-thresh=0.55 gate=Y RANGE_2025       17387  0.847     4.72   37373.14    2.149
+thresh=0.55 gate=Y RECENT_2026      71323  0.844     4.61  151778.06    2.128
+thresh=0.55 gate=Y RANGE_2025       59310  0.863     5.37  134110.20    2.261
 thresh=0.55 gate=N RECENT_2026      95084  0.828     4.09  191524.48    2.014
 thresh=0.55 gate=N RANGE_2025       79024  0.847     4.70  169652.28    2.147
-thresh=0.60 gate=Y RECENT_2026      18994  0.862     5.33   42827.68    2.255
-thresh=0.60 gate=Y RANGE_2025       16376  0.864     5.40   37106.72    2.266
+thresh=0.60 gate=Y RECENT_2026      71323  0.844     4.61  151778.06    2.128
+thresh=0.60 gate=Y RANGE_2025       59310  0.863     5.37  134110.20    2.261
 thresh=0.60 gate=N RECENT_2026      88910  0.845     4.66  190103.20    2.138
 thresh=0.60 gate=N RANGE_2025       74499  0.863     5.35  168248.78    2.258
-thresh=0.65 gate=Y RECENT_2026      17869  0.877     6.06   42117.18    2.357
-thresh=0.65 gate=Y RANGE_2025       15344  0.878     6.15   36345.68    2.369
+thresh=0.65 gate=Y RECENT_2026      66109  0.861     5.29  148680.98    2.249
+thresh=0.65 gate=Y RANGE_2025       55528  0.878     6.12  131305.16    2.365
 thresh=0.65 gate=N RECENT_2026      82492  0.863     5.36  186419.24    2.260
 thresh=0.65 gate=N RANGE_2025       69829  0.878     6.10  164971.38    2.363
-thresh=0.70 gate=Y RECENT_2026      16497  0.895     7.26   40996.34    2.485
-thresh=0.70 gate=Y RANGE_2025       14134  0.893     7.13   34955.48    2.473
+thresh=0.70 gate=Y RECENT_2026      60251  0.880     6.23  143300.22    2.378
+thresh=0.70 gate=Y RANGE_2025       51216  0.893     7.15  126730.52    2.474
 thresh=0.70 gate=N RECENT_2026      75263  0.881     6.31  179689.86    2.387
 thresh=0.70 gate=N RANGE_2025       64525  0.893     7.13  159568.50    2.473
-thresh=0.75 gate=Y RECENT_2026      14929  0.912     8.88   38922.38    2.607
-thresh=0.75 gate=Y RANGE_2025       12841  0.910     8.65   33291.02    2.593
+thresh=0.75 gate=Y RECENT_2026      53474  0.899     7.59  134428.28    2.514
+thresh=0.75 gate=Y RANGE_2025       46349  0.910     8.63  120102.78    2.591
 thresh=0.75 gate=N RECENT_2026      66872  0.900     7.71  168749.84    2.523
 thresh=0.75 gate=N RANGE_2025       58416  0.910     8.66  151468.52    2.593
-thresh=0.80 gate=Y RECENT_2026      13089  0.931    11.41   35783.58    2.734
-thresh=0.80 gate=Y RANGE_2025       11305  0.927    10.75   30592.10    2.706
+thresh=0.80 gate=Y RECENT_2026      45791  0.919     9.70  121575.02    2.655
+thresh=0.80 gate=Y RANGE_2025       40698  0.927    10.84  110285.56    2.710
 thresh=0.80 gate=N RECENT_2026      57418  0.920     9.81  152783.96    2.661
 thresh=0.80 gate=N RANGE_2025       51349  0.927    10.82  139114.78    2.709
 
@@ -39,28 +39,37 @@ Symbol          Trades     WR       PF    NetPnL%   AvgPnL
 ----------------------------------------------------------------------------------------------------
 AVAXUSDT          5838  0.891     6.93   14325.36    2.454
 LINKUSDT          5480  0.896     7.32   13648.60    2.491
+BONKUSDT          6256  0.840     4.49   13158.32    2.103
+WIFUSDT           6390  0.832     4.21   13050.80    2.042
 ADAUSDT           5179  0.899     7.60   13022.38    2.514
+PEPEUSDT          5957  0.851     4.85   12951.54    2.174
+SHIBUSDT          5143  0.896     7.35   12822.46    2.493
+DOGEUSDT          5306  0.885     6.56   12815.32    2.415
+SOLUSDT           4836  0.902     7.88   12267.92    2.537
+ETHUSDT           4074  0.911     8.71   10577.28    2.596
+XRPUSDT           3955  0.891     6.95    9711.10    2.455
+BTCUSDT           1837  0.925    10.49    4949.14    2.694
 
 ====================================================================================================
 Per-timeframe breakdown (thresh=0.70, gate=ON, RECENT_2026)
 ====================================================================================================
 TF        Trades     WR       PF    NetPnL%   AvgPnL
 ----------------------------------------------------------------------------------------------------
-15m         4921  0.847     4.70   10560.62    2.146
-5m         11576  0.916     9.24   30435.72    2.629
+15m        16474  0.842     4.53   34797.28    2.112
+5m         43777  0.894     7.19  108502.94    2.479
 
 ====================================================================================================
 Cost analysis (thresh=0.70, gate=ON, RECENT_2026)
 ====================================================================================================
-Trades:          16497
-Gross PnL total: +57163.40% of margin
-Fees total:      11547.90% of margin  (0.700% per trade)
-Slippage total:  4619.16% of margin  (0.280% per trade)
-Net PnL total:   +40996.34% of margin
+Trades:          60251
+Gross PnL total: +202346.20% of margin
+Fees total:      42175.70% of margin  (0.700% per trade)
+Slippage total:  16870.28% of margin  (0.280% per trade)
+Net PnL total:   +143300.22% of margin
 Avg leverage:    7.0x
-Win rate:        0.895
-Profit factor:   7.26
-Avg PnL/trade:   +2.485% of margin
+Win rate:        0.880
+Profit factor:   6.23
+Avg PnL/trade:   +2.378% of margin
 
 REALISTIC CAPACITY ANALYSIS
 ----------------------------------------------------------------------------------------------------
@@ -68,11 +77,11 @@ Note: the test set has ~16,497 signals over ~3 months (~180/day).
 These overlap heavily in time — you cannot take all of them sequentially.
 Below: compounded account growth if you take only N sequential trades at
 avg_net_pnl_pct per trade (one-at-a-time, full margin redeployed):
-    10 trades (0.11/day): final account = 1.28x  (= ++27.8%)
-    50 trades (0.56/day): final account = 3.41x  (= ++241.2%)
-   100 trades (1.11/day): final account = 11.64x  (= ++1064.3%)
-   200 trades (2.22/day): final account = 135.56x  (= ++13455.9%)
-   500 trades (5.56/day): final account = 213953.33x  (= ++21395233.0%)
+    10 trades (0.11/day): final account = 1.26x  (= ++26.5%)
+    50 trades (0.56/day): final account = 3.24x  (= ++223.9%)
+   100 trades (1.11/day): final account = 10.49x  (= ++949.1%)
+   200 trades (2.22/day): final account = 110.07x  (= ++10906.7%)
+   500 trades (5.56/day): final account = 127099.05x  (= ++12709804.7%)
 
 ====================================================================================================
 Cost analysis (thresh=0.70, gate=OFF, RECENT_2026)  — all signals, no risk gate
@@ -90,9 +99,9 @@ Avg PnL/trade:   +2.387% of margin
 ====================================================================================================
 Cost analysis (thresh=0.80, gate=ON, RECENT_2026)  — highest-precision subset
 ====================================================================================================
-Trades:          13089
-Net PnL total:   +35783.58% of margin
+Trades:          45791
+Net PnL total:   +121575.02% of margin
 Avg leverage:    7.0x
-Win rate:        0.931
-Profit factor:   11.41
-Avg PnL/trade:   +2.734% of margin
+Win rate:        0.919
+Profit factor:   9.70
+Avg PnL/trade:   +2.655% of margin
