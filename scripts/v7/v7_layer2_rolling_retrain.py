@@ -161,8 +161,8 @@ def split_walk_forward(feat_df: pd.DataFrame, days: int) -> tuple[pd.DataFrame, 
     if span_days < days * 0.9:
         raise RuntimeError(f"data span {span_days:.2f}d < requested {days}d")
 
-    # Proportional split: 70/10/20 (balance: enough train + bigger test)
-    test_days = max(span_days * 0.20, 1.0)
+    # Proportional split: 83/10/7 (original — maximizes training data)
+    test_days = max(span_days * 0.07, 0.5)
     val_days = max(span_days * 0.10, 0.5)
 
     test_start_ts = ts_last - int(test_days * 86400 * 1000)
