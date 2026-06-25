@@ -1811,3 +1811,36 @@ Stage Summary:
     - Every 5m: paper trader fetches candle, predicts, logs trade
     - Every 6h: Layer 2 retrains model on latest 30d, deploys if better
 - Next phase: launch both in cron, monitor for 2-4 weeks, validate ship criteria.
+---
+Task ID: SESION-2-AI-001
+Agent: AI assistant (sesion 2)
+Task: Diagnostico, cambio horizonte, binary classification, tuning
+
+Work Log:
+- H=3 reg: best_iter=1, ruido puro
+- H=288: diagnostico 0.311 BTC, 0.236 ETH
+- dow eliminado (espuria)
+- Cambio a binary classification
+- Tuning: lr=0.01, n=2000, es=150
+- ETH: test_auc=0.630, best_iter=29
+- BTC: dead end
+
+Stage Summary:
+- ETH senal real a 24h (test_auc=0.630)
+- Pendiente: n_trades=0 en ETH---
+Task ID: SESION-2-AI-001
+Agent: AI assistant (sesion 2)
+Task: Diagnostico, cambio horizonte, binary classification, tuning
+
+Work Log:
+- H=3 reg: best_iter=1, ruido puro
+- H=288: diagnostico 0.311 BTC, 0.236 ETH
+- dow eliminado (espuria)
+- Cambio a binary classification
+- Tuning: lr=0.01, n=2000, es=150
+- ETH: test_auc=0.630, best_iter=29
+- BTC: dead end
+
+Stage Summary:
+- ETH senal real a 24h (test_auc=0.630)
+- Pendiente: n_trades=0 en ETH
