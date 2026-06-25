@@ -161,8 +161,8 @@ def split_walk_forward(feat_df: pd.DataFrame, days: int) -> tuple[pd.DataFrame, 
     if span_days < days * 0.9:
         raise RuntimeError(f"data span {span_days:.2f}d < requested {days}d")
 
-    # Proportional split: 83/10/7
-    test_days = max(span_days * 0.07, 0.5)
+    # Proportional split: 60/10/30 (larger test for more trades)
+    test_days = max(span_days * 0.30, 1.0)
     val_days = max(span_days * 0.10, 0.5)
 
     test_start_ts = ts_last - int(test_days * 86400 * 1000)
@@ -243,22 +243,21 @@ def evaluate_test(bst: lgb.Booster, test_df: pd.DataFrame) -> dict:
     auc_test = float(_auc(y_label, pred))
     dir_acc = float(((pred > 0.5) == (y_label > 0.5)).mean())
 
-    # --- Sequential backtest: enter, hold HORIZON bars, exit ---
+    # --- Sequential backtest: enter LONG, hold HORIZON bars, exit ---
+    # Only LONG trades — crypto has structural upward drift, SHORT fights the trend.
     # Only enter a new trade when not in a position.
-    # Each trade's PnL = sign * fwd_ret[entry_bar] - COST_PCT
+    # Each trade's PnL = fwd_ret[entry_bar] - COST_PCT
     MIN_HOLD = HORIZON  # hold for full prediction horizon (288 bars = 24h)
     WINDOW = 200
-    Q_LONG = 85
-    Q_SHORT = 15
+    Q_LONG = 80  # top 20% of recent predictions
 
     n_trades = 0
-    n_long = 0
-    n_short = 0
     n_win = 0
     pnl = 0.0
     in_trade = False
     exit_bar = 0
     recent_preds = []
+    trade_returns = []
 
     for i in range(len(pred)):
         p_val = float(pred[i])
@@ -273,51 +272,40 @@ def evaluate_test(bst: lgb.Booster, test_df: pd.DataFrame) -> dict:
             else:
                 continue
 
-        # Not in a trade — look for entry signal
+        # Not in a trade — look for LONG entry signal
         if len(recent_preds) < 20:
             continue
 
         q_high = np.percentile(recent_preds, Q_LONG)
-        q_low = np.percentile(recent_preds, Q_SHORT)
 
-        sig = 0
-        if p_val > q_high:
-            sig = 1
-        elif p_val < q_low:
-            sig = -1
-
-        if sig != 0 and not np.isnan(fwd_ret[i]):
+        if p_val > q_high and not np.isnan(fwd_ret[i]):
             n_trades += 1
-            trade_ret = sig * fwd_ret[i] - COST_PCT
+            trade_ret = fwd_ret[i] - COST_PCT
             pnl += trade_ret
+            trade_returns.append(trade_ret)
             in_trade = True
             exit_bar = i + MIN_HOLD
-            if sig == 1:
-                n_long += 1
-            else:
-                n_short += 1
             if trade_ret > 0:
                 n_win += 1
 
     win_rate = n_win / n_trades if n_trades > 0 else 0
     avg_ret = pnl / n_trades if n_trades > 0 else 0
+    sharpe_like = np.std(trade_returns) if len(trade_returns) > 1 else 0
 
     # Prediction distribution diagnostic
     LOG.info("pred stats: min=%.4f p10=%.4f p25=%.4f p50=%.4f p75=%.4f p90=%.4f max=%.4f mean=%.4f std=%.4f",
              float(pred.min()), float(np.percentile(pred, 10)), float(np.percentile(pred, 25)),
              float(np.percentile(pred, 50)), float(np.percentile(pred, 75)),
              float(np.percentile(pred, 90)), float(pred.max()), float(pred.mean()), float(pred.std()))
-    LOG.info("sequential backtest: hold=%d bars, q_long=%d q_short=%d",
-             MIN_HOLD, Q_LONG, Q_SHORT)
-    LOG.info("trades: n=%d (L=%d S=%d) win_rate=%.1f%% avg_ret=%.3f%% pnl=%.3f%%",
-             n_trades, n_long, n_short, win_rate * 100, avg_ret, pnl)
+    LOG.info("LONG-only sequential backtest: hold=%d bars, q_long=%d",
+             MIN_HOLD, Q_LONG)
+    LOG.info("trades: n=%d win_rate=%.1f%% avg_ret=%.3f%% pnl=%.3f%%",
+             n_trades, win_rate * 100, avg_ret, pnl)
     return {
         "n_test": len(X_test),
         "auc_test": auc_test,
         "dir_acc_test": dir_acc,
         "n_trades": n_trades,
-        "n_long": n_long,
-        "n_short": n_short,
         "win_rate": win_rate,
         "avg_ret_pct": avg_ret,
         "pnl_total_pct": float(pnl),
@@ -482,8 +470,7 @@ def run_one_retrain(feed: Feed, symbol: str, days: int = 90, dry_run: bool = Fal
             "auc_test": test_metrics.get("auc_test"),
             "dir_acc_test": test_metrics.get("dir_acc_test"),
             "n_trades_test": test_metrics.get("n_trades"),
-            "pnl_long_test": test_metrics.get("n_long_bars"),
-            "pnl_short_test": test_metrics.get("n_short_bars"),
+            "win_rate_test": test_metrics.get("win_rate"),
             "pnl_total_test": test_metrics.get("pnl_total_pct"),
             "feature_names": FEATURE_NAMES,
             "horizon": HORIZON,
