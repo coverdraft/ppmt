@@ -9,9 +9,9 @@ refresh on demand.
 
 Architecture follows v6_train_wf.py:
 - Single LightGBM regression on ALL labels (no sign filter — keeps directional learning)
-- Label = fwd_ret_3 (1-hour forward return in %, HORIZON=12 bars × 5min)
+- Label = fwd_ret_3 (24-hour forward return in %, HORIZON=288 bars × 5min)
 - 59 features (matches v6_extract_features.py)
-- Anti-leakage: num_leaves=31, lr=0.05, n_estimators=500, early_stopping=50
+- Anti-leakage: num_leaves=15, lr=0.02, n_estimators=1000, early_stopping=80 + L1/L2 reg
 """
 from __future__ import annotations
 
@@ -34,23 +34,27 @@ MODEL_DIR.mkdir(parents=True, exist_ok=True)
 DEFAULT_PARAMS = {
     "objective": "regression",
     "metric": ["rmse", "mae"],
-    "num_leaves": 31,
-    "learning_rate": 0.05,
-    "n_estimators": 500,
-    "early_stopping_rounds": 50,
-    "feature_fraction": 0.9,
-    "bagging_fraction": 0.8,
-    "bagging_freq": 5,
-    "min_data_in_leaf": 50,
+    "num_leaves": 15,           # was 31 — weaker trees resist overfit on noisy labels
+    "learning_rate": 0.02,      # was 0.05 — slower learning, more iterations needed
+    "n_estimators": 1000,       # was 500 — compensate lower lr
+    "early_stopping_rounds": 80, # was 50 — give more patience with lower lr
+    "feature_fraction": 0.7,    # was 0.9 — more randomness per tree
+    "bagging_fraction": 0.7,    # was 0.8 — more row subsampling
+    "bagging_freq": 3,          # was 5
+    "min_data_in_leaf": 100,    # was 50 — prevent tiny-leaf overfit
+    "lambda_l1": 0.1,          # L1 regularization — feature selection
+    "lambda_l2": 1.0,          # L2 regularization — smooth weights
     "verbosity": -1,
 }
 
-# Decision thresholds (from v7.5 walk-forward backtest: thr_long=0.20, thr_short=0.50)
-THR_LONG = 0.20
-THR_SHORT = 0.50
+# Decision thresholds — TODO: re-tune after HORIZON change
+# Old v7.5 values (thr_long=0.20, thr_short=0.50) were for 15m label
+# With 24h label, expected returns are ~4x larger, so thresholds scale up
+THR_LONG = 0.50
+THR_SHORT = 0.80
 # Cost per round-trip trade (entry + exit) in %
 COST_PCT = 0.14
-HORIZON = 12  # 12 * 5m = 1h forward (was 3=15m, too noisy)
+HORIZON = 288  # 288 * 5m = 24h forward (was 3=15m, then 12=1h, both too noisy)
 
 
 def model_path(symbol: str) -> Path:
