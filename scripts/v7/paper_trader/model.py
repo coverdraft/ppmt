@@ -9,7 +9,7 @@ refresh on demand.
 
 Architecture follows v6_train_wf.py:
 - Single LightGBM regression on ALL labels (no sign filter — keeps directional learning)
-- Label = fwd_ret_3 (15-minute forward return in %)
+- Label = fwd_ret_3 (1-hour forward return in %, HORIZON=12 bars × 5min)
 - 59 features (matches v6_extract_features.py)
 - Anti-leakage: num_leaves=31, lr=0.05, n_estimators=500, early_stopping=50
 """
@@ -50,7 +50,7 @@ THR_LONG = 0.20
 THR_SHORT = 0.50
 # Cost per round-trip trade (entry + exit) in %
 COST_PCT = 0.14
-HORIZON = 3  # 3 * 5m = 15m forward
+HORIZON = 12  # 12 * 5m = 1h forward (was 3=15m, too noisy)
 
 
 def model_path(symbol: str) -> Path:
