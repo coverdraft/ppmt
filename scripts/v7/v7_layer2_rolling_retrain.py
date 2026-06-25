@@ -226,43 +226,54 @@ def train_with_split(train_df: pd.DataFrame, val_df: pd.DataFrame, params: dict 
 
 
 def evaluate_test(bst: lgb.Booster, test_df: pd.DataFrame) -> dict:
-    """Evaluate trained classifier on held-out test set with quantile-based trading.
+    """Evaluate trained classifier with horizon-aligned sequential backtest.
 
-    Instead of fixed probability thresholds (PROB_LONG/SHORT), uses a rolling
-    quantile approach: go LONG when prediction is in the top 15% of recent
-    predictions, SHORT when in the bottom 15%. This avoids the problem of
-    poorly calibrated probabilities clumping around a narrow range.
+    Key insight: model predicts P(UP in 24h), so each trade holds for 24h.
+    Sequential backtest: no overlapping positions — enter, hold HORIZON bars, exit.
+    PnL for each trade = fwd_ret_3 (the actual 24h forward return at entry).
+    This eliminates churning and aligns holding period with prediction horizon.
     """
     if len(test_df) == 0:
         return {"n_test": 0}
     X_test = test_df[FEATURE_NAMES].values.astype(np.float32)
     y_label = test_df["label"].values.astype(np.float32)
+    fwd_ret = test_df["fwd_ret_3"].values.astype(np.float64)
     pred = bst.predict(X_test)
 
     auc_test = float(_auc(y_label, pred))
     dir_acc = float(((pred > 0.5) == (y_label > 0.5)).mean())
 
-    # --- Quantile-based signal generation ---
-    WINDOW = 200  # rolling window for quantile estimation
-    Q_LONG = 85   # go LONG if pred > 85th pctile of recent preds
-    Q_SHORT = 15  # go SHORT if pred < 15th pctile of recent preds
+    # --- Sequential backtest: enter, hold HORIZON bars, exit ---
+    # Only enter a new trade when not in a position.
+    # Each trade's PnL = sign * fwd_ret[entry_bar] - COST_PCT
+    MIN_HOLD = HORIZON  # hold for full prediction horizon (288 bars = 24h)
+    WINDOW = 200
+    Q_LONG = 85
+    Q_SHORT = 15
 
-    closes = test_df["close"].values.astype(np.float64)
-    bar_rets = np.diff(closes) / closes[:-1] * 100  # per-bar pct returns
-
-    position = 0
     n_trades = 0
+    n_long = 0
+    n_short = 0
+    n_win = 0
     pnl = 0.0
-    n_long_bars = 0
-    n_short_bars = 0
+    in_trade = False
+    exit_bar = 0
     recent_preds = []
 
-    for i in range(min(len(bar_rets), len(pred))):
+    for i in range(len(pred)):
         p_val = float(pred[i])
         recent_preds.append(p_val)
         if len(recent_preds) > WINDOW:
             recent_preds.pop(0)
 
+        # If in a trade, check if it's time to exit
+        if in_trade:
+            if i >= exit_bar:
+                in_trade = False
+            else:
+                continue
+
+        # Not in a trade — look for entry signal
         if len(recent_preds) < 20:
             continue
 
@@ -272,34 +283,43 @@ def evaluate_test(bst: lgb.Booster, test_df: pd.DataFrame) -> dict:
         sig = 0
         if p_val > q_high:
             sig = 1
-            n_long_bars += 1
         elif p_val < q_low:
             sig = -1
-            n_short_bars += 1
 
-        if sig != 0 and sig != position:
+        if sig != 0 and not np.isnan(fwd_ret[i]):
             n_trades += 1
-            pnl -= COST_PCT
-            position = sig
-        elif sig == 0 and position != 0:
-            position = 0
-        pnl += position * bar_rets[i]
+            trade_ret = sig * fwd_ret[i] - COST_PCT
+            pnl += trade_ret
+            in_trade = True
+            exit_bar = i + MIN_HOLD
+            if sig == 1:
+                n_long += 1
+            else:
+                n_short += 1
+            if trade_ret > 0:
+                n_win += 1
+
+    win_rate = n_win / n_trades if n_trades > 0 else 0
+    avg_ret = pnl / n_trades if n_trades > 0 else 0
 
     # Prediction distribution diagnostic
     LOG.info("pred stats: min=%.4f p10=%.4f p25=%.4f p50=%.4f p75=%.4f p90=%.4f max=%.4f mean=%.4f std=%.4f",
              float(pred.min()), float(np.percentile(pred, 10)), float(np.percentile(pred, 25)),
              float(np.percentile(pred, 50)), float(np.percentile(pred, 75)),
              float(np.percentile(pred, 90)), float(pred.max()), float(pred.mean()), float(pred.std()))
-    LOG.info("quantile trading: window=%d q_long=%d q_short=%d", WINDOW, Q_LONG, Q_SHORT)
-    LOG.info("trades: n_trades=%d n_long_bars=%d n_short_bars=%d pnl=%.3f%%",
-             n_trades, n_long_bars, n_short_bars, pnl)
+    LOG.info("sequential backtest: hold=%d bars, q_long=%d q_short=%d",
+             MIN_HOLD, Q_LONG, Q_SHORT)
+    LOG.info("trades: n=%d (L=%d S=%d) win_rate=%.1f%% avg_ret=%.3f%% pnl=%.3f%%",
+             n_trades, n_long, n_short, win_rate * 100, avg_ret, pnl)
     return {
         "n_test": len(X_test),
         "auc_test": auc_test,
         "dir_acc_test": dir_acc,
         "n_trades": n_trades,
-        "n_long_bars": n_long_bars,
-        "n_short_bars": n_short_bars,
+        "n_long": n_long,
+        "n_short": n_short,
+        "win_rate": win_rate,
+        "avg_ret_pct": avg_ret,
         "pnl_total_pct": float(pnl),
     }
 
