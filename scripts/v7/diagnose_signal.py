@@ -11,15 +11,23 @@ import numpy as np
 import pandas as pd
 from scripts.v7.v7_layer2_rolling_retrain import fetch_30d_data, HORIZON
 from scripts.v7.paper_trader.features import FEATURE_NAMES, extract_features
+from scripts.v7.paper_trader.feed import Feed
 
 def main():
     symbol = sys.argv[1] if len(sys.argv) > 1 else "BTC/USDT"
     days = int(sys.argv[2]) if len(sys.argv) > 2 else 30
     print(f"=== DIAGNÓSTICO {symbol} {days}d (HORIZON={HORIZON}) ===\n")
 
-    sym_df, btc_df, eth_df = fetch_30d_data(symbol, days)
+    feed = Feed(exchange_id="bybit")
+    sym_df, btc_df, eth_df = fetch_30d_data(feed, symbol, days)
     feat_df = extract_features(sym_df, btc_df, eth_df)
-    feat_df["fwd_ret_3"] = sym_df["close"].shift(-HORIZON) / sym_df["close"] - 1
+    # Label en porcentaje (igual que el entrenamiento: * 100)
+    c = feat_df["close"].values
+    n = len(feat_df)
+    fwd = np.full(n, np.nan)
+    for i in range(n - HORIZON):
+        fwd[i] = (c[i + HORIZON] - c[i]) / c[i] * 100
+    feat_df["fwd_ret_3"] = fwd
 
     valid = feat_df[FEATURE_NAMES + ["fwd_ret_3"]].dropna().reset_index(drop=True)
     print(f"Clean rows: {len(valid)}")
