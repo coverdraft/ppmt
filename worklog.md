@@ -779,3 +779,31 @@ Stage Summary:
 
 Next: F5b — LightGBM-SHORT expert (filter fwd_ret_3 < 0, sample_weight 2x drops + 2x BEAR_2022).
       Reuse v7_materialize_short_features.py pattern (parquet materialization) for fast load.
+
+---
+Task ID: v7-rebuild-and-option-d
+Agent: super-z (main)
+Task: Rebuild v7 environment after F5b/F6/F7/F7b work was lost (never committed) — execute Option D (v7.5: v7 features + v6 architecture)
+
+Context:
+- Previous session completed F5b/F6/F7/F7b but NEVER pushed to GitHub. All that work is lost.
+- Last commit on GitHub: F5a (17ac1ce). Local DB was 0 bytes (gitignored).
+- User instruction: "haz el mas correcto pero siempre debes guardar alli" → rebuild from scratch AND commit+push every step.
+
+Work Log:
+- Cloned repo from https://github.com/coverdraft/ppmt → /home/z/my-project/ppmt_v7/
+- Confirmed last commit is F5a; F5b/F6/F7/F7b are NOT in git history
+- Created symlink /home/z/my-project/data → /home/z/my-project/ppmt_v7/data (so hardcoded paths in scripts work)
+- Rebuilt DB from scratch:
+  * Downloaded OHLCV 5m for 7 windows (BEAR_2018_Q2_Q4, BEAR_2019_Q1, BEAR_2020_COVID, BEAR_2022, BULL_2024, RANGE_2025, RECENT_2026) × 12 symbols = 1,438,238 candles
+  * Ran v6_extract_features.py → 1,435,702 rows in feature_observations_v6 with fwd_ret_3
+  * Ran v7_prefetch_extras.py → 15,330 funding rates + 6,012 OI snapshots cached in data/v7_cache/
+  * Ran v7_extract_features_extras.py → 1,435,702 rows in feature_observations_v7_extras (12 F4 features)
+- Verified: 1.44M rows match what the previous session reported. Funding rates populated, OI is 0 for historical data (cache only covers 7 days, expected limitation).
+- Next: Create v7_train_v75.py (single regression, ALL labels, 71 features, 5 walk-forward windows)
+
+Stage Summary:
+- DB rebuilt: 1.44M feature observations with both v6 (59 features) and v7_extras (12 features)
+- All cache files (funding_cache.db, oi_cache.db) repopulated
+- Workspace stable at /home/z/my-project/ppmt_v7/
+- IMPORTANT: data/ is gitignored (3.3GB). DB must be rebuilt via v6_download_ohlcv.py + v6_extract_features.py + v7_prefetch_extras.py + v7_extract_features_extras.py if lost again.
