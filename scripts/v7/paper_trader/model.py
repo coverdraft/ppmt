@@ -43,16 +43,16 @@ MODEL_DIR.mkdir(parents=True, exist_ok=True)
 DEFAULT_PARAMS = {
     "objective": "binary",
     "metric": ["binary_logloss", "auc"],
-    "num_leaves": 15,
-    "learning_rate": 0.02,
-    "n_estimators": 1000,
-    "early_stopping_rounds": 80,
+    "num_leaves": 31,
+    "learning_rate": 0.01,
+    "n_estimators": 2000,
+    "early_stopping_rounds": 150,
     "feature_fraction": 0.7,
     "bagging_fraction": 0.7,
     "bagging_freq": 3,
-    "min_data_in_leaf": 100,
-    "lambda_l1": 0.1,
-    "lambda_l2": 1.0,
+    "min_data_in_leaf": 30,
+    "lambda_l1": 0.3,
+    "lambda_l2": 3.0,
     "verbosity": -1,
 }
 
