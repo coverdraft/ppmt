@@ -1732,3 +1732,82 @@ Stage Summary:
   - Or use trie as FILTER (block disagreeing trades) rather than ensemble
   - Or PCA-then-bin for denser pattern collision
 - 🚀 NEXT: F9 Layer 2 rolling retrain (6h cadence, 30d train window, acceptance gate)
+
+---
+Task ID: F9-LAYER2-ROLLING-RETRAIN
+Agent: main
+Task: Implement F9 Layer 2 rolling retrain (Option A from previous turn).
+Cadence: every 6h. Window: 30 days. Acceptance gate: deploy only if new
+val_dir_acc >= old - 2pp; reject if < old - 5pp. Atomic swap.
+
+Architecture (scripts/v7/v7_layer2_rolling_retrain.py — standalone script):
+- fetch_30d_data(feed, symbol, days): paginated OHLCV fetch from Bybit for
+  symbol + BTC + ETH (288 * days bars each)
+- split_walk_forward(feat_df, days): proportional 83/10/7 split into
+  train/val/test by timestamp (works for any window size, not just 30d)
+- train_with_split(train_df, val_df): trains v6-LONG LightGBM regression
+  (single regression on ALL labels, no sign filter — preserves directional
+  learning per F7b finding)
+- evaluate_test(bst, test_df): final acceptance gate — dir_acc + simulated
+  PnL with thr_long=0.20, thr_short=0.50, cost=0.14%
+- atomic_deploy(bst, meta, symbol): writes .tmp, fsync, atomic rename —
+  no half-written models on disk
+- run_one_retrain(feed, symbol, days, dry_run): full pipeline + acceptance
+  gate decision + CSV log
+
+Acceptance gate logic:
+  delta = new_val_dir_acc - old_val_dir_acc
+  - FIRST_DEPLOY          if no prior model
+  - ACCEPT                if delta >= -0.02 (within noise band)
+  - ACCEPT_WITH_WARNING   if -0.05 <= delta < -0.02 (grey zone)
+  - REJECT                if delta < -0.05 (significant regression)
+
+Bug fixed during smoke test:
+- Initial split_walk_forward was hardcoded for 30d (val=3d, test=2d),
+  leaving only 2d for train when --days 7 was used. Fixed: proportional
+  split (83/10/7) works for any window size, with min 0.5d floors.
+
+Smoke test results (2026-06-25 17:01 UTC, 7-day window):
+  Symbol     Decision             New dir_acc  Old dir_acc  Delta
+  BTC/USDT   ACCEPT               0.591       0.549        +0.042
+  ETH/USDT   REJECT               0.465       0.518        -0.053
+  SOL/USDT   ACCEPT_WITH_WARNING  0.551       0.580        -0.030
+
+All three acceptance gate branches exercised correctly:
+- BTC: significant improvement → DEPLOYED via atomic swap
+- ETH: significant regression (-5.3pp beyond REJECT_THRESHOLD=5pp) → kept old model
+- SOL: small regression (within grey zone) → DEPLOYED with warning
+
+End-to-end pipeline verified: Bybit fetch → 59 features → walk-forward split →
+LightGBM train → val evaluate → test evaluate → acceptance gate → atomic
+deploy → CSV log (data/paper_trading/logs/retrain_<SYM>.csv).
+
+Documentation:
+- RUNBOOK_layer2.md (NEW): complete operator guide with quick start, cron
+  config, acceptance gate logic, log schemas, daily/weekly review scripts,
+  rollback procedures, known limitations, F9.x roadmap.
+
+Master plan updated:
+- §16.15 phase table: F9 marked ✅ DONE, paper trader marked ✅ DONE
+- Immediate next steps updated: launch paper trading for 2-4 weeks, then
+  F9.1 (drift-based early trigger) and F9.2 (hot-reload in paper trader).
+
+Files produced:
+- scripts/v7/v7_layer2_rolling_retrain.py (~340 lines)
+- RUNBOOK_layer2.md (~280 lines)
+- data/paper_trading/logs/retrain_BTC_USDT.csv (1 row)
+- data/paper_trading/logs/retrain_ETH_USDT.csv (1 row)
+- data/paper_trading/logs/retrain_SOL_USDT.csv (3 rows)
+- data/paper_trading/models/v6_long_BTC_USDT.txt + _meta.json (refreshed)
+- data/paper_trading/models/v6_long_SOL_USDT.txt + _meta.json (refreshed)
+- (ETH not refreshed — REJECT kept the old model)
+
+Stage Summary:
+- F9 Layer 2 rolling retrain OPERATIONAL. Acceptance gate validated end-to-end.
+- Ready for cron deployment: `30 */6 * * *` with --symbols "BTC/USDT,ETH/USDT,SOL/USDT"
+- Paper trader will pick up new models automatically when run in --once mode
+  from cron; foreground mode requires restart (will be fixed in F9.2).
+- Combined with paper trader (Task PAPER-TRADER-v7.5), the full live loop is:
+    - Every 5m: paper trader fetches candle, predicts, logs trade
+    - Every 6h: Layer 2 retrains model on latest 30d, deploys if better
+- Next phase: launch both in cron, monitor for 2-4 weeks, validate ship criteria.

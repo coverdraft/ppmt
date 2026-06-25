@@ -1060,20 +1060,25 @@ For each candle (sorted by ts):
 
 **Conclusion:** F8 is **implemented, tested, and reproducible**, but the simple ensemble approach does not improve on the static baseline. The component is ready to plug into F9-F13, but should be re-tuned (or replaced with a filter approach) before going live.
 
-### 16.15 Status: F8 DONE, F9 next
+### 16.15 Status: F8 DONE, F9 DONE, paper trader DONE
 
 | Phase | Status | Notes |
 |-------|--------|-------|
 | F0-F7 | ✅ DONE | Trie v6, features, walk-forward backtest shipped |
 | F8 (Layer 1 online trie) | ✅ DONE | 21/21 tests pass; online sim shows no improvement over static |
-| F9 (Layer 2 rolling retrain) | ⏳ NEXT | Re-train LightGBM every 6h on rolling 30-day window |
+| F9 (Layer 2 rolling retrain) | ✅ DONE | `scripts/v7/v7_layer2_rolling_retrain.py` — 6h cadence, 30d window, atomic swap, acceptance gate (ACCEPT/ACCEPT_WITH_WARNING/REJECT/FIRST_DEPLOY) |
+| Paper trading harness | ✅ DONE | `scripts/v7/paper_trader/` package — live Bybit feed, v6-LONG LightGBM, CSV signal/equity logs, 3 models trained for BTC/ETH/SOL |
 | F10 (Adaptive SL/TP) | ⏳ pending | |
 | F11 (Walk-forward monthly) | ⏳ pending | |
 | F12 (Circuit breakers) | ⏳ pending | |
 | F13 (k-hours retune) | ⏳ pending | |
 
 **Immediate next steps:**
-1. **F9 rolling retrain** — implement `scripts/v7/v7_rolling_retrain.py` with 6h cadence, 30-day train window, validation acceptance gate (LONG WR > 60%, SHORT WR > 50%)
-2. **Paper trading harness** — `scripts/v7/v7_paper_trade.py` connecting to live OHLCV feed, using F8 trie + F9 rolling models
-3. **More symbols** — fix OHLCV download for the 7 missing tokens (target: 12 symbols total)
+1. ~~F9 rolling retrain~~ — ✅ DONE (see `RUNBOOK_layer2.md`)
+2. ~~Paper trading harness~~ — ✅ DONE (see `RUNBOOK_paper_trading.md`)
+3. **Launch paper trading in production** — run for 2-4 weeks, validate ship criteria (Sharpe>1.0, MaxDD>-15%, WR>52%, N>=50)
+4. **F9.1 — drift-based early trigger** (master plan §12.2): force retrain when |pred_avg_24h - outcome_avg_24h| > 0.5%
+5. **F9.2 — hot-reload in paper trader** (mtime check each cycle so foreground process picks up new models without restart)
+6. **More symbols** — fix OHLCV download for the 7 missing tokens (target: 12 symbols total)
+7. **F10 — Adaptive SL/TP manager** (master plan §7)
 
