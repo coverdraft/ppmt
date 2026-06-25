@@ -11,9 +11,10 @@ Per PPMT_v7_MASTER_PLAN.md §6.2 (adapted to v7.5 single-regression architecture
     2. Compute 58 v6 features (no leakage — all backward-looking, 'dow' removed).
     3. Compute fwd_ret_3 labels (24h forward return, HORIZON=288).
     4. Walk-forward split: train=days 1-75, val=days 76-84, test=days 85-90.
-    5. Subsample training rows every HORIZON bars to remove label autocorrelation.
-    6. Train v6-LONG LightGBM regression (single regression on ALL labels,
+    5. Train v6-LONG LightGBM regression (single regression on ALL labels,
        no sign filter — preserves directional learning per F7b finding).
+       Strong regularization (L1/L2, min_data_in_leaf=100) handles label
+       autocorrelation from 24h overlapping windows.
     6. Acceptance gate:
          - new_val_dir_acc >= current_val_dir_acc - ACCEPT_TOLERANCE (2pp)
            → ACCEPT (deploy new model via atomic swap)
@@ -320,21 +321,19 @@ def run_one_retrain(feed: Feed, symbol: str, days: int = 30, dry_run: bool = Fal
         LOG.exception("split failed for %s: %s", symbol, e)
         return 2, {"symbol": symbol, "decision": "ERROR", "error": str(e)}
 
-    if len(train_df) < 500:
+    if len(train_df) < 1000:
         LOG.error("%s: train set too small (%d); skipping", symbol, len(train_df))
         return 2, {"symbol": symbol, "decision": "ERROR", "error": f"train set too small: {len(train_df)}"}
 
-    # 3b. Subsample training rows every HORIZON bars to remove label autocorrelation.
-    #     With HORIZON=288 (24h), consecutive rows share 99.97% of their label window.
-    #     Subsampling gives ~1 independent sample per day instead of 288 correlated ones.
-    n_before = len(train_df)
-    train_df = train_df.iloc[::HORIZON].reset_index(drop=True)
-    LOG.info("%s: subsampled train %d → %d rows (every %d bars)",
-             symbol, n_before, len(train_df), HORIZON)
-
-    # 3c. Subsample val similarly (less critical but keeps evaluation honest)
-    val_df = val_df.iloc[::HORIZON].reset_index(drop=True)
-    LOG.info("%s: subsampled val → %d rows", symbol, len(val_df))
+    # 3b. NO subsampling — train/val on all rows with strong regularization instead.
+    #     With HORIZON=288 (24h), consecutive labels are 99.97% overlapping, so the
+    #     effective independent sample size is ~days, not ~bars. But LightGBM with
+    #     min_data_in_leaf=100, L1/L2 reg, low lr, and feature/bagging subsampling
+    #     is constrained enough to not overfit the autocorrelation structure.
+    #     Val is temporally out-of-sample (walk-forward), so direction accuracy
+    #     comparison between models is fair even with correlated rows.
+    LOG.info("%s: training on all %d rows (no subsample — regularization handles autocorr)",
+             symbol, len(train_df))
 
     # 4. Train
     bst, train_metrics = train_with_split(train_df, val_df)
