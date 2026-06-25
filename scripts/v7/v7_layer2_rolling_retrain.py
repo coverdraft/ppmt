@@ -240,6 +240,23 @@ def evaluate_test(bst: lgb.Booster, test_df: pd.DataFrame) -> dict:
     pnl_long = (y_ret[longs] - COST_PCT).sum() if longs.any() else 0.0
     pnl_short = (-y_ret[shorts] - COST_PCT).sum() if shorts.any() else 0.0
     n_trades = int(longs.sum() + shorts.sum())
+    # Prediction distribution diagnostic
+    pred_min = float(pred.min())
+    pred_max = float(pred.max())
+    pred_mean = float(pred.mean())
+    pred_std = float(pred.std())
+    pred_p10 = float(np.percentile(pred, 10))
+    pred_p25 = float(np.percentile(pred, 25))
+    pred_p50 = float(np.percentile(pred, 50))
+    pred_p75 = float(np.percentile(pred, 75))
+    pred_p90 = float(np.percentile(pred, 90))
+    n_above_long = int((pred > PROB_LONG).sum())
+    n_below_short = int((pred < PROB_SHORT).sum())
+    LOG.info("pred stats: min=%.4f p10=%.4f p25=%.4f p50=%.4f p75=%.4f p90=%.4f max=%.4f mean=%.4f std=%.4f",
+             pred_min, pred_p10, pred_p25, pred_p50, pred_p75, pred_p90, pred_max, pred_mean, pred_std)
+    LOG.info("threshold: PROB_LONG=%.2f -> %d/%d (%.1f%%), PROB_SHORT=%.2f -> %d/%d (%.1f%%)",
+             PROB_LONG, n_above_long, len(pred), 100*n_above_long/len(pred),
+             PROB_SHORT, n_below_short, len(pred), 100*n_below_short/len(pred))
     return {
         "n_test": len(X_test),
         "auc_test": auc_test,

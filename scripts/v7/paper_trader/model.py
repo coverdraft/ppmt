@@ -59,8 +59,8 @@ DEFAULT_PARAMS = {
 # Decision thresholds for binary classification
 # P(up) > PROB_LONG → LONG, P(up) < PROB_SHORT → SHORT, else WAIT
 # Asymmetric: crypto has structural upward drift, so SHORT needs higher conviction
-PROB_LONG = 0.55   # need 55%+ confidence to go LONG
-PROB_SHORT = 0.40   # need <40% confidence (i.e., >60% down) to go SHORT
+PROB_LONG = 0.51   # need 55%+ confidence to go LONG
+PROB_SHORT = 0.46   # need <40% confidence (i.e., >60% down) to go SHORT
 # Cost per round-trip trade (entry + exit) in %
 COST_PCT = 0.14
 HORIZON = 288  # 288 * 5m = 24h forward
