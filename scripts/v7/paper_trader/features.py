@@ -26,7 +26,10 @@ FEATURE_NAMES_V5 = [
     "bullish_engulf_2", "hammer_like", "shooting_star",
     "breakout_up", "breakout_down", "dist_to_high_20", "dist_to_low_20",
     "trend_50", "vol_regime", "trending",
-    "hour_sin", "hour_cos", "dow",
+    "hour_sin", "hour_cos",
+    # NOTE: "dow" REMOVED — with HORIZON=288 (24h forward), only ~4-5 samples per
+    # day-of-week in 30d window. Correlation is spurious (0.52 on BTC) and does not
+    # generalize. hour_sin/hour_cos capture intraday seasonality without overfitting.
 ]
 FEATURE_NAMES_V6_NEW = [
     "btc_ret_1m", "btc_ret_5m", "btc_ret_15m", "btc_vol_z",
@@ -37,7 +40,7 @@ FEATURE_NAMES_V6_NEW = [
     "alt_lead_5m", "alt_lag_signal", "momentum_dispersion",
 ]
 FEATURE_NAMES = FEATURE_NAMES_V5 + FEATURE_NAMES_V6_NEW
-assert len(FEATURE_NAMES) == 59
+assert len(FEATURE_NAMES) == 58  # was 59, removed 'dow'
 
 
 def compute_indicators_v5(df: pd.DataFrame) -> pd.DataFrame:

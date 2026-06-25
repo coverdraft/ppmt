@@ -4,14 +4,15 @@ v7_layer2_rolling_retrain.py — F9 Layer 2 rolling retrain.
 Per PPMT_v7_MASTER_PLAN.md §6.2 (adapted to v7.5 single-regression architecture):
 
   Trigger  : every 6h (00:00, 06:00, 12:00, 18:00 UTC) — driven by cron.
-  Window   : last 30 days of 5m candles (= 8640 bars per symbol).
+  Window   : last 90 days of 5m candles (= 25920 bars per symbol).
   Symbols  : BTC/USDT, ETH/USDT, SOL/USDT (configurable).
   Pipeline :
-    1. Fetch 30d OHLCV for symbol + BTC + ETH from Bybit (paginated).
-    2. Compute 59 v6 features (no leakage — all backward-looking).
-    3. Compute fwd_ret_3 labels.
-    4. Walk-forward split: train=days 1-25, val=days 26-28, test=days 29-30.
-    5. Train v6-LONG LightGBM regression (single regression on ALL labels,
+    1. Fetch 90d OHLCV for symbol + BTC + ETH from Bybit (paginated).
+    2. Compute 58 v6 features (no leakage — all backward-looking, 'dow' removed).
+    3. Compute fwd_ret_3 labels (24h forward return, HORIZON=288).
+    4. Walk-forward split: train=days 1-75, val=days 76-84, test=days 85-90.
+    5. Subsample training rows every HORIZON bars to remove label autocorrelation.
+    6. Train v6-LONG LightGBM regression (single regression on ALL labels,
        no sign filter — preserves directional learning per F7b finding).
     6. Acceptance gate:
          - new_val_dir_acc >= current_val_dir_acc - ACCEPT_TOLERANCE (2pp)
@@ -319,9 +320,21 @@ def run_one_retrain(feed: Feed, symbol: str, days: int = 30, dry_run: bool = Fal
         LOG.exception("split failed for %s: %s", symbol, e)
         return 2, {"symbol": symbol, "decision": "ERROR", "error": str(e)}
 
-    if len(train_df) < 1000:
+    if len(train_df) < 500:
         LOG.error("%s: train set too small (%d); skipping", symbol, len(train_df))
         return 2, {"symbol": symbol, "decision": "ERROR", "error": f"train set too small: {len(train_df)}"}
+
+    # 3b. Subsample training rows every HORIZON bars to remove label autocorrelation.
+    #     With HORIZON=288 (24h), consecutive rows share 99.97% of their label window.
+    #     Subsampling gives ~1 independent sample per day instead of 288 correlated ones.
+    n_before = len(train_df)
+    train_df = train_df.iloc[::HORIZON].reset_index(drop=True)
+    LOG.info("%s: subsampled train %d → %d rows (every %d bars)",
+             symbol, n_before, len(train_df), HORIZON)
+
+    # 3c. Subsample val similarly (less critical but keeps evaluation honest)
+    val_df = val_df.iloc[::HORIZON].reset_index(drop=True)
+    LOG.info("%s: subsampled val → %d rows", symbol, len(val_df))
 
     # 4. Train
     bst, train_metrics = train_with_split(train_df, val_df)
@@ -443,8 +456,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--symbol", default="SOL/USDT")
     p.add_argument("--symbols", default=None,
                    help="comma-separated list (overrides --symbol)")
-    p.add_argument("--days", type=int, default=30,
-                   help="training window in days (default 30)")
+    p.add_argument("--days", type=int, default=90,
+                   help="training window in days (default 90 for 24h label horizon)")
     p.add_argument("--exchange", default="bybit", choices=["bybit", "okx", "kraken", "coinbase"])
     p.add_argument("--dry-run", action="store_true",
                    help="train + evaluate but don't deploy")

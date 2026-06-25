@@ -10,7 +10,7 @@ refresh on demand.
 Architecture follows v6_train_wf.py:
 - Single LightGBM regression on ALL labels (no sign filter — keeps directional learning)
 - Label = fwd_ret_3 (24-hour forward return in %, HORIZON=288 bars × 5min)
-- 59 features (matches v6_extract_features.py)
+- 58 features (v6 minus 'dow' — spurious with 24h horizon)
 - Anti-leakage: num_leaves=15, lr=0.02, n_estimators=1000, early_stopping=80 + L1/L2 reg
 """
 from __future__ import annotations
