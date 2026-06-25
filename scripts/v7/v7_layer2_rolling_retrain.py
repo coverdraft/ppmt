@@ -73,6 +73,7 @@ from scripts.v7.paper_trader.feed import Feed
 from scripts.v7.paper_trader.model import (
     FEATURE_NAMES, train, load_model, load_metadata, is_trained,
     model_path, metadata_path, MODEL_DIR, DEFAULT_PARAMS, HORIZON,
+    PROB_LONG, PROB_SHORT, COST_PCT,
 )
 from scripts.v7.paper_trader.features import extract_features
 
@@ -81,17 +82,17 @@ LOG = logging.getLogger("pt_layer2")
 LOGS_DIR = SCRIPT_DIR.parents[2] / "data" / "paper_trading" / "logs"
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
-# Acceptance gate thresholds (percentage points)
-ACCEPT_TOLERANCE = 0.02     # 2pp — within this band of old dir_acc, accept (noise)
-REJECT_THRESHOLD = 0.05     # 5pp — beyond this, reject (significant regression)
+# Acceptance gate thresholds — now based on AUC instead of dir_acc
+ACCEPT_TOLERANCE = 0.02     # 2pp AUC — within this band, accept (noise)
+REJECT_THRESHOLD = 0.05     # 5pp AUC — beyond this, reject (significant regression)
 
 RETRAIN_LOG_HEADER = [
     "ts_utc", "ts_iso", "symbol",
     "window_days", "n_train", "n_val", "n_test",
-    "new_val_dir_acc", "new_val_rmse", "new_val_corr",
-    "old_val_dir_acc", "old_val_rmse",
-    "decision",  # ACCEPT, ACCEPT_WITH_WARNING, REJECT, FIRST_DEPLOY, ERROR
-    "delta_dir_acc",
+    "new_val_auc", "new_val_dir_acc", "new_val_logloss",
+    "old_val_auc", "old_val_dir_acc",
+    "decision",
+    "delta_auc",
     "model_path", "trained_at",
 ]
 
@@ -179,15 +180,15 @@ def split_walk_forward(feat_df: pd.DataFrame, days: int) -> tuple[pd.DataFrame, 
 
 
 def train_with_split(train_df: pd.DataFrame, val_df: pd.DataFrame, params: dict | None = None) -> tuple[lgb.Booster, dict]:
-    """Train LightGBM on train_df, evaluate on val_df. Returns (booster, metrics)."""
+    """Train LightGBM binary classifier on train_df, evaluate on val_df. Returns (booster, metrics)."""
     p = dict(DEFAULT_PARAMS)
     if params:
         p.update(params)
 
     X_tr = train_df[FEATURE_NAMES].values.astype(np.float32)
-    y_tr = train_df["fwd_ret_3"].values.astype(np.float32)
+    y_tr = train_df["label"].values.astype(np.float32)
     X_val = val_df[FEATURE_NAMES].values.astype(np.float32)
-    y_val = val_df["fwd_ret_3"].values.astype(np.float32)
+    y_val = val_df["label"].values.astype(np.float32)
 
     d_tr = lgb.Dataset(X_tr, label=y_tr, feature_name=FEATURE_NAMES, free_raw_data=False)
     d_val = lgb.Dataset(X_val, label=y_val, feature_name=FEATURE_NAMES, free_raw_data=False)
@@ -195,24 +196,25 @@ def train_with_split(train_df: pd.DataFrame, val_df: pd.DataFrame, params: dict 
     bst = lgb.train(
         p,
         d_tr,
-        num_boost_round=p.get("n_estimators", 500),
+        num_boost_round=p.get("n_estimators", 1000),
         valid_sets=[d_tr, d_val],
         valid_names=["train", "val"],
-        callbacks=[lgb.log_evaluation(period=100), lgb.early_stopping(p.get("early_stopping_rounds", 50), verbose=False)],
+        callbacks=[lgb.log_evaluation(period=100), lgb.early_stopping(p.get("early_stopping_rounds", 80), verbose=False)],
     )
 
     pred_val = bst.predict(X_val)
-    rmse_val = float(np.sqrt(np.mean((pred_val - y_val) ** 2)))
-    mae_val = float(np.mean(np.abs(pred_val - y_val)))
-    corr_val = float(np.corrcoef(pred_val, y_val)[0, 1]) if len(y_val) > 1 else 0.0
-    dir_acc = float(((pred_val > 0) == (y_val > 0)).mean())
+    # Binary classification metrics
+    auc_val = float(_auc(y_val, pred_val))
+    logloss_val = float(-np.mean(y_val * np.log(pred_val + 1e-15) + (1 - y_val) * np.log(1 - pred_val + 1e-15)))
+    dir_acc = float(((pred_val > 0.5) == (y_val > 0.5)).mean())
 
     metrics = {
         "best_iteration": int(bst.best_iteration) if bst.best_iteration else 0,
-        "rmse_val": rmse_val,
-        "mae_val": mae_val,
-        "corr_val": corr_val,
+        "auc_val": auc_val,
+        "logloss_val": logloss_val,
         "dir_acc_val": dir_acc,
+        "label_up_pct_train": float(y_tr.mean() * 100),
+        "label_up_pct_val": float(y_val.mean() * 100),
         "n_train": len(X_tr),
         "n_val": len(X_val),
     }
@@ -220,32 +222,51 @@ def train_with_split(train_df: pd.DataFrame, val_df: pd.DataFrame, params: dict 
 
 
 def evaluate_test(bst: lgb.Booster, test_df: pd.DataFrame) -> dict:
-    """Evaluate trained model on held-out test set (final acceptance gate)."""
+    """Evaluate trained classifier on held-out test set (final acceptance gate)."""
     if len(test_df) == 0:
         return {"n_test": 0}
     X_test = test_df[FEATURE_NAMES].values.astype(np.float32)
-    y_test = test_df["fwd_ret_3"].values.astype(np.float32)
+    y_label = test_df["label"].values.astype(np.float32)
+    y_ret = test_df["fwd_ret_3"].values.astype(np.float32)
     pred = bst.predict(X_test)
-    rmse = float(np.sqrt(np.mean((pred - y_test) ** 2)))
-    corr = float(np.corrcoef(pred, y_test)[0, 1]) if len(y_test) > 1 else 0.0
-    dir_acc = float(((pred > 0) == (y_test > 0)).mean())
-    # Trading simulation: LONG if pred > thr_long, SHORT if pred < -thr_short
-    from scripts.v7.paper_trader.model import THR_LONG, THR_SHORT, COST_PCT
-    longs = pred > THR_LONG
-    shorts = pred < -THR_SHORT
-    pnl_long = (y_test[longs] - COST_PCT).sum() if longs.any() else 0.0
-    pnl_short = (-y_test[shorts] - COST_PCT).sum() if shorts.any() else 0.0
+
+    auc_test = float(_auc(y_label, pred))
+    dir_acc = float(((pred > 0.5) == (y_label > 0.5)).mean())
+
+    # Trading simulation: LONG if P(up) > PROB_LONG, SHORT if P(up) < PROB_SHORT
+    longs = pred > PROB_LONG
+    shorts = pred < PROB_SHORT
+    # PnL: LONG gains y_ret, SHORT gains -y_ret, minus cost
+    pnl_long = (y_ret[longs] - COST_PCT).sum() if longs.any() else 0.0
+    pnl_short = (-y_ret[shorts] - COST_PCT).sum() if shorts.any() else 0.0
     n_trades = int(longs.sum() + shorts.sum())
     return {
         "n_test": len(X_test),
-        "rmse_test": rmse,
-        "corr_test": corr,
+        "auc_test": auc_test,
         "dir_acc_test": dir_acc,
         "n_trades": n_trades,
         "pnl_long_pct": float(pnl_long),
         "pnl_short_pct": float(pnl_short),
         "pnl_total_pct": float(pnl_long + pnl_short),
     }
+
+
+def _auc(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Simple AUC calculation without sklearn dependency."""
+    order = np.argsort(-y_pred)
+    y_sorted = y_true[order]
+    n_pos = y_sorted.sum()
+    n_neg = len(y_sorted) - n_pos
+    if n_pos == 0 or n_neg == 0:
+        return 0.5
+    tp = 0.0
+    auc = 0.0
+    for y in y_sorted:
+        if y == 1:
+            tp += 1
+        else:
+            auc += tp
+    return auc / (n_pos * n_neg)
 
 
 # ----------------------------------------------------------------------------
@@ -286,7 +307,7 @@ def log_retrain_row(row: dict, symbol: str) -> None:
         w.writerow([row.get(h, "") for h in RETRAIN_LOG_HEADER])
 
 
-def run_one_retrain(feed: Feed, symbol: str, days: int = 30, dry_run: bool = False) -> tuple[int, dict]:
+def run_one_retrain(feed: Feed, symbol: str, days: int = 90, dry_run: bool = False) -> tuple[int, dict]:
     """Run one retrain cycle for a single symbol. Returns (exit_code, result_dict)."""
     ts_now = int(time.time())
     ts_iso = dt.datetime.utcfromtimestamp(ts_now).isoformat()
@@ -301,7 +322,7 @@ def run_one_retrain(feed: Feed, symbol: str, days: int = 30, dry_run: bool = Fal
         log_retrain_row(row, symbol)
         return 2, row
 
-    # 2. Compute features + labels
+    # 2. Compute features + labels (binary: UP=1, DOWN=0)
     feat_df = extract_features(sym_df, btc_df, eth_df)
     c = feat_df["close"].values
     n = len(feat_df)
@@ -309,10 +330,11 @@ def run_one_retrain(feed: Feed, symbol: str, days: int = 30, dry_run: bool = Fal
     for i in range(n - HORIZON):
         fwd[i] = (c[i + HORIZON] - c[i]) / c[i] * 100
     feat_df["fwd_ret_3"] = fwd
+    feat_df["label"] = (fwd > 0).astype(int)  # 1 = UP, 0 = DOWN
 
     keep_mask = feat_df[FEATURE_NAMES].notna().all(axis=1) & feat_df["fwd_ret_3"].notna()
     feat_df = feat_df.loc[keep_mask].reset_index(drop=True)
-    LOG.info("%s: clean feature rows=%d", symbol, len(feat_df))
+    LOG.info("%s: clean rows=%d label_up=%.1f%%", symbol, len(feat_df), feat_df["label"].mean() * 100)
 
     # 3. Walk-forward split
     try:
@@ -325,42 +347,35 @@ def run_one_retrain(feed: Feed, symbol: str, days: int = 30, dry_run: bool = Fal
         LOG.error("%s: train set too small (%d); skipping", symbol, len(train_df))
         return 2, {"symbol": symbol, "decision": "ERROR", "error": f"train set too small: {len(train_df)}"}
 
-    # 3b. NO subsampling — train/val on all rows with strong regularization instead.
-    #     With HORIZON=288 (24h), consecutive labels are 99.97% overlapping, so the
-    #     effective independent sample size is ~days, not ~bars. But LightGBM with
-    #     min_data_in_leaf=100, L1/L2 reg, low lr, and feature/bagging subsampling
-    #     is constrained enough to not overfit the autocorrelation structure.
-    #     Val is temporally out-of-sample (walk-forward), so direction accuracy
-    #     comparison between models is fair even with correlated rows.
-    LOG.info("%s: training on all %d rows (no subsample — regularization handles autocorr)",
+    LOG.info("%s: training on %d rows — binary classification P(UP in 24h)",
              symbol, len(train_df))
 
     # 4. Train
     bst, train_metrics = train_with_split(train_df, val_df)
-    LOG.info("%s: trained — val_dir_acc=%.3f val_rmse=%.4f val_corr=%.3f best_iter=%d",
-             symbol, train_metrics["dir_acc_val"], train_metrics["rmse_val"],
-             train_metrics["corr_val"], train_metrics["best_iteration"])
+    LOG.info("%s: trained — val_auc=%.3f val_dir_acc=%.3f val_logloss=%.4f best_iter=%d",
+             symbol, train_metrics["auc_val"], train_metrics["dir_acc_val"],
+             train_metrics["logloss_val"], train_metrics["best_iteration"])
 
     # 5. Evaluate on test set
     test_metrics = evaluate_test(bst, test_df)
-    LOG.info("%s: test — dir_acc=%.3f n_trades=%d pnl_total=%.3f%%",
-             symbol, test_metrics.get("dir_acc_test", 0), test_metrics.get("n_trades", 0),
-             test_metrics.get("pnl_total_pct", 0))
+    LOG.info("%s: test — auc=%.3f dir_acc=%.3f n_trades=%d pnl_total=%.3f%%",
+             symbol, test_metrics.get("auc_test", 0), test_metrics.get("dir_acc_test", 0),
+             test_metrics.get("n_trades", 0), test_metrics.get("pnl_total_pct", 0))
 
-    # 6. Acceptance gate — compare to existing model
+    # 6. Acceptance gate — compare AUC to existing model
     has_prior = is_trained(symbol)
     if has_prior:
         try:
             old_meta = load_metadata(symbol)
-            old_dir_acc = float(old_meta.get("dir_acc_val", 0))
-            old_rmse = float(old_meta.get("rmse_val", 0))
+            old_auc = float(old_meta.get("auc_val", 0.5))
         except Exception:
             has_prior = False
-            old_dir_acc = 0.0
-            old_rmse = 0.0
+            old_auc = 0.5
+    else:
+        old_auc = 0.5
 
-    new_dir_acc = train_metrics["dir_acc_val"]
-    delta = new_dir_acc - (old_dir_acc if has_prior else 0)
+    new_auc = train_metrics["auc_val"]
+    delta = new_auc - (old_auc if has_prior else 0.5)
 
     if not has_prior:
         decision = "FIRST_DEPLOY"
@@ -371,8 +386,8 @@ def run_one_retrain(feed: Feed, symbol: str, days: int = 30, dry_run: bool = Fal
     else:
         decision = "ACCEPT_WITH_WARNING"
 
-    LOG.info("%s: acceptance gate — decision=%s delta_dir_acc=%+.3f (new=%.3f old=%.3f)",
-             symbol, decision, delta, new_dir_acc, old_dir_acc if has_prior else 0)
+    LOG.info("%s: acceptance gate — decision=%s delta_auc=%+.3f (new=%.3f old=%.3f)",
+             symbol, decision, delta, new_auc, old_auc if has_prior else 0.5)
 
     # 7. Deploy (or skip)
     deployed = False
@@ -381,16 +396,17 @@ def run_one_retrain(feed: Feed, symbol: str, days: int = 30, dry_run: bool = Fal
             "symbol": symbol,
             "trained_at": ts_now,
             "training_window_days": days,
+            "model_type": "binary_classification",
             "n_train": train_metrics["n_train"],
             "n_val": train_metrics["n_val"],
             "n_test": test_metrics.get("n_test", 0),
             "best_iteration": train_metrics["best_iteration"],
-            "rmse_val": train_metrics["rmse_val"],
-            "mae_val": train_metrics["mae_val"],
-            "corr_val": train_metrics["corr_val"],
+            "auc_val": train_metrics["auc_val"],
+            "logloss_val": train_metrics["logloss_val"],
             "dir_acc_val": train_metrics["dir_acc_val"],
-            "rmse_test": test_metrics.get("rmse_test"),
-            "corr_test": test_metrics.get("corr_test"),
+            "label_up_pct_train": train_metrics["label_up_pct_train"],
+            "label_up_pct_val": train_metrics["label_up_pct_val"],
+            "auc_test": test_metrics.get("auc_test"),
             "dir_acc_test": test_metrics.get("dir_acc_test"),
             "n_trades_test": test_metrics.get("n_trades"),
             "pnl_long_test": test_metrics.get("pnl_long_pct"),
@@ -398,11 +414,13 @@ def run_one_retrain(feed: Feed, symbol: str, days: int = 30, dry_run: bool = Fal
             "pnl_total_test": test_metrics.get("pnl_total_pct"),
             "feature_names": FEATURE_NAMES,
             "horizon": HORIZON,
+            "prob_long": PROB_LONG,
+            "prob_short": PROB_SHORT,
             "acceptance": {
                 "decision": decision,
-                "delta_dir_acc": delta,
-                "old_dir_acc": old_dir_acc if has_prior else None,
-                "new_dir_acc": new_dir_acc,
+                "delta_auc": delta,
+                "old_auc": old_auc if has_prior else None,
+                "new_auc": new_auc,
                 "accept_tolerance": ACCEPT_TOLERANCE,
                 "reject_threshold": REJECT_THRESHOLD,
             },
@@ -430,13 +448,13 @@ def run_one_retrain(feed: Feed, symbol: str, days: int = 30, dry_run: bool = Fal
         "n_train": train_metrics["n_train"],
         "n_val": train_metrics["n_val"],
         "n_test": test_metrics.get("n_test", 0),
-        "new_val_dir_acc": new_dir_acc,
-        "new_val_rmse": train_metrics["rmse_val"],
-        "new_val_corr": train_metrics["corr_val"],
-        "old_val_dir_acc": old_dir_acc if has_prior else 0,
-        "old_val_rmse": old_rmse if has_prior else 0,
+        "new_val_auc": new_auc,
+        "new_val_dir_acc": train_metrics["dir_acc_val"],
+        "new_val_logloss": train_metrics["logloss_val"],
+        "old_val_auc": old_auc if has_prior else 0,
+        "old_val_dir_acc": 0,
         "decision": decision,
-        "delta_dir_acc": delta,
+        "delta_auc": delta,
         "model_path": str(model_path(symbol)) if deployed else "",
         "trained_at": ts_now if deployed else "",
     }

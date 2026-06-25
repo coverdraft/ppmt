@@ -5,7 +5,7 @@ On each 5m candle close:
 1. Fetch latest closed OHLCV for the target symbol + BTC + ETH (200 bars each)
 2. Compute 59 features for the latest closed candle
 3. Predict fwd_ret_3 with the v6-LONG model
-4. Decision rule: LONG if pred > thr_long, SHORT if pred < -thr_short, else WAIT
+4. Decision rule: LONG if P(up) > prob_long, SHORT if P(up) < prob_short, else WAIT
 5. Manage any open position:
    - If a position is open and a new decision disagrees (LONG→SHORT or SHORT→LONG),
      close the open position at the current close, record PnL, open the new one.
@@ -34,7 +34,7 @@ from .feed import Feed
 from .features import latest_feature_row, FEATURE_NAMES
 from .model import (
     load_model, load_metadata, predict, train, is_trained,
-    THR_LONG, THR_SHORT, COST_PCT, HORIZON,
+    PROB_LONG, PROB_SHORT, COST_PCT, HORIZON,
 )
 
 LOG = logging.getLogger("pt_engine")
@@ -46,7 +46,7 @@ LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 SIGNAL_CSV_HEADER = [
     "ts_utc", "ts_iso", "symbol", "close",
-    "pred", "decision", "thr_long", "thr_short",
+    "pred", "decision", "prob_long", "prob_short",
     "action",  # OPEN_LONG, OPEN_SHORT, CLOSE_LONG, CLOSE_SHORT, HOLD, NO_ACTION
     "position_side", "position_bars_held",
     "entry_price", "exit_price", "pnl_pct", "cost_pct", "pnl_net_pct",
@@ -245,8 +245,8 @@ class Engine:
             "close": close,
             "pred": pred,
             "decision": decision,
-            "thr_long": THR_LONG,
-            "thr_short": THR_SHORT,
+            "prob_long": PROB_LONG,
+            "prob_short": PROB_SHORT,
             "action": action,
             "position_side": pos["side"] if pos else "",
             "position_bars_held": pos.get("bars_held", 0) if pos else 0,
