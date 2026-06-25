@@ -1146,3 +1146,57 @@ Stage Summary:
 - ⚠️ Muestra pequeña (289 trades) requiere validación en paper trading
 - 🚀 PRÓXIMO PASO: F8 Online Learning + paper trading harness (plan LIVE a escribir)
 - 📊 Recomendación: NO ir a capital real todavía — paper trading primero 2-4 semanas
+
+---
+Task ID: f8-online-trie
+Agent: main
+Task: F8 Layer 1 — Online Trie (insert-after-predict) implementation per master plan §6.1
+
+Work Log:
+- Created scripts/v7/v7_trie_online.py — OnlineTrie class with:
+  - Quantized feature hashing (n_bins per feature, SHA1 key)
+  - predict_and_record(features, ts, symbol) → buffers pending prediction
+  - commit_outcome(ts, outcome, symbol) → inserts after outcome known (15m delay)
+  - lookup_pattern(features) → returns (mean, std, n_obs, eff_obs)
+  - prune(min_obs) + LRU eviction + time decay (half-life 24h)
+  - save/load for persistence between runs
+- Created scripts/v7/v7_online_simulate.py — walk-forward backtest simulating live online loop:
+  - Pre-builds outcome_lookup dict with zip() (1.3s for 1.4M rows, was 30+ min with iterrows)
+  - Per-window: fit bins on first 5K rows, predict all with LGB, then loop chronologically
+  - Each iter: commit pending → lookup trie → ensemble (0.8*lgb + 0.2*trie_mean) → record
+  - Compares metrics vs static v7.5 baseline
+- Created tests/v7/test_trie_online.py — 21 unit tests covering:
+  - TrieNodeOnline insert/decay
+  - Quantization stability + shape validation
+  - Insert-after-predict flow (cannot commit without prior predict)
+  - Multi-symbol same-ts commit (selective by symbol)
+  - Prune + LRU eviction
+  - Time decay (effective_obs reduces with elapsed hours)
+  - Ensemble helper (low obs → pure LGB, high obs → blend)
+  - Save/load roundtrip
+  - Integration mini-loop
+- Optimizations during dev:
+  - Vectorized _quantize with NumPy broadcasting (was Python loop over 71 features)
+  - Replaced iterrows with zip() for outcome_lookup (100x faster)
+  - Switched LRU eviction from sorted() to heapq.nsmallest for partial sort
+  - Silenced prune log when removed=0
+  - Raised PRUNE_EVERY_N_INSERTS from 1k to 10k
+  - Disabled auto-prune during inserts (only LRU eviction); explicit prune() at caller
+- Bug fixes:
+  - Fixed ts int64 vs datetime mismatch (compute_metrics expects datetime, parquet has int64)
+  - Fixed commit_outcome to support per-symbol outcomes (was committing all entries at same ts with same outcome)
+  - Fixed decay check `node.last_ts > 0` → `node.n_obs > 0` (first insert at ts=0 was treated as no-decay)
+
+Stage Summary:
+- ✅ F8 Layer 1 IMPLEMENTED: 21/21 unit tests pass
+- ✅ Online simulation runs end-to-end on 5 walk-forward windows (~17s total)
+- ⚠️ Online metrics slightly WORSE than static baseline:
+  - Static:  1535 trades, WR 0.524, PF 1.19, PnL +249.83%, Sharpe 2.17, MaxDD -7.63% (3/3 ship)
+  - Online:  1540 trades, WR 0.523, PF 1.19, PnL +246.55%, Sharpe 2.14, MaxDD -26.70% (2/3 ship)
+- 🔍 Root cause: trie_hits are rare (~5% of trades), and when activated the mean_outcome
+  is noisy (few obs per node), which sometimes flips winning trades to losers (hence worse MaxDD)
+- 📋 F8 component is ready to plug into F9-F13, but ensemble approach needs re-tuning:
+  - Use fewer features for trie key (top 8-10 important)
+  - Or use trie as FILTER (block disagreeing trades) rather than ensemble
+  - Or PCA-then-bin for denser pattern collision
+- 🚀 NEXT: F9 Layer 2 rolling retrain (6h cadence, 30d train window, acceptance gate)
