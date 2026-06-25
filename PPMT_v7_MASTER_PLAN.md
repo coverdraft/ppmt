@@ -707,3 +707,73 @@ For now: direct to `main`. If we need experiment isolation:
 - **Worklog:** `worklog.md` (append-only, all agents must update)
 
 **End of master plan. Implementation begins with F0.**
+
+---
+
+## 16. macOS reproduction notes (2026-06-25)
+
+### 16.1 Issue encountered
+
+When reproducing v7.5 on a MacBook Air (Apple Silicon, macOS Sequoia, 16GB RAM, 186GB free disk), the OHLCV download was silently truncated by the previous default `--max-seconds=110` flag in `scripts/v6/v6_download_ohlcv.py`. This caused:
+
+- 5m download: only 8/84 jobs completed (495,726 candles instead of ~1.4M expected)
+- 15m download: only 39/84 jobs completed (314,852 candles instead of ~700k expected)
+- `v6_extract_features.py` only processed 3 symbols (BTC, ETH, SOL) because those were the only ones with complete OHLCV in both timeframes for all windows
+- Resulting training set: 494,886 rows × 71 features (vs 1.44M expected)
+
+### 16.2 Impact on v7.5 metrics
+
+| Run | Symbols | Rows | dir_acc | Mean test corr | Sharpe |
+|-----|---------|------|---------|----------------|--------|
+| Original (sandbox) | 12 | 1.44M | 0.504 | +0.054 | 2.80 |
+| macOS repro | 3 | 494k | 0.490 | +0.056 | (not run yet) |
+
+The macOS reproduction is **not representative** of v7.5's true performance. The user must re-run the download without time limit to get all 12 symbols.
+
+### 16.3 Fix applied
+
+Changed default `--max-seconds` from `110` to `0` (unlimited) in `scripts/v6/v6_download_ohlcv.py`. The conditional check was also updated to handle the `0` case (skip the time-budget check entirely).
+
+### 16.4 Required user action
+
+To reproduce v7.5 properly:
+
+```bash
+# Delete partial DB and re-download from scratch (no time limit now)
+rm -rf data/
+mkdir -p data/v6_models data/v7_models/v75
+
+python3 scripts/v6/v6_download_ohlcv.py --timeframe 5m   # ~30-60 min, all 84 jobs
+python3 scripts/v6/v6_download_ohlcv.py --timeframe 15m  # ~15-30 min, all 84 jobs
+
+# Then continue with the rest of the pipeline
+python3 scripts/v6/v6_extract_features.py
+python3 scripts/v7/v7_prefetch_extras.py
+python3 scripts/v7/v7_extract_features_extras.py
+python3 scripts/v7/v7_materialize_v75_features.py
+python3 scripts/v7/v7_train_v75.py
+python3 scripts/v7/v7_backtest_v75.py
+```
+
+Expected results (matching original sandbox run):
+- feature_observations_v6: ~1.44M rows across 12 symbols
+- v75_features.parquet: ~250 MB, 1.44M × 75 cols
+- Backtest: ~1,280 trades, WR 51.7%, PnL +333.76%, Sharpe 2.80, MaxDD -7.09%
+
+### 16.5 Environment specifics for macOS
+
+Dependencies that need extra steps on macOS:
+- `libomp` via Homebrew (`brew install libomp`) — required for LightGBM
+- Python 3.12 from python.org works fine
+- `python-binance`, `ccxt`, `lightgbm`, `pyarrow` install via pip without issues
+- No need for symlink or env vars after the portable-paths patch (commit 1402d08)
+
+### 16.6 Files modified in this session
+
+| File | Change | Reason |
+|------|--------|--------|
+| `scripts/v6/v6_download_ohlcv.py` | `--max-seconds` default 110→0, conditional updated | Don't truncate download silently |
+| `scripts/patch_paths.py` (new) | Reusable path patcher | Apply portable paths to future scripts |
+| `RUNBOOK_v75.md` (new) | Step-by-step macOS reproduction guide | Help user run v7.5 locally |
+| `worklog.md` | Added Task ID `v75-repro-macos` entry | Document what happened |
+| `PPMT_v7_MASTER_PLAN.md` | Added §16 (this section) | Document the issue + fix for future reference |

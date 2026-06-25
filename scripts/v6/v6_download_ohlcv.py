@@ -314,8 +314,8 @@ def main() -> int:
     parser.add_argument("--timeframe", default="5m", choices=list(TF_CONFIG.keys()),
                         help="5m (default) or 15m (Fase 3 SHORT experiment)")
     parser.add_argument("--workers", type=int, default=6)
-    parser.add_argument("--max-seconds", type=int, default=110,
-                        help="Soft time budget for this invocation (env rotation aware)")
+    parser.add_argument("--max-seconds", type=int, default=0,
+                        help="Soft time budget (0 = unlimited). Default 0 — full download takes ~30-60min for 5m, ~15-30min for 15m.")
     args = parser.parse_args()
 
     ensure_db()
@@ -361,7 +361,7 @@ def main() -> int:
     with ThreadPoolExecutor(max_workers=args.workers, thread_name_prefix="w") as ex:
         futs = {ex.submit(download_one, *job): job for job in jobs}
         for fut in as_completed(futs):
-            if time.time() - t_start > args.max_seconds:
+            if args.max_seconds > 0 and time.time() - t_start > args.max_seconds:
                 LOG.info("Hit max_seconds=%d, exiting cleanly", args.max_seconds)
                 # Cancel remaining
                 for f in futs:
