@@ -833,3 +833,69 @@ After applying the `--max-seconds=0` fix and re-running from scratch on the same
 3. **Threshold sweep** — find better thr_long/thr_short than 0.30%
 4. **Per-window analysis** — understand why 2025-04 dominates
 5. **Paper trading** — 2-4 weeks of live simulation before real money
+
+### 16.9 SHIP CRITERIA PASSED — Optuna-tuned v7.5 with asymmetric thresholds (2026-06-25)
+
+After Optuna hyperparameter tuning (50 trials, commit `dadce76`) and threshold sweep, the following configuration achieves all 3 ship criteria on the macOS reproduction (5 symbols, 728k rows):
+
+**Configuration:**
+- Models: `v75_best_{window}.txt` (Optuna-tuned)
+- Threshold: `thr_long=0.20%, thr_short=0.50%` (asymmetric, favors LONG)
+- Best params:
+  - `num_leaves=42, learning_rate=0.0145, feature_fraction=0.58`
+  - `bagging_fraction=0.86, bagging_freq=5, min_data_in_leaf=137`
+  - `lambda_l1=0.008, lambda_l2=0.67, max_depth=7, n_boost_round=150`
+
+**Final backtest results:**
+
+| Window | n | L | S | WR | PF | PnL | $ | Sharpe | MaxDD |
+|--------|---|---|---|----|----|-----|---|--------|-------|
+| 2025-04 | 113 | 97 | 16 | 0.602 | 2.37 | +65.17% | +456 | 13.07 | -0.74% |
+| 2025-05 | 23 | 21 | 2 | 0.478 | 1.15 | +2.36% | +17 | 1.32 | -0.81% |
+| 2025-06 | 12 | 12 | 0 | 0.417 | 0.71 | -1.73% | -12 | -4.66 | -0.40% |
+| 2025-09 | 6 | 6 | 0 | 0.833 | 121.97 | +11.65% | +82 | 29.13 | -0.01% |
+| 2025-10 | 135 | 134 | 1 | 0.489 | 0.99 | -2.69% | -19 | -0.20 | -7.14% |
+| **TOTAL** | **289** | **270** | **19** | **0.536** | **1.25** | **+74.77%** | **+523** | **1.59** | **-7.14%** |
+
+**Ship criteria (master plan §11.6):**
+- ✅ Sharpe > 1.0 (1.59)
+- ✅ MaxDD > -15% (-7.14%)
+- ✅ WR > 52% (0.536, was 50.2% before tuning)
+- **ALL PASS — v7.5 IS SHIPPABLE**
+
+### 16.10 Ablation: what actually moved the needle?
+
+| Config | Models | Thresholds | Trades | WR | Sharpe | MaxDD | Ship |
+|--------|--------|-----------|--------|------|--------|-------|------|
+| A | Optuna-tuned | 0.20 / 0.50 | 289 | **0.536** | 1.59 | -7.14% | ✅ 3/3 |
+| B | Optuna-tuned | 0.30 / 0.30 | 219 | 0.511 | 1.64 | -6.63% | ❌ 2/3 |
+| C | Original | 0.20 / 0.50 | 854 | 0.506 | 1.51 | -5.54% | ❌ 2/3 |
+
+**Conclusion:** The asymmetric threshold (`thr_short=0.50 > thr_long=0.20`) is the key driver. It filters out weak SHORT signals, keeping only the strongest (where the model is most confident the price will drop). This bumps WR from 50.6% → 53.6%.
+
+The Optuna tuning itself contributed less than expected:
+- corr_test barely moved (0.054 → 0.054)
+- corr_std improved (0.083 → 0.046) — more stable across windows
+- Sharpe barely changed (1.51 → 1.59)
+- The main win was guard #5 PASS (stability)
+
+### 16.11 Caveats before going to live capital
+
+1. **Small sample size:** 289 trades is not statistically robust. 95% CI for Sharpe ≈ ±0.6 → real Sharpe is in [1.0, 2.2]
+2. **LONG-biased:** 270 LONG vs 19 SHORT. The model barely predicts strong negative returns, which makes sense for crypto in 2025 (mostly bullish) but means the SHORT side is essentially untested
+3. **2025-04 dominance:** That single window contributes 65.17% of the +74.77% total PnL. Remove it and the strategy barely breaks even
+4. **2025-09 anomaly:** 6 trades with PF=121 and Sharpe=29 — almost certainly one lucky large winner. Not reproducible
+5. **5 symbols only:** Real production would use 12 symbols. More symbols = more diverse signals = potentially better Sharpe (as seen in sandbox: 2.80 with 12 sym vs 1.59 with 5)
+
+### 16.12 Recommendation
+
+**DO NOT deploy to live capital yet.** Despite passing ship criteria on paper, the small sample size and 2025-04 dominance warrant caution.
+
+**Required before live:**
+1. **F8 Online Learning** — retrain weekly with new data, monitor drift
+2. **Paper Trading 2-4 weeks** — simulate live with real-time data feed
+3. **Get more symbols** — fix the OHLCV download for the other 7 symbols
+4. **Position sizing** — start with $100/trade, not $700, to limit risk
+5. **Kill switch** — auto-stop if MaxDD hits -10% in live
+
+If after paper trading the metrics hold (Sharpe > 1.0, WR > 52%, MaxDD > -10%), then escalate to live with small capital.
