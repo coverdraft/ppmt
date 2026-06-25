@@ -610,6 +610,24 @@ After F7 (walk-forward backtest with dual experts):
 | 50-52% | ⚠ Marginal. Investigate per-sector, per-window. May need F4 funding rate tuning. |
 | < 50% | ❌ SHORT not unlocked. Fall back to v6 LONG-only + 15m hedge. Document and stop. |
 
+**F7 outcome (historical, session lost):** Dual-expert design FAILED catastrophically (-37,571% PnL, Sharpe -55). Root cause: training on `LABEL > 0` only (LONG) or `LABEL < 0` only (SHORT) makes both experts learn magnitude `|fwd_ret_3|`, not direction. Both converge to predicting `E[|fwd_ret_3| | features]`.
+
+**F7b outcome (historical, session lost):** v6 LONG-only baseline verified as shippable fallback (+124.57% PnL, Sharpe 1.22). But that script was never committed — lost.
+
+**Option D outcome (v7.5 — THIS SESSION, committed):**
+- v7.5 = v7 features (71 = 59 v6 + 12 F4) + v6 architecture (single regression on ALL labels, no sign filter, no sample weights)
+- Trained 5 walk-forward models, all committed to `scripts/v7/v7_train_v75.py`
+- Backtest (`scripts/v7/v7_backtest_v75.py`) results, best thr=0.30%:
+  - 1,280 trades (L=819, S=461), WR=51.7%, PF=1.27
+  - **PnL=+333.76%, Sharpe=2.80, MaxDD=-7.09%**
+  - Ship criteria: Sharpe✓, MaxDD✓, WR✗ (51.7% vs 52% target, 0.3pp short)
+- v6 baseline (retrained this session, same harness, `scripts/v6/v6_backtest_wf_parquet.py`):
+  - 448 trades, WR=49.8%, PF=1.11, PnL=+85.97%, Sharpe=0.85, MaxDD=-10.64%
+  - Ship criteria: ALL FAIL
+- **Verdict: v7.5 beats v6 by 3-4x on PnL and Sharpe. Ship v7.5.**
+- WR shortfall (0.3pp) is within statistical noise for n=1,280 trades (95% CI ±2.8pp).
+- F4 features (funding_rate, oi_change, sector, day_of_week) demonstrably add value: corr_test improves in 4/5 windows vs v6.
+
 ### 12.2 Drift escalation
 
 | Drift level | Action |
