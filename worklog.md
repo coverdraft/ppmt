@@ -1237,3 +1237,77 @@ Files produced:
 - data/v7_models/f7b_v6_backtest/v6_backtest_summary.json
 - data/v7_models/f7b_v6_backtest/v6_trades_{window}.parquet (5 files)
 - data/v7_models/f7b_v6_backtest/v6_equity_curve_{window}.parquet (5 files)
+
+---
+Task ID: PAPER-TRADER-v7.5
+Agent: main
+Task: Build v7.5 paper trading harness (Option C) — live OHLCV feed + v6-LONG LightGBM + CSV signal/equity logger.
+
+Goal: validate v6-LONG regression architecture (Sharpe 1.22 / +124.57% PnL in
+walk-forward backtest F7b) under live market conditions before risking real
+capital. Ship criteria for going live with real money (per master plan §12.1):
+Sharpe > 1.0, MaxDD > -15%, WR > 52%, N trades >= 50 over 2-4 weeks.
+
+Architecture (scripts/v7/paper_trader/ — Python package):
+- features.py: 59-feature extractor (exact copy of v6_extract_features,
+  all backward-looking, no leakage)
+- feed.py: Bybit public API OHLCV fetcher (no key needed), polls every 30s
+- model.py: v6-LONG LightGBM regression (single regression on ALL labels,
+  no sign filter — preserves directional learning per F7b finding)
+- engine.py: main loop — on 5m close → extract features → predict →
+  manage position → log to CSV
+- runner.py: CLI entrypoint with --train, --once, --status, --symbols modes
+- __main__.py: enables `python -m scripts.v7.paper_trader.runner`
+
+Key design decisions:
+1. Bybit (not Binance) — Binance IP-banned us (418) in this environment
+2. One model per symbol — saves to data/paper_trading/models/v6_long_<SYM>.txt
+3. Decision thresholds: thr_long=0.20, thr_short=0.50 (asymmetric, per v7.5 Optuna tuning)
+4. Hold period = HORIZON=3 bars (15m) — matches training label
+5. Cost = 0.14% per round-trip (Bybit taker 0.055% × 2 + 0.03% slippage)
+6. State persisted to JSON between runs (open positions + cumulative equity)
+7. CSV logs: signals_<SYM>.csv (1 row per candle) + equity_<SYM>.csv (1 row per candle)
+
+Bug fixed during smoke test:
+- features.py used `pd.to_datetime(ts, unit='s')` but ccxt returns timestamps
+  in MILLISECONDS. Fixed: auto-detect unit by magnitude (>1e12 → ms, else s).
+  This makes the same code work with both ccxt (ms) and v6 SQLite data (s).
+
+Smoke test results (2026-06-25 16:40 UTC):
+- Trained 3 models: BTC/USDT (dir_acc 54.9%), ETH/USDT (51.8%), SOL/USDT (58.0%)
+  on 1000 bars (~3.5 days) of 5m data each.
+- Single-cycle run on SOL/USDT: fetched 200-bar window, extracted 59 features,
+  predicted -0.053 → decision WAIT (within [-0.50, +0.20] band). Logged to CSV.
+- All artifacts produced: model file, meta JSON, signal CSV, equity CSV, state JSON.
+
+Documentation:
+- RUNBOOK_paper_trading.md (NEW): complete operator guide with quick start,
+  log schemas, decision rules, daily/weekly ops procedures, troubleshooting,
+  known limitations, and graduation path to F9/F10/F11/F12.
+
+Files produced:
+- scripts/v7/paper_trader/__init__.py
+- scripts/v7/paper_trader/__main__.py
+- scripts/v7/paper_trader/features.py (~190 lines)
+- scripts/v7/paper_trader/feed.py (~110 lines)
+- scripts/v7/paper_trader/model.py (~165 lines)
+- scripts/v7/paper_trader/engine.py (~245 lines)
+- scripts/v7/paper_trader/runner.py (~115 lines)
+- RUNBOOK_paper_trading.md (~250 lines)
+- data/paper_trading/models/v6_long_BTC_USDT.txt + _meta.json
+- data/paper_trading/models/v6_long_ETH_USDT.txt + _meta.json
+- data/paper_trading/models/v6_long_SOL_USDT.txt + _meta.json
+- data/paper_trading/logs/signals_SOL_USDT.csv
+- data/paper_trading/logs/equity_SOL_USDT.csv
+- data/paper_trading/state/engine_SOL_USDT.json
+
+Stage Summary:
+- Paper trading harness OPERATIONAL. End-to-end pipeline verified:
+  Bybit API → 59 features → v6-LONG prediction → decision → CSV log.
+- 3 models trained for BTC/ETH/SOL. dir_acc 51-58% matches v6 walk-forward
+  baseline (56.7%) given the smaller training set (1000 vs 60K+ bars).
+- Ready for 2-4 week paper trading run. User should launch:
+    python3 -m scripts.v7.paper_trader.runner --symbol SOL/USDT
+  in tmux/screen and monitor weekly via the RUNBOOK §6.2 review script.
+- Next phase (Option A — F9 Layer 2 rolling retrain) will replace one-shot
+  bootstrap with 30d rolling window retrained every 6h, scheduled separately.
