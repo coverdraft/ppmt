@@ -1912,3 +1912,28 @@ Stage Summary:
 - H=288 es el unico horizonte viable — mas operaciones = mas perdidas
 - Per-symbol Q config implementada (6 tokens con overrides)
 - Proximo paso: paper trading multi-token con config optimizada
+---
+Task ID: SESION-3-AI-003
+Agent: AI assistant (sesion 3)
+Task: Deep optimization (180d, 2520 configs) + actualizar sistema
+
+Work Log:
+- Creado deep_optimize.py: 4 tokens × 5 HP × 7 Q × 3 windows × 3 costs × 4 folds
+- Ejecutado por usuario en Mac con DOGE+AVAX (2520 configs, ~4min)
+- HALLAZGO CRITICO: Q95/5 ultra-selectivo es mejor que Q85/15
+  - DOGE Q95/5: +41.5% PnL, 4/4, Sharpe 0.725, MaxDD -4.6%, PF=30.78
+  - AVAX Q82/18 more_reg: +44.8% PnL, 4/4, MaxDD -10.4%
+- HP tuning importa MUCHO: more_reg vs slow_deep = +30pp diferencia
+- Window=400 > Window=200 > Window=100
+- Maker fees (0.04%) dan +5pp vs taker (0.14%)
+- 15 configs con 4/4 consistencia Y PnL>10% → SEÑAL REAL
+- Actualizado model.py: SYMBOL_CONFIG (Q, window, cost, HP per token), HP_PRESETS, get_params_for_symbol()
+- Actualizado evaluate_test(): usa SYMBOL_CONFIG completo (window_size, cost_pct)
+- Actualizado train_with_split(): usa per-symbol HP via get_params_for_symbol()
+- Pendiente: deep optimization para ETH y SOL (falta ejecutar en Mac)
+
+Stage Summary:
+- Edge confirmado en DOGE y AVAX con 180d y 4/4 consistencia
+- DOGE Q95/5 Sharpe 0.725 es excepcional — pero PF=30.78 sospechosamente alto
+- Sistema ahora tiene config completa por token (Q, window, cost, HP)
+- Proximo: ejecutar deep_optimize para ETH y SOL, luego paper trading

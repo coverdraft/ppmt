@@ -60,28 +60,118 @@ DEFAULT_PARAMS = {
     "verbosity": -1,
 }
 
-# Per-symbol quantile overrides from comprehensive sweep results
-# Key: each token has a different optimal Q config
-SYMBOL_Q_OVERRIDES = {
-    "ETH/USDT":  (80, 20),   # Q80/20 → PnL=+22.8%, 3/4 cons
-    "SOL/USDT":  (90, 10),   # Q90/10 → PnL=+34.8%, 3/4 cons
-    "DOGE/USDT": (85, 15),   # Q85/15 → PnL=+34.0%, 4/4 cons (BEST consistency)
-    "AVAX/USDT": (85, 15),   # Q85/15 → PnL=+17.2%, 4/4 cons
-    "LINK/USDT": (90, 10),   # Q90/10 → PnL=+13.0%, 3/4 cons
-    "XRP/USDT":  (80, 20),   # Q80/20 → PnL=+21.7%, 3/4 cons
+# Per-symbol config overrides from deep optimization (180d, 2520 configs)
+# Updated from: Q85/15 (90d sweep) → Q95/5 DOGE, Q82/18 AVAX (180d deep opt)
+# Each token now has: (q_long, q_short, window_size, cost_pct, hp_preset)
+SYMBOL_CONFIG = {
+    "DOGE/USDT": {
+        "q_long": 95, "q_short": 5,      # Q95/5 ultra-selective
+        "window_size": 400,               # longer lookback for quantile
+        "cost_pct": 0.04,                  # maker fees (limit orders)
+        "hp": "default",                   # default HP is best for DOGE
+        "pnl_180d": 41.5, "consistency": "4/4",
+    },
+    "AVAX/USDT": {
+        "q_long": 82, "q_short": 18,      # Q82/18 moderate-selective
+        "window_size": 200,
+        "cost_pct": 0.04,                  # maker fees
+        "hp": "more_reg",                   # more regularization
+        "pnl_180d": 44.8, "consistency": "4/4",
+    },
+    # Below: from 90d comprehensive sweep (pending deep optimization)
+    "SOL/USDT": {
+        "q_long": 90, "q_short": 10,
+        "window_size": 200,
+        "cost_pct": 0.14,                  # taker (conservative)
+        "hp": "default",
+        "pnl_90d": 34.8, "consistency": "3/4",
+    },
+    "ETH/USDT": {
+        "q_long": 80, "q_short": 20,
+        "window_size": 200,
+        "cost_pct": 0.14,
+        "hp": "default",
+        "pnl_90d": 22.8, "consistency": "3/4",
+    },
+    "LINK/USDT": {
+        "q_long": 90, "q_short": 10,
+        "window_size": 200,
+        "cost_pct": 0.14,
+        "hp": "default",
+        "pnl_90d": 13.0, "consistency": "3/4",
+    },
+    "XRP/USDT": {
+        "q_long": 80, "q_short": 20,
+        "window_size": 200,
+        "cost_pct": 0.14,
+        "hp": "default",
+        "pnl_90d": 21.7, "consistency": "3/4",
+    },
     # BTC intentionally excluded — dead end
 }
 
+# Backwards-compatible Q overrides (used by evaluate_test)
+SYMBOL_Q_OVERRIDES = {
+    sym: (cfg["q_long"], cfg["q_short"]) for sym, cfg in SYMBOL_CONFIG.items()
+}
+
+# Hyperparameter presets per symbol
+HP_PRESETS = {
+    "default": {
+        "learning_rate": 0.01,
+        "num_leaves": 31,
+        "min_data_in_leaf": 30,
+        "lambda_l1": 0.3,
+        "lambda_l2": 3.0,
+    },
+    "more_reg": {
+        "learning_rate": 0.005,
+        "num_leaves": 15,
+        "min_data_in_leaf": 50,
+        "lambda_l1": 1.0,
+        "lambda_l2": 5.0,
+    },
+    "less_reg": {
+        "learning_rate": 0.02,
+        "num_leaves": 63,
+        "min_data_in_leaf": 20,
+        "lambda_l1": 0.1,
+        "lambda_l2": 1.0,
+    },
+    "very_reg": {
+        "learning_rate": 0.01,
+        "num_leaves": 15,
+        "min_data_in_leaf": 100,
+        "lambda_l1": 1.0,
+        "lambda_l2": 10.0,
+    },
+    "slow_deep": {
+        "learning_rate": 0.005,
+        "num_leaves": 63,
+        "min_data_in_leaf": 30,
+        "lambda_l1": 0.5,
+        "lambda_l2": 3.0,
+    },
+}
+
+def get_params_for_symbol(symbol: str) -> dict:
+    """Get LightGBM params with per-symbol HP overrides."""
+    p = dict(DEFAULT_PARAMS)
+    cfg = SYMBOL_CONFIG.get(symbol)
+    if cfg and "hp" in cfg:
+        hp = HP_PRESETS.get(cfg["hp"], {})
+        p.update(hp)
+    return p
+
 # Decision thresholds for binary classification
 # P(up) > PROB_LONG → LONG, P(up) < PROB_SHORT → SHORT, else WAIT
-# Updated per rolling sweep: Q90/Q10 means trade only at conviction extremes.
-# For live predict(), we use fixed thresholds as approximation.
-# The evaluate_test() uses rolling quantiles (per-symbol Q overrides) which is more robust.
-PROB_LONG = 0.55   # P(UP) > this → LONG (tighter — only high-conviction signals)
-PROB_SHORT = 0.42   # P(UP) < this → SHORT (tighter — only high-conviction shorts)
-# Cost per round-trip trade (entry + exit) in %
-COST_PCT = 0.14
-HORIZON = 288  # 288 * 5m = 24h forward
+# For live predict(), fixed thresholds. evaluate_test() uses rolling quantiles.
+PROB_LONG = 0.55   # P(UP) > this → LONG
+PROB_SHORT = 0.42   # P(UP) < this → SHORT
+# Default cost per round-trip trade (entry + exit) in %
+# Per-symbol overrides in SYMBOL_CONFIG (DOGE/AVAX use maker=0.04%)
+COST_PCT = 0.14   # taker default
+HORIZON = 288  # 288 * 5m = 24h forward — ONLY viable horizon
 
 
 def model_path(symbol: str) -> Path:

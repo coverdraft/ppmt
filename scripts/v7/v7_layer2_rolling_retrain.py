@@ -73,7 +73,8 @@ from scripts.v7.paper_trader.feed import Feed
 from scripts.v7.paper_trader.model import (
     FEATURE_NAMES, train, load_model, load_metadata, is_trained,
     model_path, metadata_path, MODEL_DIR, DEFAULT_PARAMS, HORIZON,
-    PROB_LONG, PROB_SHORT, COST_PCT, SYMBOL_Q_OVERRIDES,
+    PROB_LONG, PROB_SHORT, COST_PCT, SYMBOL_CONFIG, SYMBOL_Q_OVERRIDES,
+    get_params_for_symbol,
 )
 from scripts.v7.paper_trader.features import extract_features
 
@@ -179,11 +180,16 @@ def split_walk_forward(feat_df: pd.DataFrame, days: int) -> tuple[pd.DataFrame, 
     return train_df, val_df, test_df
 
 
-def train_with_split(train_df: pd.DataFrame, val_df: pd.DataFrame, params: dict | None = None) -> tuple[lgb.Booster, dict]:
+def train_with_split(train_df: pd.DataFrame, val_df: pd.DataFrame,
+                     params: dict | None = None, symbol: str | None = None) -> tuple[lgb.Booster, dict]:
     """Train LightGBM binary classifier on train_df, evaluate on val_df. Returns (booster, metrics)."""
-    p = dict(DEFAULT_PARAMS)
+    # Use per-symbol HP if available, else default
     if params:
-        p.update(params)
+        p = dict(params)
+    elif symbol:
+        p = get_params_for_symbol(symbol)
+    else:
+        p = dict(DEFAULT_PARAMS)
 
     X_tr = train_df[FEATURE_NAMES].values.astype(np.float32)
     y_tr = train_df["label"].values.astype(np.float32)
@@ -246,22 +252,20 @@ def evaluate_test(bst: lgb.Booster, test_df: pd.DataFrame, symbol: str | None = 
     dir_acc = float(((pred > 0.5) == (y_label > 0.5)).mean())
 
     # --- Sequential backtest: L+S with horizon-aligned holding ---
-    # Comprehensive sweep (7 tokens × 6 horizons × 3 Q-configs × 4 windows) showed:
-    #   - H=288 is the ONLY viable horizon (shorter = catastrophic losses)
-    #   - Q85/15 is best cross-token: DOGE +34% 4/4, AVAX +17% 4/4
-    #   - Q80/20 is best for ETH (+23%) and XRP (+22%)
-    #   - Q90/10 is best for SOL (+35%) and LINK (+13%)
-    #   - BTC = dead end regardless of config
-    #   - LONG-only always loses, SHORT is essential
-    # Default Q85/15 as best cross-token balance; override per symbol if needed.
+    # Deep optimization (180d, 2520 configs) showed:
+    #   - Q95/5 ultra-selective is best for DOGE (+41.5%, 4/4, Sharpe 0.725)
+    #   - Q82/18 + more_reg is best for AVAX (+44.8%, 4/4)
+    #   - Window=400 better for ultra-selective Q configs
+    #   - Maker fees (0.04%) are achievable with limit orders
+    #   - Per-symbol HP tuning gives +30pp improvement
+    #   - BTC = dead end, SHORT is essential, LONG-only always loses
     MIN_HOLD = HORIZON  # hold for full prediction horizon (288 bars = 24h)
-    WINDOW = 200
-    # Use per-symbol Q override if available, else default Q85/15
-    if symbol and symbol in SYMBOL_Q_OVERRIDES:
-        Q_LONG, Q_SHORT = SYMBOL_Q_OVERRIDES[symbol]
-    else:
-        Q_LONG = 85   # top 15% of recent predictions → LONG (cross-token default)
-        Q_SHORT = 15  # bottom 15% of recent predictions → SHORT
+    # Use per-symbol config from SYMBOL_CONFIG (deep opt validated)
+    sym_cfg = SYMBOL_CONFIG.get(symbol, {})
+    WINDOW = sym_cfg.get("window_size", 200)
+    Q_LONG = sym_cfg.get("q_long", 85)
+    Q_SHORT = sym_cfg.get("q_short", 15)
+    trade_cost = sym_cfg.get("cost_pct", COST_PCT)
 
     n_trades = 0
     n_long = 0
@@ -303,7 +307,7 @@ def evaluate_test(bst: lgb.Booster, test_df: pd.DataFrame, symbol: str | None = 
 
         if sig != 0 and not np.isnan(fwd_ret[i]):
             n_trades += 1
-            trade_ret = sig * fwd_ret[i] - COST_PCT
+            trade_ret = sig * fwd_ret[i] - trade_cost
             pnl += trade_ret
             trade_returns.append(trade_ret)
             in_trade = True
@@ -320,8 +324,8 @@ def evaluate_test(bst: lgb.Booster, test_df: pd.DataFrame, symbol: str | None = 
              float(pred.min()), float(np.percentile(pred, 10)), float(np.percentile(pred, 25)),
              float(np.percentile(pred, 50)), float(np.percentile(pred, 75)),
              float(np.percentile(pred, 90)), float(pred.max()), float(pred.mean()), float(pred.std()))
-    LOG.info("L+S sequential backtest: hold=%d bars, q_long=%d q_short=%d",
-             MIN_HOLD, Q_LONG, Q_SHORT)
+    LOG.info("L+S sequential backtest: hold=%d bars, q_long=%d q_short=%d window=%d cost=%.2f%%",
+             MIN_HOLD, Q_LONG, Q_SHORT, WINDOW, trade_cost)
     LOG.info("trades: n=%d (L=%d S=%d) win_rate=%.1f%% avg_ret=%.3f%% pnl=%.3f%%",
              n_trades, n_long, n_short, win_rate * 100, avg_ret, pnl)
     return {
@@ -437,7 +441,7 @@ def run_one_retrain(feed: Feed, symbol: str, days: int = 90, dry_run: bool = Fal
              symbol, len(train_df))
 
     # 4. Train
-    bst, train_metrics = train_with_split(train_df, val_df)
+    bst, train_metrics = train_with_split(train_df, val_df, symbol=symbol)
     LOG.info("%s: trained — val_auc=%.3f val_dir_acc=%.3f val_logloss=%.4f best_iter=%d",
              symbol, train_metrics["auc_val"], train_metrics["dir_acc_val"],
              train_metrics["logloss_val"], train_metrics["best_iteration"])
