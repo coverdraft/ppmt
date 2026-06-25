@@ -13,7 +13,8 @@ Architecture:
 - 58 features (v6 minus 'dow' — spurious with 24h horizon)
 - HORIZON=288 (24h forward, 288 × 5min bars)
 - Decision: LONG if P(up) > PROB_LONG, SHORT if P(up) < PROB_SHORT, else WAIT
-- Strong regularization: num_leaves=15, lr=0.02, L1/L2 reg
+- Fixed 50 trees, no early stopping (avoids instability)
+- Quantile-based trading in evaluate_test (ranking-based)
 
 Why classification instead of regression:
 - Regression predicts MAGNITUDE, which varies with market regime
@@ -45,8 +46,8 @@ DEFAULT_PARAMS = {
     "metric": ["binary_logloss", "auc"],
     "num_leaves": 31,
     "learning_rate": 0.01,
-    "n_estimators": 2000,
-    "early_stopping_rounds": 150,
+    "n_estimators": 50,
+    "early_stopping_rounds": -1,
     "feature_fraction": 0.7,
     "bagging_fraction": 0.7,
     "bagging_freq": 3,
@@ -59,8 +60,8 @@ DEFAULT_PARAMS = {
 # Decision thresholds for binary classification
 # P(up) > PROB_LONG → LONG, P(up) < PROB_SHORT → SHORT, else WAIT
 # Asymmetric: crypto has structural upward drift, so SHORT needs higher conviction
-PROB_LONG = 0.51   # need 55%+ confidence to go LONG
-PROB_SHORT = 0.46   # need <40% confidence (i.e., >60% down) to go SHORT
+PROB_LONG = 0.51   # P(UP) > this → LONG (used in model.predict)
+PROB_SHORT = 0.46   # P(UP) < this → SHORT (used in model.predict)
 # Cost per round-trip trade (entry + exit) in %
 COST_PCT = 0.14
 HORIZON = 288  # 288 * 5m = 24h forward
@@ -144,13 +145,17 @@ def train(symbol: str, ohlcv_df: pd.DataFrame, btc_df: pd.DataFrame, eth_df: pd.
     d_tr = lgb.Dataset(X_tr, label=y_tr, feature_name=FEATURE_NAMES, free_raw_data=False)
     d_val = lgb.Dataset(X_val, label=y_val, feature_name=FEATURE_NAMES, free_raw_data=False)
 
+    callbacks = [lgb.log_evaluation(period=50)]
+    es_rounds = p.get("early_stopping_rounds", -1)
+    if es_rounds and es_rounds > 0:
+        callbacks.append(lgb.early_stopping(es_rounds, verbose=False))
     bst = lgb.train(
         p,
         d_tr,
         num_boost_round=p.get("n_estimators", 1000),
         valid_sets=[d_tr, d_val],
         valid_names=["train", "val"],
-        callbacks=[lgb.log_evaluation(period=50), lgb.early_stopping(p.get("early_stopping_rounds", 80), verbose=False)],
+        callbacks=callbacks,
     )
 
     # Metrics

@@ -193,13 +193,17 @@ def train_with_split(train_df: pd.DataFrame, val_df: pd.DataFrame, params: dict 
     d_tr = lgb.Dataset(X_tr, label=y_tr, feature_name=FEATURE_NAMES, free_raw_data=False)
     d_val = lgb.Dataset(X_val, label=y_val, feature_name=FEATURE_NAMES, free_raw_data=False)
 
+    callbacks = [lgb.log_evaluation(period=100)]
+    es_rounds = p.get("early_stopping_rounds", -1)
+    if es_rounds and es_rounds > 0:
+        callbacks.append(lgb.early_stopping(es_rounds, verbose=False))
     bst = lgb.train(
         p,
         d_tr,
         num_boost_round=p.get("n_estimators", 1000),
         valid_sets=[d_tr, d_val],
         valid_names=["train", "val"],
-        callbacks=[lgb.log_evaluation(period=100), lgb.early_stopping(p.get("early_stopping_rounds", 80), verbose=False)],
+        callbacks=callbacks,
     )
 
     pred_val = bst.predict(X_val)
@@ -222,49 +226,81 @@ def train_with_split(train_df: pd.DataFrame, val_df: pd.DataFrame, params: dict 
 
 
 def evaluate_test(bst: lgb.Booster, test_df: pd.DataFrame) -> dict:
-    """Evaluate trained classifier on held-out test set (final acceptance gate)."""
+    """Evaluate trained classifier on held-out test set with quantile-based trading.
+
+    Instead of fixed probability thresholds (PROB_LONG/SHORT), uses a rolling
+    quantile approach: go LONG when prediction is in the top 15% of recent
+    predictions, SHORT when in the bottom 15%. This avoids the problem of
+    poorly calibrated probabilities clumping around a narrow range.
+    """
     if len(test_df) == 0:
         return {"n_test": 0}
     X_test = test_df[FEATURE_NAMES].values.astype(np.float32)
     y_label = test_df["label"].values.astype(np.float32)
-    y_ret = test_df["fwd_ret_3"].values.astype(np.float32)
     pred = bst.predict(X_test)
 
     auc_test = float(_auc(y_label, pred))
     dir_acc = float(((pred > 0.5) == (y_label > 0.5)).mean())
 
-    # Trading simulation: LONG if P(up) > PROB_LONG, SHORT if P(up) < PROB_SHORT
-    longs = pred > PROB_LONG
-    shorts = pred < PROB_SHORT
-    # PnL: LONG gains y_ret, SHORT gains -y_ret, minus cost
-    pnl_long = (y_ret[longs] - COST_PCT).sum() if longs.any() else 0.0
-    pnl_short = (-y_ret[shorts] - COST_PCT).sum() if shorts.any() else 0.0
-    n_trades = int(longs.sum() + shorts.sum())
+    # --- Quantile-based signal generation ---
+    WINDOW = 200  # rolling window for quantile estimation
+    Q_LONG = 85   # go LONG if pred > 85th pctile of recent preds
+    Q_SHORT = 15  # go SHORT if pred < 15th pctile of recent preds
+
+    closes = test_df["close"].values.astype(np.float64)
+    bar_rets = np.diff(closes) / closes[:-1] * 100  # per-bar pct returns
+
+    position = 0
+    n_trades = 0
+    pnl = 0.0
+    n_long_bars = 0
+    n_short_bars = 0
+    recent_preds = []
+
+    for i in range(min(len(bar_rets), len(pred))):
+        p_val = float(pred[i])
+        recent_preds.append(p_val)
+        if len(recent_preds) > WINDOW:
+            recent_preds.pop(0)
+
+        if len(recent_preds) < 20:
+            continue
+
+        q_high = np.percentile(recent_preds, Q_LONG)
+        q_low = np.percentile(recent_preds, Q_SHORT)
+
+        sig = 0
+        if p_val > q_high:
+            sig = 1
+            n_long_bars += 1
+        elif p_val < q_low:
+            sig = -1
+            n_short_bars += 1
+
+        if sig != 0 and sig != position:
+            n_trades += 1
+            pnl -= COST_PCT
+            position = sig
+        elif sig == 0 and position != 0:
+            position = 0
+        pnl += position * bar_rets[i]
+
     # Prediction distribution diagnostic
-    pred_min = float(pred.min())
-    pred_max = float(pred.max())
-    pred_mean = float(pred.mean())
-    pred_std = float(pred.std())
-    pred_p10 = float(np.percentile(pred, 10))
-    pred_p25 = float(np.percentile(pred, 25))
-    pred_p50 = float(np.percentile(pred, 50))
-    pred_p75 = float(np.percentile(pred, 75))
-    pred_p90 = float(np.percentile(pred, 90))
-    n_above_long = int((pred > PROB_LONG).sum())
-    n_below_short = int((pred < PROB_SHORT).sum())
     LOG.info("pred stats: min=%.4f p10=%.4f p25=%.4f p50=%.4f p75=%.4f p90=%.4f max=%.4f mean=%.4f std=%.4f",
-             pred_min, pred_p10, pred_p25, pred_p50, pred_p75, pred_p90, pred_max, pred_mean, pred_std)
-    LOG.info("threshold: PROB_LONG=%.2f -> %d/%d (%.1f%%), PROB_SHORT=%.2f -> %d/%d (%.1f%%)",
-             PROB_LONG, n_above_long, len(pred), 100*n_above_long/len(pred),
-             PROB_SHORT, n_below_short, len(pred), 100*n_below_short/len(pred))
+             float(pred.min()), float(np.percentile(pred, 10)), float(np.percentile(pred, 25)),
+             float(np.percentile(pred, 50)), float(np.percentile(pred, 75)),
+             float(np.percentile(pred, 90)), float(pred.max()), float(pred.mean()), float(pred.std()))
+    LOG.info("quantile trading: window=%d q_long=%d q_short=%d", WINDOW, Q_LONG, Q_SHORT)
+    LOG.info("trades: n_trades=%d n_long_bars=%d n_short_bars=%d pnl=%.3f%%",
+             n_trades, n_long_bars, n_short_bars, pnl)
     return {
         "n_test": len(X_test),
         "auc_test": auc_test,
         "dir_acc_test": dir_acc,
         "n_trades": n_trades,
-        "pnl_long_pct": float(pnl_long),
-        "pnl_short_pct": float(pnl_short),
-        "pnl_total_pct": float(pnl_long + pnl_short),
+        "n_long_bars": n_long_bars,
+        "n_short_bars": n_short_bars,
+        "pnl_total_pct": float(pnl),
     }
 
 
@@ -426,8 +462,8 @@ def run_one_retrain(feed: Feed, symbol: str, days: int = 90, dry_run: bool = Fal
             "auc_test": test_metrics.get("auc_test"),
             "dir_acc_test": test_metrics.get("dir_acc_test"),
             "n_trades_test": test_metrics.get("n_trades"),
-            "pnl_long_test": test_metrics.get("pnl_long_pct"),
-            "pnl_short_test": test_metrics.get("pnl_short_pct"),
+            "pnl_long_test": test_metrics.get("n_long_bars"),
+            "pnl_short_test": test_metrics.get("n_short_bars"),
             "pnl_total_test": test_metrics.get("pnl_total_pct"),
             "feature_names": FEATURE_NAMES,
             "horizon": HORIZON,
