@@ -436,19 +436,33 @@ def threshold_sweep(splits, models: Dict[str, lgb.Booster]) -> Tuple[pd.DataFram
             pf = wins / losses if losses > 0 else 99.0
 
             pnl_total_pct = float(all_pnl.sum())
-            pnl_dollars = float(pnl_total_pct / 100 * 700)  # $700 per trade
+            # $700 per trade, PnL is in % so divide by 100
+            pnl_dollars = float(pnl_total_pct / 100 * 700)
 
-            # Sharpe (annualized, 5m bars, 288/day, 365 days)
-            if len(all_pnl) > 1 and all_pnl.std() > 0:
-                sharpe = float(all_pnl.mean() / all_pnl.std() * np.sqrt(288 * 365))
+            # Sharpe (annualized) — CORRECT formula matching v7_backtest_v75.py
+            # Per-trade Sharpe × sqrt(trades_per_year)
+            # trades_per_year derived from actual time span of trades
+            if len(all_pnl) > 1 and len(all_ts) > 1:
+                ts_arr = pd.to_datetime(all_ts)
+                span_seconds = (ts_arr.max() - ts_arr.min()).total_seconds()
+                if span_seconds > 0:
+                    trades_per_year = (len(all_pnl) / span_seconds) * 365 * 24 * 3600
+                else:
+                    trades_per_year = len(all_pnl) * 12
             else:
-                sharpe = 0.0
+                trades_per_year = len(all_pnl) * 12
+            std_pnl = float(all_pnl.std()) if len(all_pnl) > 1 else 0.001
+            sharpe_per_trade = float(all_pnl.mean()) / std_pnl if std_pnl > 0 else 0.0
+            sharpe = sharpe_per_trade * np.sqrt(max(trades_per_year, 1))
 
-            # MaxDD (equity curve)
-            equity = np.cumsum(all_pnl)
-            running_max = np.maximum.accumulate(equity)
-            drawdown = equity - running_max
-            max_dd_pct = float(drawdown.min()) if len(drawdown) > 0 else 0.0
+            # MaxDD — CORRECT formula matching v7_backtest_v75.py
+            # Equity curve in dollars, then convert to % of account ($10k)
+            cum_dollars = np.cumsum(all_pnl / 100 * 700)
+            equity = 10000.0 + cum_dollars
+            equity_pct = equity / 10000.0 * 100
+            running_max = np.maximum.accumulate(equity_pct)
+            dd_pct = equity_pct - running_max  # negative values
+            max_dd_pct = float(dd_pct.min()) if len(dd_pct) > 0 else 0.0
 
             rows.append({
                 "thr_long": thr_long,

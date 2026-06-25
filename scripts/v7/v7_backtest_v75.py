@@ -258,11 +258,14 @@ def main():
                         help="SHORT threshold (pred < -thr_short → SHORT). Default 0.30%")
     parser.add_argument("--sweep", action="store_true",
                         help="Sweep multiple thresholds and report best")
+    parser.add_argument("--model-suffix", type=str, default="",
+                        help="Model file suffix. Empty=default (v75_{window}.txt). 'best'=tuned (v75_best_{window}.txt)")
     args = parser.parse_args()
 
     print("=" * 110)
     print("v7.5 WALK-FORWARD BACKTEST — Option D")
-    print(f"  features: {len(FEATURE_NAMES)} (59 v6 + 12 F4)")
+    suffix_str = f" [models: v75_{args.model_suffix}_*" if args.model_suffix else " [models: v75_*"
+    print(f"  features: {len(FEATURE_NAMES)} (59 v6 + 12 F4){suffix_str}")
     print(f"  decision rule: pred > +{args.thr_long}% → LONG, pred < -{args.thr_short}% → SHORT")
     print(f"  cost: {ROUND_TRIP_COST_PCT}% round-trip   position: ${POSITION_NOTIONAL}   account: ${ACCOUNT_SIZE}")
     print(f"  walk-forward windows: {WF_WINDOWS}")
@@ -282,9 +285,12 @@ def main():
     print("\nPredicting all windows...")
     windows_data: Dict[str, pd.DataFrame] = {}
     for w in WF_WINDOWS:
-        model_path = MODELS_DIR / f"v75_{w}.txt"
+        if args.model_suffix:
+            model_path = MODELS_DIR / f"v75_{args.model_suffix}_{w}.txt"
+        else:
+            model_path = MODELS_DIR / f"v75_{w}.txt"
         if not model_path.exists():
-            LOG.warning("Model missing for %s — skipping", w)
+            LOG.warning("Model missing for %s — skipping (looked for %s)", w, model_path.name)
             continue
         df_w = load_window_data(df_all, w)
         if len(df_w) == 0:
