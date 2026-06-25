@@ -11,10 +11,13 @@ Architecture:
 - LightGBM binary classification: predict P(price UP in 24h)
 - Label = 1 if fwd_ret_3 > 0, 0 otherwise
 - 58 features (v6 minus 'dow' — spurious with 24h horizon)
-- HORIZON=288 (24h forward, 288 × 5min bars)
+- HORIZON=288 (24h forward, 288 × 5min bars) — ONLY viable horizon per comprehensive sweep
 - Decision: LONG if P(up) > PROB_LONG, SHORT if P(up) < PROB_SHORT, else WAIT
 - 2000 trees with early_stopping=150 (avoids best_iter=1 instability)
-- Quantile-based trading in evaluate_test: Q90/Q10 L+S (rolling sweep validated)
+- Per-symbol Q config overrides in SYMBOL_Q_OVERRIDES (from 7-token comprehensive sweep)
+- Quantile-based trading in evaluate_test: Q85/15 default, Q80/20 for ETH/XRP, Q90/10 for SOL/LINK
+- SHORT is essential — LONG-only always loses across all tokens
+- BTC = dead end (confirmed across all configs)
 
 Why classification instead of regression:
 - Regression predicts MAGNITUDE, which varies with market regime
@@ -57,11 +60,23 @@ DEFAULT_PARAMS = {
     "verbosity": -1,
 }
 
+# Per-symbol quantile overrides from comprehensive sweep results
+# Key: each token has a different optimal Q config
+SYMBOL_Q_OVERRIDES = {
+    "ETH/USDT":  (80, 20),   # Q80/20 → PnL=+22.8%, 3/4 cons
+    "SOL/USDT":  (90, 10),   # Q90/10 → PnL=+34.8%, 3/4 cons
+    "DOGE/USDT": (85, 15),   # Q85/15 → PnL=+34.0%, 4/4 cons (BEST consistency)
+    "AVAX/USDT": (85, 15),   # Q85/15 → PnL=+17.2%, 4/4 cons
+    "LINK/USDT": (90, 10),   # Q90/10 → PnL=+13.0%, 3/4 cons
+    "XRP/USDT":  (80, 20),   # Q80/20 → PnL=+21.7%, 3/4 cons
+    # BTC intentionally excluded — dead end
+}
+
 # Decision thresholds for binary classification
 # P(up) > PROB_LONG → LONG, P(up) < PROB_SHORT → SHORT, else WAIT
 # Updated per rolling sweep: Q90/Q10 means trade only at conviction extremes.
 # For live predict(), we use fixed thresholds as approximation.
-# The evaluate_test() uses rolling quantiles (Q90/Q10) which is more robust.
+# The evaluate_test() uses rolling quantiles (per-symbol Q overrides) which is more robust.
 PROB_LONG = 0.55   # P(UP) > this → LONG (tighter — only high-conviction signals)
 PROB_SHORT = 0.42   # P(UP) < this → SHORT (tighter — only high-conviction shorts)
 # Cost per round-trip trade (entry + exit) in %

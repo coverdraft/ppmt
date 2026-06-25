@@ -1885,3 +1885,30 @@ Stage Summary:
 - LONG-only pierde siempre (-11% a -21%)
 - test_auc=0.496 pero ranking funciona
 - Proximo paso: paper trading real ETH 2-4 semanas
+---
+Task ID: SESION-3-AI-002
+Agent: AI assistant (sesion 3)
+Task: Comprehensive sweep multi-token × multi-horizon + actualizar config
+
+Work Log:
+- Creado comprehensive_sweep.py: 7 tokens × 6 horizontes × 3 Q-configs × 4 ventanas = 504 configs
+- Quick sweep (3 tokens, 3 horizontes) validado en ~47s
+- Full sweep ejecutado: 504 per-window results, 126 aggregated
+- Hallazgo CRITICO: horizontes cortos son catastroficos
+  - H=6 (30min): avg PnL=-101%
+  - H=12 (1h): avg PnL=-57%
+  - H=36 (3h): avg PnL=-23%
+  - H=288 (24h): avg PnL=+5.6% (UNICO positivo)
+- 6/7 tokens operables, BTC = dead end confirmado
+- DOGE Q85/15 y AVAX Q85/15: 4/4 consistencia (mejor robustez)
+- SOL Q90/10: mejor PnL (+35%) pero solo 3/4 consistencia
+- Actualizado model.py: SYMBOL_Q_OVERRIDES per-token
+- Actualizado evaluate_test(): acepta symbol param, usa overrides
+- Actualizado ESTADO_PROYECTO.md con resultados completos
+- Respuesta al usuario: temporalidades bajas NO funcionan, edge esta en 24h
+
+Stage Summary:
+- 504 configs testeadas — la optimizacion mas rigurosa hasta ahora
+- H=288 es el unico horizonte viable — mas operaciones = mas perdidas
+- Per-symbol Q config implementada (6 tokens con overrides)
+- Proximo paso: paper trading multi-token con config optimizada

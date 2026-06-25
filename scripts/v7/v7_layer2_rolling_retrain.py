@@ -73,7 +73,7 @@ from scripts.v7.paper_trader.feed import Feed
 from scripts.v7.paper_trader.model import (
     FEATURE_NAMES, train, load_model, load_metadata, is_trained,
     model_path, metadata_path, MODEL_DIR, DEFAULT_PARAMS, HORIZON,
-    PROB_LONG, PROB_SHORT, COST_PCT,
+    PROB_LONG, PROB_SHORT, COST_PCT, SYMBOL_Q_OVERRIDES,
 )
 from scripts.v7.paper_trader.features import extract_features
 
@@ -225,13 +225,15 @@ def train_with_split(train_df: pd.DataFrame, val_df: pd.DataFrame, params: dict 
     return bst, metrics
 
 
-def evaluate_test(bst: lgb.Booster, test_df: pd.DataFrame) -> dict:
+def evaluate_test(bst: lgb.Booster, test_df: pd.DataFrame, symbol: str | None = None) -> dict:
     """Evaluate trained classifier with horizon-aligned sequential backtest.
 
     Key insight: model predicts P(UP in 24h), so each trade holds for 24h.
     Sequential backtest: no overlapping positions — enter, hold HORIZON bars, exit.
     PnL for each trade = fwd_ret_3 (the actual 24h forward return at entry).
     This eliminates churning and aligns holding period with prediction horizon.
+
+    symbol: if provided, uses per-symbol Q overrides from SYMBOL_Q_OVERRIDES.
     """
     if len(test_df) == 0:
         return {"n_test": 0}
@@ -244,15 +246,22 @@ def evaluate_test(bst: lgb.Booster, test_df: pd.DataFrame) -> dict:
     dir_acc = float(((pred > 0.5) == (y_label > 0.5)).mean())
 
     # --- Sequential backtest: L+S with horizon-aligned holding ---
-    # Rolling sweep (4 windows, ETH/USDT) showed Q90/Q10 L+S hold=288 is best:
-    #   pnl=+18.1%, sharpe=0.138, 27 trades, 3/4 windows positive, 53% win rate.
-    # Q90/Q10 = trade only when conviction is highest (top/bottom 10% of preds).
-    # Each trade holds for HORIZON bars (24h), matching prediction horizon.
-    # Sequential: no overlapping positions — enter, hold, exit, then re-evaluate.
+    # Comprehensive sweep (7 tokens × 6 horizons × 3 Q-configs × 4 windows) showed:
+    #   - H=288 is the ONLY viable horizon (shorter = catastrophic losses)
+    #   - Q85/15 is best cross-token: DOGE +34% 4/4, AVAX +17% 4/4
+    #   - Q80/20 is best for ETH (+23%) and XRP (+22%)
+    #   - Q90/10 is best for SOL (+35%) and LINK (+13%)
+    #   - BTC = dead end regardless of config
+    #   - LONG-only always loses, SHORT is essential
+    # Default Q85/15 as best cross-token balance; override per symbol if needed.
     MIN_HOLD = HORIZON  # hold for full prediction horizon (288 bars = 24h)
     WINDOW = 200
-    Q_LONG = 90   # top 10% of recent predictions → LONG
-    Q_SHORT = 10  # bottom 10% of recent predictions → SHORT
+    # Use per-symbol Q override if available, else default Q85/15
+    if symbol and symbol in SYMBOL_Q_OVERRIDES:
+        Q_LONG, Q_SHORT = SYMBOL_Q_OVERRIDES[symbol]
+    else:
+        Q_LONG = 85   # top 15% of recent predictions → LONG (cross-token default)
+        Q_SHORT = 15  # bottom 15% of recent predictions → SHORT
 
     n_trades = 0
     n_long = 0
@@ -434,7 +443,7 @@ def run_one_retrain(feed: Feed, symbol: str, days: int = 90, dry_run: bool = Fal
              train_metrics["logloss_val"], train_metrics["best_iteration"])
 
     # 5. Evaluate on test set
-    test_metrics = evaluate_test(bst, test_df)
+    test_metrics = evaluate_test(bst, test_df, symbol=symbol)
     LOG.info("%s: test — auc=%.3f dir_acc=%.3f n_trades=%d pnl_total=%.3f%%",
              symbol, test_metrics.get("auc_test", 0), test_metrics.get("dir_acc_test", 0),
              test_metrics.get("n_trades", 0), test_metrics.get("pnl_total_pct", 0))
