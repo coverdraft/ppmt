@@ -11,6 +11,16 @@ Decision rule (same as v7.5):
 """
 from __future__ import annotations
 
+
+# === Auto-detected project root (portable paths, patched) ===
+import os as _os
+from pathlib import Path as _Path
+_PROJECT_ROOT = _Path(__file__).resolve().parents[2]
+_PROJECT_ROOT_STR = str(_PROJECT_ROOT)
+# === End path setup ===
+
+
+
 import argparse
 import json
 import logging
@@ -24,9 +34,9 @@ import numpy as np
 import pandas as pd
 import lightgbm as lgb
 
-MODELS_DIR = Path("/home/z/my-project/data/v6_models")
+MODELS_DIR = Path(_PROJECT_ROOT_STR + "/data/v6_models")
 OUTPUT_DIR = MODELS_DIR
-PARQUET_PATH = Path("/home/z/my-project/data/v7_models/v75/v75_features.parquet")
+PARQUET_PATH = Path(_PROJECT_ROOT_STR + "/data/v7_models/v75/v75_features.parquet")
 
 LOG = logging.getLogger("v6_bt")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")

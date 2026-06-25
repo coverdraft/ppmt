@@ -52,6 +52,16 @@ USAGE:
 """
 from __future__ import annotations
 
+
+# === Auto-detected project root (portable paths, patched) ===
+import os as _os
+from pathlib import Path as _Path
+_PROJECT_ROOT = _Path(__file__).resolve().parents[2]
+_PROJECT_ROOT_STR = str(_PROJECT_ROOT)
+# === End path setup ===
+
+
+
 import argparse
 import logging
 import math
@@ -79,9 +89,9 @@ from v7_ohlcv_encoder import symbol_to_sector
 # Constants
 # ----------------------------------------------------------------------------
 
-DB_PATH = os.environ.get("PPMT_DB_PATH", "/home/z/my-project/data/ppmt.db")
-FUNDING_CACHE = "/home/z/my-project/data/v7_cache/funding_cache.db"
-OI_CACHE = "/home/z/my-project/data/v7_cache/oi_cache.db"
+DB_PATH = os.environ.get("PPMT_DB_PATH", _PROJECT_ROOT_STR + "/data/ppmt.db")
+FUNDING_CACHE = _PROJECT_ROOT_STR + "/data/v7_cache/funding_cache.db"
+OI_CACHE = _PROJECT_ROOT_STR + "/data/v7_cache/oi_cache.db"
 
 LOG = logging.getLogger("v7_extract_extras")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")

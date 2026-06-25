@@ -40,6 +40,16 @@ USAGE:
 """
 from __future__ import annotations
 
+
+# === Auto-detected project root (portable paths, patched) ===
+import os as _os
+from pathlib import Path as _Path
+_PROJECT_ROOT = _Path(__file__).resolve().parents[2]
+_PROJECT_ROOT_STR = str(_PROJECT_ROOT)
+# === End path setup ===
+
+
+
 import argparse
 import json
 import logging
@@ -59,8 +69,8 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error
 # Constants
 # ----------------------------------------------------------------------------
 
-DB_PATH = os.environ.get("PPMT_DB_PATH", "/home/z/my-project/data/ppmt.db")
-OUTPUT_DIR = Path("/home/z/my-project/data/v7_models/long_expert")
+DB_PATH = os.environ.get("PPMT_DB_PATH", _PROJECT_ROOT_STR + "/data/ppmt.db")
+OUTPUT_DIR = Path(_PROJECT_ROOT_STR + "/data/v7_models/long_expert")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 LOG = logging.getLogger("v7_long_expert")

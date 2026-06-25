@@ -4,6 +4,16 @@ v6_train_pilot.py — Fast pilot training (single split) to validate the pipelin
 Train: all data before 2026-05
 Test:  May 2026 data
 """
+
+# === Auto-detected project root (portable paths, patched) ===
+import os as _os
+from pathlib import Path as _Path
+_PROJECT_ROOT = _Path(__file__).resolve().parents[2]
+_PROJECT_ROOT_STR = str(_PROJECT_ROOT)
+# === End path setup ===
+
+
+
 import json
 import os
 import sqlite3

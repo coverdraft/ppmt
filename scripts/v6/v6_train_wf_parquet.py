@@ -7,6 +7,16 @@ and selects only the 59 v6 features. Avoids slow json_extract on 1.44M rows.
 Trains one window per invocation, same interface as v6_train_wf.py:
     python v6_train_wf_parquet.py --window 2025-06
 """
+
+# === Auto-detected project root (portable paths, patched) ===
+import os as _os
+from pathlib import Path as _Path
+_PROJECT_ROOT = _Path(__file__).resolve().parents[2]
+_PROJECT_ROOT_STR = str(_PROJECT_ROOT)
+# === End path setup ===
+
+
+
 import argparse
 import json
 import os

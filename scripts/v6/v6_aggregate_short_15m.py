@@ -2,6 +2,16 @@
 v6_aggregate_short_15m.py — Aggregate SHORT-expert v2 15m walk-forward results.
 Compare against 5m SHORT-expert v2 to answer: does 15m TF unlock SHORT side?
 """
+
+# === Auto-detected project root (portable paths, patched) ===
+import os as _os
+from pathlib import Path as _Path
+_PROJECT_ROOT = _Path(__file__).resolve().parents[2]
+_PROJECT_ROOT_STR = str(_PROJECT_ROOT)
+# === End path setup ===
+
+
+
 import json
 from pathlib import Path
 

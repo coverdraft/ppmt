@@ -39,6 +39,16 @@ USAGE
 """
 from __future__ import annotations
 
+
+# === Auto-detected project root (portable paths, patched) ===
+import os as _os
+from pathlib import Path as _Path
+_PROJECT_ROOT = _Path(__file__).resolve().parents[2]
+_PROJECT_ROOT_STR = str(_PROJECT_ROOT)
+# === End path setup ===
+
+
+
 import argparse
 import json
 import logging
@@ -52,8 +62,8 @@ import numpy as np
 import pandas as pd
 import lightgbm as lgb
 
-DB_PATH = os.environ.get("PPMT_DB_PATH", "/home/z/my-project/data/ppmt.db")
-MODELS_DIR = Path("/home/z/my-project/data/v7_models/v75")
+DB_PATH = os.environ.get("PPMT_DB_PATH", _PROJECT_ROOT_STR + "/data/ppmt.db")
+MODELS_DIR = Path(_PROJECT_ROOT_STR + "/data/v7_models/v75")
 OUTPUT_DIR = MODELS_DIR
 
 LOG = logging.getLogger("v75_bt")

@@ -23,6 +23,16 @@ Usage:
 """
 from __future__ import annotations
 
+
+# === Auto-detected project root (portable paths, patched) ===
+import os as _os
+from pathlib import Path as _Path
+_PROJECT_ROOT = _Path(__file__).resolve().parents[2]
+_PROJECT_ROOT_STR = str(_PROJECT_ROOT)
+# === End path setup ===
+
+
+
 import argparse
 import json
 import logging
@@ -48,8 +58,8 @@ logging.basicConfig(
 # Config
 # ----------------------------------------------------------------------------
 
-DB_PATH = os.environ.get("PPMT_DB_PATH", "/home/z/my-project/data/ppmt.db")
-STATE_FILE = Path("/home/z/my-project/data/v6_download_state.json")
+DB_PATH = os.environ.get("PPMT_DB_PATH", _PROJECT_ROOT_STR + "/data/ppmt.db")
+STATE_FILE = Path(_PROJECT_ROOT_STR + "/data/v6_download_state.json")
 
 COINBASE_CANDLES = "https://api.exchange.coinbase.com/products/{pair}/candles"
 USER_AGENT = "ppmt-v6-research/1.0 (contact: research@example.com)"
