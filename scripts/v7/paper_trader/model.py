@@ -28,7 +28,7 @@ from .features import FEATURE_NAMES, extract_features
 
 LOG = logging.getLogger("pt_model")
 
-MODEL_DIR = Path("/home/z/my-project/data/paper_trading/models")
+MODEL_DIR = Path(__file__).resolve().parents[3] / "data" / "paper_trading" / "models"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 DEFAULT_PARAMS = {

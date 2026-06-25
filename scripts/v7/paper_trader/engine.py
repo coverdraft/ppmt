@@ -39,8 +39,8 @@ from .model import (
 
 LOG = logging.getLogger("pt_engine")
 
-STATE_DIR = Path("/home/z/my-project/data/paper_trading/state")
-LOGS_DIR = Path("/home/z/my-project/data/paper_trading/logs")
+STATE_DIR = Path(__file__).resolve().parents[3] / "data" / "paper_trading" / "state"
+LOGS_DIR = Path(__file__).resolve().parents[3] / "data" / "paper_trading" / "logs"
 STATE_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 

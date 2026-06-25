@@ -76,7 +76,7 @@ from scripts.v7.paper_trader.features import extract_features
 
 LOG = logging.getLogger("pt_layer2")
 
-LOGS_DIR = Path("/home/z/my-project/data/paper_trading/logs")
+LOGS_DIR = SCRIPT_DIR.parents[2] / "data" / "paper_trading" / "logs"
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Acceptance gate thresholds (percentage points)
