@@ -1844,3 +1844,24 @@ Work Log:
 Stage Summary:
 - ETH senal real a 24h (test_auc=0.630)
 - Pendiente: n_trades=0 en ETH
+---
+Task ID: SESION-2-AI-002
+Agent: AI assistant (sesion 2)
+Task: Backtest tuning — dedup, quantile trading, sweep
+
+Work Log:
+- Descubierto bug: THR_LONG/THR_SHORT no existen, eran PROB_LONG/PROB_SHORT
+- Cambiado PROB_LONG 0.55->0.51, PROB_SHORT 0.40->0.46
+- Implementado de-duplicated PnL (posiciones solapadas inflaban resultado)
+- pnl inflado 791% -> pnl real -3.3% (sin dedup era mentira)
+- Cambiado a quantile-based trading (ranking vs umbrales absolutos)
+- LONG-only pierde en todas las configs
+- L+S con Q80 hold=288 gana: pnl=+5%, sharpe=0.24, 7 trades
+- Creado sweep_backtest.py: 19 configs en 1 run
+- Test 7 dias = solo 7 trades = estadisticamente debil
+
+Stage Summary:
+- Primera config con pnl positivo y sharpe>0
+- Senal real pero debil (test_auc=0.62)
+- Necesitamos paper trading real para validar
+- Commits: 3768040, 14bbe03, 1e5fd8c, 060ff9d, 43e4615, fec518e, 5015b1f

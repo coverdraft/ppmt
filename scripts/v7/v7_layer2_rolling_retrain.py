@@ -243,15 +243,18 @@ def evaluate_test(bst: lgb.Booster, test_df: pd.DataFrame) -> dict:
     auc_test = float(_auc(y_label, pred))
     dir_acc = float(((pred > 0.5) == (y_label > 0.5)).mean())
 
-    # --- Sequential backtest: enter LONG, hold HORIZON bars, exit ---
-    # Only LONG trades — crypto has structural upward drift, SHORT fights the trend.
-    # Only enter a new trade when not in a position.
-    # Each trade's PnL = fwd_ret[entry_bar] - COST_PCT
+    # --- Sequential backtest: L+S with horizon-aligned holding ---
+    # Sweep showed Q80 L+S hold=288 is best config (pnl=+5%, sharpe=0.24).
+    # Each trade holds for HORIZON bars (24h), matching prediction horizon.
+    # Sequential: no overlapping positions — enter, hold, exit, then re-evaluate.
     MIN_HOLD = HORIZON  # hold for full prediction horizon (288 bars = 24h)
     WINDOW = 200
-    Q_LONG = 80  # top 20% of recent predictions
+    Q_LONG = 80   # top 20% of recent predictions → LONG
+    Q_SHORT = 20  # bottom 20% of recent predictions → SHORT
 
     n_trades = 0
+    n_long = 0
+    n_short = 0
     n_win = 0
     pnl = 0.0
     in_trade = False
@@ -272,15 +275,24 @@ def evaluate_test(bst: lgb.Booster, test_df: pd.DataFrame) -> dict:
             else:
                 continue
 
-        # Not in a trade — look for LONG entry signal
+        # Not in a trade — look for entry signal
         if len(recent_preds) < 20:
             continue
 
         q_high = np.percentile(recent_preds, Q_LONG)
+        q_low = np.percentile(recent_preds, Q_SHORT)
 
-        if p_val > q_high and not np.isnan(fwd_ret[i]):
+        sig = 0
+        if p_val > q_high:
+            sig = 1
+            n_long += 1
+        elif p_val < q_low:
+            sig = -1
+            n_short += 1
+
+        if sig != 0 and not np.isnan(fwd_ret[i]):
             n_trades += 1
-            trade_ret = fwd_ret[i] - COST_PCT
+            trade_ret = sig * fwd_ret[i] - COST_PCT
             pnl += trade_ret
             trade_returns.append(trade_ret)
             in_trade = True
@@ -297,15 +309,17 @@ def evaluate_test(bst: lgb.Booster, test_df: pd.DataFrame) -> dict:
              float(pred.min()), float(np.percentile(pred, 10)), float(np.percentile(pred, 25)),
              float(np.percentile(pred, 50)), float(np.percentile(pred, 75)),
              float(np.percentile(pred, 90)), float(pred.max()), float(pred.mean()), float(pred.std()))
-    LOG.info("LONG-only sequential backtest: hold=%d bars, q_long=%d",
-             MIN_HOLD, Q_LONG)
-    LOG.info("trades: n=%d win_rate=%.1f%% avg_ret=%.3f%% pnl=%.3f%%",
-             n_trades, win_rate * 100, avg_ret, pnl)
+    LOG.info("L+S sequential backtest: hold=%d bars, q_long=%d q_short=%d",
+             MIN_HOLD, Q_LONG, Q_SHORT)
+    LOG.info("trades: n=%d (L=%d S=%d) win_rate=%.1f%% avg_ret=%.3f%% pnl=%.3f%%",
+             n_trades, n_long, n_short, win_rate * 100, avg_ret, pnl)
     return {
         "n_test": len(X_test),
         "auc_test": auc_test,
         "dir_acc_test": dir_acc,
         "n_trades": n_trades,
+        "n_long": n_long,
+        "n_short": n_short,
         "win_rate": win_rate,
         "avg_ret_pct": avg_ret,
         "pnl_total_pct": float(pnl),
