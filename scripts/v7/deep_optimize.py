@@ -563,6 +563,7 @@ def main():
         return
 
     per_window_df = pd.DataFrame(results)
+    Path(save_csv).parent.mkdir(parents=True, exist_ok=True)
     per_window_df.to_csv(save_csv, index=False)
     LOG.info("Per-window results saved to %s", save_csv)
 
