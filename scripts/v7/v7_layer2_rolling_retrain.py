@@ -244,13 +244,15 @@ def evaluate_test(bst: lgb.Booster, test_df: pd.DataFrame) -> dict:
     dir_acc = float(((pred > 0.5) == (y_label > 0.5)).mean())
 
     # --- Sequential backtest: L+S with horizon-aligned holding ---
-    # Sweep showed Q80 L+S hold=288 is best config (pnl=+5%, sharpe=0.24).
+    # Rolling sweep (4 windows, ETH/USDT) showed Q90/Q10 L+S hold=288 is best:
+    #   pnl=+18.1%, sharpe=0.138, 27 trades, 3/4 windows positive, 53% win rate.
+    # Q90/Q10 = trade only when conviction is highest (top/bottom 10% of preds).
     # Each trade holds for HORIZON bars (24h), matching prediction horizon.
     # Sequential: no overlapping positions — enter, hold, exit, then re-evaluate.
     MIN_HOLD = HORIZON  # hold for full prediction horizon (288 bars = 24h)
     WINDOW = 200
-    Q_LONG = 80   # top 20% of recent predictions → LONG
-    Q_SHORT = 20  # bottom 20% of recent predictions → SHORT
+    Q_LONG = 90   # top 10% of recent predictions → LONG
+    Q_SHORT = 10  # bottom 10% of recent predictions → SHORT
 
     n_trades = 0
     n_long = 0

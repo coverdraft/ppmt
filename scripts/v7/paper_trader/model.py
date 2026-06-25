@@ -13,8 +13,8 @@ Architecture:
 - 58 features (v6 minus 'dow' — spurious with 24h horizon)
 - HORIZON=288 (24h forward, 288 × 5min bars)
 - Decision: LONG if P(up) > PROB_LONG, SHORT if P(up) < PROB_SHORT, else WAIT
-- Fixed 50 trees, no early stopping (avoids instability)
-- Quantile-based trading in evaluate_test (ranking-based)
+- 2000 trees with early_stopping=150 (avoids best_iter=1 instability)
+- Quantile-based trading in evaluate_test: Q90/Q10 L+S (rolling sweep validated)
 
 Why classification instead of regression:
 - Regression predicts MAGNITUDE, which varies with market regime
@@ -59,9 +59,11 @@ DEFAULT_PARAMS = {
 
 # Decision thresholds for binary classification
 # P(up) > PROB_LONG → LONG, P(up) < PROB_SHORT → SHORT, else WAIT
-# Asymmetric: crypto has structural upward drift, so SHORT needs higher conviction
-PROB_LONG = 0.51   # P(UP) > this → LONG (used in model.predict)
-PROB_SHORT = 0.46   # P(UP) < this → SHORT (used in model.predict)
+# Updated per rolling sweep: Q90/Q10 means trade only at conviction extremes.
+# For live predict(), we use fixed thresholds as approximation.
+# The evaluate_test() uses rolling quantiles (Q90/Q10) which is more robust.
+PROB_LONG = 0.55   # P(UP) > this → LONG (tighter — only high-conviction signals)
+PROB_SHORT = 0.42   # P(UP) < this → SHORT (tighter — only high-conviction shorts)
 # Cost per round-trip trade (entry + exit) in %
 COST_PCT = 0.14
 HORIZON = 288  # 288 * 5m = 24h forward
