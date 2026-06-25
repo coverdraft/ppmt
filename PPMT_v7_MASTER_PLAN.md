@@ -777,3 +777,59 @@ Dependencies that need extra steps on macOS:
 | `RUNBOOK_v75.md` (new) | Step-by-step macOS reproduction guide | Help user run v7.5 locally |
 | `worklog.md` | Added Task ID `v75-repro-macos` entry | Document what happened |
 | `PPMT_v7_MASTER_PLAN.md` | Added §16 (this section) | Document the issue + fix for future reference |
+
+### 16.7 Re-reproduction results (after max_seconds fix)
+
+After applying the `--max-seconds=0` fix and re-running from scratch on the same MacBook Air:
+
+**Dataset (improved but not full):**
+- 810,578 OHLCV 5m candles + 314,852 OHLCV 15m candles
+- 728,818 feature_observations_v6 rows (vs 494k before, vs 1.44M original sandbox)
+- 5 symbols processed: BTC, ETH, SOL, ADA, XRP (others had incomplete windows in Coinbase)
+
+**v7.5 backtest results (thr=0.30%):**
+
+| Window | n | L | S | WR | PF | PnL | $ | Sharpe | MaxDD |
+|--------|---|---|---|----|----|-----|---|--------|-------|
+| 2025-04 | 268 | 171 | 97 | 0.545 | 1.61 | +74.98% | +525 | 10.80 | -1.38% |
+| 2025-05 | 138 | 88 | 50 | 0.478 | 0.92 | -5.97% | -42 | -1.36 | -1.79% |
+| 2025-06 | 29 | 15 | 14 | 0.483 | 0.82 | -2.19% | -15 | -1.99 | -0.51% |
+| 2025-09 | 27 | 11 | 16 | 0.444 | 1.29 | +3.30% | +23 | 2.12 | -0.25% |
+| 2025-10 | 225 | 179 | 46 | 0.476 | 1.02 | +6.37% | +45 | 0.45 | -6.10% |
+| **TOTAL** | **687** | **464** | **223** | **0.502** | **1.15** | **+76.48%** | **+535** | **1.47** | **-6.10%** |
+
+**Ship criteria:**
+- ✅ Sharpe > 1.0 (1.47)
+- ✅ MaxDD > -15% (-6.10%)
+- ❌ WR > 52% (50.2%, short by 1.8pp)
+
+**Head-to-head: macOS repro vs sandbox original**
+
+| Metric | macOS (5 symbols, 728k) | Sandbox (12 symbols, 1.44M) |
+|--------|-------------------------|------------------------------|
+| Sharpe | 1.47 | 2.80 |
+| MaxDD | -6.10% | -7.09% |
+| WR | 50.2% | 51.7% |
+| PnL | +76.48% | +333.76% |
+| Trades | 687 | 1,280 |
+
+**Key observation: 2025-04 window dominates**
+- Sharpe 10.80 in 2025-04 alone, with +74.98% PnL
+- Other 4 windows are mediocre (Sharpe 0.45 to 2.12) or negative
+- The aggregate Sharpe 1.47 is heavily dependent on 2025-04 performance
+- This suggests window-specific overfitting or regime sensitivity
+
+### 16.8 Honest assessment
+
+**v7.5 IS profitable in walk-forward backtest on macOS**, but:
+1. The Sharpe 2.80 from the sandbox run is NOT reproducible with fewer symbols
+2. High variance between windows (Sharpe 10.80 to -1.99)
+3. WR fails ship criteria by 1.8pp (similar to sandbox)
+4. **Recommendation: do NOT deploy to live trading yet**
+
+**Next steps required before live:**
+1. **F8 Online Learning** — retrain periodically to handle regime changes
+2. **Hyperparameter tuning** — Optuna over num_leaves, learning_rate, etc.
+3. **Threshold sweep** — find better thr_long/thr_short than 0.30%
+4. **Per-window analysis** — understand why 2025-04 dominates
+5. **Paper trading** — 2-4 weeks of live simulation before real money
