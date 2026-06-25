@@ -21,6 +21,16 @@ Output table: feature_observations_v6
 """
 from __future__ import annotations
 
+
+# === Auto-detected project root (portable paths, patched) ===
+import os as _os
+from pathlib import Path as _Path
+_PROJECT_ROOT = _Path(__file__).resolve().parents[2]
+_PROJECT_ROOT_STR = str(_PROJECT_ROOT)
+# === End path setup ===
+
+
+
 import argparse
 import json
 import logging
@@ -39,8 +49,8 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
 )
 
-DB_PATH = os.environ.get("PPMT_DB_PATH", "/home/z/my-project/data/ppmt.db")
-STATE_FILE = Path("/home/z/my-project/data/v6_extract_state.json")
+DB_PATH = os.environ.get("PPMT_DB_PATH", _PROJECT_ROOT_STR + "/data/ppmt.db")
+STATE_FILE = Path(_PROJECT_ROOT_STR + "/data/v6_extract_state.json")
 
 # Per-timeframe config: (label horizons, primary label column, table name)
 # - 5m TF: keep v6 original behavior (horizons 3,6,12 = 15m/30m/60m forward, primary=fwd_ret_3)
