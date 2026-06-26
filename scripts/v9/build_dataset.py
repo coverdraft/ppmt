@@ -11,10 +11,13 @@ Pipeline:
 Features are computed on 1m bars to match the trader's decision timeframe.
 
 FIXED vs v1:
-  - entry_ts_ms: use .view('int64') // 1e6 for tz-aware timestamps
-  - download_1m: proper pagination across full date range
-  - timestamp matching: compare ms-to-ms correctly
-  - Skip MEXC-only symbols that don't exist on bybit/binance
+  - entry_ts_ms: robust conversion using view('int64') with astype fallback
+  - download_1m: fixed pagination — don't break when len < limit; continue until
+    last_ts >= end_ts_ms or truly empty response
+  - entry matching: round entry_ts_ms DOWN to minute boundary for primary lookup,
+    then fallback to closest-within-2min for sub-minute entries
+  - cache invalidation: wipe stale cache that doesn't overlap with trade dates
+  - diagnostic logging: print date ranges, overlap checks, match stats per symbol
 """
 from __future__ import annotations
 
@@ -316,25 +319,87 @@ def compute_features_1m(df: pd.DataFrame, symbol: str = "") -> pd.DataFrame:
     return feat
 
 
+# ── Robust timestamp-to-milliseconds conversion ──
+
+def _ts_to_ms(series: pd.Series) -> pd.Series:
+    """Convert tz-aware datetime Series to milliseconds (int64).
+    
+    Handles pandas 2.x and 3.x differences:
+    - pandas 2.x: astype(np.int64) works but may deprecate
+    - pandas 3.x: view('int64') is the recommended method
+    Both give nanoseconds since epoch in UTC.
+    """
+    # Method 1: view('int64') — works in pandas 2.x and 3.x
+    try:
+        ns = series.view("int64")
+        return (ns // 1_000_000).astype(np.int64)
+    except (TypeError, ValueError, AttributeError):
+        pass
+
+    # Method 2: astype(np.int64) — works in pandas 1.x and 2.x
+    try:
+        ns = series.astype(np.int64)
+        return (ns // 1_000_000).astype(np.int64)
+    except (TypeError, ValueError):
+        pass
+
+    # Method 3: convert to naive, then view
+    try:
+        naive = series.dt.tz_convert(None)
+        ns = naive.view("int64")
+        return (ns // 1_000_000).astype(np.int64)
+    except (TypeError, ValueError, AttributeError):
+        pass
+
+    # Method 4: use timestamp accessor
+    try:
+        seconds = series.astype("int64").astype(float) / 1e9
+        return (seconds * 1000).astype(np.int64)
+    except Exception:
+        pass
+
+    raise ValueError("Cannot convert tz-aware datetime to milliseconds — all methods failed!")
+
+
 # ── Download 1m OHLCV with proper pagination ──
 
 def download_1m(symbol: str, start_ts_ms: int, end_ts_ms: int) -> pd.DataFrame:
-    """Download 1m OHLCV with caching. Paginates properly across the full date range."""
+    """Download 1m OHLCV with caching. Paginates correctly across the full date range.
+    
+    Key fixes vs v1:
+      - Don't break pagination when len(ohlcv) < 1000; only break when
+        the response is truly empty OR last_ts >= end_ts_ms
+      - Different exchanges have different max limits per request
+    """
     cache_file = CACHE_DIR / f"{symbol}_1m.parquet"
 
-    # Check cache first
+    # ── Check cache with overlap validation ──
     if cache_file.exists():
         cached = pd.read_parquet(cache_file)
         if len(cached) > 0:
-            cache_start = cached["timestamp"].min()
-            cache_end = cached["timestamp"].max()
-            # If cache covers our range, use it
+            cache_start = int(cached["timestamp"].min())
+            cache_end = int(cached["timestamp"].max())
+
+            # Check if cache covers our range (with 1-day tolerance on each side)
             if cache_start <= start_ts_ms + 86400000 and cache_end >= end_ts_ms - 86400000:
                 mask = (cached["timestamp"] >= start_ts_ms) & (cached["timestamp"] <= end_ts_ms)
                 result = cached[mask].copy()
                 if len(result) > 0:
-                    LOG.info("  %s: %d bars from cache (1m)", symbol, len(result))
+                    LOG.info("  %s: %d bars from cache (1m)  [%s → %s]",
+                             symbol, len(result),
+                             pd.to_datetime(result["timestamp"].min(), unit="ms").strftime("%Y-%m-%d"),
+                             pd.to_datetime(result["timestamp"].max(), unit="ms").strftime("%Y-%m-%d"))
                     return result
+            else:
+                # Cache exists but doesn't cover our range — log it
+                LOG.info("  %s: cache exists but doesn't cover needed range", symbol)
+                LOG.info("    Need:    %s → %s",
+                         pd.to_datetime(start_ts_ms, unit="ms").strftime("%Y-%m-%d"),
+                         pd.to_datetime(end_ts_ms, unit="ms").strftime("%Y-%m-%d"))
+                LOG.info("    Have:    %s → %s",
+                         pd.to_datetime(cache_start, unit="ms").strftime("%Y-%m-%d"),
+                         pd.to_datetime(cache_end, unit="ms").strftime("%Y-%m-%d"))
+                # Fall through to download — will merge with existing cache
 
     import ccxt
 
@@ -347,33 +412,52 @@ def download_1m(symbol: str, start_ts_ms: int, end_ts_ms: int) -> pd.DataFrame:
                 LOG.info("  %s: not listed on %s", symbol, exchange_id)
                 continue
 
+            # Determine the actual limit for this exchange
+            # Binance: 1000, Bybit: 200-1000, MEXC: 1000
+            limit = 1000
+            if exchange_id == "bybit":
+                limit = 200  # Bybit v5 API limit for 1m candles
+
             all_ohlcv = []
             since = start_ts_ms
-            max_iterations = 500  # safety limit
+            max_iterations = 2000  # safety limit (covers ~375 days of 1m data)
             iteration = 0
+            last_fetched_count = limit  # track to detect truly no more data
 
             while since < end_ts_ms and iteration < max_iterations:
                 iteration += 1
                 try:
-                    ohlcv = exchange.fetch_ohlcv(ccxt_sym, "1m", since=since, limit=1000)
+                    ohlcv = exchange.fetch_ohlcv(ccxt_sym, "1m", since=since, limit=limit)
                 except Exception as e:
                     LOG.warning("  %s on %s: fetch error at %s: %s",
-                                symbol, exchange_id, since, str(e)[:60])
-                    time.sleep(2)
-                    break
+                                symbol, exchange_id,
+                                pd.to_datetime(since, unit="ms").strftime("%Y-%m-%d"),
+                                str(e)[:80])
+                    time.sleep(3)
+                    # Retry once
+                    try:
+                        ohlcv = exchange.fetch_ohlcv(ccxt_sym, "1m", since=since, limit=limit)
+                    except Exception:
+                        break
 
                 if not ohlcv or len(ohlcv) == 0:
+                    # Truly no more data
                     break
 
                 all_ohlcv.extend(ohlcv)
                 last_ts = ohlcv[-1][0]
 
-                # If we got less than 1000, we've reached the end
-                if len(ohlcv) < 1000:
-                    break
-
                 # If last timestamp is past our range, we're done
                 if last_ts >= end_ts_ms:
+                    break
+
+                # FIX: Don't break when len < limit!
+                # Some exchanges return slightly fewer bars than requested.
+                # Only stop if we get truly empty response or past end_ts.
+                # However, if we got much fewer than expected, the exchange
+                # might not have data for this period at all.
+                if len(ohlcv) < 5:
+                    # Very few bars — probably no more data available
                     break
 
                 # Move since to the next bar after the last one we got
@@ -387,13 +471,19 @@ def download_1m(symbol: str, start_ts_ms: int, end_ts_ms: int) -> pd.DataFrame:
                 df = df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
                 df = df[(df["timestamp"] >= start_ts_ms) & (df["timestamp"] <= end_ts_ms)]
 
-                # Merge with cache
+                # Merge with existing cache (keep all unique timestamps)
                 if cache_file.exists():
-                    old = pd.read_parquet(cache_file)
-                    df = pd.concat([old, df]).drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+                    try:
+                        old = pd.read_parquet(cache_file)
+                        df = pd.concat([old, df]).drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+                    except Exception:
+                        pass  # If cache is corrupted, just use new data
 
                 df.to_parquet(cache_file, index=False)
-                LOG.info("  %s: %d bars from %s (1m)", symbol, len(df), exchange_id)
+                LOG.info("  %s: %d bars from %s (1m)  [%s → %s]",
+                         symbol, len(df), exchange_id,
+                         pd.to_datetime(df["timestamp"].min(), unit="ms").strftime("%Y-%m-%d"),
+                         pd.to_datetime(df["timestamp"].max(), unit="ms").strftime("%Y-%m-%d"))
                 return df.copy()
 
         except Exception as e:
@@ -412,11 +502,20 @@ def main():
                         help="Re-filter with this threshold (default: $5)")
     parser.add_argument("--max-symbols", type=int, default=15,
                         help="Max symbols to process (for speed)")
+    parser.add_argument("--clear-cache", action="store_true",
+                        help="Delete all cached OHLCV data and re-download")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
                         datefmt="%H:%M:%S")
+
+    # Optional: clear cache
+    if args.clear_cache:
+        LOG.info("Clearing OHLCV cache...")
+        for f in CACHE_DIR.glob("*.parquet"):
+            f.unlink()
+        LOG.info("Cache cleared")
 
     # Load filtered trades
     trades_path = DATA_DIR / "filtered_trades.json"
@@ -430,36 +529,49 @@ def main():
     LOG.info("Loaded %d filtered trades", len(trades))
     tdf = pd.DataFrame(trades)
 
-    # ── FIX: Parse timestamps correctly ──
-    # entry_time comes as ISO string like "2025-06-15T14:30:00+00:00"
+    # ── FIX: Robust timestamp conversion ──
     tdf["entry_ts"] = pd.to_datetime(tdf["entry_time"], utc=True)
     tdf["exit_ts"] = pd.to_datetime(tdf["exit_time"], utc=True)
 
-    # Convert to milliseconds using int timestamp * 1000
-    # DO NOT use .astype(int) on tz-aware Series — it gives nanoseconds!
-    tdf["entry_ts_ms"] = (tdf["entry_ts"].astype(np.int64) // 1_000_000).astype(np.int64)
-    tdf["exit_ts_ms"] = (tdf["exit_ts"].astype(np.int64) // 1_000_000).astype(np.int64)
+    # Use robust conversion method
+    tdf["entry_ts_ms"] = _ts_to_ms(tdf["entry_ts"])
+    tdf["exit_ts_ms"] = _ts_to_ms(tdf["exit_ts"])
 
-    # Verify timestamps are sane (should be ~1.7e12 for 2024-2025)
-    sample_ts = tdf["entry_ts_ms"].iloc[0] if len(tdf) > 0 else 0
-    LOG.info("Sample entry_ts_ms: %d (%s)", sample_ts, tdf["entry_time"].iloc[0] if len(tdf) > 0 else "N/A")
+    # Verify timestamps are sane (should be ~1.7e12 for 2024-2025, ~1.75e12 for 2025-2026)
+    sample_ts = int(tdf["entry_ts_ms"].iloc[0]) if len(tdf) > 0 else 0
+    sample_date = pd.to_datetime(sample_ts, unit="ms").strftime("%Y-%m-%d %H:%M")
+    LOG.info("Sample entry_ts_ms: %d (%s)", sample_ts, sample_date)
 
     if sample_ts < 1e12 or sample_ts > 2e12:
-        LOG.error("Timestamp conversion looks wrong! Expected ~1.7e12 for 2024-2025, got %d", sample_ts)
+        LOG.error("Timestamp conversion looks wrong! Expected ~1.7-1.8e12 for 2024-2026, got %d", sample_ts)
+        LOG.error("Raw entry_time: %s", tdf["entry_time"].iloc[0] if len(tdf) > 0 else "N/A")
         sys.exit(1)
+
+    # Log overall trade date range
+    trade_min = int(tdf["entry_ts_ms"].min())
+    trade_max = int(tdf["entry_ts_ms"].max())
+    LOG.info("Trade dates: %s → %s (%.0f days)",
+             pd.to_datetime(trade_min, unit="ms").strftime("%Y-%m-%d"),
+             pd.to_datetime(trade_max, unit="ms").strftime("%Y-%m-%d"),
+             (trade_max - trade_min) / 86400000)
 
     # Top symbols
     sym_counts = tdf["symbol"].value_counts()
     top_syms = sym_counts.head(args.max_symbols).index.tolist()
     LOG.info("Processing %d symbols: %s", len(top_syms), top_syms[:10])
 
-    # Build lookup: symbol → {entry_ts_ms: direction}
+    # Build lookup: symbol → list of (entry_ts_ms_rounded, entry_ts_ms_exact, direction)
+    # We use the ROUNDED timestamp for primary lookup and EXACT for fallback
     entry_lookup = {}
     for sym in top_syms:
         sym_trades = tdf[tdf["symbol"] == sym]
-        lookup = {}
+        lookup = []
         for _, row in sym_trades.iterrows():
-            lookup[int(row["entry_ts_ms"])] = row["direction"]
+            exact_ms = int(row["entry_ts_ms"])
+            # Round DOWN to minute boundary (OHLCV bars are at minute boundaries)
+            rounded_ms = (exact_ms // 60000) * 60000
+            direction = row["direction"]
+            lookup.append((rounded_ms, exact_ms, direction))
         entry_lookup[sym] = lookup
 
     # Download 1m data per symbol
@@ -473,14 +585,33 @@ def main():
         start_ts = int(sym_trades["entry_ts_ms"].min()) - 3 * 86400000
         end_ts = int(sym_trades["exit_ts_ms"].max()) + 86400000
 
-        LOG.info("  %s: downloading from %s to %s",
+        LOG.info("  %s: downloading from %s to %s (%.0f days)",
                  symbol,
                  pd.to_datetime(start_ts, unit="ms").strftime("%Y-%m-%d"),
-                 pd.to_datetime(end_ts, unit="ms").strftime("%Y-%m-%d"))
+                 pd.to_datetime(end_ts, unit="ms").strftime("%Y-%m-%d"),
+                 (end_ts - start_ts) / 86400000)
 
         ohlcv = download_1m(symbol, start_ts, end_ts)
         if len(ohlcv) < 100:
             LOG.warning("  %s: insufficient data (%d bars), skipping", symbol, len(ohlcv))
+            continue
+
+        # Verify OHLCV date range overlaps with trades
+        ohlcv_min = int(ohlcv["timestamp"].min())
+        ohlcv_max = int(ohlcv["timestamp"].max())
+        trade_min_sym = int(sym_trades["entry_ts_ms"].min())
+        trade_max_sym = int(sym_trades["entry_ts_ms"].max())
+        overlap = ohlcv_min <= trade_max_sym and ohlcv_max >= trade_min_sym
+        LOG.info("  %s: OHLCV [%s → %s]  Trades [%s → %s]  Overlap: %s",
+                 symbol,
+                 pd.to_datetime(ohlcv_min, unit="ms").strftime("%Y-%m-%d"),
+                 pd.to_datetime(ohlcv_max, unit="ms").strftime("%Y-%m-%d"),
+                 pd.to_datetime(trade_min_sym, unit="ms").strftime("%Y-%m-%d"),
+                 pd.to_datetime(trade_max_sym, unit="ms").strftime("%Y-%m-%d"),
+                 "✅" if overlap else "❌ NO OVERLAP")
+
+        if not overlap:
+            LOG.warning("  %s: OHLCV data doesn't overlap with trades! Try --clear-cache", symbol)
             continue
 
         # Compute features for ALL bars
@@ -495,38 +626,69 @@ def main():
         # Build index of timestamp → bar position for fast lookup
         feat_ts_index = {int(ts): i for i, ts in enumerate(feat_ts)}
 
-        sym_lookup = entry_lookup.get(symbol, {})
+        sym_lookup = entry_lookup.get(symbol, [])
         n_matched = 0
+        n_exact = 0
+        n_closest = 0
 
-        for entry_ms, direction in sym_lookup.items():
-            # Try exact match first
-            if entry_ms in feat_ts_index:
-                bar_idx = feat_ts_index[entry_ms]
+        for rounded_ms, exact_ms, direction in sym_lookup:
+            matched = False
+
+            # Try 1: Exact match on the rounded (minute-boundary) timestamp
+            if rounded_ms in feat_ts_index:
+                bar_idx = feat_ts_index[rounded_ms]
                 feat_df.iloc[bar_idx, feat_df.columns.get_loc("trade_direction")] = 1.0 if direction == "long" else -1.0
                 feat_df.iloc[bar_idx, feat_df.columns.get_loc("label")] = 1.0
                 n_matched += 1
-            else:
-                # Find closest bar within 2 minutes
-                diffs = np.abs(feat_ts - entry_ms)
+                n_exact += 1
+                matched = True
+
+            if not matched:
+                # Try 2: Exact match on the original (unrounded) timestamp
+                if exact_ms in feat_ts_index:
+                    bar_idx = feat_ts_index[exact_ms]
+                    feat_df.iloc[bar_idx, feat_df.columns.get_loc("trade_direction")] = 1.0 if direction == "long" else -1.0
+                    feat_df.iloc[bar_idx, feat_df.columns.get_loc("label")] = 1.0
+                    n_matched += 1
+                    n_exact += 1
+                    matched = True
+
+            if not matched:
+                # Try 3: Closest bar within 2 minutes
+                diffs = np.abs(feat_ts - exact_ms)
                 bar_idx = int(np.argmin(diffs))
                 if diffs[bar_idx] <= 120000:  # within 2 minutes
                     feat_df.iloc[bar_idx, feat_df.columns.get_loc("trade_direction")] = 1.0 if direction == "long" else -1.0
                     feat_df.iloc[bar_idx, feat_df.columns.get_loc("label")] = 1.0
                     n_matched += 1
+                    n_closest += 1
+                    matched = True
 
-        LOG.info("  %s: matched %d / %d trades to bars",
-                 symbol, n_matched, len(sym_trades))
+            if not matched and n_matched == 0:
+                # Debug: log why first trade didn't match
+                diffs = np.abs(feat_ts - exact_ms)
+                closest_idx = int(np.argmin(diffs))
+                LOG.warning("  %s: First unmatched trade — entry=%s (%s)  closest_bar=%s (diff=%.1f min)",
+                            symbol, exact_ms,
+                            pd.to_datetime(exact_ms, unit="ms").strftime("%Y-%m-%d %H:%M:%S"),
+                            pd.to_datetime(int(feat_ts[closest_idx]), unit="ms").strftime("%Y-%m-%d %H:%M:%S"),
+                            diffs[closest_idx] / 60000)
+
+        LOG.info("  %s: matched %d / %d trades to bars (exact=%d, closest=%d)",
+                 symbol, n_matched, len(sym_trades), n_exact, n_closest)
 
         # ── Mark NEGATIVE samples ──
         # Bars that are NOT within ±15min of any entry
-        entry_ms_set = set(int(x) for x in sym_lookup.keys())
+        entry_ms_set = set()
+        for rounded_ms, exact_ms, _ in sym_lookup:
+            entry_ms_set.add(int(rounded_ms))
+            entry_ms_set.add(int(exact_ms))
 
         # Create windows around entries
         entry_windows = set()
-        for entry_ms in entry_ms_set:
-            # ±15 minutes in ms
-            low_ms = entry_ms - 900000
-            high_ms = entry_ms + 900000
+        for ems in entry_ms_set:
+            low_ms = ems - 900000
+            high_ms = ems + 900000
             window_mask = (feat_ts >= low_ms) & (feat_ts <= high_ms)
             window_ts = feat_ts[window_mask]
             entry_windows.update(window_ts.tolist())
@@ -555,6 +717,7 @@ def main():
 
     if not all_features:
         LOG.error("No features computed! Check that OHLCV data was downloaded successfully.")
+        LOG.error("Try running with --clear-cache to force re-download")
         sys.exit(1)
 
     combined = pd.concat(all_features, ignore_index=True)

@@ -42,6 +42,8 @@ def main():
     parser.add_argument("--skip-backtest", action="store_true",
                         help="Skip step 4")
     parser.add_argument("--exchange", default="bybit")
+    parser.add_argument("--clear-cache", action="store_true",
+                        help="Delete cached OHLCV data and re-download")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO,
@@ -102,8 +104,11 @@ def main():
         from scripts.v9.build_dataset import main as build_main
         # Override args
         old_argv = sys.argv
-        sys.argv = ["build_dataset", "--neg-ratio", str(args.neg_ratio),
-                     "--max-symbols", str(args.max_symbols)]
+        build_args = ["build_dataset", "--neg-ratio", str(args.neg_ratio),
+                      "--max-symbols", str(args.max_symbols)]
+        if args.clear_cache:
+            build_args.append("--clear-cache")
+        sys.argv = build_args
         try:
             build_main()
         finally:

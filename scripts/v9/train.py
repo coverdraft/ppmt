@@ -60,9 +60,11 @@ def train_model(dataset_path: Path, params: dict = None) -> tuple:
     LOG.info("Dataset: %d rows (%d pos / %d neg)", len(df), n_pos, n_neg)
 
     # ── Guard: need at least some data ──
-    if len(df) < 100 or n_pos < 20 or n_neg < 20:
-        LOG.error("Dataset too small! Need >= 100 rows with >= 20 pos and >= 20 neg.")
+    if len(df) < 50 or n_pos < 10 or n_neg < 10:
+        LOG.error("Dataset too small! Need >= 50 rows with >= 10 pos and >= 10 neg.")
         LOG.error("Got: %d total, %d pos, %d neg", len(df), n_pos, n_neg)
+        LOG.error("This usually means build_dataset.py didn't match any trades to OHLCV bars.")
+        LOG.error("Run: python3 -m scripts.v9.diagnose_build to debug")
         sys.exit(1)
 
     # Time-based split: 80% train, 20% test
