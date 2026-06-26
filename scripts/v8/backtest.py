@@ -212,15 +212,19 @@ def run_backtest(
             slt = signals_level_test[i] > 0.5
 
             # THE HOLE: breakout_down → block ALL trades
-            if sbd and not seb and not slt:
+            # Only block if there's no other signal (ema_bounce can override)
+            if sbd and not sbu and not seb and not slt:
                 n_blocked_hole += 1
                 equity_curve[i] = equity
                 continue
 
             # Determine allowed directions from pattern signals
+            # Relaxado: breakout_up permite LONG, pero también consideramos
+            # si no hay señal contraria fuerte
             long_allowed = sbu  # breakout_up → LONG (THE EDGE)
             short_allowed = seb or slt  # ema_bounce/level_test → SHORT
 
+            # Si no hay señal de patrón, no operar
             if not long_allowed and not short_allowed:
                 n_no_signal += 1
                 equity_curve[i] = equity

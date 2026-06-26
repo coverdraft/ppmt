@@ -552,16 +552,21 @@ def compute_features(
     #   BREAKOUT_DOWN + SHORT = -556 (THE HOLE) → BLOCK SHORT
     #   EMA_BOUNCE + SHORT = +27 (counter-trend) → allow SHORT
     #   LEVEL_TEST + SHORT = +33 (support bounce) → allow SHORT
+    # RELAXED from 0.95→0.85, vol 1.3→1.1 — original was too strict,
+    # causing 0 LONG trades in 90-day backtest. Added ema_alignment filter
+    # to ensure breakout context matches the direction.
     df["signal_breakout_up"] = (
-        (df["close_position_20"].values > 0.95) &
-        (df["vol_ratio"].values > 1.3) &
-        (df["breakout_strength"].values > 0.01)
+        (df["close_position_20"].values > 0.85) &
+        (df["vol_ratio"].values > 1.1) &
+        (df["breakout_strength"].values > 0.005) &
+        (df["ema_alignment"].values > 0)  # uptrend context
     ).astype(float)
 
     df["signal_breakout_down"] = (
-        (df["close_position_20"].values < 0.05) &
-        (df["vol_ratio"].values > 1.3) &
-        (df["breakout_strength"].values > 0.01)
+        (df["close_position_20"].values < 0.15) &
+        (df["vol_ratio"].values > 1.1) &
+        (df["breakout_strength"].values > 0.005) &
+        (df["ema_alignment"].values < 0)  # downtrend context
     ).astype(float)
 
     df["signal_ema_bounce"] = (

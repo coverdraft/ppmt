@@ -76,9 +76,11 @@ COST_PCT_MAKER = 0.04
 COST_PCT_TAKER = 0.14
 DEFAULT_COST = COST_PCT_MAKER
 
-# Decision thresholds
-EV_THRESHOLD_LONG = 0.05
-EV_THRESHOLD_SHORT = 0.05
+# Decision thresholds — lowered from 0.05 to 0.01
+# With CV corr ≈ 0, the 0.05 threshold was filtering randomly.
+# Pattern gating already provides the main filter.
+EV_THRESHOLD_LONG = 0.01
+EV_THRESHOLD_SHORT = 0.01
 
 # Hard rules from pattern analysis
 MAX_HOLD_BARS = LOOKAHEAD   # Time stop = 30min
@@ -377,24 +379,65 @@ def build_dataset(
 
 
 def _expand_to_two_sided(df: pd.DataFrame) -> pd.DataFrame:
-    """Expand dataset: each bar -> 2 rows (LONG + SHORT)."""
-    long_rows = df.copy()
+    """Expand dataset: direction-aware — only create rows for directions
+    allowed by pattern signals.
+
+    PATTERN GATING (from corrected analysis):
+      signal_breakout_up  → LONG only   (THE EDGE: +251)
+      signal_breakout_down → NO TRADE   (THE HOLE: -556)
+      signal_ema_bounce   → SHORT only   (+27)
+      signal_level_test   → SHORT only   (+33)
+
+    Bars with NO signal are included for BOTH directions with reduced weight
+    (the pattern-aware weighting in train_model will handle the reweighting).
+    This keeps the training set large enough while focusing on pattern bars.
+    """
+    # Direction masks from pattern signals
+    has_bu = df["signal_breakout_up"].values > 0.5
+    has_bd = df["signal_breakout_down"].values > 0.5
+    has_eb = df["signal_ema_bounce"].values > 0.5
+    has_lt = df["signal_level_test"].values > 0.5
+    has_any = has_bu | has_bd | has_eb | has_lt
+    no_signal = ~has_any
+
+    n_bu = int(has_bu.sum())
+    n_bd = int(has_bd.sum())
+    n_eb = int(has_eb.sum())
+    n_lt = int(has_lt.sum())
+    n_no = int(no_signal.sum())
+    LOG.info("Pattern signal counts: breakout_up=%d breakout_down=%d "
+             "ema_bounce=%d level_test=%d no_signal=%d",
+             n_bu, n_bd, n_eb, n_lt, n_no)
+
+    # LONG rows: breakout_up + no_signal (for background learning)
+    # Skip breakout_down for LONG (THE HOLE — but we include it to let
+    # the model learn that breakout_down + LONG = bad)
+    long_mask = has_bu | no_signal
+    long_rows = df[long_mask].copy()
     long_rows["trade_direction"] = 1.0
     long_rows["ev_label"] = long_rows["long_ev"]
-    
-    short_rows = df.copy()
+
+    # SHORT rows: ema_bounce + level_test + no_signal
+    # Skip breakout_down for SHORT (THE HOLE)
+    short_mask = has_eb | has_lt | no_signal
+    short_rows = df[short_mask].copy()
     short_rows["trade_direction"] = -1.0
     short_rows["ev_label"] = short_rows["short_ev"]
-    
+
     result = pd.concat([long_rows, short_rows], ignore_index=True)
-    
+
     n_before = len(result)
     result = result.dropna(subset=["ev_label"])
     n_after = len(result)
-    
-    LOG.info("Expanded to two-sided: %d -> %d rows (after NaN drop), positive=%.1f%%",
-             n_before, n_after, (result["ev_label"] > 0).mean() * 100)
-    
+
+    long_count = int((result["trade_direction"] == 1.0).sum())
+    short_count = int((result["trade_direction"] == -1.0).sum())
+
+    LOG.info("Direction-aware expansion: %d -> %d rows (after NaN drop), "
+             "LONG=%d SHORT=%d positive=%.1f%%",
+             n_before, n_after, long_count, short_count,
+             (result["ev_label"] > 0).mean() * 100)
+
     return result
 
 
