@@ -2020,3 +2020,35 @@ Stage Summary:
 - Engine detecta modelos inútiles (best_iter=1) y re-entrena automáticamente
 - RUNBOOK usa nohup en vez de tmux
 - Usuario debe re-entrenar: --train --all (ahora con split correcto)
+---
+Task ID: 8
+Agent: main
+Task: FIX CRÍTICO — best_iter=1 persiste con 83/10/7 split → train on ALL data sin early stopping
+
+Work Log:
+- PROBLEMA: El fix anterior (83/10/7 split) NO resolvió best_iter=1
+- Diagnóstico profundo: comparación exhaustiva model.py vs deep_optimize.py
+  - Ambos usan el MISMO split y features
+  - La diferencia: deep_optimize.py agrega 4 ventanas y evalúa PnL (no AUC)
+  - model.py usa val AUC para early stopping → AUC ≈ 0.48 desde iter 1 → best_iter=1
+- Causa raíz: REGIME SHIFT masivo entre train y val
+  - AVAX: train 46.7% UP, val 29.5% UP → val AUC 0.476
+  - SOL:  train 49.5% UP, val 36.4% UP → val AUC 0.463
+  - DOGE: train 46.9% UP, val 41.1% UP → val AUC 0.531
+  - ETH:  train 49.2% UP, val 36.1% UP → val AUC 0.560
+  - El val set está en régimen bajista → AUC < 0.5 desde iter 1 → early stopping inútil
+- FIX: Train on ALL non-test data (93%), NO early stopping, NUM_BOOST_ROUND=500
+  - Regularization (L1/L2, min_data_in_leaf, feature/bagging fraction) controla overfitting
+  - 500 árboles producen predicciones suaves y diversas → esencial para quantile trading
+  - Test set (7%) para métricas de reporting ONLY
+  - Removidos sklearn-style params (n_estimators, early_stopping_rounds) que confundían lgb.train()
+- engine.py: detecta modelos viejos (split_method=walk_forward_83_10_7 con best_iter<=1) y re-entrena
+- runner.py: loguea auc_train/auc_test en vez de best_iter/auc_val
+- Git commit + push: "FIX: train ALL data 500 rounds no early stopping"
+
+Stage Summary:
+- model.py train() reescrito: ALL data + 500 rounds + no early stopping
+- engine.py: auto-detecta y re-entrena modelos inútiles (best_iter<=1)
+- runner.py: métricas actualizadas
+- Commit + push: 4194d12
+- Usuario debe: git pull, matar nohup actual, re-entrenar con --train --all
