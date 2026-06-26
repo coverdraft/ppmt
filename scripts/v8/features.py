@@ -303,8 +303,8 @@ def compute_features(
     # always, making breakout_strength = 0 for all bars.
     # With shift(1), h_20 is the max of the PREVIOUS 20 bars,
     # so close can break above it (true breakout detection).
-    h_20 = pd.Series(h).rolling(20, min_periods=1).max().shift(1).values
-    l_20 = pd.Series(l).rolling(20, min_periods=1).min().shift(1).values
+    h_20 = pd.Series(h).rolling(20, min_periods=1).max().shift(1).values.copy()
+    l_20 = pd.Series(l).rolling(20, min_periods=1).min().shift(1).values.copy()
     # Fill NaN from shift with first available values
     h_20[:20] = np.nanmax(h_20[20:40]) if len(h_20) > 40 else h_20[len(h_20)//2]
     l_20[:20] = np.nanmin(l_20[20:40]) if len(l_20) > 40 else l_20[len(l_20)//2]
@@ -559,21 +559,22 @@ def compute_features(
     #   BREAKOUT_DOWN + SHORT = -556 (THE HOLE) → BLOCK SHORT
     #   EMA_BOUNCE + SHORT = +27 (counter-trend) → allow SHORT
     #   LEVEL_TEST + SHORT = +33 (support bounce) → allow SHORT
-    # RELAXED from 0.95→0.85, vol 1.3→1.1 — original was too strict,
-    # causing 0 LONG trades in 90-day backtest. Added ema_alignment filter
-    # to ensure breakout context matches the direction.
+    #
+    # NOTE: ema_alignment filter REMOVED from default signals.
+    # It was causing breakout_up=0 (the filter was too restrictive because
+    # ema_alignment = sign(EMA9-EMA21) is often 0 or negative even during
+    # valid breakout setups where price just started moving). The grid
+    # search can test with ema_alignment via the use_ema_filter config.
     df["signal_breakout_up"] = (
         (df["close_position_20"].values > 0.85) &
         (df["vol_ratio"].values > 1.1) &
-        (df["breakout_strength"].values > 0.005) &
-        (df["ema_alignment"].values > 0)  # uptrend context
+        (df["breakout_strength"].values > 0.005)
     ).astype(float)
 
     df["signal_breakout_down"] = (
         (df["close_position_20"].values < 0.15) &
         (df["vol_ratio"].values > 1.1) &
-        (df["breakout_strength"].values > 0.005) &
-        (df["ema_alignment"].values < 0)  # downtrend context
+        (df["breakout_strength"].values > 0.005)
     ).astype(float)
 
     df["signal_ema_bounce"] = (
@@ -582,8 +583,7 @@ def compute_features(
 
     df["signal_level_test"] = (
         (df["close_position_20"].values < 0.15) &
-        (df["vol_ratio"].values < 1.5) &   # low vol = test, not breakdown
-        (df["ema_alignment"].values < 0)    # in downtrend / resistance context
+        (df["vol_ratio"].values < 1.5)   # low vol = test, not breakdown
     ).astype(float)
 
     # ── Final cleanup ─────────────────────────────────────────────
