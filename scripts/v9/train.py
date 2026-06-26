@@ -7,9 +7,7 @@ Model: LightGBM binary classifier
 
 The model learns: "given market features at this bar, would the trader enter?"
 
-Usage:
-  python3 -m scripts.v9.train
-  python3 -m scripts.v9.train --neg-ratio 3.0 --big-loss 5.0
+FIXED: Handle empty dataset gracefully, use ATR-adaptive SL
 """
 from __future__ import annotations
 
@@ -56,8 +54,16 @@ def train_model(dataset_path: Path, params: dict = None) -> tuple:
     for col in feature_cols:
         df[col] = df[col].replace([np.inf, -np.inf], np.nan)
 
-    LOG.info("Dataset: %d rows (%.0f pos / %.0f neg)",
-             len(df), (df["label"] == 1).sum(), (df["label"] == 0).sum())
+    n_pos = int((df["label"] == 1).sum())
+    n_neg = int((df["label"] == 0).sum())
+
+    LOG.info("Dataset: %d rows (%d pos / %d neg)", len(df), n_pos, n_neg)
+
+    # ── Guard: need at least some data ──
+    if len(df) < 100 or n_pos < 20 or n_neg < 20:
+        LOG.error("Dataset too small! Need >= 100 rows with >= 20 pos and >= 20 neg.")
+        LOG.error("Got: %d total, %d pos, %d neg", len(df), n_pos, n_neg)
+        sys.exit(1)
 
     # Time-based split: 80% train, 20% test
     df = df.sort_values("timestamp").reset_index(drop=True)
@@ -74,10 +80,10 @@ def train_model(dataset_path: Path, params: dict = None) -> tuple:
     y_test = test["label"].values.astype(np.float32)
 
     # Class weights (positive samples are rarer)
-    n_pos = (y_train == 1).sum()
-    n_neg = (y_train == 0).sum()
-    scale_pos = n_neg / max(n_pos, 1)
-    LOG.info("Class balance: pos=%d neg=%d scale_pos=%.1f", int(n_pos), int(n_neg), scale_pos)
+    n_pos_tr = int((y_train == 1).sum())
+    n_neg_tr = int((y_train == 0).sum())
+    scale_pos = n_neg_tr / max(n_pos_tr, 1)
+    LOG.info("Class balance: pos=%d neg=%d scale_pos=%.1f", n_pos_tr, n_neg_tr, scale_pos)
 
     p = {
         "objective": "binary",
@@ -117,25 +123,32 @@ def train_model(dataset_path: Path, params: dict = None) -> tuple:
     pred_test = bst.predict(X_test)
     pred_train = bst.predict(X_train)
 
-    from sklearn.metrics import roc_auc_score, classification_report, precision_recall_curve
+    try:
+        from sklearn.metrics import roc_auc_score, classification_report, precision_recall_curve
 
-    auc_test = roc_auc_score(y_test, pred_test)
-    auc_train = roc_auc_score(y_train, pred_train)
+        auc_test = roc_auc_score(y_test, pred_test)
+        auc_train = roc_auc_score(y_train, pred_train)
 
-    # Find optimal threshold
-    precision, recall, thresholds = precision_recall_curve(y_test, pred_test)
-    f1 = 2 * precision * recall / np.maximum(precision + recall, 1e-10)
-    best_idx = np.argmax(f1)
-    best_threshold = float(thresholds[best_idx]) if best_idx < len(thresholds) else 0.5
+        # Find optimal threshold
+        precision, recall, thresholds = precision_recall_curve(y_test, pred_test)
+        f1 = 2 * precision * recall / np.maximum(precision + recall, 1e-10)
+        best_idx = np.argmax(f1)
+        best_threshold = float(thresholds[best_idx]) if best_idx < len(thresholds) else 0.5
 
-    LOG.info("Train AUC: %.4f  Test AUC: %.4f", auc_train, auc_test)
-    LOG.info("Best threshold: %.3f (F1=%.3f, P=%.3f, R=%.3f)",
-             best_threshold, f1[best_idx], precision[best_idx], recall[best_idx])
+        LOG.info("Train AUC: %.4f  Test AUC: %.4f", auc_train, auc_test)
+        LOG.info("Best threshold: %.3f (F1=%.3f, P=%.3f, R=%.3f)",
+                 best_threshold, f1[best_idx], precision[best_idx], recall[best_idx])
 
-    # Classification report at best threshold
-    y_pred = (pred_test > best_threshold).astype(int)
-    report = classification_report(y_test, y_pred, target_names=["NO_ENTRY", "TRADER_ENTRY"])
-    LOG.info("\n%s", report)
+        # Classification report at best threshold
+        y_pred = (pred_test > best_threshold).astype(int)
+        report = classification_report(y_test, y_pred, target_names=["NO_ENTRY", "TRADER_ENTRY"])
+        LOG.info("\n%s", report)
+
+    except ImportError:
+        LOG.warning("sklearn not available, skipping detailed metrics")
+        auc_test = 0.0
+        auc_train = 0.0
+        best_threshold = 0.5
 
     # Feature importance
     imp = bst.feature_importance(importance_type="gain")
@@ -158,8 +171,8 @@ def train_model(dataset_path: Path, params: dict = None) -> tuple:
         "best_threshold": best_threshold,
         "n_train": len(train),
         "n_test": len(test),
-        "n_pos_train": int(n_pos),
-        "n_neg_train": int(n_neg),
+        "n_pos_train": n_pos_tr,
+        "n_neg_train": n_neg_tr,
         "training_time_s": elapsed,
         "params": p,
         "top_features": imp_df.head(20).to_dict(orient="records"),
@@ -174,7 +187,7 @@ def train_model(dataset_path: Path, params: dict = None) -> tuple:
     print(f"\n{'='*70}")
     print(f"V9 CLASSIFIER TRAINED")
     print(f"{'='*70}")
-    print(f"  Train: {len(train)} rows ({int(n_pos)} pos / {int(n_neg)} neg)")
+    print(f"  Train: {len(train)} rows ({n_pos_tr} pos / {n_neg_tr} neg)")
     print(f"  Test:  {len(test)} rows")
     print(f"  AUC Train: {auc_train:.4f}")
     print(f"  AUC Test:  {auc_test:.4f}")

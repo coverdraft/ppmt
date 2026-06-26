@@ -7,7 +7,7 @@ Step 3: Train binary classifier
 Step 4: Backtest with mechanical exits
 
 Usage:
-  python3 -m scripts.v9.run_pipeline --days 30
+  python3 -m scripts.v9.run_pipeline
   python3 -m scripts.v9.run_pipeline --days 30 --symbols SOL/USDT,AVAX/USDT,XRP/USDT
 """
 from __future__ import annotations
@@ -39,6 +39,8 @@ def main():
                         help="Skip step 2 if dataset.parquet exists")
     parser.add_argument("--skip-train", action="store_true",
                         help="Skip step 3 if model exists")
+    parser.add_argument("--skip-backtest", action="store_true",
+                        help="Skip step 4")
     parser.add_argument("--exchange", default="bybit")
     args = parser.parse_args()
 
@@ -99,9 +101,13 @@ def main():
         LOG.info("Step 2: Building dataset (1m features)...")
         from scripts.v9.build_dataset import main as build_main
         # Override args
+        old_argv = sys.argv
         sys.argv = ["build_dataset", "--neg-ratio", str(args.neg_ratio),
                      "--max-symbols", str(args.max_symbols)]
-        build_main()
+        try:
+            build_main()
+        finally:
+            sys.argv = old_argv
         LOG.info("Step 2: DONE")
 
     # Step 3: Train model
@@ -109,17 +115,28 @@ def main():
     if args.skip_train and model_path.exists():
         LOG.info("Step 3: SKIPPED (model exists)")
     else:
+        if not dataset_path.exists():
+            LOG.error("dataset.parquet not found. Step 2 must have failed.")
+            sys.exit(1)
+
         LOG.info("Step 3: Training classifier...")
         from scripts.v9.train import train_model
         bst, meta = train_model(dataset_path)
         LOG.info("Step 3: DONE — AUC_test=%.4f", meta.get("auc_test", 0))
 
     # Step 4: Backtest
-    LOG.info("Step 4: Backtesting...")
-    from scripts.v9.backtest import main as backtest_main
-    sys.argv = ["backtest", "--symbols", args.symbols,
-                "--days", str(args.days), "--exchange", args.exchange]
-    backtest_main()
+    if args.skip_backtest:
+        LOG.info("Step 4: SKIPPED")
+    else:
+        LOG.info("Step 4: Backtesting...")
+        from scripts.v9.backtest import main as backtest_main
+        old_argv = sys.argv
+        sys.argv = ["backtest", "--symbols", args.symbols,
+                    "--days", str(args.days), "--exchange", args.exchange]
+        try:
+            backtest_main()
+        finally:
+            sys.argv = old_argv
 
     print("\n" + "=" * 70)
     print("V9 PIPELINE COMPLETE")

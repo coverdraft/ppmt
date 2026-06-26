@@ -3,12 +3,18 @@ build_dataset.py — Build labeled dataset from trader's entries + random bars
 
 Pipeline:
   1. Load filtered trades from parse_trades.py
-  2. Download 1m OHLCV for each symbol
+  2. Download 1m OHLCV for each symbol (paginated, multi-exchange)
   3. Compute features at each trade entry bar (POSITIVE samples)
   4. Compute features at random bars where no trade was taken (NEGATIVE samples)
   5. Save dataset for training
 
 Features are computed on 1m bars to match the trader's decision timeframe.
+
+FIXED vs v1:
+  - entry_ts_ms: use .view('int64') // 1e6 for tz-aware timestamps
+  - download_1m: proper pagination across full date range
+  - timestamp matching: compare ms-to-ms correctly
+  - Skip MEXC-only symbols that don't exist on bybit/binance
 """
 from __future__ import annotations
 
@@ -47,7 +53,6 @@ def _ema(arr: np.ndarray, period: int) -> np.ndarray:
 
 
 def _atr(h, l, c, period=14):
-    n = len(c)
     tr = np.maximum(h - l, np.maximum(np.abs(h - np.append(c[0], c[:-1])),
                                        np.abs(l - np.append(c[0], c[:-1]))))
     atr = pd.Series(tr).rolling(period, min_periods=5).mean().values
@@ -109,6 +114,11 @@ def compute_features_1m(df: pd.DataFrame, symbol: str = "") -> pd.DataFrame:
     v = df["volume"].values.astype(np.float64)
     n = len(df)
 
+    if n < 60:
+        LOG.warning("  %s: too few bars (%d) for features, need >=60", symbol, n)
+        empty = pd.DataFrame(columns=FEATURE_NAMES + ["timestamp", "_atr_14_price", "symbol"])
+        return empty
+
     rng = np.maximum(h - l, 1e-10)
     body = c - o
 
@@ -133,7 +143,7 @@ def compute_features_1m(df: pd.DataFrame, symbol: str = "") -> pd.DataFrame:
             body_consist[i] = 1 if body_sign[i] != 0 else 0
     feat["body_consistency_5"] = pd.Series(body_consist).rolling(5, min_periods=1).mean().values
 
-    range_pct_s = pd.Series(feat["range_pct"].values)
+    range_pct_s = pd.Series(feat["range_pct"].values.copy())
     avg_rng_3 = range_pct_s.rolling(3, min_periods=1).mean()
     avg_rng_20 = range_pct_s.rolling(20, min_periods=1).mean().replace(0, 1e-10)
     feat["range_expansion_3"] = (avg_rng_3 / avg_rng_20).clip(0, 10).values
@@ -163,13 +173,12 @@ def compute_features_1m(df: pd.DataFrame, symbol: str = "") -> pd.DataFrame:
     # G3: Volatility
     atr_14 = _atr(h, l, c, 14)
     feat["atr_pct"] = atr_14 / np.maximum(c, 1e-10) * 100
-    feat["atr_percentile_50"] = pd.Series(feat["atr_pct"].values).rolling(50, min_periods=5).rank(pct=True).values
+    feat["atr_percentile_50"] = pd.Series(feat["atr_pct"].values.copy()).rolling(50, min_periods=5).rank(pct=True).values
 
     sma_20 = pd.Series(c).rolling(20, min_periods=5).mean().values
     std_20 = pd.Series(c).rolling(20, min_periods=5).std().values
     bollinger_bw = 2 * std_20 / np.maximum(sma_20, 1e-10) * 100
     feat["squeeze_score"] = np.clip(bollinger_bw / np.maximum(feat["atr_pct"].values, 1e-10), 0, 20)
-
     feat["vol_regime"] = np.digitize(np.nan_to_num(feat["atr_pct"].values, nan=0.0), [0.3, 0.8, 2.0]).astype(float)
 
     # G4: Volume
@@ -183,15 +192,17 @@ def compute_features_1m(df: pd.DataFrame, symbol: str = "") -> pd.DataFrame:
     up_vol = pd.Series(np.where(c > o, v, 0.0)).rolling(10, min_periods=2).sum().values
     total_vol = pd.Series(v).rolling(10, min_periods=2).sum().values
     feat["vol_skew"] = (up_vol / np.maximum(total_vol, 1e-10) - 0.5) * 2
-    feat["vol_acceleration"] = pd.Series(feat["vol_ratio"].values).diff(3).values
+    feat["vol_acceleration"] = pd.Series(feat["vol_ratio"].values.copy()).diff(3).values
     feat["volume_conviction"] = np.clip(feat["vol_ratio"].values * np.abs(feat["body_pct"].values), 0, 5)
 
     # G5: Breakout context — shifted by 1 bar
     h_20 = pd.Series(h).rolling(20, min_periods=1).max().shift(1).values.copy()
     l_20 = pd.Series(l).rolling(20, min_periods=1).min().shift(1).values.copy()
-    # Fill initial NaN
-    h_20[:20] = np.nanmax(h_20[20:40]) if len(h_20) > 40 else h_20[len(h_20) // 2]
-    l_20[:20] = np.nanmin(l_20[20:40]) if len(l_20) > 40 else l_20[len(l_20) // 2]
+    h_20[:20] = np.nanmax(h_20[20:40]) if len(h_20) > 40 else h_20[len(h_20) // 2] if len(h_20) > 0 else 0
+    l_20[:20] = np.nanmin(l_20[20:40]) if len(l_20) > 40 else l_20[len(l_20) // 2] if len(l_20) > 0 else 0
+    # Replace any remaining NaN
+    h_20 = np.nan_to_num(h_20, nan=h_20[~np.isnan(h_20)][0] if np.any(~np.isnan(h_20)) else 0)
+    l_20 = np.nan_to_num(l_20, nan=l_20[~np.isnan(l_20)][0] if np.any(~np.isnan(l_20)) else 0)
 
     range_20 = np.maximum(h_20 - l_20, 1e-10)
     close_pos_20 = (c - l_20) / range_20
@@ -305,55 +316,91 @@ def compute_features_1m(df: pd.DataFrame, symbol: str = "") -> pd.DataFrame:
     return feat
 
 
-# ── Download 1m OHLCV ──
+# ── Download 1m OHLCV with proper pagination ──
 
 def download_1m(symbol: str, start_ts_ms: int, end_ts_ms: int) -> pd.DataFrame:
-    """Download 1m OHLCV with caching."""
+    """Download 1m OHLCV with caching. Paginates properly across the full date range."""
     cache_file = CACHE_DIR / f"{symbol}_1m.parquet"
 
+    # Check cache first
     if cache_file.exists():
         cached = pd.read_parquet(cache_file)
-        if len(cached) > 0 and cached["timestamp"].min() <= start_ts_ms + 86400000 and cached["timestamp"].max() >= end_ts_ms - 86400000:
-            return cached[(cached["timestamp"] >= start_ts_ms) & (cached["timestamp"] <= end_ts_ms)].copy()
+        if len(cached) > 0:
+            cache_start = cached["timestamp"].min()
+            cache_end = cached["timestamp"].max()
+            # If cache covers our range, use it
+            if cache_start <= start_ts_ms + 86400000 and cache_end >= end_ts_ms - 86400000:
+                mask = (cached["timestamp"] >= start_ts_ms) & (cached["timestamp"] <= end_ts_ms)
+                result = cached[mask].copy()
+                if len(result) > 0:
+                    LOG.info("  %s: %d bars from cache (1m)", symbol, len(result))
+                    return result
 
     import ccxt
+
     for exchange_id in ["bybit", "binance", "mexc"]:
         try:
             exchange = getattr(ccxt, exchange_id)({"enableRateLimit": True})
             ccxt_sym = f"{symbol}/USDT"
             exchange.load_markets()
             if ccxt_sym not in exchange.markets:
+                LOG.info("  %s: not listed on %s", symbol, exchange_id)
                 continue
 
             all_ohlcv = []
             since = start_ts_ms
-            while True:
-                ohlcv = exchange.fetch_ohlcv(ccxt_sym, "1m", since=since, limit=1000)
-                if not ohlcv:
+            max_iterations = 500  # safety limit
+            iteration = 0
+
+            while since < end_ts_ms and iteration < max_iterations:
+                iteration += 1
+                try:
+                    ohlcv = exchange.fetch_ohlcv(ccxt_sym, "1m", since=since, limit=1000)
+                except Exception as e:
+                    LOG.warning("  %s on %s: fetch error at %s: %s",
+                                symbol, exchange_id, since, str(e)[:60])
+                    time.sleep(2)
                     break
+
+                if not ohlcv or len(ohlcv) == 0:
+                    break
+
                 all_ohlcv.extend(ohlcv)
                 last_ts = ohlcv[-1][0]
-                if last_ts >= end_ts_ms or len(ohlcv) < 1000:
+
+                # If we got less than 1000, we've reached the end
+                if len(ohlcv) < 1000:
                     break
-                since = last_ts + 1
+
+                # If last timestamp is past our range, we're done
+                if last_ts >= end_ts_ms:
+                    break
+
+                # Move since to the next bar after the last one we got
+                since = last_ts + 60000  # +1 minute
+
+                # Rate limit
                 time.sleep(exchange.rateLimit / 1000)
 
             if all_ohlcv:
                 df = pd.DataFrame(all_ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
                 df = df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
                 df = df[(df["timestamp"] >= start_ts_ms) & (df["timestamp"] <= end_ts_ms)]
+
                 # Merge with cache
                 if cache_file.exists():
                     old = pd.read_parquet(cache_file)
-                    df = pd.concat([old, df]).drop_duplicates(subset=["timestamp"]).sort_values("timestamp")
+                    df = pd.concat([old, df]).drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+
                 df.to_parquet(cache_file, index=False)
                 LOG.info("  %s: %d bars from %s (1m)", symbol, len(df), exchange_id)
                 return df.copy()
+
         except Exception as e:
             LOG.warning("  %s on %s: %s", symbol, exchange_id, str(e)[:80])
             time.sleep(2)
 
-    LOG.warning("  %s: no 1m data available", symbol)
+    LOG.warning("  %s: no 1m data available on any exchange", symbol)
     return pd.DataFrame()
 
 
@@ -383,60 +430,108 @@ def main():
     LOG.info("Loaded %d filtered trades", len(trades))
     tdf = pd.DataFrame(trades)
 
-    # Parse timestamps
+    # ── FIX: Parse timestamps correctly ──
+    # entry_time comes as ISO string like "2025-06-15T14:30:00+00:00"
     tdf["entry_ts"] = pd.to_datetime(tdf["entry_time"], utc=True)
     tdf["exit_ts"] = pd.to_datetime(tdf["exit_time"], utc=True)
-    tdf["entry_ts_ms"] = (tdf["entry_ts"].astype(int) // 10**6).astype(int)
+
+    # Convert to milliseconds using int timestamp * 1000
+    # DO NOT use .astype(int) on tz-aware Series — it gives nanoseconds!
+    tdf["entry_ts_ms"] = (tdf["entry_ts"].astype(np.int64) // 1_000_000).astype(np.int64)
+    tdf["exit_ts_ms"] = (tdf["exit_ts"].astype(np.int64) // 1_000_000).astype(np.int64)
+
+    # Verify timestamps are sane (should be ~1.7e12 for 2024-2025)
+    sample_ts = tdf["entry_ts_ms"].iloc[0] if len(tdf) > 0 else 0
+    LOG.info("Sample entry_ts_ms: %d (%s)", sample_ts, tdf["entry_time"].iloc[0] if len(tdf) > 0 else "N/A")
+
+    if sample_ts < 1e12 or sample_ts > 2e12:
+        LOG.error("Timestamp conversion looks wrong! Expected ~1.7e12 for 2024-2025, got %d", sample_ts)
+        sys.exit(1)
 
     # Top symbols
     sym_counts = tdf["symbol"].value_counts()
     top_syms = sym_counts.head(args.max_symbols).index.tolist()
     LOG.info("Processing %d symbols: %s", len(top_syms), top_syms[:10])
 
+    # Build lookup: symbol → {entry_ts_ms: direction}
+    entry_lookup = {}
+    for sym in top_syms:
+        sym_trades = tdf[tdf["symbol"] == sym]
+        lookup = {}
+        for _, row in sym_trades.iterrows():
+            lookup[int(row["entry_ts_ms"])] = row["direction"]
+        entry_lookup[sym] = lookup
+
     # Download 1m data per symbol
     all_features = []
-    all_labels = []
 
     for i_sym, symbol in enumerate(top_syms):
         sym_trades = tdf[tdf["symbol"] == symbol]
         LOG.info("[%d/%d] %s: %d trades", i_sym + 1, len(top_syms), symbol, len(sym_trades))
 
-        # Time range for download
-        start_ts = int(sym_trades["entry_ts"].min().timestamp() * 1000) - 3 * 86400000
-        end_ts = int(sym_trades["entry_ts"].max().timestamp() * 1000) + 86400000
+        # Time range for download (with 3 days buffer before first trade for warmup)
+        start_ts = int(sym_trades["entry_ts_ms"].min()) - 3 * 86400000
+        end_ts = int(sym_trades["exit_ts_ms"].max()) + 86400000
+
+        LOG.info("  %s: downloading from %s to %s",
+                 symbol,
+                 pd.to_datetime(start_ts, unit="ms").strftime("%Y-%m-%d"),
+                 pd.to_datetime(end_ts, unit="ms").strftime("%Y-%m-%d"))
 
         ohlcv = download_1m(symbol, start_ts, end_ts)
         if len(ohlcv) < 100:
-            LOG.warning("  %s: insufficient data (%d bars)", symbol, len(ohlcv))
+            LOG.warning("  %s: insufficient data (%d bars), skipping", symbol, len(ohlcv))
             continue
 
         # Compute features for ALL bars
         feat_df = compute_features_1m(ohlcv, symbol=symbol)
+        if len(feat_df) == 0:
+            LOG.warning("  %s: no features computed, skipping", symbol)
+            continue
 
-        # Mark POSITIVE samples (trader entry bars)
-        entry_ts_ms_list = sym_trades["entry_ts_ms"].values
-        entry_directions = dict(zip(sym_trades["entry_ts_ms"].astype(str), sym_trades["direction"]))
+        # ── Mark POSITIVE samples (trader entry bars) ──
+        feat_ts = feat_df["timestamp"].values.astype(np.int64)
 
-        feat_ts = feat_df["timestamp"].values
-        for entry_ms in entry_ts_ms_list:
-            # Find closest bar within 1 minute
-            diffs = np.abs(feat_ts - entry_ms)
-            bar_idx = np.argmin(diffs)
-            if diffs[bar_idx] > 120000:  # >2 min off, skip
-                continue
+        # Build index of timestamp → bar position for fast lookup
+        feat_ts_index = {int(ts): i for i, ts in enumerate(feat_ts)}
 
-            direction = entry_directions.get(str(int(entry_ms)), "long")
-            feat_df.iloc[bar_idx, feat_df.columns.get_loc("trade_direction")] = 1.0 if direction == "long" else -1.0
-            feat_df.iloc[bar_idx, feat_df.columns.get_loc("label")] = 1.0
+        sym_lookup = entry_lookup.get(symbol, {})
+        n_matched = 0
 
-        # Mark NEGATIVE samples
+        for entry_ms, direction in sym_lookup.items():
+            # Try exact match first
+            if entry_ms in feat_ts_index:
+                bar_idx = feat_ts_index[entry_ms]
+                feat_df.iloc[bar_idx, feat_df.columns.get_loc("trade_direction")] = 1.0 if direction == "long" else -1.0
+                feat_df.iloc[bar_idx, feat_df.columns.get_loc("label")] = 1.0
+                n_matched += 1
+            else:
+                # Find closest bar within 2 minutes
+                diffs = np.abs(feat_ts - entry_ms)
+                bar_idx = int(np.argmin(diffs))
+                if diffs[bar_idx] <= 120000:  # within 2 minutes
+                    feat_df.iloc[bar_idx, feat_df.columns.get_loc("trade_direction")] = 1.0 if direction == "long" else -1.0
+                    feat_df.iloc[bar_idx, feat_df.columns.get_loc("label")] = 1.0
+                    n_matched += 1
+
+        LOG.info("  %s: matched %d / %d trades to bars",
+                 symbol, n_matched, len(sym_trades))
+
+        # ── Mark NEGATIVE samples ──
         # Bars that are NOT within ±15min of any entry
-        entry_windows = set()
-        for entry_ms in entry_ts_ms_list:
-            window = feat_ts[(feat_ts >= entry_ms - 900000) & (feat_ts <= entry_ms + 900000)]
-            entry_windows.update(window.tolist())
+        entry_ms_set = set(int(x) for x in sym_lookup.keys())
 
-        non_entry_mask = ~feat_df["timestamp"].isin(entry_windows)
+        # Create windows around entries
+        entry_windows = set()
+        for entry_ms in entry_ms_set:
+            # ±15 minutes in ms
+            low_ms = entry_ms - 900000
+            high_ms = entry_ms + 900000
+            window_mask = (feat_ts >= low_ms) & (feat_ts <= high_ms)
+            window_ts = feat_ts[window_mask]
+            entry_windows.update(window_ts.tolist())
+
+        non_entry_mask = ~feat_df["timestamp"].astype(np.int64).isin(entry_windows)
         non_entry_bars = feat_df[non_entry_mask]
 
         # Sample negative bars
@@ -444,7 +539,6 @@ def main():
         n_neg = min(int(n_pos * args.neg_ratio), len(non_entry_bars))
 
         if n_neg > 0 and n_pos > 0:
-            # Assign random directions to negatives
             neg_sample = non_entry_bars.sample(n=n_neg, random_state=42)
             for idx in neg_sample.index:
                 feat_df.loc[idx, "trade_direction"] = np.random.choice([1.0, -1.0])
@@ -460,7 +554,7 @@ def main():
         all_features.append(labeled)
 
     if not all_features:
-        LOG.error("No features computed!")
+        LOG.error("No features computed! Check that OHLCV data was downloaded successfully.")
         sys.exit(1)
 
     combined = pd.concat(all_features, ignore_index=True)
@@ -480,7 +574,7 @@ def main():
     # Feature columns for training
     feat_cols_path = DATA_DIR / "feature_columns.json"
     with open(feat_cols_path, "w") as f:
-        json.dump([c for c in FEATURE_NAMES if c not in ("label",)], f, indent=2)
+        json.dump([c for c in FEATURE_NAMES if c != "label"], f, indent=2)
 
     print(f"\n{'='*70}")
     print(f"V9 DATASET BUILT")
