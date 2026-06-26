@@ -414,9 +414,30 @@ def download_1m(symbol: str, start_ts_ms: int, end_ts_ms: int) -> pd.DataFrame:
     for exchange_id in ["binance", "bybit", "mexc"]:
         try:
             exchange = getattr(ccxt, exchange_id)({"enableRateLimit": True})
-            ccxt_sym = f"{symbol}/USDT"
             exchange.load_markets()
-            if ccxt_sym not in exchange.markets:
+
+            # Try multiple ticker variants: SOL/USDT, SOLUSDT, SOL/USDT:USDT
+            candidates = [
+                f"{symbol}/USDT",
+                f"{symbol}/USDT:USDT",  # Binance futures
+                f"{symbol}USDT",         # Some exchanges use this format
+            ]
+            ccxt_sym = None
+            for cand in candidates:
+                if cand in exchange.markets:
+                    ccxt_sym = cand
+                    break
+
+            if ccxt_sym is None:
+                # Fuzzy match: find any market containing this symbol
+                for market_id in exchange.markets:
+                    base = exchange.markets[market_id].get("base", "")
+                    if base.upper() == symbol and "USDT" in market_id.upper():
+                        ccxt_sym = market_id
+                        LOG.info("  %s: found as %s on %s", symbol, market_id, exchange_id)
+                        break
+
+            if ccxt_sym is None:
                 LOG.info("  %s: not listed on %s", symbol, exchange_id)
                 continue
 
@@ -510,8 +531,8 @@ def main():
                         help="Ratio of negative samples per positive (default: 3)")
     parser.add_argument("--big-loss", type=float, default=5.0,
                         help="Re-filter with this threshold (default: $5)")
-    parser.add_argument("--max-symbols", type=int, default=15,
-                        help="Max symbols to process (for speed)")
+    parser.add_argument("--max-symbols", type=int, default=50,
+                        help="Max symbols to process (default: 50 = all)")
     parser.add_argument("--clear-cache", action="store_true",
                         help="Delete all cached OHLCV data and re-download")
     args = parser.parse_args()
