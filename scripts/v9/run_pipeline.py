@@ -41,7 +41,6 @@ def main():
                         help="Skip step 3 if model exists")
     parser.add_argument("--skip-backtest", action="store_true",
                         help="Skip step 4")
-    parser.add_argument("--exchange", default="bybit")
     parser.add_argument("--clear-cache", action="store_true",
                         help="Delete cached OHLCV data and re-download")
     args = parser.parse_args()
@@ -137,7 +136,7 @@ def main():
         from scripts.v9.backtest import main as backtest_main
         old_argv = sys.argv
         sys.argv = ["backtest", "--symbols", args.symbols,
-                    "--days", str(args.days), "--exchange", args.exchange]
+                    "--days", str(args.days)]
         try:
             backtest_main()
         finally:

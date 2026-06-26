@@ -109,6 +109,18 @@ FEATURE_NAMES = [
     # G10: Direction (label-related)
     "trade_direction",  # +1=LONG, -1=SHORT
 
+    # G11: Multi-timeframe context (5m / 15m aggregation)
+    "mtf5_ema_align",      # EMA9 vs EMA21 alignment on 5m
+    "mtf5_trend_str",      # Trend strength on 5m
+    "mtf5_ret_3",          # 3-bar return on 5m (= 15min momentum)
+    "mtf5_vol_ratio",      # Volume ratio on 5m
+    "mtf5_atr_pct",        # ATR% on 5m
+    "mtf15_ema_align",     # EMA9 vs EMA21 on 15m
+    "mtf15_trend_str",     # Trend strength on 15m
+    "mtf15_ret_3",         # 3-bar return on 15m (= 45min momentum)
+    "mtf15_atr_pct",       # ATR% on 15m
+    "mtf_trend_agree",     # 1m/5m/15m all aligned same direction
+
     # LABEL
     "label",  # 1.0=winner entry, -1.0=loser entry, 0.0=random bar
 ]
@@ -312,6 +324,107 @@ def compute_features_1m(df: pd.DataFrame, symbol: str = "") -> pd.DataFrame:
         feat["hour_cos"] = 0.0
         feat["dow_sin"] = 0.0
         feat["dow_cos"] = 0.0
+
+    # ── G11: Multi-timeframe features (5m / 15m from 1m data) ──
+    # Aggregate 1m OHLCV into 5m and 15m bars, compute trend features,
+    # then map back to 1m bar positions.
+    try:
+        # 5-minute aggregation (every 5 bars)
+        df_5m = pd.DataFrame({"open": o, "high": h, "low": l, "close": c, "volume": v})
+        # Assign 5m group (based on bar index modulo 5)
+        group5 = np.arange(n) // 5
+        agg5 = df_5m.groupby(group5).agg(
+            open=("open", "first"), high=("high", "max"),
+            low=("low", "min"), close=("close", "last"), volume=("volume", "sum")
+        )
+        c5 = agg5["close"].values
+        h5 = agg5["high"].values
+        l5 = agg5["low"].values
+        v5 = agg5["volume"].values
+        n5 = len(agg5)
+
+        if n5 >= 50:
+            ema9_5 = _ema(c5, 9)
+            ema21_5 = _ema(c5, 21)
+            atr5_14 = _atr(h5, l5, c5, 14)
+            vol_ma5_20 = pd.Series(v5).rolling(20, min_periods=5).mean().values
+
+            # Compute per 5m bar
+            mtf5_ema_align = np.sign(ema9_5 - ema21_5)
+            mtf5_trend_str = (ema9_5 - ema21_5) / np.maximum(np.abs(ema21_5), 1e-10) * 100
+            mtf5_ret3 = pd.Series(c5).pct_change(3, fill_method=None).values
+            mtf5_vol_ratio = v5 / np.maximum(vol_ma5_20, 1e-10)
+            mtf5_atr_pct = atr5_14 / np.maximum(c5, 1e-10) * 100
+
+            # Map back to 1m: each 1m bar gets the value of its 5m group
+            bar_to_group5 = np.arange(n) // 5
+            # Clamp to valid range (some groups at the end may be incomplete)
+            bar_to_group5 = np.clip(bar_to_group5, 0, n5 - 1)
+
+            feat["mtf5_ema_align"] = mtf5_ema_align[bar_to_group5]
+            feat["mtf5_trend_str"] = mtf5_trend_str[bar_to_group5]
+            feat["mtf5_ret_3"] = mtf5_ret3[bar_to_group5]
+            feat["mtf5_vol_ratio"] = mtf5_vol_ratio[bar_to_group5]
+            feat["mtf5_atr_pct"] = mtf5_atr_pct[bar_to_group5]
+        else:
+            for col in ["mtf5_ema_align", "mtf5_trend_str", "mtf5_ret_3",
+                        "mtf5_vol_ratio", "mtf5_atr_pct"]:
+                feat[col] = 0.0
+
+        # 15-minute aggregation (every 15 bars)
+        group15 = np.arange(n) // 15
+        agg15 = df_5m.groupby(group15).agg(
+            open=("open", "first"), high=("high", "max"),
+            low=("low", "min"), close=("close", "last"), volume=("volume", "sum")
+        )
+        c15 = agg15["close"].values
+        h15 = agg15["high"].values
+        l15 = agg15["low"].values
+        n15 = len(agg15)
+
+        if n15 >= 50:
+            ema9_15 = _ema(c15, 9)
+            ema21_15 = _ema(c15, 21)
+            atr15_14 = _atr(h15, l15, c15, 14)
+
+            mtf15_ema_align = np.sign(ema9_15 - ema21_15)
+            mtf15_trend_str = (ema9_15 - ema21_15) / np.maximum(np.abs(ema21_15), 1e-10) * 100
+            mtf15_ret3 = pd.Series(c15).pct_change(3, fill_method=None).values
+            mtf15_atr_pct = atr15_14 / np.maximum(c15, 1e-10) * 100
+
+            # Map back to 1m
+            bar_to_group15 = np.clip(np.arange(n) // 15, 0, n15 - 1)
+
+            feat["mtf15_ema_align"] = mtf15_ema_align[bar_to_group15]
+            feat["mtf15_trend_str"] = mtf15_trend_str[bar_to_group15]
+            feat["mtf15_ret_3"] = mtf15_ret3[bar_to_group15]
+            feat["mtf15_atr_pct"] = mtf15_atr_pct[bar_to_group15]
+        else:
+            for col in ["mtf15_ema_align", "mtf15_trend_str", "mtf15_ret_3", "mtf15_atr_pct"]:
+                feat[col] = 0.0
+
+        # Trend agreement: 1m, 5m, 15m all aligned
+        ema1_align = feat["ema_alignment"].values  # 1m EMA alignment
+        mtf_trend_agree = np.where(
+            (ema1_align * feat["mtf5_ema_align"].values > 0) &
+            (ema1_align * feat["mtf15_ema_align"].values > 0),
+            1.0,  # all aligned
+            np.where(
+                (ema1_align * feat["mtf5_ema_align"].values > 0) |
+                (ema1_align * feat["mtf15_ema_align"].values > 0),
+                0.5,  # partial alignment
+                0.0   # no alignment
+            )
+        )
+        feat["mtf_trend_agree"] = mtf_trend_agree
+
+    except Exception as e:
+        LOG.warning("  %s: MTF feature computation failed: %s", symbol, str(e)[:80])
+        for col in ["mtf5_ema_align", "mtf5_trend_str", "mtf5_ret_3",
+                    "mtf5_vol_ratio", "mtf5_atr_pct",
+                    "mtf15_ema_align", "mtf15_trend_str", "mtf15_ret_3",
+                    "mtf15_atr_pct", "mtf_trend_agree"]:
+            feat[col] = 0.0
 
     # Placeholders for direction + label (filled later)
     feat["trade_direction"] = np.nan
