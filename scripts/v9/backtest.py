@@ -256,12 +256,17 @@ def main():
             btc = feed.fetch_history("BTC/USDT", "1m", limit=int(args.days * 1440 * 1.1))
 
             ohlcv_df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
-            btc_df = pd.DataFrame(btc, columns=["timestamp", "open", "high", "low", "close", "volume"])
 
             # Fresh arrays for CoW
             ohlcv_df = pd.DataFrame({col: ohlcv_df[col].values.copy() for col in ohlcv_df.columns})
 
             feat_df = compute_features_1m(ohlcv_df, symbol=base)
+
+            # Merge OHLCV columns back (needed for backtest SL/exit logic)
+            for col in ["open", "high", "low", "close", "volume"]:
+                if col not in feat_df.columns:
+                    feat_df[col] = ohlcv_df[col].values
+
             feat_df = pd.DataFrame({col: feat_df[col].values.copy() for col in feat_df.columns})
             feat_df["symbol"] = base
 
