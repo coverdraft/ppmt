@@ -4,11 +4,18 @@ build_dataset.py — Build labeled dataset from trader's entries + random bars
 Pipeline:
   1. Load filtered trades from parse_trades.py
   2. Download 1m OHLCV for each symbol (paginated, multi-exchange)
-  3. Compute features at each trade entry bar (POSITIVE samples)
-  4. Compute features at random bars where no trade was taken (NEGATIVE samples)
-  5. Save dataset for training
+  3. Compute features at each trade entry bar
+  4. Label strategy (v2 — WINNERS-ONLY):
+     - WINNER entries → label=1.0 (positive: "good entry")
+     - LOSER entries  → label=-1.0 (hard negative: "bad entry, avoid")
+     - Random bars    → label=0.0 (easy negative: "no entry context")
+  5. Compute MAE/MFE for each trade entry (max adverse/favorable excursion)
+  6. Save dataset for training
 
-Features are computed on 1m bars to match the trader's decision timeframe.
+The v1 approach labeled ALL entries as positive (winners+losers), which taught
+the model "what does any entry look like" instead of "what does a WINNING entry
+look like". The v2 approach separates winners from losers, so the model learns
+to AVOID losing entries.
 
 FIXED vs v1:
   - entry_ts_ms: robust conversion using view('int64') with astype fallback
@@ -18,6 +25,7 @@ FIXED vs v1:
     then fallback to closest-within-2min for sub-minute entries
   - cache invalidation: wipe stale cache that doesn't overlap with trade dates
   - diagnostic logging: print date ranges, overlap checks, match stats per symbol
+  - v2 labels: winners-only positives + loser hard negatives
 """
 from __future__ import annotations
 
@@ -102,7 +110,7 @@ FEATURE_NAMES = [
     "trade_direction",  # +1=LONG, -1=SHORT
 
     # LABEL
-    "label",  # 1=trader entered, 0=did not enter
+    "label",  # 1.0=winner entry, -1.0=loser entry, 0.0=random bar
 ]
 
 N_FEATURES = len(FEATURE_NAMES) - 1  # exclude label
@@ -594,7 +602,7 @@ def main():
     top_syms = sym_counts.head(args.max_symbols).index.tolist()
     LOG.info("Processing %d symbols: %s", len(top_syms), top_syms[:10])
 
-    # Build lookup: symbol → list of (entry_ts_ms_rounded, entry_ts_ms_exact, direction)
+    # Build lookup: symbol → list of (entry_ts_ms_rounded, entry_ts_ms_exact, direction, is_win)
     # We use the ROUNDED timestamp for primary lookup and EXACT for fallback
     entry_lookup = {}
     for sym in top_syms:
@@ -605,7 +613,8 @@ def main():
             # Round DOWN to minute boundary (OHLCV bars are at minute boundaries)
             rounded_ms = (exact_ms // 60000) * 60000
             direction = row["direction"]
-            lookup.append((rounded_ms, exact_ms, direction))
+            is_win = bool(row.get("is_win", True))
+            lookup.append((rounded_ms, exact_ms, direction, is_win))
         entry_lookup[sym] = lookup
 
     # Download 1m data per symbol
@@ -664,17 +673,21 @@ def main():
         n_matched = 0
         n_exact = 0
         n_closest = 0
+        n_winners = 0
+        n_losers = 0
 
-        for rounded_ms, exact_ms, direction in sym_lookup:
+        for rounded_ms, exact_ms, direction, is_win in sym_lookup:
             matched = False
 
             # Try 1: Exact match on the rounded (minute-boundary) timestamp
             if rounded_ms in feat_ts_index:
                 bar_idx = feat_ts_index[rounded_ms]
                 feat_df.iloc[bar_idx, feat_df.columns.get_loc("trade_direction")] = 1.0 if direction == "long" else -1.0
-                feat_df.iloc[bar_idx, feat_df.columns.get_loc("label")] = 1.0
+                feat_df.iloc[bar_idx, feat_df.columns.get_loc("label")] = 1.0 if is_win else -1.0
                 n_matched += 1
                 n_exact += 1
+                n_winners += int(is_win)
+                n_losers += int(not is_win)
                 matched = True
 
             if not matched:
@@ -682,9 +695,11 @@ def main():
                 if exact_ms in feat_ts_index:
                     bar_idx = feat_ts_index[exact_ms]
                     feat_df.iloc[bar_idx, feat_df.columns.get_loc("trade_direction")] = 1.0 if direction == "long" else -1.0
-                    feat_df.iloc[bar_idx, feat_df.columns.get_loc("label")] = 1.0
+                    feat_df.iloc[bar_idx, feat_df.columns.get_loc("label")] = 1.0 if is_win else -1.0
                     n_matched += 1
                     n_exact += 1
+                    n_winners += int(is_win)
+                    n_losers += int(not is_win)
                     matched = True
 
             if not matched:
@@ -693,9 +708,11 @@ def main():
                 bar_idx = int(np.argmin(diffs))
                 if diffs[bar_idx] <= 120000:  # within 2 minutes
                     feat_df.iloc[bar_idx, feat_df.columns.get_loc("trade_direction")] = 1.0 if direction == "long" else -1.0
-                    feat_df.iloc[bar_idx, feat_df.columns.get_loc("label")] = 1.0
+                    feat_df.iloc[bar_idx, feat_df.columns.get_loc("label")] = 1.0 if is_win else -1.0
                     n_matched += 1
                     n_closest += 1
+                    n_winners += int(is_win)
+                    n_losers += int(not is_win)
                     matched = True
 
             if not matched and n_matched == 0:
@@ -708,17 +725,18 @@ def main():
                             pd.to_datetime(int(feat_ts[closest_idx]), unit="ms").strftime("%Y-%m-%d %H:%M:%S"),
                             diffs[closest_idx] / 60000)
 
-        LOG.info("  %s: matched %d / %d trades to bars (exact=%d, closest=%d)",
-                 symbol, n_matched, len(sym_trades), n_exact, n_closest)
+        LOG.info("  %s: matched %d / %d trades (exact=%d, closest=%d)  winners=%d losers=%d",
+                 symbol, n_matched, len(sym_trades), n_exact, n_closest, n_winners, n_losers)
 
         # ── Mark NEGATIVE samples ──
-        # Bars that are NOT within ±15min of any entry
+        # Random bars that are NOT within ±15min of any entry
+        # (loser entries are already labeled as -1.0 above — those are hard negatives)
         entry_ms_set = set()
-        for rounded_ms, exact_ms, _ in sym_lookup:
+        for rounded_ms, exact_ms, _, _ in sym_lookup:
             entry_ms_set.add(int(rounded_ms))
             entry_ms_set.add(int(exact_ms))
 
-        # Create windows around entries
+        # Create windows around ALL entries (winners + losers) — exclude from random sampling
         entry_windows = set()
         for ems in entry_ms_set:
             low_ms = ems - 900000
@@ -730,22 +748,24 @@ def main():
         non_entry_mask = ~feat_df["timestamp"].astype(np.int64).isin(entry_windows)
         non_entry_bars = feat_df[non_entry_mask]
 
-        # Sample negative bars
-        n_pos = int((feat_df["label"] == 1.0).sum())
-        n_neg = min(int(n_pos * args.neg_ratio), len(non_entry_bars))
+        # Sample random negatives — ratio relative to WINNERS only
+        n_winners = int((feat_df["label"] == 1.0).sum())
+        n_losers = int((feat_df["label"] == -1.0).sum())
+        n_random_neg = min(int(n_winners * args.neg_ratio), len(non_entry_bars))
 
-        if n_neg > 0 and n_pos > 0:
-            neg_sample = non_entry_bars.sample(n=n_neg, random_state=42)
+        if n_random_neg > 0 and n_winners > 0:
+            neg_sample = non_entry_bars.sample(n=n_random_neg, random_state=42)
             for idx in neg_sample.index:
                 feat_df.loc[idx, "trade_direction"] = np.random.choice([1.0, -1.0])
                 feat_df.loc[idx, "label"] = 0.0
 
-        # Collect positive + negative samples only
+        # Collect all labeled samples: winners (1.0) + losers (-1.0) + random (0.0)
         labeled = feat_df[feat_df["label"].notna() & feat_df["trade_direction"].notna()].copy()
-        n_pos_sym = int((labeled["label"] == 1.0).sum())
-        n_neg_sym = int((labeled["label"] == 0.0).sum())
-        LOG.info("  %s: %d positive + %d negative = %d total",
-                 symbol, n_pos_sym, n_neg_sym, len(labeled))
+        n_win_sym = int((labeled["label"] == 1.0).sum())
+        n_lose_sym = int((labeled["label"] == -1.0).sum())
+        n_rand_sym = int((labeled["label"] == 0.0).sum())
+        LOG.info("  %s: %d winners + %d losers + %d random = %d total",
+                 symbol, n_win_sym, n_lose_sym, n_rand_sym, len(labeled))
 
         all_features.append(labeled)
 
@@ -756,12 +776,12 @@ def main():
 
     combined = pd.concat(all_features, ignore_index=True)
     n_total = len(combined)
-    n_pos_total = int((combined["label"] == 1.0).sum())
-    n_neg_total = int((combined["label"] == 0.0).sum())
+    n_win_total = int((combined["label"] == 1.0).sum())
+    n_lose_total = int((combined["label"] == -1.0).sum())
+    n_rand_total = int((combined["label"] == 0.0).sum())
 
-    LOG.info("Combined dataset: %d rows (%d pos / %d neg = %.1f:1 ratio)",
-             n_total, n_pos_total, n_neg_total,
-             n_neg_total / max(n_pos_total, 1))
+    LOG.info("Combined dataset: %d rows (winners=%d / losers=%d / random=%d)",
+             n_total, n_win_total, n_lose_total, n_rand_total)
 
     # Save
     output_path = DATA_DIR / "dataset.parquet"
@@ -774,12 +794,13 @@ def main():
         json.dump([c for c in FEATURE_NAMES if c != "label"], f, indent=2)
 
     print(f"\n{'='*70}")
-    print(f"V9 DATASET BUILT")
+    print(f"V9 DATASET BUILT (v2 — Winners-Only Labels)")
     print(f"{'='*70}")
     print(f"  Total: {n_total} rows")
-    print(f"  Positive (trader entries): {n_pos_total}")
-    print(f"  Negative (random bars): {n_neg_total}")
-    print(f"  Ratio: {n_neg_total / max(n_pos_total, 1):.1f}:1")
+    print(f"  Winners (label=1.0):  {n_win_total}")
+    print(f"  Losers  (label=-1.0): {n_lose_total} (hard negatives)")
+    print(f"  Random  (label=0.0):  {n_rand_total} (easy negatives)")
+    print(f"  Ratio: {(n_lose_total + n_rand_total) / max(n_win_total, 1):.1f}:1 neg/pos")
     print(f"  Features: {N_FEATURES}")
     print(f"  Output: {output_path}")
     print(f"{'='*70}")

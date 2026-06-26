@@ -1,13 +1,20 @@
 """
-train.py — Train binary classifier on trader entry patterns
+train.py — Train binary classifier: winning entries vs everything else
 
 Model: LightGBM binary classifier
-  - Positive class: bars where the trader entered
-  - Negative class: random bars where the trader didn't enter
+  - Positive class (label=1): bars where the trader entered AND WON
+  - Negative class (label=0): bars where the trader entered and LOST (hard neg)
+                           + random bars where the trader didn't enter (easy neg)
 
-The model learns: "given market features at this bar, would the trader enter?"
+The model learns: "given market features at this bar, is this a WINNING entry?"
 
-FIXED: Handle empty dataset gracefully, use ATR-adaptive SL
+Key insight from v1: labeling ALL entries (winners+losers) as positive taught the
+model "what does any entry look like" → 38% WR in backtest. By separating winners
+from losers, the model learns to distinguish good entries from bad ones.
+
+Hard negatives (loser entries) get 3x sample weight vs easy negatives (random bars)
+because they're much more informative — the market looked like an entry but wasn't
+profitable.
 """
 from __future__ import annotations
 
@@ -38,7 +45,7 @@ FEATURE_COLS_PATH = DATA_DIR / "feature_columns.json"
 
 
 def train_model(dataset_path: Path, params: dict = None) -> tuple:
-    """Train LightGBM binary classifier."""
+    """Train LightGBM binary classifier: winning entries vs rest."""
     LOG.info("Loading dataset from %s", dataset_path)
     df = pd.read_parquet(dataset_path)
 
@@ -54,18 +61,33 @@ def train_model(dataset_path: Path, params: dict = None) -> tuple:
     for col in feature_cols:
         df[col] = df[col].replace([np.inf, -np.inf], np.nan)
 
-    n_pos = int((df["label"] == 1).sum())
-    n_neg = int((df["label"] == 0).sum())
+    # ── Convert 3-class labels to binary ──
+    # Original: 1.0=winner, -1.0=loser, 0.0=random
+    # Binary:   1=winner, 0=loser or random
+    df["label_binary"] = (df["label"] == 1.0).astype(float)
 
-    LOG.info("Dataset: %d rows (%d pos / %d neg)", len(df), n_pos, n_neg)
+    n_winners = int(df["label_binary"].sum())
+    n_losers = int((df["label"] == -1.0).sum())
+    n_random = int((df["label"] == 0.0).sum())
+    n_neg = n_losers + n_random
+
+    LOG.info("Dataset: %d rows (winners=%d / losers=%d / random=%d / total_neg=%d)",
+             len(df), n_winners, n_losers, n_random, n_neg)
 
     # ── Guard: need at least some data ──
-    if len(df) < 50 or n_pos < 10 or n_neg < 10:
-        LOG.error("Dataset too small! Need >= 50 rows with >= 10 pos and >= 10 neg.")
-        LOG.error("Got: %d total, %d pos, %d neg", len(df), n_pos, n_neg)
-        LOG.error("This usually means build_dataset.py didn't match any trades to OHLCV bars.")
+    if len(df) < 50 or n_winners < 10 or n_neg < 10:
+        LOG.error("Dataset too small! Need >= 50 rows with >= 10 winners and >= 10 negatives.")
+        LOG.error("Got: %d total, %d winners, %d neg", len(df), n_winners, n_neg)
         LOG.error("Run: python3 -m scripts.v9.diagnose_build to debug")
         sys.exit(1)
+
+    # ── Sample weights: hard negatives get 3x weight ──
+    # Loser entries are much more informative than random bars
+    sample_weight = np.ones(len(df))
+    loser_mask = df["label"] == -1.0
+    sample_weight[loser_mask] = 3.0  # hard negatives: 3x weight
+    # Winners and random bars keep weight=1.0
+    df["_sample_weight"] = sample_weight
 
     # Time-based split: 80% train, 20% test
     df = df.sort_values("timestamp").reset_index(drop=True)
@@ -77,15 +99,17 @@ def train_model(dataset_path: Path, params: dict = None) -> tuple:
     LOG.info("Train: %d  Test: %d", len(train), len(test))
 
     X_train = train[feature_cols].values.astype(np.float32)
-    y_train = train["label"].values.astype(np.float32)
+    y_train = train["label_binary"].values.astype(np.float32)
+    w_train = train["_sample_weight"].values.astype(np.float32)
     X_test = test[feature_cols].values.astype(np.float32)
-    y_test = test["label"].values.astype(np.float32)
+    y_test = test["label_binary"].values.astype(np.float32)
+    w_test = test["_sample_weight"].values.astype(np.float32)
 
-    # Class weights (positive samples are rarer)
+    # Class weights (winners are rarer)
     n_pos_tr = int((y_train == 1).sum())
     n_neg_tr = int((y_train == 0).sum())
     scale_pos = n_neg_tr / max(n_pos_tr, 1)
-    LOG.info("Class balance: pos=%d neg=%d scale_pos=%.1f", n_pos_tr, n_neg_tr, scale_pos)
+    LOG.info("Class balance: winners=%d neg=%d scale_pos=%.1f", n_pos_tr, n_neg_tr, scale_pos)
 
     p = {
         "objective": "binary",
@@ -95,7 +119,7 @@ def train_model(dataset_path: Path, params: dict = None) -> tuple:
         "feature_fraction": 0.7,
         "bagging_fraction": 0.7,
         "bagging_freq": 3,
-        "min_data_in_leaf": 50,
+        "min_data_in_leaf": 30,
         "lambda_l1": 1.0,
         "lambda_l2": 5.0,
         "scale_pos_weight": scale_pos,
@@ -105,8 +129,10 @@ def train_model(dataset_path: Path, params: dict = None) -> tuple:
     if params:
         p.update(params)
 
-    d_train = lgb.Dataset(X_train, label=y_train, feature_name=feature_cols, free_raw_data=False)
-    d_test = lgb.Dataset(X_test, label=y_test, feature_name=feature_cols, free_raw_data=False)
+    d_train = lgb.Dataset(X_train, label=y_train, weight=w_train,
+                          feature_name=feature_cols, free_raw_data=False)
+    d_test = lgb.Dataset(X_test, label=y_test, weight=w_test,
+                         feature_name=feature_cols, free_raw_data=False)
 
     t0 = time.time()
     bst = lgb.train(
@@ -128,8 +154,20 @@ def train_model(dataset_path: Path, params: dict = None) -> tuple:
     try:
         from sklearn.metrics import roc_auc_score, classification_report, precision_recall_curve
 
+        # Overall AUC (winners vs all negatives)
         auc_test = roc_auc_score(y_test, pred_test)
         auc_train = roc_auc_score(y_train, pred_train)
+
+        # AUC winners vs losers ONLY (most important metric!)
+        test_losers_mask = test["label"] == -1.0
+        test_winners_or_losers = test[test_losers_mask | (test["label"] == 1.0)]
+        if len(test_winners_or_losers) > 20:
+            y_wl = (test_winners_or_losers["label"] == 1.0).astype(float)
+            p_wl = bst.predict(test_winners_or_losers[feature_cols].values.astype(np.float32))
+            auc_win_vs_lose = roc_auc_score(y_wl, p_wl)
+            LOG.info("AUC winners-vs-losers: %.4f (KEY METRIC — can model tell them apart?)", auc_win_vs_lose)
+        else:
+            auc_win_vs_lose = 0.0
 
         # Find optimal threshold
         precision, recall, thresholds = precision_recall_curve(y_test, pred_test)
@@ -143,13 +181,14 @@ def train_model(dataset_path: Path, params: dict = None) -> tuple:
 
         # Classification report at best threshold
         y_pred = (pred_test > best_threshold).astype(int)
-        report = classification_report(y_test, y_pred, target_names=["NO_ENTRY", "TRADER_ENTRY"])
+        report = classification_report(y_test, y_pred, target_names=["NO_WIN", "WINNER_ENTRY"])
         LOG.info("\n%s", report)
 
     except ImportError:
         LOG.warning("sklearn not available, skipping detailed metrics")
         auc_test = 0.0
         auc_train = 0.0
+        auc_win_vs_lose = 0.0
         best_threshold = 0.5
 
     # Feature importance
@@ -170,14 +209,19 @@ def train_model(dataset_path: Path, params: dict = None) -> tuple:
         "feature_cols": feature_cols,
         "auc_train": float(auc_train),
         "auc_test": float(auc_test),
+        "auc_win_vs_lose": float(auc_win_vs_lose),
         "best_threshold": best_threshold,
         "n_train": len(train),
         "n_test": len(test),
-        "n_pos_train": n_pos_tr,
+        "n_winners_train": n_pos_tr,
         "n_neg_train": n_neg_tr,
+        "n_winners_total": n_winners,
+        "n_losers_total": n_losers,
+        "n_random_total": n_random,
         "training_time_s": elapsed,
         "params": p,
         "top_features": imp_df.head(20).to_dict(orient="records"),
+        "label_scheme": "v2_winners_only",
     }
     meta_path = MODEL_DIR / "v9_meta.json"
     with open(meta_path, "w") as f:
@@ -187,12 +231,13 @@ def train_model(dataset_path: Path, params: dict = None) -> tuple:
 
     # Print summary
     print(f"\n{'='*70}")
-    print(f"V9 CLASSIFIER TRAINED")
+    print(f"V9 CLASSIFIER TRAINED (v2 — Winners-Only Labels)")
     print(f"{'='*70}")
-    print(f"  Train: {len(train)} rows ({n_pos_tr} pos / {n_neg_tr} neg)")
+    print(f"  Train: {len(train)} rows ({n_pos_tr} winners / {n_neg_tr} neg)")
     print(f"  Test:  {len(test)} rows")
-    print(f"  AUC Train: {auc_train:.4f}")
-    print(f"  AUC Test:  {auc_test:.4f}")
+    print(f"  AUC Train:  {auc_train:.4f}")
+    print(f"  AUC Test:   {auc_test:.4f}")
+    print(f"  AUC Win vs Lose: {auc_win_vs_lose:.4f}  ← KEY METRIC")
     print(f"  Best Threshold: {best_threshold:.3f}")
     print(f"  Top 5 Features:")
     for _, row in imp_df.head(5).iterrows():
