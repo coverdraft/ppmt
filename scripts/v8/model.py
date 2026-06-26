@@ -310,9 +310,15 @@ def build_dataset(
             btc_df = btc_df[btc_df["timestamp"].isin(common_ts)].sort_values("timestamp").reset_index(drop=True)
             eth_df = eth_df[eth_df["timestamp"].isin(common_ts)].sort_values("timestamp").reset_index(drop=True)
 
+            # Reconstruct DataFrames from fresh arrays — pandas CoW can leave
+            # read-only backing arrays after boolean indexing + reset_index
+            ohlcv_df = pd.DataFrame({col: ohlcv_df[col].values.copy() for col in ohlcv_df.columns})
+            btc_df = pd.DataFrame({col: btc_df[col].values.copy() for col in btc_df.columns})
+            eth_df = pd.DataFrame({col: eth_df[col].values.copy() for col in eth_df.columns})
+
             feat_df = compute_features(ohlcv_df, btc_df, eth_df, symbol=symbol)
-            # Ensure writability — pandas 2.x CoW can make DataFrames read-only
-            feat_df = feat_df.copy()
+            # Reconstruct from fresh arrays after compute_features
+            feat_df = pd.DataFrame({col: feat_df[col].values.copy() for col in feat_df.columns})
 
             atr_14_price = feat_df["_atr_14_price"].values.copy()
             long_labels, short_labels = compute_ev_labels_both_sides(

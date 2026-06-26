@@ -238,12 +238,15 @@ def compute_features(
     sector_avg_ret_5m: float = 0.0,
 ) -> pd.DataFrame:
     """Compute all v8 pattern-based features for a symbol's OHLCV data."""
-    df = ohlcv_df.copy().reset_index(drop=True)
-    o = df["open"].values.copy().astype(np.float64)
-    h = df["high"].values.copy().astype(np.float64)
-    l = df["low"].values.copy().astype(np.float64)
-    c = df["close"].values.copy().astype(np.float64)
-    v = df["volume"].values.copy().astype(np.float64)
+    # Reconstruct DataFrame from fresh numpy arrays — pandas 2.x CoW can make
+    # .copy() still return read-only backing arrays after boolean indexing / merge.
+    _data = {col: ohlcv_df[col].values.copy() for col in ohlcv_df.columns}
+    df = pd.DataFrame(_data)
+    o = _data["open"].astype(np.float64)
+    h = _data["high"].astype(np.float64)
+    l = _data["low"].astype(np.float64)
+    c = _data["close"].astype(np.float64)
+    v = _data["volume"].astype(np.float64)
     n = len(df)
 
     rng = np.maximum(h - l, 1e-10)
@@ -456,11 +459,12 @@ def compute_features(
     btc = btc.drop_duplicates(subset=["timestamp"], keep="first")
     df = df.merge(btc, on="timestamp", how="left")
 
-    # Deep copy after merge — pandas 2.x CoW makes merged blocks read-only
-    df = df.copy()
+    # Reconstruct from fresh arrays after merge — pandas CoW makes merged blocks read-only
+    _merged = {col: df[col].values.copy() for col in df.columns}
+    df = pd.DataFrame(_merged)
 
     # After merge, re-extract close array (length may differ if BTC had missing timestamps)
-    c_post = df["close"].values.copy().astype(np.float64)
+    c_post = _merged["close"].astype(np.float64)
 
     # Alt-BTC lag
     alt_ret_1 = pd.Series(c_post).pct_change(1, fill_method=None).values
