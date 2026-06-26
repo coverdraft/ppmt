@@ -120,9 +120,10 @@ def main(argv: list[str] | None = None) -> int:
                          warmup_bars=args.warmup_bars, exchange=args.exchange,
                          bootstrap_bars=args.bootstrap_bars, auto_train=True)
             eng._bootstrap_train()
-            log.info("=== TRAIN %s done: best_iter=%d auc=%.3f ===",
-                     sym, eng.meta.get("best_iteration", 0),
-                     eng.meta.get("auc_val", 0))
+            log.info("=== TRAIN %s done: n_rounds=%d auc_train=%.3f auc_test=%.3f ===",
+                     sym, eng.meta.get("num_boost_round", 0),
+                     eng.meta.get("auc_train", 0),
+                     eng.meta.get("auc_test", 0))
         return 0
 
     # --- Status mode ---

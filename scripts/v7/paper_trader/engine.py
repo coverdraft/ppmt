@@ -148,15 +148,20 @@ class Engine:
         if is_trained(self.symbol):
             self.bst = load_model(self.symbol)
             self.meta = load_metadata(self.symbol)
-            # Check if model is usable (best_iter > 1)
-            best_iter = self.meta.get("best_iteration", 0)
-            if best_iter <= 1:
-                LOG.warning("engine: existing model for %s has best_iter=%d (useless) — retraining",
-                            self.symbol, best_iter)
-                self._bootstrap_train()
-                return
-            LOG.info("engine: loaded existing model for %s (best_iter=%d auc=%.3f)",
-                     self.symbol, best_iter, self.meta.get("auc_val", 0))
+            # v7: no early stopping — check num_boost_round instead of best_iter
+            n_rounds = self.meta.get("num_boost_round", 0)
+            split_method = self.meta.get("split_method", "")
+            # If model was trained with old early-stopping approach and has best_iter<=1,
+            # it's useless — retrain with new approach
+            if split_method == "walk_forward_83_10_7":
+                best_iter = self.meta.get("best_iteration", 0)
+                if best_iter <= 1:
+                    LOG.warning("engine: old model for %s has best_iter=%d (useless) — retraining with new approach",
+                                self.symbol, best_iter)
+                    self._bootstrap_train()
+                    return
+            LOG.info("engine: loaded existing model for %s (n_rounds=%d auc_test=%.3f)",
+                     self.symbol, n_rounds, self.meta.get("auc_test", 0))
             return
 
         if not self.auto_train:

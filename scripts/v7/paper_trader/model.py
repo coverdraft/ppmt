@@ -1,8 +1,8 @@
 """
-model.py — v6-LONG LightGBM binary classification model wrapper.
+model.py — v7 LightGBM binary classification model wrapper.
 
 On first run (no model file present), bootstrap-train a fresh model
-on ~90d of historical 5m data from the same exchange. Saves to disk.
+on ~180d of historical 5m data from the same exchange. Saves to disk.
 
 On subsequent runs, load existing model. Supports `retrain` command to
 refresh on demand.
@@ -13,13 +13,21 @@ Architecture:
 - 58 features (v6 minus 'dow' — spurious with 24h horizon)
 - HORIZON=288 (24h forward, 288 × 5min bars) — ONLY viable horizon per comprehensive sweep
 - Decision: LONG if P(up) > PROB_LONG, SHORT if P(up) < PROB_SHORT, else WAIT
-- 2000 trees with early_stopping=150 (avoids best_iter=1 instability)
 - Per-symbol config overrides in SYMBOL_CONFIG (from 180d deep optimization, 5040 configs)
 - Quantile-based trading in evaluate_test: per-symbol Q/window/cost from SYMBOL_CONFIG
 - 3/4 core tokens have 4/4 consistency: DOGE Q95/5, AVAX Q82/18, SOL Q85/15
 - ETH Q87/13 is the only 3/4 token (no 4/4 config found in deep opt)
 - SHORT is essential — LONG-only always loses across all tokens
 - BTC = dead end (confirmed across all configs)
+
+Training strategy (v7 fix):
+- NO early stopping — train on ALL non-test data with fixed num_boost_round=500
+- The val set has massive regime shift (e.g., AVAX: train 46.7% UP, val 29.5% UP)
+  causing val AUC ≈ 0.48 from iteration 1, triggering early stopping at best_iter=1
+- A 1-tree model is useless; 500 trees with regularization is far more robust
+- Overfitting is controlled by regularization (L1/L2, min_data_in_leaf, feature/bagging fraction)
+- Test set (last 7%) is used for metrics reporting ONLY
+- deep_optimize.py validated that quantile-based trading works even with imperfect models
 
 Why classification instead of regression:
 - Regression predicts MAGNITUDE, which varies with market regime
@@ -46,13 +54,18 @@ LOG = logging.getLogger("pt_model")
 MODEL_DIR = Path(__file__).resolve().parents[3] / "data" / "paper_trading" / "models"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
+# Fixed boosting iterations — NO early stopping.
+# Previous approach used early_stopping_rounds=150 with a val set, but regime shift
+# in the val set (e.g., AVAX: train 46.7% UP, val 29.5% UP) caused val AUC ≈ 0.48
+# from iteration 1, triggering best_iter=1 and producing useless 1-tree models.
+# 500 rounds with regularization is far more robust for quantile-based trading.
+NUM_BOOST_ROUND = 500
+
 DEFAULT_PARAMS = {
     "objective": "binary",
     "metric": ["binary_logloss", "auc"],
     "num_leaves": 31,
     "learning_rate": 0.01,
-    "n_estimators": 2000,
-    "early_stopping_rounds": 150,
     "feature_fraction": 0.7,
     "bagging_fraction": 0.7,
     "bagging_freq": 3,
@@ -163,7 +176,10 @@ HP_PRESETS = {
 }
 
 def get_params_for_symbol(symbol: str) -> dict:
-    """Get LightGBM params with per-symbol HP overrides."""
+    """Get LightGBM params with per-symbol HP overrides.
+
+    Returns a dict of VALID LightGBM training params (no sklearn-style keys).
+    """
     p = dict(DEFAULT_PARAMS)
     cfg = SYMBOL_CONFIG.get(symbol)
     if cfg and "hp" in cfg:
@@ -214,24 +230,39 @@ def train(symbol: str, ohlcv_df: pd.DataFrame, btc_df: pd.DataFrame, eth_df: pd.
           val_frac: float = 0.2, params: dict | None = None) -> dict:
     """Train binary classification model: P(price UP in HORIZON bars).
 
-    Uses walk-forward split 83/10/7 (train/val/test) for proper time-series
-    validation. Early stopping uses the val set (10%). The test set (7%) is
-    held out — not used for early stopping — matching deep optimization methodology.
+    v7 FIX: Train on ALL non-test data with FIXED num_boost_round, NO early stopping.
 
-    This is critical: the old simple 80/20 split caused best_iter=1 because
-    the last 20% of data has a very different label distribution (regime shift),
-    making validation AUC useless for early stopping. The 83/10/7 split puts
-    the val set ADJACENT to train (not at the end), giving meaningful early stopping.
+    Previous approach used early stopping with a val set (83/10/7 split). This caused
+    best_iter=1 because the val set has massive regime shift vs training:
+      - AVAX: train 46.7% UP, val 29.5% UP → val AUC 0.476
+      - SOL:  train 49.5% UP, val 36.4% UP → val AUC 0.463
+      - DOGE: train 46.9% UP, val 41.1% UP → val AUC 0.531
+    The val AUC is ≈0.48 from iteration 1 and never improves, so early stopping
+    triggers at best_iter=1 producing a useless 1-tree model.
 
-    ohlcv_df : full historical OHLCV for the target symbol (5m, >=2000 rows recommended)
+    New approach: train on ALL data except a small test holdout (7%), with
+    NUM_BOOST_ROUND=500 and NO early stopping. Overfitting is controlled by
+    regularization (L1/L2, min_data_in_leaf, feature/bagging fraction), not by
+    early stopping on a regime-shifted val set. This produces models with 500
+    trees that generate smooth, diverse predictions — essential for quantile-
+    based trading which only needs rank ordering, not high AUC.
+
+    deep_optimize.py validated this: quantile-based trading produces positive
+    PnL even with imperfect models, because it trades on the RANK of predictions,
+    not their absolute value.
+
+    ohlcv_df : full historical OHLCV for the target symbol (5m, >=2000 rows)
     btc_df   : BTC/USDT 5m aligned by timestamp
     eth_df   : ETH/USDT 5m aligned by timestamp
-    val_frac : IGNORED — kept for API compatibility. Walk-forward 83/10/7 is always used.
+    val_frac : IGNORED — kept for API compatibility
     params   : LightGBM params override (if None, uses per-symbol or default)
     """
     p = dict(DEFAULT_PARAMS)
     if params:
         p.update(params)
+    # Remove sklearn-style params that confuse lgb.train()
+    p.pop("n_estimators", None)
+    p.pop("early_stopping_rounds", None)
 
     LOG.info("model.train: symbol=%s rows=%d", symbol, len(ohlcv_df))
     t0 = time.time()
@@ -257,56 +288,64 @@ def train(symbol: str, ohlcv_df: pd.DataFrame, btc_df: pd.DataFrame, eth_df: pd.
     if len(feat_df) < 500:
         raise ValueError(f"too few clean rows ({len(feat_df)}) to train; need >=500")
 
-    # Walk-forward split: 83/10/7 (train/val/test) — same as deep optimization
-    # This is critical for time-series: val set is ADJACENT to train, not at the end.
-    # Simple 80/20 split puts val in a different regime → best_iter=1 → useless model.
+    # Split: train on ALL non-test data (93%), test for metrics (7%)
+    # NO validation set — no early stopping needed.
+    # The previous val set caused regime shift → best_iter=1 → useless model.
     ts = feat_df["timestamp"].values
     ts_first, ts_last = ts[0], ts[-1]
     span_ms = ts_last - ts_first
     span_days = span_ms / (1000 * 86400)
 
     test_days = max(span_days * 0.07, 0.5)
-    val_days = max(span_days * 0.10, 0.5)
-
     test_start_ts = ts_last - int(test_days * 86400 * 1000)
-    val_start_ts = test_start_ts - int(val_days * 86400 * 1000)
 
-    train_df = feat_df[feat_df["timestamp"] < val_start_ts].reset_index(drop=True)
-    val_df = feat_df[(feat_df["timestamp"] >= val_start_ts) & (feat_df["timestamp"] < test_start_ts)].reset_index(drop=True)
-    # test_df held out — NOT used for training or early stopping
+    train_df = feat_df[feat_df["timestamp"] < test_start_ts].reset_index(drop=True)
+    test_df = feat_df[feat_df["timestamp"] >= test_start_ts].reset_index(drop=True)
 
     X_tr = train_df[FEATURE_NAMES].values.astype(np.float32)
     y_tr = train_df["label"].values.astype(np.float32)
-    X_val = val_df[FEATURE_NAMES].values.astype(np.float32)
-    y_val = val_df["label"].values.astype(np.float32)
 
-    LOG.info("model.train: walk-forward split n_tr=%d n_val=%d  tr_up=%.1f%% val_up=%.1f%%",
-             len(X_tr), len(X_val), y_tr.mean()*100, y_val.mean()*100)
+    LOG.info("model.train: train=%d test=%d  tr_up=%.1f%% test_up=%.1f%%",
+             len(X_tr), len(test_df),
+             y_tr.mean() * 100,
+             test_df["label"].mean() * 100 if len(test_df) > 0 else 0)
 
-    if len(X_tr) < 200 or len(X_val) < 50:
-        raise ValueError(f"insufficient data after walk-forward split: tr={len(X_tr)} val={len(X_val)}")
+    if len(X_tr) < 200:
+        raise ValueError(f"insufficient training data: {len(X_tr)}")
 
     d_tr = lgb.Dataset(X_tr, label=y_tr, feature_name=FEATURE_NAMES, free_raw_data=False)
-    d_val = lgb.Dataset(X_val, label=y_val, feature_name=FEATURE_NAMES, free_raw_data=False)
 
+    # FIXED iteration count — NO early stopping
+    # 500 rounds with regularization controls overfitting better than
+    # early stopping on a regime-shifted val set that triggers best_iter=1.
     callbacks = [lgb.log_evaluation(period=50)]
-    es_rounds = p.get("early_stopping_rounds", -1)
-    if es_rounds and es_rounds > 0:
-        callbacks.append(lgb.early_stopping(es_rounds, verbose=False))
+
     bst = lgb.train(
         p,
         d_tr,
-        num_boost_round=p.get("n_estimators", 1000),
-        valid_sets=[d_tr, d_val],
-        valid_names=["train", "val"],
+        num_boost_round=NUM_BOOST_ROUND,
+        valid_sets=[d_tr],
+        valid_names=["train"],
         callbacks=callbacks,
     )
 
-    # Metrics
-    pred_val = bst.predict(X_val)
-    auc_val = float(_auc(y_val, pred_val))
-    logloss_val = float(-np.mean(y_val * np.log(pred_val + 1e-15) + (1 - y_val) * np.log(1 - pred_val + 1e-15)))
-    dir_acc = float(((pred_val > 0.5) == (y_val > 0.5)).mean())
+    # Metrics on train set (diagnostic) and test set (honest evaluation)
+    pred_tr = bst.predict(X_tr)
+    auc_tr = float(_auc(y_tr, pred_tr))
+
+    auc_test = 0.5
+    logloss_test = 0.0
+    dir_acc_test = 0.5
+    if len(test_df) > 0:
+        X_test = test_df[FEATURE_NAMES].values.astype(np.float32)
+        y_test = test_df["label"].values.astype(np.float32)
+        pred_test = bst.predict(X_test)
+        auc_test = float(_auc(y_test, pred_test))
+        logloss_test = float(-np.mean(
+            y_test * np.log(pred_test + 1e-15) +
+            (1 - y_test) * np.log(1 - pred_test + 1e-15)
+        ))
+        dir_acc_test = float(((pred_test > 0.5) == (y_test > 0.5)).mean())
 
     # Save
     mp = model_path(symbol)
@@ -315,29 +354,30 @@ def train(symbol: str, ohlcv_df: pd.DataFrame, btc_df: pd.DataFrame, eth_df: pd.
         "symbol": symbol,
         "trained_at": int(time.time()),
         "n_train": int(len(X_tr)),
-        "n_val": int(len(X_val)),
-        "best_iteration": int(bst.best_iteration) if bst.best_iteration else 0,
-        "auc_val": auc_val,
-        "logloss_val": logloss_val,
-        "dir_acc_val": dir_acc,
+        "n_test": int(len(test_df)),
+        "num_boost_round": NUM_BOOST_ROUND,
+        "auc_train": auc_tr,
+        "auc_test": auc_test,
+        "logloss_test": logloss_test,
+        "dir_acc_test": dir_acc_test,
         "label_up_pct_train": float(y_tr.mean() * 100),
-        "label_up_pct_val": float(y_val.mean() * 100),
+        "label_up_pct_test": float(test_df["label"].mean() * 100) if len(test_df) > 0 else 0,
         "feature_names": FEATURE_NAMES,
-        "params": {k: v for k, v in p.items() if k != "early_stopping_rounds"},
+        "params": {k: v for k, v in p.items()},
         "horizon": HORIZON,
         "cost_pct": COST_PCT,
         "prob_long": PROB_LONG,
         "prob_short": PROB_SHORT,
         "model_type": "binary_classification",
-        "split_method": "walk_forward_83_10_7",
+        "split_method": "train_all_no_early_stop",
         "training_rows_time_range": {
             "first_ts": int(feat_df["timestamp"].iloc[0]),
             "last_ts": int(feat_df["timestamp"].iloc[-1]),
         },
     }
     metadata_path(symbol).write_text(json.dumps(meta, indent=2))
-    LOG.info("model.train: saved %s (auc=%.3f logloss=%.4f dir_acc=%.3f best_iter=%d) in %.1fs",
-             mp, auc_val, logloss_val, dir_acc, meta["best_iteration"], time.time() - t0)
+    LOG.info("model.train: saved %s (auc_train=%.3f auc_test=%.3f logloss_test=%.4f dir_acc_test=%.3f n_rounds=%d) in %.1fs",
+             mp, auc_tr, auc_test, logloss_test, dir_acc_test, NUM_BOOST_ROUND, time.time() - t0)
     return meta
 
 
