@@ -410,7 +410,8 @@ def download_1m(symbol: str, start_ts_ms: int, end_ts_ms: int) -> pd.DataFrame:
 
     import ccxt
 
-    for exchange_id in ["bybit", "binance", "mexc"]:
+    # Binance FIRST — supports 1000 bars/request (5x faster than Bybit 200)
+    for exchange_id in ["binance", "bybit", "mexc"]:
         try:
             exchange = getattr(ccxt, exchange_id)({"enableRateLimit": True})
             ccxt_sym = f"{symbol}/USDT"
@@ -419,17 +420,19 @@ def download_1m(symbol: str, start_ts_ms: int, end_ts_ms: int) -> pd.DataFrame:
                 LOG.info("  %s: not listed on %s", symbol, exchange_id)
                 continue
 
-            # Determine the actual limit for this exchange
-            # Binance: 1000, Bybit: 200-1000, MEXC: 1000
+            # Binance/Bybit both support 1000 bars/request via ccxt
             limit = 1000
-            if exchange_id == "bybit":
-                limit = 200  # Bybit v5 API limit for 1m candles
 
             all_ohlcv = []
             since = start_ts_ms
             max_iterations = 2000  # safety limit (covers ~375 days of 1m data)
             iteration = 0
             last_fetched_count = limit  # track to detect truly no more data
+
+            total_days = (end_ts_ms - start_ts_ms) / 86400000
+            LOG.info("  %s: fetching from %s (%.0f days, ~%d requests)...",
+                     symbol, exchange_id, total_days,
+                     int(total_days * 1440 / limit) + 1)
 
             while since < end_ts_ms and iteration < max_iterations:
                 iteration += 1
