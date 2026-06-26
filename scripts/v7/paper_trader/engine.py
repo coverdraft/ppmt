@@ -1,22 +1,33 @@
 """
-engine.py — paper trading engine main loop.
+engine.py — v7 paper trading engine main loop.
 
 On each 5m candle close:
-1. Fetch latest closed OHLCV for the target symbol + BTC + ETH (200 bars each)
-2. Compute 59 features for the latest closed candle
-3. Predict fwd_ret_3 with the v6-LONG model
-4. Decision rule: LONG if P(up) > prob_long, SHORT if P(up) < prob_short, else WAIT
+1. Fetch latest closed OHLCV for the target symbol + BTC + ETH
+2. Compute 58 features for the latest closed candle
+3. Predict P(UP in 24h) with the v7 binary classification model
+4. Decision rule: rolling quantile-based (matches backtest logic)
+   - LONG if pred > rolling Q_LONG percentile
+   - SHORT if pred < rolling Q_SHORT percentile
+   - WAIT otherwise
 5. Manage any open position:
-   - If a position is open and a new decision disagrees (LONG→SHORT or SHORT→LONG),
-     close the open position at the current close, record PnL, open the new one.
-   - If a position has been open for >= HORIZON candles, close it.
-6. Log every decision (signal, fill, exit) to CSV
+   - If a position is open and has been held for >= HORIZON (288 bars = 24h),
+     close it at the current close.
+   - If a reverse signal fires (LONG→SHORT or SHORT→LONG), close and reverse.
+6. Log every decision to CSV
 7. Update equity curve state file
 
 State (persisted between runs):
 - position: {symbol, side, entry_ts, entry_price, bars_held}
 - equity: total PnL since start
+- recent_preds: list of recent predictions for rolling quantile computation
 - last_signal_ts: ts of the last signal we acted on (to avoid duplicate fills)
+
+Key changes from v6 engine:
+- Binary classification P(UP in 24h) instead of regression
+- Quantile-based trading instead of fixed thresholds
+- HORIZON=288 (24h) instead of HORIZON=3 (15min)
+- Per-symbol config (Q, window_size, cost_pct, HP) from SYMBOL_CONFIG
+- Maker fees (0.04%) instead of taker (0.14%) — requires limit orders
 """
 from __future__ import annotations
 
@@ -26,8 +37,8 @@ import logging
 import time
 import datetime as dt
 from pathlib import Path
-from typing import Optional
 
+import numpy as np
 import pandas as pd
 
 from .feed import Feed
@@ -35,6 +46,7 @@ from .features import latest_feature_row, FEATURE_NAMES
 from .model import (
     load_model, load_metadata, predict, train, is_trained,
     PROB_LONG, PROB_SHORT, COST_PCT, HORIZON,
+    SYMBOL_CONFIG, get_params_for_symbol,
 )
 
 LOG = logging.getLogger("pt_engine")
@@ -46,7 +58,7 @@ LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 SIGNAL_CSV_HEADER = [
     "ts_utc", "ts_iso", "symbol", "close",
-    "pred", "decision", "prob_long", "prob_short",
+    "pred", "decision", "q_high", "q_low",
     "action",  # OPEN_LONG, OPEN_SHORT, CLOSE_LONG, CLOSE_SHORT, HOLD, NO_ACTION
     "position_side", "position_bars_held",
     "entry_price", "exit_price", "pnl_pct", "cost_pct", "pnl_net_pct",
@@ -58,14 +70,37 @@ EQUITY_CSV_HEADER = ["ts_utc", "ts_iso", "equity_pct", "n_trades", "n_wins", "wi
 
 class Engine:
     def __init__(self, symbol: str, timeframe: str = "5m",
-                 warmup_bars: int = 200, exchange: str = "bybit",
-                 bootstrap_bars: int = 4000,
+                 warmup_bars: int = 400, exchange: str = "bybit",
+                 bootstrap_bars: int = 52000,
                  auto_train: bool = True):
+        """Initialize paper trading engine for one symbol.
+
+        Args:
+            symbol: Trading pair, e.g. "DOGE/USDT"
+            timeframe: Candle timeframe (must be "5m")
+            warmup_bars: Number of historical bars fetched each cycle for features.
+                         400 ensures enough for 50-period indicators + quantile window.
+            exchange: Exchange ID for ccxt
+            bootstrap_bars: Bars for initial training (~180d = 52000)
+            auto_train: Auto-train if no model exists
+        """
         self.symbol = symbol
         self.timeframe = timeframe
         self.warmup_bars = warmup_bars
         self.bootstrap_bars = bootstrap_bars
         self.auto_train = auto_train
+
+        # Per-symbol config from deep optimization
+        self.sym_cfg = SYMBOL_CONFIG.get(symbol, {})
+        self.q_long = self.sym_cfg.get("q_long", 85)
+        self.q_short = self.sym_cfg.get("q_short", 15)
+        self.window_size = self.sym_cfg.get("window_size", 200)
+        self.trade_cost = self.sym_cfg.get("cost_pct", COST_PCT)
+        self.hp_label = self.sym_cfg.get("hp", "default")
+
+        LOG.info("engine: %s config: Q%d/%d Win=%d Cost=%.2f%% HP=%s",
+                 symbol, self.q_long, self.q_short, self.window_size,
+                 self.trade_cost, self.hp_label)
 
         self.feed = Feed(exchange_id=exchange)
         self.state_path = STATE_DIR / f"engine_{symbol.replace('/', '_')}.json"
@@ -95,6 +130,7 @@ class Engine:
             "equity_pct": 0.0,
             "n_trades": 0,
             "n_wins": 0,
+            "recent_preds": [],  # rolling window of predictions for quantile computation
         }
 
     def _save_state(self) -> None:
@@ -121,7 +157,8 @@ class Engine:
                 "run `python -m scripts.v7.paper_trader.runner --train` first"
             )
 
-        LOG.info("engine: no model found — bootstrapping training on %d bars", self.bootstrap_bars)
+        LOG.info("engine: no model found — bootstrapping training on %d bars (~180d)",
+                 self.bootstrap_bars)
         self._bootstrap_train()
 
     def _bootstrap_train(self) -> None:
@@ -140,8 +177,39 @@ class Engine:
         btc_df = btc_df[btc_df["timestamp"].isin(common_ts)].sort_values("timestamp").reset_index(drop=True)
         eth_df = eth_df[eth_df["timestamp"].isin(common_ts)].sort_values("timestamp").reset_index(drop=True)
         LOG.info("bootstrap: aligned rows=%d", len(ohlcv_df))
-        self.meta = train(self.symbol, ohlcv_df, btc_df, eth_df)
+
+        # Use per-symbol HP from SYMBOL_CONFIG
+        params = get_params_for_symbol(self.symbol)
+        self.meta = train(self.symbol, ohlcv_df, btc_df, eth_df, params=params)
         self.bst = load_model(self.symbol)
+
+    # ------------------------------------------------------------------
+    # Quantile-based decision
+    # ------------------------------------------------------------------
+    def _quantile_decision(self, pred: float) -> tuple[str, float, float]:
+        """Compute quantile-based decision from rolling prediction window.
+
+        Returns (decision, q_high, q_low).
+        """
+        recent = self.state.get("recent_preds", [])
+        if len(recent) < 20:
+            # Not enough data for quantile computation — use fixed thresholds
+            if pred > PROB_LONG:
+                return "LONG", 0.0, 0.0
+            elif pred < PROB_SHORT:
+                return "SHORT", 0.0, 0.0
+            else:
+                return "WAIT", 0.0, 0.0
+
+        q_high = float(np.percentile(recent, self.q_long))
+        q_low = float(np.percentile(recent, self.q_short))
+
+        if pred > q_high:
+            return "LONG", q_high, q_low
+        elif pred < q_low:
+            return "SHORT", q_high, q_low
+        else:
+            return "WAIT", q_high, q_low
 
     # ------------------------------------------------------------------
     # Main signal loop
@@ -163,7 +231,7 @@ class Engine:
             LOG.warning("engine.run_once: failed fetching BTC/ETH window")
             return None
 
-        # 3. Build DataFrames (truncate to warmup length)
+        # 3. Build DataFrames
         ohlcv_df = pd.DataFrame(new_window[-self.warmup_bars:],
                                 columns=["timestamp", "open", "high", "low", "close", "volume"])
         btc_df = pd.DataFrame(btc_window[-self.warmup_bars:],
@@ -183,18 +251,31 @@ class Engine:
             LOG.warning("engine.run_once: insufficient history for features")
             return None
 
-        # 5. Predict
-        pred, decision = predict(self.bst, feat_row)
-        LOG.info("engine.run_once: pred=%.4f decision=%s", pred, decision)
+        # 5. Predict P(UP in 24h)
+        pred, _ = predict(self.bst, feat_row)
 
-        # 6. Manage position + take action
-        result = self._act_on_decision(decision, pred, latest_ts, latest_close)
+        # 6. Update rolling prediction window
+        recent_preds = self.state.get("recent_preds", [])
+        recent_preds.append(float(pred))
+        if len(recent_preds) > self.window_size:
+            recent_preds = recent_preds[-self.window_size:]
+        self.state["recent_preds"] = recent_preds
 
-        # 7. Persist state
+        # 7. Quantile-based decision
+        decision, q_high, q_low = self._quantile_decision(pred)
+        LOG.info("engine.run_once: pred=%.4f decision=%s q_high=%.4f q_low=%.4f (window=%d)",
+                 pred, decision, q_high, q_low, len(recent_preds))
+
+        # 8. Manage position + take action
+        result = self._act_on_decision(decision, pred, q_high, q_low, latest_ts, latest_close)
+
+        # 9. Persist state
         self._save_state()
         return result
 
-    def _act_on_decision(self, decision: str, pred: float, ts: int, close: float) -> dict:
+    def _act_on_decision(self, decision: str, pred: float,
+                         q_high: float, q_low: float,
+                         ts: int, close: float) -> dict:
         pos = self.state["position"]
         action = "NO_ACTION"
         entry_price = exit_price = pnl_pct = pnl_net_pct = 0.0
@@ -203,7 +284,7 @@ class Engine:
         if pos is not None:
             pos["bars_held"] = pos.get("bars_held", 0) + 1
             side = pos["side"]
-            # Force-close after HORIZON bars (matches training label horizon)
+            # Force-close after HORIZON bars (288 = 24h, matches training label)
             time_up = pos["bars_held"] >= HORIZON
             # Disagreement: pos is LONG and decision is SHORT, or vice versa
             disagree = (side == "LONG" and decision == "SHORT") or (side == "SHORT" and decision == "LONG")
@@ -217,7 +298,7 @@ class Engine:
                     pnl_pct = (exit_price - entry_price) / entry_price * 100
                 else:
                     pnl_pct = (entry_price - exit_price) / entry_price * 100
-                pnl_net_pct = pnl_pct - COST_PCT
+                pnl_net_pct = pnl_pct - self.trade_cost
                 self.state["equity_pct"] += pnl_net_pct
                 self.state["n_trades"] += 1
                 if pnl_net_pct > 0:
@@ -245,15 +326,15 @@ class Engine:
             "close": close,
             "pred": pred,
             "decision": decision,
-            "prob_long": PROB_LONG,
-            "prob_short": PROB_SHORT,
+            "q_high": q_high,
+            "q_low": q_low,
             "action": action,
             "position_side": pos["side"] if pos else "",
             "position_bars_held": pos.get("bars_held", 0) if pos else 0,
             "entry_price": entry_price,
             "exit_price": exit_price,
             "pnl_pct": pnl_pct,
-            "cost_pct": COST_PCT if action.startswith("CLOSE") or action.startswith("REVERSE") else 0.0,
+            "cost_pct": self.trade_cost if action.startswith("CLOSE") or action.startswith("REVERSE") else 0.0,
             "pnl_net_pct": pnl_net_pct,
             "equity_pct": self.state["equity_pct"],
         }
@@ -309,6 +390,13 @@ class Engine:
         return {
             "symbol": self.symbol,
             "timeframe": self.timeframe,
+            "config": {
+                "q_long": self.q_long,
+                "q_short": self.q_short,
+                "window_size": self.window_size,
+                "cost_pct": self.trade_cost,
+                "hp": self.hp_label,
+            },
             "model_loaded": self.bst is not None,
             "model_meta": self.meta,
             "state": self.state,

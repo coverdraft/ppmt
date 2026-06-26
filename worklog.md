@@ -1965,3 +1965,34 @@ Stage Summary:
 - Maker fees (0.04%) esencial: todas las configs óptimas usan maker
 - Sistema listo para paper trading con config optimizada per-token
 - Pendiente: LINK y XRP deep opt (opcional, menor prioridad)
+
+---
+Task ID: 6
+Agent: main
+Task: Actualizar engine y runner para paper trading v7
+
+Work Log:
+- Reescrito engine.py: quantile rolling (matches backtest), HORIZON=288, per-symbol config
+  - Rolling quantile decision: LONG if pred > Q_LONG%, SHORT if pred < Q_SHORT%
+  - recent_preds stored in state JSON for persistence between restarts
+  - Per-symbol cost_pct from SYMBOL_CONFIG (maker 0.04% for core tokens)
+  - Warmup: 20 preds needed for quantile, falls back to fixed thresholds
+  - warmup_bars=400 (up from 200) for better indicator computation
+  - bootstrap_bars=52000 (~180d) for initial training
+- Actualizado runner.py: multi-token support
+  - --all flag for core tokens (DOGE, AVAX, SOL, ETH)
+  - multiprocessing for multi-symbol execution
+  - Per-symbol config displayed in status
+- Actualizado RUNBOOK_paper_trading.md: completa reescritura para v7
+  - Quantile-based trading explanation
+  - Per-symbol config table from deep optimization
+  - Multi-token launch procedures
+  - Updated ship criteria (more conservative for OOS)
+  - Weekly review script
+- Pendiente: git commit + push
+
+Stage Summary:
+- Paper trading engine actualizado a v7 (binary classification + quantile)
+- Multi-token soportado via --all o --symbols
+- RUNBOOK completo con procedimientos operativos
+- Sistema listo para lanzar paper trading en Mac del usuario

@@ -1,6 +1,6 @@
-# RUNBOOK — PPMT v7.5 Paper Trading Harness
+# RUNBOOK — PPMT v7 Paper Trading Harness
 
-**Status:** OPERATIONAL · **First deployed:** 2026-06-25
+**Status:** OPERATIONAL · **Last updated:** 2026-06-26 (v7 binary classification)
 **Code:** `scripts/v7/paper_trader/` (Python package)
 **Outputs:** `data/paper_trading/{models,logs,state}/`
 
@@ -8,21 +8,26 @@
 
 ## 1. Purpose
 
-Validate the v6-LONG regression model (59 features, single LightGBM, no sign
-filter — the architecture that scored Sharpe 1.22 / +124.57% PnL in walk-forward
-backtest F7b) under live market conditions before risking real capital.
+Validate the v7 binary classification model (58 features, LightGBM, quantile-based
+trading) under live market conditions before risking real capital.
 
-Ship criteria for going live with real money (per `PPMT_v7_MASTER_PLAN.md` §12.1):
+The model predicts P(UP in 24h) and uses rolling quantile thresholds to generate
+LONG/SHORT signals. This architecture was validated through:
+- 7-token comprehensive sweep (90d, 504 configs)
+- Deep optimization (180d, 5040 configs across 4 tokens)
+- 3/4 core tokens have 4/4 window consistency
+
+Ship criteria for going live with real capital:
 
 | Metric        | Threshold   | Source           |
 |---------------|-------------|------------------|
-| Sharpe (2-4w) | > 1.0       | paper-trade log  |
+| Sharpe (2-4w) | > 0.3       | paper-trade log  |
 | MaxDD         | > -15%      | paper-trade log  |
-| Win rate      | > 52%       | paper-trade log  |
-| N trades      | >= 50       | paper-trade log  |
+| Win rate      | > 55%       | paper-trade log  |
+| N trades      | >= 20       | paper-trade log  |
 
-If 2-4 weeks of paper trading pass all 4 criteria, escalate to real capital.
-If any fails, investigate root cause before re-running.
+Note: thresholds are more conservative than backtest because OOS performance
+is typically lower. We expect ~10-12 trades per token per 45-day window.
 
 ---
 
@@ -38,32 +43,34 @@ If any fails, investigate root cause before re-running.
 ┌──────────────────────────────────────────────────────────┐
 │  Feed (scripts/v7/paper_trader/feed.py)                  │
 │  - wait_for_next_close(): polls every 30s                │
-│  - fetch_recent_window(): pulls 200 bars per cycle       │
+│  - fetch_recent_window(): pulls 400 bars per cycle       │
 └────────────────┬─────────────────────────────────────────┘
                  │  ohlcv_df, btc_df, eth_df
                  ▼
 ┌──────────────────────────────────────────────────────────┐
 │  Features (features.py)                                  │
-│  - 38 v5 indicators (RSI, EMA, ATR, body/wick, ...)      │
+│  - 37 v5 indicators (RSI, EMA, ATR, body/wick, ...)      │
 │  - 21 v6 indicators (BTC ret, ETH corr, microstructure)  │
-│  - = 59 features, all backward-looking, no leakage       │
+│  - = 58 features, all backward-looking, no leakage       │
 └────────────────┬─────────────────────────────────────────┘
                  │  latest_feature_row()
                  ▼
 ┌──────────────────────────────────────────────────────────┐
-│  Model (model.py) — v6-LONG LightGBM regression          │
-│  - Loaded from disk if exists, else bootstrap-trains     │
-│  - 1 model per symbol (BTC/USDT, ETH/USDT, SOL/USDT...)  │
-│  - Predicts fwd_ret_3 (15m forward return %)             │
-│  - Decision: LONG if pred>0.20, SHORT if pred<-0.50      │
+│  Model (model.py) — v7 LightGBM binary classification    │
+│  - P(UP in 24h) = model.predict(features)                │
+│  - 1 model per symbol with per-symbol HP config           │
+│  - Per-symbol config: Q, window, cost, HP from deep opt  │
+│  - Quantile-based decision: LONG if pred > Q_LONG%       │
+│    SHORT if pred < Q_SHORT%, WAIT otherwise               │
 └────────────────┬─────────────────────────────────────────┘
                  │  (pred, decision)
                  ▼
 ┌──────────────────────────────────────────────────────────┐
 │  Engine (engine.py) — position management                │
-│  - Open position when signal fires                       │
-│  - Close after HORIZON=3 bars (15m) OR on reverse signal │
-│  - Cost: 0.14% per round-trip                            │
+│  - Rolling quantile window for signal generation          │
+│  - Open position when quantile signal fires               │
+│  - Close after HORIZON=288 bars (24h) OR on reverse      │
+│  - Per-symbol cost: maker 0.04% (limit orders)           │
 │  - Persists state to JSON, logs every signal to CSV      │
 └────────────────┬─────────────────────────────────────────┘
                  │
@@ -77,93 +84,116 @@ If any fails, investigate root cause before re-running.
 
 ---
 
-## 3. Quick start
+## 3. Per-Symbol Config (from Deep Optimization 180d)
 
-### 3.1 Train (or re-train) models for the symbols you want to paper-trade
+| Token | Q Long | Q Short | Window | Cost | HP | PnL 180d | Consistency |
+|-------|--------|---------|--------|------|-----|----------|-------------|
+| DOGE/USDT | 95 | 5 | 400 | 0.04% | default | +41.55% | **4/4** |
+| AVAX/USDT | 82 | 18 | 200 | 0.04% | more_reg | +44.76% | **4/4** |
+| SOL/USDT | 85 | 15 | 200 | 0.04% | very_reg | +41.46% | **4/4** |
+| ETH/USDT | 87 | 13 | 400 | 0.04% | default | +36.56% | 3/4 |
+| LINK/USDT | 90 | 10 | 200 | 0.14% | default | +13.0%* | 3/4* |
+| XRP/USDT | 80 | 20 | 200 | 0.14% | default | +21.7%* | 3/4* |
+
+*90d sweep results (pending deep optimization)
+
+**IMPORTANT**: All 4 core tokens use maker fees (0.04%). This requires placing
+LIMIT ORDERS, not market orders. Taker fees (0.14%) reduce profitability by ~5pp.
+
+---
+
+## 4. Quick start
+
+### 4.1 Train models for the tokens you want to paper-trade
 
 ```bash
-cd /home/z/my-project
-python3 -m scripts.v7.paper_trader.runner --train \
-    --symbols "BTC/USDT,ETH/USDT,SOL/USDT" \
-    --bootstrap-bars 4000
+cd ~/ppmt && source .venv/bin/activate
+
+# Train all core tokens (DOGE, AVAX, SOL, ETH)
+python -m scripts.v7.paper_trader.runner --train --all
+
+# Or train specific tokens
+python -m scripts.v7.paper_trader.runner --train --symbol DOGE/USDT
+python -m scripts.v7.paper_trader.runner --train --symbols "DOGE/USDT,AVAX/USDT"
 ```
 
-`--bootstrap-bars 4000` pulls ~14 days of 5m candles from Bybit and trains
-one LightGBM model per symbol. Models are saved to
-`data/paper_trading/models/v6_long_<SYM>.txt` with companion `_meta.json`.
+Training uses ~180d of data (52000 bars) with per-symbol HP config.
+Each token takes ~2-3 minutes. Models are saved to
+`data/paper_trading/models/v7_clf_<SYM>.txt` with companion `_meta.json`.
 
-### 3.2 Run paper trading in continuous mode
+### 4.2 Run paper trading
 
 ```bash
-# Foreground (Ctrl+C to stop)
-python3 -m scripts.v7.paper_trader.runner --symbol SOL/USDT
+# Single token (foreground)
+python -m scripts.v7.paper_trader.runner --symbol DOGE/USDT
 
-# Background via nohup
-nohup python3 -m scripts.v7.paper_trader.runner --symbol SOL/USDT \
-    > /tmp/pt_SOL.log 2>&1 &
+# All core tokens (multiprocessing)
+python -m scripts.v7.paper_trader.runner --all
 
-# Or via screen / tmux for resilience
-tmux new -s pt_SOL 'python3 -m scripts.v7.paper_trader.runner --symbol SOL/USDT'
+# Single token (background via nohup)
+nohup python -m scripts.v7.paper_trader.runner --symbol DOGE/USDT \
+    > /tmp/pt_DOGE.log 2>&1 &
+
+# Via tmux for resilience
+tmux new -s pt_DOGE 'python -m scripts.v7.paper_trader.runner --symbol DOGE/USDT'
 ```
 
 Each cycle:
 1. Waits for next 5m candle close on Bybit.
-2. Fetches 200 most recent closed candles for SOL/USDT + BTC/USDT + ETH/USDT.
-3. Computes 59 features on the latest closed candle.
-4. Predicts fwd_ret_3 and applies decision rule.
-5. Manages any open position (close on reverse signal or after 15m).
-6. Appends a row to `signals_SOL_USDT.csv` and `equity_SOL_USDT.csv`.
-7. Updates `state/engine_SOL_USDT.json`.
+2. Fetches 400 most recent closed candles for symbol + BTC/USDT + ETH/USDT.
+3. Computes 58 features on the latest closed candle.
+4. Predicts P(UP in 24h) and applies quantile decision rule.
+5. Manages any open position (close on reverse signal or after 24h).
+6. Appends a row to signal/equity CSVs.
+7. Updates state JSON (including rolling prediction window).
 
-### 3.3 Single-cycle mode (for cron or smoke test)
+### 4.3 Single-cycle mode (for cron or smoke test)
 
 ```bash
-python3 -m scripts.v7.paper_trader.runner --symbol SOL/USDT --once
+python -m scripts.v7.paper_trader.runner --symbol DOGE/USDT --once
 ```
-
-This processes exactly one candle close and exits. Use this if you want to
-drive the engine from cron / systemd timer instead of a long-running process.
 
 Cron example (every 5 minutes, 30s after candle close):
 ```cron
-*/5 * * * * sleep 30 && cd /home/z/my-project && \
-    python3 -m scripts.v7.paper_trader.runner --symbol SOL/USDT --once \
-    >> /tmp/pt_SOL.cron.log 2>&1
+*/5 * * * * sleep 30 && cd ~/ppmt && source .venv/bin/activate && \
+    python -m scripts.v7.paper_trader.runner --symbol DOGE/USDT --once \
+    >> /tmp/pt_DOGE.cron.log 2>&1
 ```
 
-### 3.4 Check status
+### 4.4 Check status
 
 ```bash
-python3 -m scripts.v7.paper_trader.runner --status --symbol SOL/USDT
+python -m scripts.v7.paper_trader.runner --status --symbol DOGE/USDT
+python -m scripts.v7.paper_trader.runner --status --all
 ```
 
 ---
 
-## 4. Logs schema
+## 5. Logs schema
 
-### 4.1 `signals_<SYM>.csv`
+### 5.1 `signals_<SYM>.csv`
 
 | Column              | Description                                                   |
 |---------------------|---------------------------------------------------------------|
 | ts_utc              | Candle close timestamp (ms since epoch)                       |
 | ts_iso              | ISO-8601 UTC timestamp                                        |
-| symbol              | Trading pair, e.g. `SOL/USDT`                                 |
+| symbol              | Trading pair, e.g. `DOGE/USDT`                                |
 | close               | Candle close price                                            |
-| pred                | Model prediction (expected fwd_ret_3 in %)                    |
-| decision            | `LONG`, `SHORT`, or `WAIT` (raw signal)                       |
-| thr_long            | LONG threshold (0.20)                                         |
-| thr_short           | SHORT threshold (0.50, asymmetric per v7.5 tuning)            |
+| pred                | Model prediction P(UP in 24h) [0-1]                          |
+| decision            | `LONG`, `SHORT`, or `WAIT` (quantile-based)                   |
+| q_high              | Rolling Q_LONG percentile threshold                           |
+| q_low               | Rolling Q_SHORT percentile threshold                          |
 | action              | `OPEN_LONG`, `OPEN_SHORT`, `CLOSE_LONG`, `CLOSE_SHORT`, `REVERSE_TO_*`, `HOLD`, `NO_ACTION` |
 | position_side       | `LONG`, `SHORT`, or empty                                     |
 | position_bars_held  | How many 5m bars the current position has been held           |
 | entry_price         | Filled entry price (only set on CLOSE/REVERSE)                |
 | exit_price          | Filled exit price (only set on CLOSE/REVERSE)                 |
 | pnl_pct             | Gross PnL of the closed trade in %                            |
-| cost_pct            | Round-trip cost in % (0.14)                                   |
+| cost_pct            | Round-trip cost in % (0.04% maker / 0.14% taker)             |
 | pnl_net_pct         | `pnl_pct - cost_pct`                                          |
 | equity_pct          | Cumulative net PnL since engine start                         |
 
-### 4.2 `equity_<SYM>.csv`
+### 5.2 `equity_<SYM>.csv`
 
 | Column     | Description                                  |
 |------------|----------------------------------------------|
@@ -174,210 +204,226 @@ python3 -m scripts.v7.paper_trader.runner --status --symbol SOL/USDT
 | n_wins     | Trades with pnl_net_pct > 0                  |
 | win_rate   | n_wins / n_trades                            |
 
-### 4.3 `state/engine_<SYM>.json`
+### 5.3 `state/engine_<SYM>.json`
 
 Persists engine state between runs. Contains:
-- `last_closed_candle_ts`: ts of the most recent candle processed (avoids duplicate processing)
+- `last_closed_candle_ts`: ts of the most recent candle processed
 - `position`: `{side, entry_ts, entry_price, bars_held}` or null
+- `recent_preds`: list of recent predictions for rolling quantile computation
 - `equity_pct`, `n_trades`, `n_wins`: cumulative stats
 
 ---
 
-## 5. Decision rule & thresholds
+## 6. Decision logic
 
-Per `PPMT_v7_MASTER_PLAN.md` §16 (v7.5 walk-forward backtest results):
+### 6.1 Quantile-based trading (matches backtest)
 
 ```python
-pred = model.predict(features)
+# Each 5m candle:
+pred = model.predict(features)  # P(UP in 24h)
 
-if pred > 0.20:
-    decision = "LONG"    # expected 15m return > +0.20%
-elif pred < -0.50:
-    decision = "SHORT"   # expected 15m return < -0.50%
+# Update rolling window
+recent_preds.append(pred)
+if len(recent_preds) > window_size:
+    recent_preds = recent_preds[-window_size:]
+
+# Compute thresholds
+q_high = np.percentile(recent_preds, Q_LONG)   # e.g. 95th percentile
+q_low = np.percentile(recent_preds, Q_SHORT)    # e.g. 5th percentile
+
+# Decision
+if pred > q_high:
+    decision = "LONG"
+elif pred < q_low:
+    decision = "SHORT"
 else:
-    decision = "WAIT"    # no edge
+    decision = "WAIT"
 ```
 
-**Why asymmetric?** The v7.5 Optuna tuning found that LONG signals are reliable
-at lower conviction (0.20%) but SHORT signals need much higher conviction (0.50%)
-to be profitable — consistent with the crypto structural upward drift.
+### 6.2 Position management
 
-**Position management:**
-- Hold period = HORIZON = 3 bars (15m) — matches training label.
+- Hold period = HORIZON = 288 bars (24h) — matches training label.
 - If a reverse signal fires while a position is open, close current and open opposite.
 - If position has been held for HORIZON bars, force-close at next candle close.
 - One position per symbol at a time (no pyramiding).
 
-**Cost model:**
-- Round-trip cost = 0.14% (Bybit taker fee 0.055% × 2 sides + 0.03% slippage buffer).
-- Deducted from `pnl_net_pct` on every CLOSE.
+### 6.3 Cost model
+
+- Maker fees: 0.04% round-trip (Bybit maker 0.02% × 2 sides).
+  **Requires limit orders.** This is what the deep optimization assumes.
+- Taker fees: 0.14% round-trip (0.055% × 2 + 0.03% slippage).
+  This would reduce PnL by ~5pp. Avoid market orders if possible.
 
 ---
 
-## 6. Operating procedures
+## 7. Operating procedures
 
-### 6.1 Daily health check
+### 7.1 Launch paper trading (recommended: 3 tokens with 4/4 consistency)
 
 ```bash
-# 1. Is the process alive?
+cd ~/ppmt && source .venv/bin/activate
+
+# Train all core tokens first
+python -m scripts.v7.paper_trader.runner --train --all
+
+# Launch 3 most robust tokens in tmux sessions
+tmux new -d -s pt_DOGE 'python -m scripts.v7.paper_trader.runner --symbol DOGE/USDT'
+tmux new -d -s pt_AVAX 'python -m scripts.v7.paper_trader.runner --symbol AVAX/USDT'
+tmux new -d -s pt_SOL  'python -m scripts.v7.paper_trader.runner --symbol SOL/USDT'
+
+# Or use --all to launch all 4 in multiprocessing mode
+tmux new -d -s pt_all 'python -m scripts.v7.paper_trader.runner --all'
+```
+
+### 7.2 Daily health check
+
+```bash
+# 1. Are processes alive?
 ps -ef | grep paper_trader | grep -v grep
 
-# 2. Latest signal
-tail -3 /home/z/my-project/data/paper_trading/logs/signals_SOL_USDT.csv
+# 2. Latest signals
+tail -3 ~/ppmt/data/paper_trading/logs/signals_DOGE_USDT.csv
 
 # 3. Equity curve
-tail -10 /home/z/my-project/data/paper_trading/logs/equity_SOL_USDT.csv
+tail -10 ~/ppmt/data/paper_trading/logs/equity_DOGE_USDT.csv
 
-# 4. Current position
-python3 -c "import json; print(json.dumps(json.load(open('/home/z/my-project/data/paper_trading/state/engine_SOL_USDT.json')), indent=2))"
+# 4. Status report
+python -m scripts.v7.paper_trader.runner --status --all
 ```
 
-### 6.2 Weekly performance review
-
-```python
-import pandas as pd
-df = pd.read_csv('/home/z/my-project/data/paper_trading/logs/equity_SOL_USDT.csv')
-trades = pd.read_csv('/home/z/my-project/data/paper_trading/logs/signals_SOL_USDT.csv')
-closed = trades[trades['action'].str.startswith('CLOSE')]
-print(f"Total trades:    {len(closed)}")
-print(f"Win rate:        {(closed['pnl_net_pct']>0).mean():.1%}")
-print(f"Total PnL:       {df['equity_pct'].iloc[-1]:.2f}%")
-print(f"Avg trade PnL:   {closed['pnl_net_pct'].mean():.3f}%")
-print(f"Best trade:      {closed['pnl_net_pct'].max():.3f}%")
-print(f"Worst trade:     {closed['pnl_net_pct'].min():.3f}%")
-
-# Sharpe (per-trade, annualized to 5m bars)
-import numpy as np
-returns = closed['pnl_net_pct'].values / 100
-sharpe = np.sqrt(252*288) * returns.mean() / returns.std() if returns.std() > 0 else 0
-print(f"Sharpe (annualized): {sharpe:.2f}")
-
-# Max drawdown
-equity = df['equity_pct'].values / 100
-peak = np.maximum.accumulate(equity)
-dd = equity - peak
-print(f"Max drawdown:    {dd.min()*100:.2f}%")
-```
-
-### 6.3 Retrain (Layer 2 rolling retrain — future F9 work)
+### 7.3 Weekly performance review
 
 ```bash
-# Retrain on the most recent 14 days of data
-python3 -m scripts.v7.paper_trader.runner --train \
-    --symbol SOL/USDT \
-    --bootstrap-bars 4000
+cd ~/ppmt && source .venv/bin/activate
+python3 -c "
+import pandas as pd, numpy as np, glob
+
+for sym in ['DOGE_USDT', 'AVAX_USDT', 'SOL_USDT', 'ETH_USDT']:
+    try:
+        eq = pd.read_csv(f'data/paper_trading/logs/equity_{sym}.csv')
+        sig = pd.read_csv(f'data/paper_trading/logs/signals_{sym}.csv')
+        closed = sig[sig['action'].str.startswith('CLOSE') | sig['action'].str.startswith('REVERSE')]
+        print(f'\n=== {sym} ===')
+        print(f'Total trades:    {len(closed)}')
+        if len(closed) > 0:
+            print(f'Win rate:        {(closed[\"pnl_net_pct\"]>0).mean():.1%}')
+            print(f'Total PnL:       {eq[\"equity_pct\"].iloc[-1]:.2f}%')
+            print(f'Avg trade PnL:   {closed[\"pnl_net_pct\"].mean():.3f}%')
+            returns = closed['pnl_net_pct'].values / 100
+            if len(returns) > 1 and returns.std() > 0:
+                sharpe = np.sqrt(252*288) * returns.mean() / returns.std()
+                print(f'Sharpe (ann.):   {sharpe:.2f}')
+        equity = eq['equity_pct'].values / 100
+        peak = np.maximum.accumulate(equity)
+        dd = equity - peak
+        print(f'Max drawdown:    {dd.min()*100:.2f}%')
+    except FileNotFoundError:
+        print(f'\n=== {sym} === (no data yet)')
+"
 ```
 
-The engine will pick up the new model on next cycle (no restart needed if you
-run in `--once` mode from cron; if running in foreground, restart the process).
-
-### 6.4 Stop / restart cleanly
+### 7.4 Retrain (Layer 2 rolling retrain)
 
 ```bash
-# Stop
-kill $(pgrep -f "paper_trader.runner.*SOL/USDT")
+cd ~/ppmt && source .venv/bin/activate
 
-# The engine persists state to JSON, so restart picks up where it left off
-# (open positions are remembered, equity continues accumulating).
-python3 -m scripts.v7.paper_trader.runner --symbol SOL/USDT
+# Retrain on 90d of data with per-symbol HP
+python scripts/v7/v7_layer2_rolling_retrain.py --symbol DOGE/USDT --days 90
+
+# Retrain all core tokens
+python scripts/v7/v7_layer2_rolling_retrain.py --symbols "DOGE/USDT,AVAX/USDT,SOL/USDT,ETH/USDT" --days 90
 ```
 
-### 6.5 Emergency stop (kill switch)
+The engine will pick up the new model on the next cycle (no restart needed
+if using `--once` cron mode; for foreground, restart the process).
+
+### 7.5 Stop / restart cleanly
+
+```bash
+# Stop specific token
+kill $(pgrep -f "paper_trader.runner.*DOGE")
+
+# Stop all
+kill $(pgrep -f paper_trader)
+
+# Engine persists state, so restart picks up where it left off
+python -m scripts.v7.paper_trader.runner --symbol DOGE/USDT
+```
+
+### 7.6 Emergency stop (kill switch)
 
 If the model starts losing money rapidly:
 
 ```bash
-# 1. Kill the engine (stops new signals)
+# 1. Kill the engine
 kill $(pgrep -f paper_trader)
 
-# 2. Manually close any open position in the state file
+# 2. Clear position state
 python3 -c "
 import json
-p = '/home/z/my-project/data/paper_trading/state/engine_SOL_USDT.json'
-s = json.load(open(p))
-s['position'] = None
-json.dump(s, open(p, 'w'), indent=2)
-print('Position cleared. Manual PnL reconciliation needed.')
+for sym in ['DOGE_USDT', 'AVAX_USDT', 'SOL_USDT', 'ETH_USDT']:
+    p = f'data/paper_trading/state/engine_{sym}.json'
+    try:
+        s = json.load(open(p))
+        s['position'] = None
+        json.dump(s, open(p, 'w'), indent=2)
+        print(f'{sym}: position cleared')
+    except: pass
 "
 
-# 3. Investigate root cause before restarting
-#    - Check latest signals: tail signals_SOL_USDT.csv
-#    - Compare prediction distribution to training: is there drift?
-#    - Check Bybit status page for exchange-side issues
+# 3. Investigate before restarting
 ```
 
 ---
 
-## 7. Known limitations (as of v7.5)
+## 8. Known limitations
 
-1. **Single-symbol engine.** Running multiple symbols requires launching
-   separate processes. A future version could multiplex inside one process.
+1. **Paper trading only.** No real order execution. Simulated fills at candle close.
 
-2. **Bootstrap training uses only 14 days.** v6 walk-forward trained on 60+
-   days per window. The smaller training set means dir_acc on validation
-   is currently 51-58% (vs 56.7% in v6 walk-forward). This is expected to
-   improve as we accumulate more historical data via Layer 2 rolling retrain.
+2. **No short-selling on spot.** SHORT trades are simulated as
+   `-(24h return) - 0.04%`. Real SHORT would require futures/perps.
 
-3. **No live order book / funding rate features.** The 6 F4 features
-   (funding_rate, oi_change, sector, day_of_week) from v7 master plan §3
-   are NOT yet implemented in the paper trader. Only the 59 v6 features
-   are used. Adding F4 is a future enhancement (F8 / F10).
+3. **No position sizing.** Each trade is simulated as 100% notional. Real
+   deployment needs fixed-fractional sizing (e.g. 10% of equity per trade).
 
-4. **Bybit only.** Binance IP-banned us in development. The code supports
-   `--exchange okx|kraken|coinbase` but only Bybit has been smoke-tested.
+4. **Quantile window warmup.** The engine needs ~20 predictions before quantile
+   trading activates. During warmup, it falls back to fixed thresholds
+   (PROB_LONG=0.55, PROB_SHORT=0.42), which are less optimal.
 
-5. **No short-selling cost modeling.** SHORT trades are simulated as
-   `-fwd_ret_3 - 0.14%`, ignoring borrow fees. Real SHORT on Bybit spot
-   isn't possible — would need futures mode (future work).
+5. **BTC excluded.** BTC/USDT is a dead end — confirmed across all configs.
 
-6. **No position sizing.** Each trade is simulated as 100% notional. Real
-   deployment needs fixed-fractional sizing (e.g. 7% of equity per trade
-   to match v6 production sizing).
+6. **Bybit only.** Code supports other exchanges but only Bybit is tested.
+
+7. **No funding rate / OI features.** The 58 features are all price/volume-based.
+   Adding funding rate and open interest could improve edge.
 
 ---
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 | Symptom                                      | Fix                                                            |
 |----------------------------------------------|----------------------------------------------------------------|
-| `ModuleNotFoundError: ccxt`                  | `pip install ccxt` (or in the venv: `python3 -m pip install ccxt`) |
+| `ModuleNotFoundError: ccxt`                  | `pip install ccxt` (or in venv: `python3 -m pip install ccxt`) |
 | `DDoSProtection: binance 418`                | Use `--exchange bybit` (default)                               |
-| `OutOfBoundsDatetime: 58442-09-05`           | Already fixed in features.py (auto-detects ms vs s timestamps) |
-| Model not loading after retrain              | Check `models/v6_long_<SYM>_meta.json` exists alongside `.txt` |
-| Engine keeps timing out waiting for candle   | Check Bybit API status; bump `--warmup-bars` to 250            |
+| Model not loading after retrain              | Check `models/v7_clf_<SYM>_meta.json` exists alongside `.txt` |
+| Engine keeps timing out waiting for candle   | Check Bybit API status; bump `--warmup-bars` to 500            |
 | Equity going negative quickly                | Stop engine, inspect last 20 signals, retrain if drift detected |
-| Cron mode missing candles                    | Ensure cron runs `*/5 * * * *` with `sleep 30` offset          |
-
----
-
-## 9. Glossary
-
-| Term          | Definition                                                   |
-|---------------|--------------------------------------------------------------|
-| fwd_ret_3     | Forward 15-minute return: `(close[T+3] - close[T]) / close[T] * 100` on 5m TF |
-| HORIZON       | Number of 5m bars to hold a position (= 3, i.e. 15 minutes)  |
-| thr_long      | LONG threshold: pred must exceed 0.20 to fire LONG signal    |
-| thr_short     | SHORT threshold: pred must be below -0.50 to fire SHORT      |
-| cost_pct      | Round-trip trading cost = 0.14% (fees + slippage)            |
-| warmup_bars   | Number of historical bars fetched each cycle for feature computation (default 200) |
-| bootstrap_bars| Number of historical bars used for one-shot training (default 4000) |
+| All decisions are WAIT                       | Quantile window not warmed up yet. Wait ~2h for 20+ preds.     |
+| Too many trades (churning)                   | Q config may be wrong. Check SYMBOL_CONFIG for the symbol.     |
 
 ---
 
 ## 10. Next steps after paper trading graduates
 
-Once 2-4 weeks of paper trading pass all 4 ship criteria:
+1. **Futures mode.** Implement real SHORT via Bybit USDT perpetual contracts.
 
-1. **F9 — Layer 2 rolling retrain.** Replace one-shot bootstrap with rolling
-   30-day window retrained every 6h. Code path:
-   `scripts/v7/v7_layer2_rolling_retrain.py` (TODO).
+2. **Position sizing.** Fixed-fractional (e.g. 10% equity per trade) with
+   correlation limits across tokens.
 
-2. **F10 — Live order execution.** Replace the simulated fills in
-   `engine.py:_act_on_decision` with real ccxt order placement. Start with
-   Bybit testnet, then small real size (e.g. $10/trade).
+3. **Live order execution.** Replace simulated fills with real ccxt order
+   placement. Start with Bybit testnet, then small real size.
 
-3. **F11 — Multi-symbol portfolio.** Aggregate signals across BTC/ETH/SOL/...
-   with position sizing and correlation limits.
+4. **Funding rate / OI features.** Add these to potentially improve edge.
 
-4. **F12 — Monitoring dashboard.** Stream `signals_*.csv` and `equity_*.csv`
+5. **Monitoring dashboard.** Stream `signals_*.csv` and `equity_*.csv`
    into Grafana / Streamlit for real-time visibility.

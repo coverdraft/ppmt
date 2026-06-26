@@ -1,35 +1,53 @@
 """
-runner.py — CLI entrypoint for the v7.5 paper trader.
+runner.py — CLI entrypoint for the v7 paper trader.
+
+Supports multi-token paper trading with per-symbol config from SYMBOL_CONFIG.
 
 Usage:
-    # 1. Train model (or re-train) on ~30d of historical 5m data
-    python -m scripts.v7.paper_trader.runner --train --symbol SOL/USDT
+    # 1. Train model (or re-train) on ~180d of historical 5m data
+    python -m scripts.v7.paper_trader.runner --train --symbol DOGE/USDT
 
-    # 2. Start paper trading loop (one cycle per 5m candle close)
-    python -m scripts.v7.paper_trader.runner --symbol SOL/USDT
+    # 2. Train all core tokens (DOGE, AVAX, SOL, ETH)
+    python -m scripts.v7.paper_trader.runner --train --all
 
-    # 3. Single-cycle mode (for cron / smoke test)
-    python -m scripts.v7.paper_trader.runner --symbol SOL/USDT --once
+    # 3. Start paper trading loop (one symbol)
+    python -m scripts.v7.paper_trader.runner --symbol DOGE/USDT
 
-    # 4. Status report
-    python -m scripts.v7.paper_trader.runner --status --symbol SOL/USDT
+    # 4. Start multi-token paper trading (separate processes)
+    python -m scripts.v7.paper_trader.runner --all
 
-    # 5. Train multiple symbols in batch
-    python -m scripts.v7.paper_trader.runner --train --symbols BTC/USDT,ETH/USDT,SOL/USDT
+    # 5. Single-cycle mode (for cron / smoke test)
+    python -m scripts.v7.paper_trader.runner --symbol DOGE/USDT --once
 
-Recommended symbols for paper trading (per PPMT_v7_MASTER_PLAN.md §6):
-    BTC/USDT, ETH/USDT, SOL/USDT, ADA/USDT, XRP/USDT, DOGE/USDT
+    # 6. Status report
+    python -m scripts.v7.paper_trader.runner --status --symbol DOGE/USDT
+
+Recommended symbols for paper trading (per deep optimization 180d):
+    DOGE/USDT (4/4, +41.6%), AVAX/USDT (4/4, +44.8%),
+    SOL/USDT (4/4, +41.5%), ETH/USDT (3/4, +36.6%)
 
 By default we use Bybit (Binance IP-banned in some regions). Override with
-`--exchange bybit|okx|kraken`.
+--exchange bybit|okx|kraken.
+
+IMPORTANT: Use LIMIT ORDERS to achieve maker fees (0.04% round-trip).
+Taker fees (0.14%) significantly reduce profitability.
 """
 from __future__ import annotations
 
 import argparse
 import logging
+import multiprocessing
 import sys
 
 from .engine import Engine
+from .model import SYMBOL_CONFIG
+
+
+# Core tokens with 180d deep optimization (4/4 or 3/4 consistency)
+CORE_TOKENS = ["DOGE/USDT", "AVAX/USDT", "SOL/USDT", "ETH/USDT"]
+
+# All tokens with any validated config
+ALL_TOKENS = list(SYMBOL_CONFIG.keys())
 
 
 def setup_logging(verbose: bool = False) -> None:
@@ -41,19 +59,37 @@ def setup_logging(verbose: bool = False) -> None:
     )
 
 
+def _run_engine(symbol: str, timeframe: str, warmup_bars: int,
+                exchange: str, bootstrap_bars: int, once: bool) -> int:
+    """Run engine for one symbol. Used for both single and multi-token."""
+    eng = Engine(symbol=symbol, timeframe=timeframe,
+                 warmup_bars=warmup_bars, exchange=exchange,
+                 bootstrap_bars=bootstrap_bars, auto_train=True)
+    eng.ensure_model()
+
+    if once:
+        result = eng.run_once()
+        return 0 if result else 1
+
+    eng.run_forever()
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description="PPMT v7.5 paper trader")
-    p.add_argument("--symbol", default="SOL/USDT",
-                   help="target trading symbol (default SOL/USDT)")
+    p = argparse.ArgumentParser(description="PPMT v7 paper trader")
+    p.add_argument("--symbol", default=None,
+                   help="target trading symbol (e.g. DOGE/USDT)")
     p.add_argument("--symbols", default=None,
-                   help="comma-separated list for batch train/status (overrides --symbol)")
+                   help="comma-separated list for batch train/status")
+    p.add_argument("--all", action="store_true",
+                   help="use all core tokens (DOGE, AVAX, SOL, ETH)")
     p.add_argument("--exchange", default="bybit",
                    choices=["bybit", "okx", "kraken", "coinbase"])
     p.add_argument("--timeframe", default="5m")
-    p.add_argument("--warmup-bars", type=int, default=200,
+    p.add_argument("--warmup-bars", type=int, default=400,
                    help="number of historical bars fetched each cycle for feature warm-up")
-    p.add_argument("--bootstrap-bars", type=int, default=4000,
-                   help="number of historical bars used for one-shot bootstrap training")
+    p.add_argument("--bootstrap-bars", type=int, default=52000,
+                   help="number of historical bars used for bootstrap training (~180d)")
     p.add_argument("--train", action="store_true",
                    help="train (or re-train) the model and exit")
     p.add_argument("--once", action="store_true",
@@ -66,7 +102,15 @@ def main(argv: list[str] | None = None) -> int:
     setup_logging(args.verbose)
     log = logging.getLogger("pt_runner")
 
-    symbols = args.symbols.split(",") if args.symbols else [args.symbol]
+    # Determine symbols
+    if args.all:
+        symbols = CORE_TOKENS
+    elif args.symbols:
+        symbols = args.symbols.split(",")
+    elif args.symbol:
+        symbols = [args.symbol]
+    else:
+        symbols = [CORE_TOKENS[0]]  # default: DOGE/USDT
 
     # --- Train mode ---
     if args.train:
@@ -76,7 +120,9 @@ def main(argv: list[str] | None = None) -> int:
                          warmup_bars=args.warmup_bars, exchange=args.exchange,
                          bootstrap_bars=args.bootstrap_bars, auto_train=True)
             eng._bootstrap_train()
-            log.info("=== TRAIN %s done: %s ===", sym, eng.meta)
+            log.info("=== TRAIN %s done: best_iter=%d auc=%.3f ===",
+                     sym, eng.meta.get("best_iteration", 0),
+                     eng.meta.get("auc_val", 0))
         return 0
 
     # --- Status mode ---
@@ -85,27 +131,57 @@ def main(argv: list[str] | None = None) -> int:
             eng = Engine(symbol=sym, timeframe=args.timeframe,
                          warmup_bars=args.warmup_bars, exchange=args.exchange,
                          bootstrap_bars=args.bootstrap_bars, auto_train=False)
+            status = eng.status()
             log.info("=== STATUS %s ===", sym)
-            log.info("state: %s", eng.state)
+            log.info("  config: Q%d/%d Win=%d Cost=%.2f%% HP=%s",
+                     status["config"]["q_long"], status["config"]["q_short"],
+                     status["config"]["window_size"], status["config"]["cost_pct"],
+                     status["config"]["hp"])
+            log.info("  model_loaded: %s", status["model_loaded"])
+            log.info("  equity: %.3f%% trades=%d wins=%d WR=%.1f%%",
+                     status["state"].get("equity_pct", 0),
+                     status["state"].get("n_trades", 0),
+                     status["state"].get("n_wins", 0),
+                     (status["state"].get("n_wins", 0) / max(status["state"].get("n_trades", 1), 1)) * 100)
+            pos = status["state"].get("position")
+            if pos:
+                log.info("  position: %s @ %.4f bars_held=%d",
+                         pos["side"], pos["entry_price"], pos.get("bars_held", 0))
+            else:
+                log.info("  position: none")
         return 0
 
     # --- Run mode ---
-    if len(symbols) > 1:
-        log.error("running multiple symbols in parallel not supported in this version; "
-                  "launch separate processes per symbol")
-        return 1
+    if len(symbols) == 1:
+        # Single symbol — run in this process
+        return _run_engine(symbols[0], args.timeframe, args.warmup_bars,
+                          args.exchange, args.bootstrap_bars, args.once)
 
-    eng = Engine(symbol=symbols[0], timeframe=args.timeframe,
-                 warmup_bars=args.warmup_bars, exchange=args.exchange,
-                 bootstrap_bars=args.bootstrap_bars, auto_train=True)
-    eng.ensure_model()
+    # Multi-symbol — launch separate processes
+    log.info("Launching %d engines: %s", len(symbols), ", ".join(symbols))
+    processes = []
+    for sym in symbols:
+        proc = multiprocessing.Process(
+            target=_run_engine,
+            args=(sym, args.timeframe, args.warmup_bars,
+                  args.exchange, args.bootstrap_bars, args.once),
+            name=f"pt_{sym.replace('/', '_')}",
+        )
+        proc.start()
+        processes.append(proc)
+        log.info("Started engine for %s (PID=%d)", sym, proc.pid)
 
-    if args.once:
-        result = eng.run_once()
-        log.info("once result: %s", result)
-        return 0 if result else 1
+    # Wait for all to finish (they run forever unless --once)
+    try:
+        for proc in processes:
+            proc.join()
+    except KeyboardInterrupt:
+        log.info("Interrupted — stopping all engines")
+        for proc in processes:
+            proc.terminate()
+        for proc in processes:
+            proc.join(timeout=10)
 
-    eng.run_forever()
     return 0
 
 
