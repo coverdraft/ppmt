@@ -1,13 +1,17 @@
 """
-backtest.py — v8 Pattern-Informed Realistic Backtest
+backtest.py — v8 Pattern-Gated Realistic Backtest
 
 KEY RULES from corrected pattern analysis (446 entries, long+short):
-1. TIME STOP at 30min (6 bars) — winners 8-9min, losers 21-28min
-2. NO averaging down — both long and short have 1:3 win/loss ratio
-3. Max 3 entries per trade (with EV confirmation only)
+1. PATTERN GATING — only trade when pattern signal is detected:
+   - signal_breakout_up → LONG only  (THE EDGE: +251)
+   - signal_breakout_down → NO TRADE  (THE HOLE: -556)
+   - signal_ema_bounce → SHORT only   (counter-trend: +27)
+   - signal_level_test → SHORT only   (support bounce: +33)
+2. TIME STOP at 30min (6 bars) — winners 8-9min, losers 21-28min
+3. NO averaging down — both long and short have 1:3 win/loss ratio
 4. ATR-adaptive TP/SL matching training labels
 5. Conservative "both hit same bar" = SL wins
-6. Direction-aware: breakout longs win (+251), breakout shorts lose (-556)
+6. Dual-direction prediction: predict EV for both LONG and SHORT per bar
 """
 from __future__ import annotations
 
@@ -43,6 +47,7 @@ class TradeResult:
     ev_prediction: float
     atr_at_entry: float
     bars_held: int
+    signal_type: str = ""  # "breakout_up", "ema_bounce", "level_test"
     symbol: str = ""
 
 
@@ -55,6 +60,8 @@ class BacktestResult:
     n_tp: int = 0
     n_sl: int = 0
     n_time_stop: int = 0
+    n_blocked_hole: int = 0     # trades blocked by THE HOLE rule
+    n_no_signal: int = 0        # bars skipped (no pattern signal)
     win_rate: float = 0.0
     avg_pnl_pct: float = 0.0
     total_pnl_pct: float = 0.0
@@ -70,12 +77,17 @@ class BacktestResult:
 
 
 def run_backtest(
-    predictions: np.ndarray,
+    predictions_long: np.ndarray,
+    predictions_short: np.ndarray,
     closes: np.ndarray,
     highs: np.ndarray,
     lows: np.ndarray,
     atr_14: np.ndarray,
     symbols: Optional[np.ndarray] = None,
+    signals_breakout_up: Optional[np.ndarray] = None,
+    signals_breakout_down: Optional[np.ndarray] = None,
+    signals_ema_bounce: Optional[np.ndarray] = None,
+    signals_level_test: Optional[np.ndarray] = None,
     ev_threshold_long: float = EV_THRESHOLD_LONG,
     ev_threshold_short: float = EV_THRESHOLD_SHORT,
     tp_atr_mult: float = TP_ATR_MULT,
@@ -85,12 +97,27 @@ def run_backtest(
     cost_pct: float = DEFAULT_COST,
     max_concurrent: int = MAX_CONCURRENT_POSITIONS,
     position_size_pct: float = 100.0,
+    pattern_gating: bool = True,
 ) -> BacktestResult:
-    """Run realistic backtest with hard rules from pattern analysis."""
-    n = len(predictions)
+    """Run realistic backtest with pattern gating.
+
+    PATTERN GATING RULES (from corrected analysis of 446 trades):
+      signal_breakout_up  → allow LONG only   (BREAKOUT long: +251)
+      signal_breakout_down → BLOCK ALL TRADES  (BREAKOUT short: -556, THE HOLE)
+      signal_ema_bounce   → allow SHORT only   (EMA_BOUNCE short: +27)
+      signal_level_test   → allow SHORT only   (LEVEL_TEST short: +33)
+
+    The model predicts EV for BOTH directions per bar. A trade is taken only when:
+    1. A pattern signal is active
+    2. The signal allows the direction
+    3. The model confirms positive EV for that direction
+    """
+    n = len(closes)
     trades = []
     equity = 100.0
     equity_curve = np.full(n, 100.0)
+    n_blocked_hole = 0
+    n_no_signal = 0
 
     positions = {}  # symbol → position dict
 
@@ -162,6 +189,7 @@ def run_backtest(
                     ev_prediction=pos["ev_pred"],
                     atr_at_entry=pos["atr"],
                     bars_held=bars_held,
+                    signal_type=pos.get("signal_type", ""),
                     symbol=symbol,
                 ))
                 del positions[symbol]
@@ -171,26 +199,76 @@ def run_backtest(
             equity_curve[i] = equity
             continue
 
-        pred = predictions[i]
         lagged_atr = atr_14[i - atr_lag_offset] if i >= atr_lag_offset else 0
-
         if np.isnan(lagged_atr) or lagged_atr <= 0:
             equity_curve[i] = equity
             continue
 
-        if pred > ev_threshold_long:
-            direction = "LONG"
-            tp_price = closes[i] + tp_atr_mult * lagged_atr
-            sl_price = closes[i] - sl_atr_mult * lagged_atr
-            size = min(pred / ev_threshold_long, 3.0) * position_size_pct
-        elif pred < -ev_threshold_short:
-            direction = "SHORT"
-            tp_price = closes[i] - tp_atr_mult * lagged_atr
-            sl_price = closes[i] + sl_atr_mult * lagged_atr
-            size = min(abs(pred) / ev_threshold_short, 3.0) * position_size_pct
+        # ── Pattern gating ──
+        if pattern_gating and signals_breakout_up is not None:
+            sbu = signals_breakout_up[i] > 0.5
+            sbd = signals_breakout_down[i] > 0.5
+            seb = signals_ema_bounce[i] > 0.5
+            slt = signals_level_test[i] > 0.5
+
+            # THE HOLE: breakout_down → block ALL trades
+            if sbd and not seb and not slt:
+                n_blocked_hole += 1
+                equity_curve[i] = equity
+                continue
+
+            # Determine allowed directions from pattern signals
+            long_allowed = sbu  # breakout_up → LONG (THE EDGE)
+            short_allowed = seb or slt  # ema_bounce/level_test → SHORT
+
+            if not long_allowed and not short_allowed:
+                n_no_signal += 1
+                equity_curve[i] = equity
+                continue
+
+            # Determine signal type for trade logging
+            signal_type = ""
+            if sbu:
+                signal_type = "breakout_up"
+            elif seb:
+                signal_type = "ema_bounce"
+            elif slt:
+                signal_type = "level_test"
         else:
+            # No pattern gating → allow both directions (legacy mode)
+            long_allowed = True
+            short_allowed = True
+            signal_type = ""
+
+        # ── Choose direction based on model predictions + gating ──
+        direction = None
+        ev = 0.0
+
+        ev_long = float(predictions_long[i])
+        ev_short = float(predictions_short[i])
+
+        if long_allowed and ev_long > ev_threshold_long:
+            direction = "LONG"
+            ev = ev_long
+
+        if short_allowed and ev_short > ev_threshold_short:
+            if direction is None or ev_short > ev:
+                direction = "SHORT"
+                ev = ev_short
+
+        if direction is None:
             equity_curve[i] = equity
             continue
+
+        # ── Enter trade ──
+        if direction == "LONG":
+            tp_price = closes[i] + tp_atr_mult * lagged_atr
+            sl_price = closes[i] - sl_atr_mult * lagged_atr
+            size = min(ev / max(ev_threshold_long, 1e-10), 3.0) * position_size_pct
+        else:  # SHORT
+            tp_price = closes[i] - tp_atr_mult * lagged_atr
+            sl_price = closes[i] + sl_atr_mult * lagged_atr
+            size = min(ev / max(ev_threshold_short, 1e-10), 3.0) * position_size_pct
 
         positions[symbol] = {
             "entry_bar": i,
@@ -198,25 +276,32 @@ def run_backtest(
             "entry_price": closes[i],
             "tp_price": tp_price,
             "sl_price": sl_price,
-            "ev_pred": pred,
+            "ev_pred": ev,
             "atr": lagged_atr,
             "symbol": symbol,
             "size": size,
+            "signal_type": signal_type,
         }
 
         equity_curve[i] = equity
 
-    return _compute_stats(trades, equity_curve, symbols)
+    return _compute_stats(trades, equity_curve, symbols, n_blocked_hole, n_no_signal)
 
 
 def _compute_stats(
     trades: list[TradeResult],
     equity_curve: np.ndarray,
     symbols: Optional[np.ndarray] = None,
+    n_blocked_hole: int = 0,
+    n_no_signal: int = 0,
 ) -> BacktestResult:
     """Compute comprehensive backtest statistics."""
     if not trades:
-        return BacktestResult(equity_curve=equity_curve)
+        return BacktestResult(
+            n_blocked_hole=n_blocked_hole,
+            n_no_signal=n_no_signal,
+            equity_curve=equity_curve,
+        )
 
     pnls = [t.pnl_net_pct for t in trades]
     n_trades = len(trades)
@@ -255,6 +340,19 @@ def _compute_stats(
             "sharpe": np.mean(sym_pnls) / max(np.std(sym_pnls), 1e-10) * np.sqrt(288 * 365) if len(sym_pnls) > 1 else 0,
         }
 
+    # Per-signal-type stats
+    per_signal = {}
+    for sig_type in set(t.signal_type for t in trades if t.signal_type):
+        sig_trades = [t for t in trades if t.signal_type == sig_type]
+        sig_pnls = [t.pnl_net_pct for t in sig_trades]
+        per_signal[sig_type] = {
+            "n_trades": len(sig_trades),
+            "n_long": sum(1 for t in sig_trades if t.direction == "LONG"),
+            "n_short": sum(1 for t in sig_trades if t.direction == "SHORT"),
+            "win_rate": sum(1 for p in sig_pnls if p > 0) / max(len(sig_pnls), 1),
+            "total_pnl": sum(sig_pnls),
+        }
+
     return BacktestResult(
         n_trades=n_trades,
         n_long=n_long,
@@ -262,6 +360,8 @@ def _compute_stats(
         n_tp=n_tp,
         n_sl=n_sl,
         n_time_stop=n_time_stop,
+        n_blocked_hole=n_blocked_hole,
+        n_no_signal=n_no_signal,
         win_rate=win_rate,
         avg_pnl_pct=avg_pnl,
         total_pnl_pct=total_pnl,
@@ -280,7 +380,7 @@ def _compute_stats(
 def print_backtest_report(result: BacktestResult) -> None:
     """Print comprehensive backtest report."""
     print("\n" + "=" * 80)
-    print("V8 PATTERN-BASED BACKTEST REPORT")
+    print("V8 PATTERN-GATED BACKTEST REPORT")
     print("=" * 80)
 
     print(f"\n  Trades:          {result.n_trades}")
@@ -288,6 +388,10 @@ def print_backtest_report(result: BacktestResult) -> None:
     print(f"    TP exits:      {result.n_tp}")
     print(f"    SL exits:      {result.n_sl}")
     print(f"    TIME STOP:     {result.n_time_stop}  (30min max hold)")
+    if result.n_blocked_hole > 0:
+        print(f"    BLOCKED (HOLE): {result.n_blocked_hole}  (breakout_down → no trade)")
+    if result.n_no_signal > 0:
+        print(f"    NO SIGNAL:     {result.n_no_signal}  (bars without pattern)")
     print(f"  Win Rate:        {result.win_rate * 100:.1f}%")
     print(f"  Avg PnL:         {result.avg_pnl_pct:+.4f}%")
     print(f"  Total PnL:       {result.total_pnl_pct:+.2f}%")
@@ -313,9 +417,35 @@ def print_backtest_report(result: BacktestResult) -> None:
             print(f"  {sym:<15} {stats['n_trades']:>7} {stats['win_rate']*100:>6.1f} "
                   f"{stats['total_pnl']:>+9.2f} {stats['sharpe']:>8.3f}")
 
-    print("\n  HARD RULES (from pattern analysis):")
+    # Per-signal breakdown
+    if result.trades:
+        signal_types = {}
+        for t in result.trades:
+            sig = t.signal_type or "none"
+            if sig not in signal_types:
+                signal_types[sig] = {"trades": [], "long": 0, "short": 0}
+            signal_types[sig]["trades"].append(t)
+            if t.direction == "LONG":
+                signal_types[sig]["long"] += 1
+            else:
+                signal_types[sig]["short"] += 1
+
+        if signal_types:
+            print(f"\n  Per-Signal Breakdown:")
+            print(f"  {'Signal':<18} {'Trades':>7} {'LONG':>6} {'SHORT':>6} {'WR%':>6} {'PnL%':>9}")
+            print(f"  {'-'*60}")
+            for sig, data in sorted(signal_types.items()):
+                pnls = [t.pnl_net_pct for t in data["trades"]]
+                wr = sum(1 for p in pnls if p > 0) / max(len(pnls), 1) * 100
+                pnl = sum(pnls)
+                print(f"  {sig:<18} {len(pnls):>7} {data['long']:>6} {data['short']:>6} "
+                      f"{wr:>6.1f} {pnl:>+9.2f}")
+
+    print("\n  PATTERN GATING RULES (from corrected analysis):")
+    print("    + breakout_up → LONG only   (BREAKOUT long: +251)")
+    print("    + breakout_down → NO TRADE   (BREAKOUT short: -556, THE HOLE)")
+    print("    + ema_bounce → SHORT only    (EMA_BOUNCE short: +27)")
+    print("    + level_test → SHORT only    (LEVEL_TEST short: +33)")
     print("    + Time stop at 30min (6 bars)")
-    print("    + No averaging down on breakdown entries")
     print("    + Conservative SL-wins tiebreak")
-    print("    + Max 3 entries per trade with EV confirmation")
     print("\n" + "=" * 80)

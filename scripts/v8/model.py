@@ -147,6 +147,20 @@ def train_model(
     weights = None
     if use_sample_weights:
         weights = compute_sample_weights(y_tr)
+
+        # Pattern-aware boost: 5x weight for bars with pattern signals
+        # These bars are where the edge lives (breakout, ema_bounce, level_test)
+        signal_cols = [c for c in ["signal_breakout_up", "signal_breakout_down",
+                                    "signal_ema_bounce", "signal_level_test"]
+                       if c in train_clean.columns]
+        if signal_cols:
+            has_signal = train_clean[signal_cols].values.sum(axis=1) > 0.5
+            weights[has_signal] *= 5.0
+            n_signal = int(has_signal.sum())
+            LOG.info("Pattern-aware weighting: %d/%d rows boosted 5x (%.1f%%)",
+                     n_signal, len(weights), n_signal / len(weights) * 100)
+
+        weights = weights / weights.mean()  # renormalize
         LOG.info("Sample weights: mean=%.3f std=%.3f", weights.mean(), weights.std())
 
     d_tr = lgb.Dataset(

@@ -170,15 +170,28 @@ FEATURES_G12 = [
     "price_tier",
 ]
 
+# G13: Pattern signals (4) — discrete flags for pattern-gated trading
+# These are the KEY signals from corrected pattern analysis:
+#   BREAKOUT long: +251 → signal_breakout_up allows LONG
+#   BREAKOUT short: -556 → signal_breakout_down BLOCKS SHORT (THE HOLE)
+#   EMA_BOUNCE short: +27 → signal_ema_bounce allows SHORT
+#   LEVEL_TEST short: +33 → signal_level_test allows SHORT
+FEATURES_G13 = [
+    "signal_breakout_up",
+    "signal_breakout_down",
+    "signal_ema_bounce",
+    "signal_level_test",
+]
+
 FEATURE_NAMES = (
     FEATURES_G1 + FEATURES_G2 + FEATURES_G3 + FEATURES_G4 + FEATURES_G5 +
     FEATURES_G6 + FEATURES_G7 + FEATURES_G8 + FEATURES_G9 + FEATURES_G10 +
-    FEATURES_G11 + FEATURES_G12 +
+    FEATURES_G11 + FEATURES_G12 + FEATURES_G13 +
     ["trade_direction"]  # +1=LONG, -1=SHORT — added by model.py at expand time
 )
 
 N_FEATURES = len(FEATURE_NAMES)
-LOG.info("v8 Pattern-based features: %d total (%d groups)", N_FEATURES, 12)
+LOG.info("v8 Pattern-based features: %d total (%d groups)", N_FEATURES, 13)
 
 # ---------------------------------------------------------------------------
 # Sector definitions
@@ -532,6 +545,34 @@ def compute_features(
     # ── G12: Token identity ───────────────────────────────────────
     df["sector_idx_float"] = float(sector_idx)
     df["price_tier"] = np.vectorize(price_to_tier)(c_post)
+
+    # ── G13: Pattern signals (discrete) ────────────────────────────
+    # Based on CORRECTED pattern analysis:
+    #   BREAKOUT_UP + LONG = +251 (THE EDGE)  → allow LONG
+    #   BREAKOUT_DOWN + SHORT = -556 (THE HOLE) → BLOCK SHORT
+    #   EMA_BOUNCE + SHORT = +27 (counter-trend) → allow SHORT
+    #   LEVEL_TEST + SHORT = +33 (support bounce) → allow SHORT
+    df["signal_breakout_up"] = (
+        (df["close_position_20"].values > 0.95) &
+        (df["vol_ratio"].values > 1.3) &
+        (df["breakout_strength"].values > 0.01)
+    ).astype(float)
+
+    df["signal_breakout_down"] = (
+        (df["close_position_20"].values < 0.05) &
+        (df["vol_ratio"].values > 1.3) &
+        (df["breakout_strength"].values > 0.01)
+    ).astype(float)
+
+    df["signal_ema_bounce"] = (
+        df["ema21_bounce_score"].values > 0.5
+    ).astype(float)
+
+    df["signal_level_test"] = (
+        (df["close_position_20"].values < 0.15) &
+        (df["vol_ratio"].values < 1.5) &   # low vol = test, not breakdown
+        (df["ema_alignment"].values < 0)    # in downtrend / resistance context
+    ).astype(float)
 
     # ── Final cleanup ─────────────────────────────────────────────
     for col in FEATURE_NAMES:

@@ -98,23 +98,51 @@ def run_validate(args):
     else:
         LOG.warning("No valid CV folds")
 
-    # 5. Backtest on holdout (last 15%)
+    # 5. Backtest on holdout (per-symbol temporal split)
     LOG.info("\nStep 3: Backtest on holdout...")
-    n = len(dataset)
-    holdout_start = int(n * 0.85)
-    holdout = dataset.iloc[holdout_start:].dropna(subset=["ev_label"])
+
+    # Use LONG rows only (trade_direction=1) — these have ALL original columns
+    # including both long_ev and short_ev. This avoids the two-sided ordering bug.
+    long_rows = dataset[dataset["trade_direction"] == 1.0].copy()
+    long_rows = long_rows.sort_values(["symbol", "timestamp"]).reset_index(drop=True)
+
+    # Per-symbol temporal holdout (last 15% of each symbol's data)
+    holdout_parts = []
+    for sym in long_rows["symbol"].unique():
+        sym_data = long_rows[long_rows["symbol"] == sym]
+        cutoff = int(len(sym_data) * 0.85)
+        holdout_parts.append(sym_data.iloc[cutoff:])
+
+    holdout = pd.concat(holdout_parts) if holdout_parts else pd.DataFrame()
 
     if len(holdout) > 50:
+        # Predict EV for BOTH directions per bar
         X_hold = holdout[FEATURE_NAMES].values.astype(np.float32)
-        preds = model.predict(X_hold)
+
+        # LONG prediction: set trade_direction = 1.0
+        X_long = X_hold.copy()
+        td_idx = FEATURE_NAMES.index("trade_direction")
+        X_long[:, td_idx] = 1.0
+        preds_long = model.predict(X_long)
+
+        # SHORT prediction: set trade_direction = -1.0
+        X_short = X_hold.copy()
+        X_short[:, td_idx] = -1.0
+        preds_short = model.predict(X_short)
 
         result = run_backtest(
-            predictions=preds,
+            predictions_long=preds_long,
+            predictions_short=preds_short,
             closes=holdout["close"].values,
             highs=holdout["high"].values,
             lows=holdout["low"].values,
             atr_14=holdout["_atr_14_price"].values,
-            symbols=holdout.get("symbol", pd.Series([""] * len(holdout))).values,
+            symbols=holdout["symbol"].values,
+            signals_breakout_up=holdout["signal_breakout_up"].values,
+            signals_breakout_down=holdout["signal_breakout_down"].values,
+            signals_ema_bounce=holdout["signal_ema_bounce"].values,
+            signals_level_test=holdout["signal_level_test"].values,
+            pattern_gating=True,
         )
         print_backtest_report(result)
     else:
