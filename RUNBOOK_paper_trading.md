@@ -130,12 +130,12 @@ python -m scripts.v7.paper_trader.runner --symbol DOGE/USDT
 # All core tokens (multiprocessing)
 python -m scripts.v7.paper_trader.runner --all
 
-# Single token (background via nohup)
+# Single token (background via nohup — survives terminal close)
 nohup python -m scripts.v7.paper_trader.runner --symbol DOGE/USDT \
     > /tmp/pt_DOGE.log 2>&1 &
 
-# Via tmux for resilience
-tmux new -s pt_DOGE 'python -m scripts.v7.paper_trader.runner --symbol DOGE/USDT'
+# Or via screen (if available)
+screen -dmS pt_DOGE python -m scripts.v7.paper_trader.runner --symbol DOGE/USDT
 ```
 
 Each cycle:
@@ -266,13 +266,13 @@ cd ~/ppmt && source .venv/bin/activate
 # Train all core tokens first
 python -m scripts.v7.paper_trader.runner --train --all
 
-# Launch 3 most robust tokens in tmux sessions
-tmux new -d -s pt_DOGE 'python -m scripts.v7.paper_trader.runner --symbol DOGE/USDT'
-tmux new -d -s pt_AVAX 'python -m scripts.v7.paper_trader.runner --symbol AVAX/USDT'
-tmux new -d -s pt_SOL  'python -m scripts.v7.paper_trader.runner --symbol SOL/USDT'
+# Launch 3 most robust tokens in background (nohup)
+nohup python -m scripts.v7.paper_trader.runner --symbol DOGE/USDT > /tmp/pt_DOGE.log 2>&1 &
+nohup python -m scripts.v7.paper_trader.runner --symbol AVAX/USDT > /tmp/pt_AVAX.log 2>&1 &
+nohup python -m scripts.v7.paper_trader.runner --symbol SOL/USDT  > /tmp/pt_SOL.log 2>&1 &
 
-# Or use --all to launch all 4 in multiprocessing mode
-tmux new -d -s pt_all 'python -m scripts.v7.paper_trader.runner --all'
+# Or use --all for all 4 core tokens
+nohup python -m scripts.v7.paper_trader.runner --all > /tmp/pt_all.log 2>&1 &
 ```
 
 ### 7.2 Daily health check

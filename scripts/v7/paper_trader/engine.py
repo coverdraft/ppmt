@@ -146,9 +146,17 @@ class Engine:
     # ------------------------------------------------------------------
     def ensure_model(self) -> None:
         if is_trained(self.symbol):
-            LOG.info("engine: loading existing model for %s", self.symbol)
             self.bst = load_model(self.symbol)
             self.meta = load_metadata(self.symbol)
+            # Check if model is usable (best_iter > 1)
+            best_iter = self.meta.get("best_iteration", 0)
+            if best_iter <= 1:
+                LOG.warning("engine: existing model for %s has best_iter=%d (useless) — retraining",
+                            self.symbol, best_iter)
+                self._bootstrap_train()
+                return
+            LOG.info("engine: loaded existing model for %s (best_iter=%d auc=%.3f)",
+                     self.symbol, best_iter, self.meta.get("auc_val", 0))
             return
 
         if not self.auto_train:

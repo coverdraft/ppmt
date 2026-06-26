@@ -1996,3 +1996,27 @@ Stage Summary:
 - Multi-token soportado via --all o --symbols
 - RUNBOOK completo con procedimientos operativos
 - Sistema listo para lanzar paper trading en Mac del usuario
+
+---
+Task ID: 7
+Agent: main
+Task: Fix best_iter=1 — model.train() usaba split 80/20 en vez de walk-forward 83/10/7
+
+Work Log:
+- PROBLEMA: bootstrap train produjo best_iter=1 para DOGE, AVAX, SOL (AUC 0.46-0.52)
+- Causa: model.train() usaba split simple 80/20 → val set en régimen diferente → early stopping inútil
+- Con 180d data + HORIZON=288, las últimas filas tienen fwd_ret_3=NaN (no hay futuro),
+  así que el 20% final tiene distribución de labels completamente diferente
+- FIX: model.train() reescrito para usar walk-forward 83/10/7 (igual que deep_opt y Layer 2)
+  - val set ADJACENTE a train (no al final) → early stopping funciona
+  - test set (7%) held out completamente
+  - Añadido split_method="walk_forward_83_10_7" al metadata
+- engine.py: ensure_model() ahora detecta modelos con best_iter<=1 y re-entrena automáticamente
+- RUNBOOK: reemplazado tmux por nohup (tmux no disponible en Mac del usuario)
+- Pendiente: git commit + push, usuario debe re-entrenar
+
+Stage Summary:
+- model.train() corregido: walk-forward 83/10/7 en vez de 80/20
+- Engine detecta modelos inútiles (best_iter=1) y re-entrena automáticamente
+- RUNBOOK usa nohup en vez de tmux
+- Usuario debe re-entrenar: --train --all (ahora con split correcto)

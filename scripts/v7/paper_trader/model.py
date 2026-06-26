@@ -214,9 +214,20 @@ def train(symbol: str, ohlcv_df: pd.DataFrame, btc_df: pd.DataFrame, eth_df: pd.
           val_frac: float = 0.2, params: dict | None = None) -> dict:
     """Train binary classification model: P(price UP in HORIZON bars).
 
+    Uses walk-forward split 83/10/7 (train/val/test) for proper time-series
+    validation. Early stopping uses the val set (10%). The test set (7%) is
+    held out — not used for early stopping — matching deep optimization methodology.
+
+    This is critical: the old simple 80/20 split caused best_iter=1 because
+    the last 20% of data has a very different label distribution (regime shift),
+    making validation AUC useless for early stopping. The 83/10/7 split puts
+    the val set ADJACENT to train (not at the end), giving meaningful early stopping.
+
     ohlcv_df : full historical OHLCV for the target symbol (5m, >=2000 rows recommended)
     btc_df   : BTC/USDT 5m aligned by timestamp
     eth_df   : ETH/USDT 5m aligned by timestamp
+    val_frac : IGNORED — kept for API compatibility. Walk-forward 83/10/7 is always used.
+    params   : LightGBM params override (if None, uses per-symbol or default)
     """
     p = dict(DEFAULT_PARAMS)
     if params:
@@ -246,16 +257,34 @@ def train(symbol: str, ohlcv_df: pd.DataFrame, btc_df: pd.DataFrame, eth_df: pd.
     if len(feat_df) < 500:
         raise ValueError(f"too few clean rows ({len(feat_df)}) to train; need >=500")
 
-    X = feat_df[FEATURE_NAMES].values.astype(np.float32)
-    y = feat_df["label"].values.astype(np.float32)
+    # Walk-forward split: 83/10/7 (train/val/test) — same as deep optimization
+    # This is critical for time-series: val set is ADJACENT to train, not at the end.
+    # Simple 80/20 split puts val in a different regime → best_iter=1 → useless model.
+    ts = feat_df["timestamp"].values
+    ts_first, ts_last = ts[0], ts[-1]
+    span_ms = ts_last - ts_first
+    span_days = span_ms / (1000 * 86400)
 
-    # Time-based split (no shuffle — respects causality)
-    n_val = max(int(len(X) * val_frac), 100)
-    n_tr = len(X) - n_val
-    X_tr, X_val = X[:n_tr], X[n_tr:]
-    y_tr, y_val = y[:n_tr], y[n_tr:]
-    LOG.info("model.train: split n_tr=%d n_val=%d  tr_up=%.1f%% val_up=%.1f%%",
-             n_tr, n_val, y_tr.mean()*100, y_val.mean()*100)
+    test_days = max(span_days * 0.07, 0.5)
+    val_days = max(span_days * 0.10, 0.5)
+
+    test_start_ts = ts_last - int(test_days * 86400 * 1000)
+    val_start_ts = test_start_ts - int(val_days * 86400 * 1000)
+
+    train_df = feat_df[feat_df["timestamp"] < val_start_ts].reset_index(drop=True)
+    val_df = feat_df[(feat_df["timestamp"] >= val_start_ts) & (feat_df["timestamp"] < test_start_ts)].reset_index(drop=True)
+    # test_df held out — NOT used for training or early stopping
+
+    X_tr = train_df[FEATURE_NAMES].values.astype(np.float32)
+    y_tr = train_df["label"].values.astype(np.float32)
+    X_val = val_df[FEATURE_NAMES].values.astype(np.float32)
+    y_val = val_df["label"].values.astype(np.float32)
+
+    LOG.info("model.train: walk-forward split n_tr=%d n_val=%d  tr_up=%.1f%% val_up=%.1f%%",
+             len(X_tr), len(X_val), y_tr.mean()*100, y_val.mean()*100)
+
+    if len(X_tr) < 200 or len(X_val) < 50:
+        raise ValueError(f"insufficient data after walk-forward split: tr={len(X_tr)} val={len(X_val)}")
 
     d_tr = lgb.Dataset(X_tr, label=y_tr, feature_name=FEATURE_NAMES, free_raw_data=False)
     d_val = lgb.Dataset(X_val, label=y_val, feature_name=FEATURE_NAMES, free_raw_data=False)
@@ -285,8 +314,8 @@ def train(symbol: str, ohlcv_df: pd.DataFrame, btc_df: pd.DataFrame, eth_df: pd.
     meta = {
         "symbol": symbol,
         "trained_at": int(time.time()),
-        "n_train": int(n_tr),
-        "n_val": int(n_val),
+        "n_train": int(len(X_tr)),
+        "n_val": int(len(X_val)),
         "best_iteration": int(bst.best_iteration) if bst.best_iteration else 0,
         "auc_val": auc_val,
         "logloss_val": logloss_val,
@@ -300,6 +329,7 @@ def train(symbol: str, ohlcv_df: pd.DataFrame, btc_df: pd.DataFrame, eth_df: pd.
         "prob_long": PROB_LONG,
         "prob_short": PROB_SHORT,
         "model_type": "binary_classification",
+        "split_method": "walk_forward_83_10_7",
         "training_rows_time_range": {
             "first_ts": int(feat_df["timestamp"].iloc[0]),
             "last_ts": int(feat_df["timestamp"].iloc[-1]),
