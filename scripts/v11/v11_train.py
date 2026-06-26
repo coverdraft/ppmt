@@ -147,6 +147,20 @@ def make_walk_forward_splits(df: pd.DataFrame, n_windows: int = 4) -> list:
     span_ms = ts_last - ts_first
     span_days = span_ms / (1000 * 86400)
     
+    # Sanity check: if timestamps are corrupted (not in ms), warn
+    if span_days < 1 and len(df) > 1000:
+        LOG.warning("Timestamp span < 1 day with %d rows — timestamps may be corrupted!", len(df))
+        LOG.warning("  ts_first=%s ts_last=%s span_ms=%s", ts_first, ts_last, span_ms)
+        # Try to detect if timestamps are in seconds instead of ms
+        if ts_last > 1e9 and ts_last < 2e9:
+            LOG.info("  Timestamps appear to be in SECONDS — converting to ms")
+            df = df.copy()
+            df["timestamp"] = df["timestamp"] * 1000
+            ts = df["timestamp"].values
+            ts_first, ts_last = ts[0], ts[-1]
+            span_ms = ts_last - ts_first
+            span_days = span_ms / (1000 * 86400)
+    
     test_days = max(span_days * 0.07, 0.5)
     
     splits = []
