@@ -271,7 +271,8 @@ def compute_features(
     df["range_expansion_3"] = (avg_rng_3 / avg_rng_20).clip(0, 10).values
 
     # Price acceleration
-    ret_1_raw = np.diff(c, prepend=c[0]) / np.maximum(c[:-1], 1e-10)  # prepend to keep length
+    prev_c = np.append(c[0], c[:-1])  # previous close per bar (length N)
+    ret_1_raw = np.diff(c, prepend=c[0]) / np.maximum(prev_c, 1e-10)  # prepend to keep length
     ret_1_raw[0] = 0
     accel = np.diff(ret_1_raw, prepend=0)
     df["price_acceleration"] = accel
@@ -487,14 +488,14 @@ def compute_features(
         ts_dt = pd.to_datetime(df["timestamp"], unit=unit, utc=True)
         df["_ts_dt"] = ts_dt
 
-        df["ret_1h"] = pd.Series(c).pct_change(12, fill_method=None).values
+        df["ret_1h"] = pd.Series(c_post).pct_change(12, fill_method=None).values
 
-        ret_12 = pd.Series(c).pct_change(12, fill_method=None)
+        ret_12 = pd.Series(c_post).pct_change(12, fill_method=None)
         ret_12_mean = ret_12.rolling(60, min_periods=12).mean()
         df["ema_trend_1h"] = np.sign(ret_12 - ret_12_mean).astype(float).values
 
         atr_12 = pd.Series(atr_14).rolling(12, min_periods=3).mean().values
-        df["atr_pct_1h"] = atr_12 / np.maximum(c, 1e-10) * 100
+        df["atr_pct_1h"] = atr_12 / np.maximum(c_post, 1e-10) * 100
         df["vol_regime_1h"] = np.digitize(
             np.nan_to_num(df["atr_pct_1h"].values, 0), [0.3, 0.8, 2.0]
         ).astype(float)
@@ -518,7 +519,7 @@ def compute_features(
 
     # ── G12: Token identity ───────────────────────────────────────
     df["sector_idx_float"] = float(sector_idx)
-    df["price_tier"] = np.vectorize(price_to_tier)(c)
+    df["price_tier"] = np.vectorize(price_to_tier)(c_post)
 
     # ── Final cleanup ─────────────────────────────────────────────
     for col in FEATURE_NAMES:
