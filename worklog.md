@@ -1937,3 +1937,31 @@ Stage Summary:
 - DOGE Q95/5 Sharpe 0.725 es excepcional — pero PF=30.78 sospechosamente alto
 - Sistema ahora tiene config completa por token (Q, window, cost, HP)
 - Proximo: ejecutar deep_optimize para ETH y SOL, luego paper trading
+
+---
+Task ID: 5
+Agent: main
+Task: Deep optimization ETH+SOL + actualizar sistema con configs completas
+
+Work Log:
+- Usuario ejecutó deep_optimize.py ETH+SOL en Mac (2520 configs, 256s)
+- Resultados ETH/USDT: best HP=default Q87/13 Win=400 Cost=maker → +36.56% 3/4
+- Resultados SOL/USDT: best overall slow_deep Q85/15 Win=200 → +48.67% 3/4
+  - SOL 4/4 robust: very_reg Q85/15 Win=200 → +41.46% (elegido por consistencia)
+- 193 configs con PnL>10% y >=3/4, 25 con 4/4 → SEÑAL STRONG
+- HP tuning impacto: ETH Δ=+27.4pp, SOL Δ=+23.3pp entre mejor/peor HP
+- Actualizado model.py SYMBOL_CONFIG:
+  - SOL: Q90/10→Q85/15, HP default→very_reg, cost 0.14→0.04, 4/4 consistencia
+  - ETH: Q80/20→Q87/13, Win 200→400, cost 0.14→0.04, HP=default (3/4)
+  - Añadidos sharpe_180d, max_dd, pf a DOGE y AVAX
+- Actualizado v7_layer2_rolling_retrain.py comentarios con resultados 4 tokens
+- Actualizado ESTADO_PROYECTO.md completo con sección deep optimization 4 tokens
+- Pendiente: git commit + push
+
+Stage Summary:
+- Deep optimization COMPLETO: 4 tokens, 5040 configs, 180d
+- 3/4 tokens con 4/4 consistencia (DOGE, AVAX, SOL), ETH 3/4
+- PnLs: AVAX +44.8%, DOGE +41.6%, SOL +41.5%, ETH +36.6%
+- Maker fees (0.04%) esencial: todas las configs óptimas usan maker
+- Sistema listo para paper trading con config optimizada per-token
+- Pendiente: LINK y XRP deep opt (opcional, menor prioridad)

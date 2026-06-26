@@ -252,12 +252,14 @@ def evaluate_test(bst: lgb.Booster, test_df: pd.DataFrame, symbol: str | None = 
     dir_acc = float(((pred > 0.5) == (y_label > 0.5)).mean())
 
     # --- Sequential backtest: L+S with horizon-aligned holding ---
-    # Deep optimization (180d, 2520 configs) showed:
-    #   - Q95/5 ultra-selective is best for DOGE (+41.5%, 4/4, Sharpe 0.725)
-    #   - Q82/18 + more_reg is best for AVAX (+44.8%, 4/4)
-    #   - Window=400 better for ultra-selective Q configs
+    # Deep optimization (180d, 5040 configs across 4 tokens) showed:
+    #   - DOGE: Q95/5 default Win=400 maker → +41.55% 4/4 Sharpe=0.725
+    #   - AVAX: Q82/18 more_reg Win=200 maker → +44.76% 4/4
+    #   - SOL: Q85/15 very_reg Win=200 maker → +41.46% 4/4
+    #     (slow_deep gives +48.67% but only 3/4)
+    #   - ETH: Q87/13 default Win=400 maker → +36.56% 3/4
     #   - Maker fees (0.04%) are achievable with limit orders
-    #   - Per-symbol HP tuning gives +30pp improvement
+    #   - Per-symbol HP tuning gives +23-37pp improvement vs worst HP
     #   - BTC = dead end, SHORT is essential, LONG-only always loses
     MIN_HOLD = HORIZON  # hold for full prediction horizon (288 bars = 24h)
     # Use per-symbol config from SYMBOL_CONFIG (deep opt validated)

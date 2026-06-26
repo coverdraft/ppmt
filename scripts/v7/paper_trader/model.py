@@ -14,8 +14,10 @@ Architecture:
 - HORIZON=288 (24h forward, 288 × 5min bars) — ONLY viable horizon per comprehensive sweep
 - Decision: LONG if P(up) > PROB_LONG, SHORT if P(up) < PROB_SHORT, else WAIT
 - 2000 trees with early_stopping=150 (avoids best_iter=1 instability)
-- Per-symbol Q config overrides in SYMBOL_Q_OVERRIDES (from 7-token comprehensive sweep)
-- Quantile-based trading in evaluate_test: Q85/15 default, Q80/20 for ETH/XRP, Q90/10 for SOL/LINK
+- Per-symbol config overrides in SYMBOL_CONFIG (from 180d deep optimization, 5040 configs)
+- Quantile-based trading in evaluate_test: per-symbol Q/window/cost from SYMBOL_CONFIG
+- 3/4 core tokens have 4/4 consistency: DOGE Q95/5, AVAX Q82/18, SOL Q85/15
+- ETH Q87/13 is the only 3/4 token (no 4/4 config found in deep opt)
 - SHORT is essential — LONG-only always loses across all tokens
 - BTC = dead end (confirmed across all configs)
 
@@ -60,39 +62,45 @@ DEFAULT_PARAMS = {
     "verbosity": -1,
 }
 
-# Per-symbol config overrides from deep optimization (180d, 2520 configs)
-# Updated from: Q85/15 (90d sweep) → Q95/5 DOGE, Q82/18 AVAX (180d deep opt)
-# Each token now has: (q_long, q_short, window_size, cost_pct, hp_preset)
+# Per-symbol config overrides from deep optimization (180d, 5040 configs total)
+# Deep opt tested: 5 HP × 7 Q × 3 windows × 3 costs × 4 folds × 4 tokens
+# All 4 core tokens now have 180d-validated configs with maker fees
+# Remaining tokens (LINK, XRP) use 90d sweep results
 SYMBOL_CONFIG = {
     "DOGE/USDT": {
         "q_long": 95, "q_short": 5,      # Q95/5 ultra-selective
         "window_size": 400,               # longer lookback for quantile
         "cost_pct": 0.04,                  # maker fees (limit orders)
         "hp": "default",                   # default HP is best for DOGE
-        "pnl_180d": 41.5, "consistency": "4/4",
+        "pnl_180d": 41.55, "consistency": "4/4",
+        "sharpe_180d": 0.725, "max_dd": -4.61, "pf": 30.78,
     },
     "AVAX/USDT": {
         "q_long": 82, "q_short": 18,      # Q82/18 moderate-selective
         "window_size": 200,
         "cost_pct": 0.04,                  # maker fees
         "hp": "more_reg",                   # more regularization
-        "pnl_180d": 44.8, "consistency": "4/4",
+        "pnl_180d": 44.76, "consistency": "4/4",
+        "sharpe_180d": 0.292, "max_dd": -10.37, "pf": 4.69,
     },
-    # Below: from 90d comprehensive sweep (pending deep optimization)
     "SOL/USDT": {
-        "q_long": 90, "q_short": 10,
+        "q_long": 85, "q_short": 15,      # Q85/15 — 4/4 robust config
         "window_size": 200,
-        "cost_pct": 0.14,                  # taker (conservative)
-        "hp": "default",
-        "pnl_90d": 34.8, "consistency": "3/4",
+        "cost_pct": 0.04,                  # maker fees (upgraded from taker)
+        "hp": "very_reg",                   # very_reg gives 4/4 consistency (+41.5%)
+        "pnl_180d": 41.46, "consistency": "4/4",
+        "sharpe_180d": 0.325, "max_dd": -12.88, "pf": 3.86,
+        # Note: slow_deep Q85/15 Win=200 PnL=+48.67% but only 3/4 consistency
     },
     "ETH/USDT": {
-        "q_long": 80, "q_short": 20,
-        "window_size": 200,
-        "cost_pct": 0.14,
-        "hp": "default",
-        "pnl_90d": 22.8, "consistency": "3/4",
+        "q_long": 87, "q_short": 13,      # Q87/13 best for ETH (upgraded from Q80/20)
+        "window_size": 400,                 # Win=400 best (upgraded from 200)
+        "cost_pct": 0.04,                  # maker fees (upgraded from taker)
+        "hp": "default",                   # default HP best for ETH
+        "pnl_180d": 36.56, "consistency": "3/4",
+        "sharpe_180d": 0.324, "max_dd": -9.15, "pf": 2.55,
     },
+    # Below: from 90d comprehensive sweep (pending 180d deep optimization)
     "LINK/USDT": {
         "q_long": 90, "q_short": 10,
         "window_size": 200,
