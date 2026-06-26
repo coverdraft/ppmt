@@ -324,38 +324,45 @@ def compute_features_1m(df: pd.DataFrame, symbol: str = "") -> pd.DataFrame:
 def _ts_to_ms(series: pd.Series) -> pd.Series:
     """Convert tz-aware datetime Series to milliseconds (int64).
     
-    Handles pandas 2.x and 3.x differences:
-    - pandas 2.x: astype(np.int64) works but may deprecate
-    - pandas 3.x: view('int64') is the recommended method
-    Both give nanoseconds since epoch in UTC.
+    CRITICAL: In pandas 2.x, astype(np.int64) on tz-aware DatetimeIndex
+    returns SECONDS (not nanoseconds). We use .dt.as_unit('ms') which
+    is the reliable cross-version method, with fallbacks.
     """
-    # Method 1: view('int64') — works in pandas 2.x and 3.x
+    # Method 1: .dt.as_unit('ms') — pandas 2.0+ recommended
     try:
-        ns = series.view("int64")
-        return (ns // 1_000_000).astype(np.int64)
+        ms_series = series.dt.as_unit("ms")
+        return ms_series.view("int64").astype(np.int64)
     except (TypeError, ValueError, AttributeError):
         pass
 
-    # Method 2: astype(np.int64) — works in pandas 1.x and 2.x
+    # Method 2: .apply with .timestamp() — always correct, slower
     try:
-        ns = series.astype(np.int64)
-        return (ns // 1_000_000).astype(np.int64)
-    except (TypeError, ValueError):
+        return series.apply(lambda ts: int(ts.timestamp() * 1000)).astype(np.int64)
+    except (TypeError, ValueError, AttributeError):
         pass
 
-    # Method 3: convert to naive, then view
+    # Method 3: convert to naive UTC first, then as_unit
     try:
         naive = series.dt.tz_convert(None)
-        ns = naive.view("int64")
-        return (ns // 1_000_000).astype(np.int64)
+        ms_series = naive.as_unit("ms")
+        return ms_series.view("int64").astype(np.int64)
     except (TypeError, ValueError, AttributeError):
         pass
 
-    # Method 4: use timestamp accessor
+    # Method 4: astype(int64) — in pandas 2.x gives seconds, multiply by 1000
     try:
-        seconds = series.astype("int64").astype(float) / 1e9
-        return (seconds * 1000).astype(np.int64)
-    except Exception:
+        val = series.astype(np.int64)
+        # Check if values look like seconds (~1.7e9) or nanoseconds (~1.7e18)
+        sample = int(val.iloc[0]) if len(val) > 0 else 0
+        if 1e9 < sample < 2e9:
+            # Seconds since epoch — multiply by 1000
+            return (val * 1000).astype(np.int64)
+        elif 1e18 < sample < 2e18:
+            # Nanoseconds since epoch — divide by 1e6
+            return (val // 1_000_000).astype(np.int64)
+        else:
+            raise ValueError(f"Unexpected timestamp value: {sample}")
+    except (TypeError, ValueError):
         pass
 
     raise ValueError("Cannot convert tz-aware datetime to milliseconds — all methods failed!")
