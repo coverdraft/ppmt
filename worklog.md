@@ -2052,3 +2052,92 @@ Stage Summary:
 - runner.py: métricas actualizadas
 - Commit + push: 4194d12
 - Usuario debe: git pull, matar nohup actual, re-entrenar con --train --all
+---
+Task ID: v9-fix-build
+Agent: main
+Task: Fix V9 build_dataset.py — 0 positive labels bug
+
+Work Log:
+- Diagnosed 3 root causes for "0 positive + 0 negative" in build_dataset.py:
+  1. Download pagination breaks too early: `if len(ohlcv) < 1000: break` stops after 1 fetch when Bybit returns 999 bars
+  2. Entry timestamps not rounded to minute boundaries: trade at 14:30:23 can't match bar at 14:30:00 with exact lookup
+  3. Stale cache from previous runs covers wrong date range, no overlap validation
+- Added `_ts_to_ms()` robust timestamp conversion (4 fallback methods for pandas 2.x/3.x)
+- Fixed pagination: removed `< 1000` break condition, use `< 5` instead; set Bybit limit=200
+- Added entry_ts_ms rounding to minute boundary for primary matching
+- Added 3-tier matching: rounded → exact → closest-within-2min
+- Added OHLCV/trade date range overlap check with ❌/✅ logging
+- Added `--clear-cache` flag to force re-download
+- Added `diagnose_build.py` diagnostic script
+- Lowered train.py minimum dataset requirements from 100→50 rows
+
+Stage Summary:
+- build_dataset.py rewritten with 3 bug fixes + diagnostic logging
+- diagnose_build.py created for root cause verification
+- train.py error messages improved
+- User needs to: git pull, run `python3 -m scripts.v9.run_pipeline --clear-cache`
+---
+Task ID: v11-ltf
+Agent: super-z
+Task: Build v11 low-timeframe trading system based on v7.5
+
+Work Log:
+- Analyzed v7.5 (best previous version): Sharpe 2.80, PnL +333.76%, WR 51.7%, only H=288 (24h) viable
+- Identified why short horizons failed: noise-dominated features, high costs, lack of microstructure
+- Designed v11 with 5 key innovations: 1m microstructure, MTF aggregation, ultra-regularization, maker fees, adaptive horizons
+- Built v11_build_dataset.py: 1m→5m aggregation, 80 features (13 micro + 58 5m + 4 15m + 5 1h)
+- Built v11_train_fast.py: binary classifier with per-horizon HP tuning
+- Built v11_backtest.py: adaptive exits + MTF filter + cost sweep
+- Trained 12 models (3 symbols × 4 horizons) and ran walk-forward validation
+
+Stage Summary:
+- BREAKTHROUGH: 1h horizon now works! (was -56.5% catastrophic in v7.5)
+- AVAX H=12(1h): +176.3% PnL, WR 58.9%, 4/4 consistency — BEST RESULT
+- DOGE H=72(6h): +122.3% PnL, WR 60.6%, 4/4 consistency — BEST SHARPE
+- DOGE H=12(1h): +124.8% PnL, WR 59.7%, 4/4 consistency — 1h VIABLE
+- Top features: rsi_1h (#1), hour_cos, ema_20_50_cross, cvd_5m (#4 NEW), hour_sin
+- MTF filter improves WR by +4pp and Sharpe by +8% (fewer but better trades)
+- Key enablers: 1m CVD, 1h RSI, ultra-regularization (7 leaves), maker fees (0.04%)
+- Models saved to data/v11/models/
+- Dataset saved to data/v11/v11_dataset.parquet (236K rows)
+---
+Task ID: v12-optimize
+Agent: super-z
+Task: V12 — Optimize trading parameters for V11 low-TF model
+
+Work Log:
+- Analyzed V11 model signal quality: signal strength bins show strong discrimination
+- Built v12_analyze.py: feature/filter analysis — signal strength is most powerful discriminator
+- Built v12_optimize.py: exhaustive search over 108 configs (9 Q × 2 dir × 2 trend × 3 symbols)
+- Found Q95/5 as optimal for most symbols (WR 0.70 vs Q85/15 WR 0.62)
+- Built v12_validate.py: 6-window walk-forward validation with retraining per window
+- All 3 symbols robust: SOL 4/4, DOGE 6/6, AVAX 6/6 windows profitable
+- Tested cost-aware labels (threshold 0.08%) — WORSE performance, abandoned
+- Built v12_build_dataset.py with 12 new features + cost-aware labels (abandoned approach)
+- Built v12_train_final.py comparing standard vs cost-aware labels
+- Built v12_adaptive_exit.py: trailing stop testing — fixed hold period remains best
+
+Stage Summary:
+- V12 = V11 model + optimized Q thresholds = WR 0.39 → 0.693 (+77%)
+- Best configs: SOL Q95/5 both WR=0.693, DOGE Q98/2 both WR=0.681, AVAX Q97/3 long_only WR=0.625
+- 100% walk-forward windows profitable across all symbols
+- Cost-aware labels DONT help — model learns profitability implicitly
+- Signal gating (RSI/MTF filters) marginal — not worth complexity
+- Key insight: selectivity > frequency for trading performance
+---
+Task ID: v12-documentation
+Agent: super-z
+Task: Document V11/V12 work for traceability and prepare paper trading
+
+Work Log:
+- Updated README.md with V11/V12 versions, two active pipelines comparison
+- Updated ESTADO_PROYECTO.md with V12 results, corrected "H=12 is impossible" finding
+- Created docs/v12/README.md with full technical documentation
+- Creating RUNBOOK_v12_paper_trading.md for V12 paper trading operations
+- Creating V12 paper trading engine (1m data, 80 features, H=12)
+- Appending worklog entries for V11/V12 work
+
+Stage Summary:
+- Documentation updated across all key files
+- V12 now has proper traceability in the repo
+- Paper trading engine being built for OOS validation

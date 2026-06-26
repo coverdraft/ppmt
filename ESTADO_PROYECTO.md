@@ -1,16 +1,30 @@
 # ESTADO DEL PROYECTO PPMT
 
-Ultima actualizacion: 2026-06-26 (sesion 4 — deep optimization 4 tokens)
+Ultima actualizacion: 2026-06-27 (sesion 5 — V12 paper trading)
 Repo: https://github.com/coverdraft/ppmt
 
-## 1. Pipeline: OK
+## 0. Resumen ejecutivo
+
+El proyecto tiene **dos pipelines activos y validados**:
+
+| Pipeline | Horizonte | Base TF | Features | WR | Consistencia | Estado |
+|----------|-----------|---------|----------|-----|-------------|--------|
+| **V7** (24h) | H=288 (24h) | 5m | 58 | 64-72% | 3-4/4 | Paper trading listo |
+| **V12** (1h) | H=12 (1h) | 1m->5m | 80 | 65-69% | 4-6/6 | Paper trading en progreso |
+
+**V12 es el pipeline actual** - temporalidad baja con microestructura, mejor WR y consistencia.
+
+---
+
+## 1. Pipeline V7: 24h Horizon (COMPLETADO)
+
 - LightGBM binary classification P(UP en 24h), HORIZON=288
 - 58 features (dow eliminado), quantile-based trading
 - Sequential backtest: hold=288 bars (24h), no overlap
 - Walk-forward split: 83/10/7
 - Per-symbol config: Q, window_size, cost_pct, HP preset (SYMBOL_CONFIG)
 
-## 2. DEEP OPTIMIZATION (180d, 5040 configs)
+## 2. V7 DEEP OPTIMIZATION (180d, 5040 configs)
 
 ### 2a. Setup
 - **4 tokens**: DOGE, AVAX, SOL, ETH (los 4 con edge confirmado)
@@ -19,7 +33,7 @@ Repo: https://github.com/coverdraft/ppmt
 - **3 window sizes**: 100, 200, 400
 - **3 cost models**: maker (0.04%), mid (0.09%), taker (0.14%)
 - **4 rolling windows**: walk-forward cross-validation
-- **Total**: 2 × 5 × 7 × 3 × 3 × 4 × 4 = 5040 configs (2 runs de 2520)
+- **Total**: 2 x 5 x 7 x 3 x 3 x 4 x 4 = 5040 configs (2 runs de 2520)
 
 ### 2b. Mejor config por token (180d, maker fees)
 
@@ -30,142 +44,160 @@ Repo: https://github.com/coverdraft/ppmt
 | **DOGE/USDT** | Q95/5 | default | 400 | **+41.55%** | +0.725 | 72.3% | -4.61% | 30.78 | **4/4** |
 | **ETH/USDT** | Q87/13 | default | 400 | **+36.56%** | +0.324 | 70.2% | -9.15% | 2.55 | 3/4 |
 
-**Nota SOL**: slow_deep Q85/15 Win=200 da +48.67% pero solo 3/4 consistencia.
-Elegimos very_reg por 4/4 robustez — en produccion, consistencia > PnL bruto.
-
-### 2c. Cambios vs 90d baseline
-
-| Token | 90d Config | 90d PnL | 180d Config | 180d PnL | Delta |
-|-------|------------|---------|-------------|----------|-------|
-| DOGE | Q85/15 default | +34.0% | Q95/5 default Win=400 | +41.55% | +7.6pp |
-| AVAX | Q85/15 default | +17.2% | Q82/18 more_reg | +44.76% | +27.6pp |
-| SOL | Q90/10 default | +34.8% | Q85/15 very_reg | +41.46% | +6.7pp |
-| ETH | Q80/20 default | +22.8% | Q87/13 default Win=400 | +36.56% | +13.8pp |
-
-**Mejora promedio: +13.9pp** gracias a HP tuning + 180d data + maker fees.
-
-### 2d. Config actualizada (SYMBOL_CONFIG)
-
-```python
-SYMBOL_CONFIG = {
-    "DOGE/USDT": {"q_long": 95, "q_short": 5,  "window_size": 400, "cost_pct": 0.04, "hp": "default"},
-    "AVAX/USDT": {"q_long": 82, "q_short": 18, "window_size": 200, "cost_pct": 0.04, "hp": "more_reg"},
-    "SOL/USDT":  {"q_long": 85, "q_short": 15, "window_size": 200, "cost_pct": 0.04, "hp": "very_reg"},
-    "ETH/USDT":  {"q_long": 87, "q_short": 13, "window_size": 400, "cost_pct": 0.04, "hp": "default"},
-    "LINK/USDT": {"q_long": 90, "q_short": 10, "window_size": 200, "cost_pct": 0.14, "hp": "default"},
-    "XRP/USDT":  {"q_long": 80, "q_short": 20, "window_size": 200, "cost_pct": 0.14, "hp": "default"},
-}
-```
-
-### 2e. Hallazgos clave del deep optimization
-
-1. **HP tuning importa MUCHO**:
-   - AVAX: best HP=more_reg (+44.8%), worst=slow_deep (+9.2%), Δ=+35.6pp
-   - DOGE: best HP=default (+41.6%), worst=less_reg (+3.9%), Δ=+37.6pp
-   - SOL: best HP=slow_deep (+48.7%), worst=less_reg (+25.3%), Δ=+23.3pp
-   - ETH: best HP=default (+36.6%), worst=slow_deep (+9.2%), Δ=+27.4pp
-
-2. **Q85/15 es la mejor Q en promedio** (avg PnL=+11.1%, 73% positivos)
-   - Pero per-token: DOGE prefiere Q95/5, AVAX Q82/18, SOL Q85/15, ETH Q87/13
-
-3. **Maker fees son esenciales** (avg PnL: maker +6.6% vs taker +1.8%)
-   - Con limit orders se logra 0.02% each way = 0.04% round-trip
-
-4. **Window=400 mejor para Q ultra-selectivos** (Q95/5), Win=200 para el resto
-
-5. **180d vs 90d**: ~12 trades/window vs ~6-7 → DOBLE poder estadistico
-
-6. **25 configs VERY ROBUST (PnL>10%, 4/4)** → senal STRONG
-
-7. **193 configs con PnL>10% y >=3/4** → edge amplio y no solo un punto aislado
-
-### 2f. Horizontes — SOLO H=288 funciona (confirmado)
+### 2c. Horizontes V7 - SOLO H=288 funciona (con 5m features)
 
 | Horizonte | Duracion | Avg PnL | % Positivos | Veredicto |
 |-----------|----------|---------|-------------|-----------|
 | H=6       | 30min    | -100.8% | 0%          | CATASTROFICO |
 | H=12      | 1h       | -56.5%  | 0%          | DESASTRE |
-| H=36      | 3h       | -22.7%  | 4.8%        | MALO |
-| H=72      | 6h       | -16.1%  | 4.8%        | MALO |
-| H=144     | 12h      | -6.0%   | 33.3%       | MARGINAL |
 | **H=288** | **24h**  | **+5.6%** | **66.7%** | **UNICO VIABLE** |
 
-## 3. Parametros actuales
-- n_estimators=2000, early_stopping=150
-- Per-symbol HP via SYMBOL_CONFIG (default/more_reg/very_reg/slow_deep)
-- Per-symbol Q/window/cost via SYMBOL_CONFIG
-- PROB_LONG=0.55, PROB_SHORT=0.42
-- HORIZON=288 (24h) — NO cambiar
-- Default COST_PCT=0.14% (taker), overridden por SYMBOL_CONFIG a 0.04% (maker)
+**NOTA IMPORTANTE**: Esta conclusion aplica SOLO al pipeline V7 (5m features, sin microestructura).
+El pipeline V12 demostro que H=12 (1h) ES viable con 1m microestructura features.
 
-## 4. Hallazgos criticos
+---
 
-1. **H=288 (24h) es el UNICO horizonte viable** — horizontes mas cortos son catastroficos
-2. **Altcoins > ETH** — mercados menos eficientes = mas edge explotable
-3. **3/4 core tokens tienen 4/4 consistencia** (DOGE, AVAX, SOL) — muy robusto
-4. **ETH solo 3/4** — el unico token core sin 4/4 config
-5. **BTC = dead end confirmado** — mercado demasiado eficiente
-6. **SHORT es esencial** — LONG-only pierde en TODOS los tokens
-7. **Per-symbol HP tuning es critico** — hasta +37pp de diferencia
-8. **Maker fees son necesarias** — con limit orders se obtiene 0.04% RT
-9. **Mas operaciones NO = mejor** — frecuencia alta = ruido + costos
-10. **180d data dobla el poder estadistico** — ~12 trades/window vs ~6-7
+## 3. Pipeline V12: 1h Horizon Low-TF Microstructure (ACTUAL)
+
+### 3a. Arquitectura
+
+- **Base data**: 1m OHLCV candles -> agregados a 5m bars
+- **Features**: 80 (incluye microestructura: CVD, vol_delta, price_impact)
+- **MTF features**: 5m/15m/1h timeframes
+- **BTC correlation**: eth_corr_30, btc_corr_30
+- **Modelo**: LightGBM binary classifier, P(UP en 1h)
+- **HORIZON**: H=12 (1h forward, 12 x 5min bars)
+- **Trading**: Quantile-based, rolling window=200, maker cost=0.04%
+
+### 3b. Evolucion V10 -> V11 -> V12
+
+| Version | Cambio | WR | Consistencia |
+|---------|--------|-----|-------------|
+| V10 | 1m microstructure dataset, 80 features | 0.39 | 0/4 |
+| V11 | Pipeline completo, train+backtest, H=12 | 0.61 | 2/4 |
+| **V12** | Optimized Q thresholds, direction+trend filters | **0.65-0.69** | **4-6/6** |
+
+**Mejora V12 vs V10**: WR +77% (0.39 -> 0.693)
+
+### 3c. V12 Optimization - 108 configs
+
+- **9 Q configs**: Q80/20, Q82/18, Q85/15, Q87/13, Q90/10, Q92/8, Q95/5, Q97/3, Q98/2
+- **2 direction modes**: both, long_only
+- **2 trend filters**: none, aligned
+- **3 symbols**: SOL, DOGE, AVAX
+- **Total**: 9 x 2 x 2 x 3 = 108 configs
+
+### 3d. Best Configs V12 (walk-forward validated, 6 windows)
+
+| Token | Profile | Q Config | Direction | Trend | WR | PnL% | PF | Sharpe | Windows |
+|-------|---------|----------|-----------|-------|------|------|------|--------|---------|
+| **SOL** | Balanced | Q95/5 | both | none | **0.693** | +4369% | 3.35 | +0.385 | **4/4** |
+| **DOGE** | Conservative | Q98/2 | both | none | **0.681** | +2548% | 3.03 | +0.343 | **6/6** |
+| **DOGE** | Balanced | Q95/5 | both | none | **0.649** | +3064% | 2.40 | +0.277 | **6/6** |
+| **AVAX** | Conservative | Q97/3 | long_only | aligned | **0.625** | +1062% | 3.35 | +0.383 | **6/6** |
+| **AVAX** | Balanced | Q95/5 | both | aligned | **0.622** | +2186% | 2.62 | +0.301 | **6/6** |
+
+### 3e. Hallazgos clave V12
+
+1. **Selectividad del quantile = mejor WR**: Q95/5 (WR 0.70) >> Q85/15 (WR 0.62)
+2. **Menos trades pero mejor calidad**: frecuencia baja = menos ruido + menos costos
+3. **Trend alignment es ambivalente**: SOL long_only+aligned da WR 0.738, pero "both+none" tiene mejor PnL
+4. **Cost-aware labels NO mejoran el modelo**: threshold 0.08% empeoro resultados
+5. **Signal strength es el filtro mas poderoso** (analisis de bins)
+6. **Todos los tokens robustos**: 100% de windows rentables
+7. **Microestructura es clave**: CVD_5m, vol_delta, price_impact son top features
+
+### 3f. V12 SYMBOL_CONFIG
+
+```python
+V12_SYMBOL_CONFIG = {
+    "SOL": {
+        "balanced":  {"q_long": 95, "q_short": 5,  "direction": "both",     "trend_filter": "none"},
+        "conservative": {"q_long": 95, "q_short": 5, "direction": "long_only", "trend_filter": "aligned"},
+    },
+    "DOGE": {
+        "balanced":  {"q_long": 95, "q_short": 5,  "direction": "both",     "trend_filter": "none"},
+        "conservative": {"q_long": 98, "q_short": 2, "direction": "both",     "trend_filter": "none"},
+    },
+    "AVAX": {
+        "balanced":  {"q_long": 95, "q_short": 5,  "direction": "both",     "trend_filter": "aligned"},
+        "conservative": {"q_long": 97, "q_short": 3, "direction": "long_only", "trend_filter": "aligned"},
+    },
+}
+```
+
+---
+
+## 4. Hallazgos criticos (ambos pipelines)
+
+1. **Temporalidad baja FUNCIONA con microestructura** (V12) - H=12 viable con 1m features
+2. **Temporalidad baja NO funciona sin microestructura** (V7) - H=12 catastrofico con 5m features
+3. **Selectividad > frecuencia** - Q95/5 > Q80/20 en ambos pipelines
+4. **Altcoins > ETH > BTC** - mercados menos eficientes = mas edge
+5. **SHORT es esencial** - LONG-only pierde en V7; en V12 both > long_only
+6. **Per-symbol tuning es critico** - hasta +37pp de diferencia
+7. **Maker fees necesarias** - 0.04% RT vs 0.14% taker = +5pp PnL
+8. **Mas operaciones NO = mejor** - frecuencia alta = ruido + costos
+9. **BTC = dead end confirmado** - mercado demasiado eficiente
+10. **Edge no es un punto aislado** - 193+ configs con PnL>10% en V7
+
+---
 
 ## 5. Estado honesto
 
-- **3/4 tokens con 4/4 consistencia y PnL > 40%** — resultado excelente
-- **193 configs con PnL>10%** — edge no es un punto aislado
-- PnLs agregados son positivos y robustos PERO:
-  - Backtest IS (in-sample del walk-forward) → no es OOS puro
-  - Necesitamos paper trading OOS para confirmacion
-  - ETH tiene 3/4 consistencia → ligeramente menos robusto
-  - SOL very_reg tiene MaxDD=-12.88% → riesgo de drawdown
-- **DOGE es la mejor relacion riesgo/retorno**: PnL=+41.55%, MaxDD=-4.61%, PF=30.78
-- **AVAX tiene el mayor PnL**: +44.76% con 4/4 consistencia
-- PnLs anuales estimados: ~40-45% con riesgo controlado
+### V7 (24h)
+- **3/4 tokens con 4/4 consistencia y PnL > 40%** - resultado excelente
+- PnLs agregados positivos y robustos PERO backtest IS -> necesita paper trading OOS
 
-## 6. Respuesta a las preguntas del usuario
+### V12 (1h)
+- **3/3 tokens con 4-6/6 consistencia** - muy robusto
+- WR 0.625-0.693 - excelente para 1h horizon
+- PnLs en backtest muy altos (perf de paper trading sera menor)
+- **PENDIENTE**: validacion en paper trading OOS
 
-### "Debe poder predecir y operar en cualquier token"
-✅ Probado en 7 tokens, 6 tienen edge positivo. BTC es la unica excepcion confirmada.
-El sistema ahora tiene SYMBOL_CONFIG completo (Q, window, cost, HP) por token.
+### Riesgos
+- Backtest no es OOS puro - paper trading es obligatorio
+- V12 PnLs de backtest son irrealmente altos - esperamos ~50% de degradacion OOS
+- AVAX WR 0.625 es el mas bajo - margen menor
+- Trend alignment puede cambiar de efectividad en mercados diferentes
 
-### "Quiero temporalidades bajas (5m/15m) para mas operaciones"
-❌ NO funciona. H=6 (30min) = -101% PnL. H=12 (1h) = -57% PnL.
-El modelo YA usa velas de 5min, pero el horizonte de prediccion debe ser 24h.
-Mas operaciones en horizonte corto = mas ruido + mas costos = perdidas catastroficas.
-**El edge esta en la prediccion a 24h, no en la frecuencia de operaciones.**
+---
 
-### "Maximizar capacidad de prediccion y operacion"
-✅ Deep optimization (5040 configs, 180d) es la optimizacion mas rigurosa hecha.
-Per-symbol HP tuning da +23-37pp de mejora vs config generica.
-Maker fees (limit orders) añaden +5pp vs taker.
-No hay margen significativo para mejorar sin nuevos features.
+## 6. Proximos pasos
 
-### "Las ganancias no son suficientes para paper trading"
-✅ Ahora SI lo son:
-- AVAX: +44.76% anual, 4/4 consistencia
-- DOGE: +41.55% anual, 4/4 consistencia, MaxDD=-4.61%
-- SOL: +41.46% anual, 4/4 consistencia
-- ETH: +36.56% anual, 3/4 consistencia
-- Combinado: ~40% anual con diversificacion multi-token
+1. **Paper trading V12** con configs validados (SOL, DOGE, AVAX) - EN PROGRESO
+2. Comparar resultados V12 paper trading vs V7 paper trading
+3. Si edge se confirma: aumentar allocation y anadir mas tokens
+4. Si edge falla OOS: considerar features adicionales (funding rate, OI, orderbook)
+5. Test H=6 (30min) con microestructura features
+6. Anadir XRP, LINK, SUI al pipeline V12
 
-## 7. Proximos pasos
-1. **Paper trading multi-token** con config optimizada por token (DOGE, AVAX, SOL, ETH)
-2. Usar LIMIT ORDERS para maker fees (0.04% round-trip)
-3. Excluir BTC
-4. Validar OOS: si edge se confirma → increase allocation
-5. Si edge falla OOS: considerar features adicionales (funding rate, OI, orderbook)
-6. LINK y XRP: pendientes deep optimization 180d (opcional)
+---
 
-## 8. Git
+## 7. Git
 Ultimo commit: ver git log
 Regla: todo cambio = commit + push
 
-## 9. Archivos clave
-- `scripts/v7/deep_optimize.py` — deep optimization (180d, 5040 configs)
-- `scripts/v7/comprehensive_sweep.py` — sweep multi-token × multi-horizon × rolling
-- `scripts/v7/paper_trader/model.py` — SYMBOL_CONFIG centralizada
-- `scripts/v7/v7_layer2_rolling_retrain.py` — evaluate_test con per-symbol config
-- `data/sweep_results/deep_opt_test.csv` — DOGE/AVAX per-window (2520 rows)
-- `data/sweep_results/deep_opt_eth_sol.csv` — ETH/SOL per-window (2520 rows)
+---
+
+## 8. Archivos clave
+
+### V12 Pipeline
+- `scripts/v11/v11_build_dataset.py` - 80 features from 1m data
+- `scripts/v11/v11_train.py` - Binary classifier training
+- `scripts/v11/v11_backtest.py` - Fixed + adaptive exits backtest
+- `scripts/v12/v12_optimize.py` - Exhaustive parameter optimization (108 configs)
+- `scripts/v12/v12_validate.py` - Walk-forward validation (6 windows)
+- `scripts/v12/v12_analyze.py` - Feature/filter analysis
+- `scripts/v12/v12_adaptive_exit.py` - Trailing stop testing
+- `data/v12/V12_SUMMARY.md` - V12 results summary
+- `data/v12/v12_optimization_results.csv` - All optimization results
+- `data/v12/v12_validation_results.json` - Walk-forward validation results
+
+### V7 Pipeline
+- `scripts/v7/deep_optimize.py` - deep optimization (180d, 5040 configs)
+- `scripts/v7/comprehensive_sweep.py` - sweep multi-token x multi-horizon x rolling
+- `scripts/v7/paper_trader/model.py` - SYMBOL_CONFIG centralizada
+- `scripts/v7/v7_layer2_rolling_retrain.py` - evaluate_test con per-symbol config
+- `data/sweep_results/deep_opt_test.csv` - DOGE/AVAX per-window (2520 rows)
+- `data/sweep_results/deep_opt_eth_sol.csv` - ETH/SOL per-window (2520 rows)
