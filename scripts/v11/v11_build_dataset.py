@@ -721,11 +721,16 @@ def main():
     # Build per-symbol datasets
     all_dfs = []
     for sym in symbols:
+        LOG.info(">>> Building dataset for %s...", sym)
         try:
             df = build_symbol_dataset(sym, horizons, btc_1m)
+            if len(df) == 0:
+                LOG.error(">>> %s: build returned 0 rows!", sym)
+            else:
+                LOG.info(">>> %s: SUCCESS — %d rows", sym, len(df))
             all_dfs.append(df)
         except Exception as e:
-            LOG.error("Failed for %s: %s", sym, e)
+            LOG.error(">>> %s: FAILED with %s: %s", sym, type(e).__name__, e)
             import traceback
             traceback.print_exc()
     
