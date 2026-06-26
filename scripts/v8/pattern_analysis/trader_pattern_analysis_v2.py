@@ -59,16 +59,19 @@ def parse_mexc_orders(xlsx_path: Path) -> pd.DataFrame:
     # Parse symbol: "RIVERUSDT" → "RIVER"
     df["_symbol"] = df["Par de Trading de Futuros"].str.strip().str.upper().str.replace("USDT", "", regex=False).str.strip()
     
-    # Parse direction: MEXC semantics
-    #   buy long  = OPEN LONG   (PNL always 0)
-    #   sell long = CLOSE LONG  (PNL = trade result)
-    #   sell short = OPEN SHORT  (PNL always 0)
-    #   buy short = CLOSE SHORT  (PNL = trade result)
+    # Parse direction: MEXC semantics (VERIFIED from actual order flow)
+    #   buy long   = OPEN LONG    (PNL always 0)
+    #   sell long  = CLOSE LONG   (PNL = trade result)
+    #   buy short  = OPEN SHORT   (PNL always 0)  ← was WRONG before!
+    #   sell short = CLOSE SHORT  (PNL = trade result)  ← was WRONG before!
+    #
+    # Evidence: RIVERUSDT short trade: buy short @ 4.327, 4.314 → sell short @ 4.294 (PnL +1.97)
+    # The "buy short" orders open the position, "sell short" closes it with PnL.
     df["_action"] = df["Dirección"].str.strip().str.lower().map({
         "buy long": "open_long",
         "sell long": "close_long", 
-        "sell short": "open_short",
-        "buy short": "close_short",
+        "buy short": "open_short",
+        "sell short": "close_short",
     })
     
     # Numeric columns
