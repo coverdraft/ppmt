@@ -75,9 +75,12 @@ def run_backtest(
     lows = df["low"].values
     symbols = df["symbol"].values if "symbol" in df.columns else np.array(["all"] * len(df))
 
-    # Predict
-    X = df[feature_cols].values.astype(np.float32)
-    probs = model.predict(X)
+    # Predict (use pre-computed probs if available)
+    if "_prob" in df.columns:
+        probs = df["_prob"].values
+    else:
+        X = df[feature_cols].values.astype(np.float32)
+        probs = model.predict(X)
 
     trades = []
     positions = {}  # symbol → position
@@ -171,7 +174,11 @@ def run_backtest(
 
 def compute_stats(trades: list[Trade]) -> dict:
     if not trades:
-        return {"n_trades": 0, "pnl": 0, "wr": 0}
+        return {"n_trades": 0, "n_long": 0, "n_short": 0,
+                "n_sl": 0, "n_ts": 0,
+                "wr": 0, "long_wr": 0, "short_wr": 0,
+                "total_pnl": 0, "avg_pnl": 0,
+                "pf": 0, "sharpe": 0, "max_dd": 0}
 
     pnls = [t.pnl_net for t in trades]
     n = len(pnls)
@@ -330,6 +337,21 @@ def main():
     if "trade_direction" not in combined.columns or combined["trade_direction"].isna().all():
         combined["trade_direction"] = np.where(combined["ema_alignment"] > 0, 1.0, -1.0)
 
+    # ── Predict on all bars (once) and analyze distribution ──
+    X = combined[feature_cols].values.astype(np.float32)
+    all_probs = bst.predict(X)
+
+    pcts = [50, 75, 90, 95, 99, 99.5, 99.9]
+    pctiles = np.percentile(all_probs, pcts)
+    print(f"\n  ── PROBABILITY DISTRIBUTION ──")
+    print(f"  Mean={np.mean(all_probs):.4f}  Std={np.std(all_probs):.4f}")
+    for p, v in zip(pcts, pctiles):
+        n_above = int(np.sum(all_probs >= v))
+        print(f"  P{p:<5} = {v:.4f}  ({n_above} bars above)")
+
+    # Attach probs to combined for run_backtest
+    combined["_prob"] = all_probs
+
     # Run backtest with different configs
     configs = [
         ("SL0.5_TS15", 0.5, 15),
@@ -362,12 +384,41 @@ def main():
 
     # Per-threshold scan
     print(f"\n  ── THRESHOLD SCAN (SL=0.5% TS=15min) ──")
-    for thr in [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]:
+    for thr in [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95]:
         trades = run_backtest(combined, bst, feature_cols,
                               threshold=thr, sl_pct=0.5, max_hold_min=15)
         stats = compute_stats(trades)
-        print(f"  thr={thr:.1f}  N={stats['n_trades']:>5}  L={stats['n_long']:>4} S={stats['n_short']:>4}  "
+        print(f"  thr={thr:.2f}  N={stats['n_trades']:>5}  L={stats['n_long']:>4} S={stats['n_short']:>4}  "
               f"WR={stats['wr']:>5.1f}%  PnL={stats['total_pnl']:>+8.2f}%  PF={stats['pf']:.2f}")
+
+    # Cooldown scan — the model fires too often, need longer cooldown
+    print(f"\n  ── COOLDOWN SCAN (SL=0.5% TS=15min thr={threshold:.3f}) ──")
+    for cd in [5, 15, 30, 60, 120, 240]:
+        trades = run_backtest(combined, bst, feature_cols,
+                              threshold=threshold, sl_pct=0.5,
+                              max_hold_min=15, cooldown_bars=cd)
+        stats = compute_stats(trades)
+        print(f"  cd={cd:>3}min  N={stats['n_trades']:>5}  L={stats['n_long']:>4} S={stats['n_short']:>4}  "
+              f"WR={stats['wr']:>5.1f}%  PnL={stats['total_pnl']:>+8.2f}%  PF={stats['pf']:.2f}")
+
+    # Best combo scan: high threshold + reasonable SL/TS
+    print(f"\n  ── BEST COMBO SCAN (high selectivity) ──")
+    best_combos = [
+        ("thr0.7_SL0.5_TS15", 0.7, 0.5, 15),
+        ("thr0.7_SL0.5_TS30", 0.7, 0.5, 30),
+        ("thr0.7_SL1.0_TS15", 0.7, 1.0, 15),
+        ("thr0.8_SL0.5_TS15", 0.8, 0.5, 15),
+        ("thr0.8_SL1.0_TS30", 0.8, 1.0, 30),
+        ("thr0.9_SL1.0_TS30", 0.9, 1.0, 30),
+        ("thr0.95_SL1.0_TS60", 0.95, 1.0, 60),
+    ]
+    for name, thr, sl, ts in best_combos:
+        trades = run_backtest(combined, bst, feature_cols,
+                              threshold=thr, sl_pct=sl, max_hold_min=ts,
+                              cooldown_bars=30)
+        stats = compute_stats(trades)
+        print(f"  {name:<24} N={stats['n_trades']:>5}  WR={stats['wr']:>5.1f}%  "
+              f"PnL={stats['total_pnl']:>+8.2f}%  PF={stats['pf']:.2f}  DD={stats['max_dd']:>7.2f}")
 
     print(f"{'='*110}")
 

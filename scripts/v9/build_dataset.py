@@ -500,7 +500,6 @@ def download_1m(symbol: str, start_ts_ms: int, end_ts_ms: int) -> pd.DataFrame:
             if all_ohlcv:
                 df = pd.DataFrame(all_ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
                 df = df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
-                df = df[(df["timestamp"] >= start_ts_ms) & (df["timestamp"] <= end_ts_ms)]
 
                 # Merge with existing cache (keep all unique timestamps)
                 if cache_file.exists():
@@ -510,12 +509,16 @@ def download_1m(symbol: str, start_ts_ms: int, end_ts_ms: int) -> pd.DataFrame:
                     except Exception:
                         pass  # If cache is corrupted, just use new data
 
+                # Save full cache (all data we have)
                 df.to_parquet(cache_file, index=False)
+
+                # Filter to requested range BEFORE returning
+                result = df[(df["timestamp"] >= start_ts_ms) & (df["timestamp"] <= end_ts_ms)].copy()
                 LOG.info("  %s: %d bars from %s (1m)  [%s → %s]",
-                         symbol, len(df), exchange_id,
-                         pd.to_datetime(df["timestamp"].min(), unit="ms").strftime("%Y-%m-%d"),
-                         pd.to_datetime(df["timestamp"].max(), unit="ms").strftime("%Y-%m-%d"))
-                return df.copy()
+                         symbol, len(result), exchange_id,
+                         pd.to_datetime(result["timestamp"].min(), unit="ms").strftime("%Y-%m-%d"),
+                         pd.to_datetime(result["timestamp"].max(), unit="ms").strftime("%Y-%m-%d"))
+                return result
 
         except Exception as e:
             LOG.warning("  %s on %s: %s", symbol, exchange_id, str(e)[:80])
