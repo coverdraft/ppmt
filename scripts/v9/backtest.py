@@ -36,7 +36,6 @@ PROJECT_ROOT = SCRIPT_DIR.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.v9.build_dataset import compute_features_1m, download_1m, FEATURE_NAMES
-from scripts.v7.paper_trader.feed import Feed
 
 LOG = logging.getLogger("v9_bt")
 
@@ -220,7 +219,6 @@ def main():
                         help="Stop loss %% (default: 0.5)")
     parser.add_argument("--max-hold-min", type=float, default=15,
                         help="Max hold minutes (default: 15)")
-    parser.add_argument("--exchange", default="bybit")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO,
@@ -243,37 +241,64 @@ def main():
 
     LOG.info("Model loaded. Threshold=%.3f Features=%d", threshold, len(feature_cols))
 
-    # Build 1m data
-    feed = Feed(exchange_id=args.exchange)
+    # Build 1m data — use download_1m from build_dataset (same code as training)
     symbols = args.symbols.split(",")
+
+    # Calculate timestamp range for download_1m
+    now_ms = int(time.time() * 1000)
+    start_ms = now_ms - args.days * 86400 * 1000
 
     all_dfs = []
     for symbol in symbols:
         base = symbol.split("/")[0]
         LOG.info("Fetching 1m data for %s (%d days)...", symbol, args.days)
         try:
-            ohlcv = feed.fetch_history(symbol, "1m", limit=int(args.days * 1440 * 1.1))
-            btc = feed.fetch_history("BTC/USDT", "1m", limit=int(args.days * 1440 * 1.1))
+            # Use download_1m (same as build_dataset) — guaranteed to return
+            # DataFrame with [timestamp, open, high, low, close, volume]
+            ohlcv_df = download_1m(base, start_ts_ms=start_ms, end_ts_ms=now_ms)
 
-            ohlcv_df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
+            if ohlcv_df is None or len(ohlcv_df) < 60:
+                LOG.warning("  %s: insufficient data (%d bars), skipping", symbol,
+                            len(ohlcv_df) if ohlcv_df is not None else 0)
+                continue
 
-            # Fresh arrays for CoW
-            ohlcv_df = pd.DataFrame({col: ohlcv_df[col].values.copy() for col in ohlcv_df.columns})
+            # Save OHLCV columns before feature computation (they get dropped)
+            ohlcv_cols = ohlcv_df[["open", "high", "low", "close", "volume"]].copy()
 
             feat_df = compute_features_1m(ohlcv_df, symbol=base)
 
-            # Merge OHLCV columns back (needed for backtest SL/exit logic)
-            for col in ["open", "high", "low", "close", "volume"]:
-                if col not in feat_df.columns:
-                    feat_df[col] = ohlcv_df[col].values
+            if len(feat_df) == 0:
+                LOG.warning("  %s: compute_features_1m returned empty, skipping", symbol)
+                continue
 
-            feat_df = pd.DataFrame({col: feat_df[col].values.copy() for col in feat_df.columns})
+            # Merge OHLCV columns back (needed for backtest SL/exit logic)
+            # Use explicit length check to avoid misalignment
+            n_feat = len(feat_df)
+            n_ohlcv = len(ohlcv_cols)
+            if n_feat != n_ohlcv:
+                LOG.warning("  %s: row mismatch feat=%d ohlcv=%d, aligning by index",
+                            symbol, n_feat, n_ohlcv)
+                # Take the last n_feat rows from ohlcv (features may drop warmup rows)
+                ohlcv_cols = ohlcv_cols.iloc[-n_feat:].reset_index(drop=True)
+                feat_df = feat_df.reset_index(drop=True)
+
+            for col in ["open", "high", "low", "close", "volume"]:
+                feat_df[col] = ohlcv_cols[col].values
+
             feat_df["symbol"] = base
 
+            # Validate OHLCV columns present
+            missing_ohlcv = [col for col in ["open", "high", "low", "close"] if col not in feat_df.columns]
+            if missing_ohlcv:
+                LOG.error("  %s: BUG — columns missing after merge: %s", symbol, missing_ohlcv)
+                continue
+
             all_dfs.append(feat_df)
-            LOG.info("  %s: %d bars", symbol, len(feat_df))
+            LOG.info("  %s: %d bars, columns include OHLCV ✓", symbol, len(feat_df))
         except Exception as e:
             LOG.error("Failed for %s: %s", symbol, e)
+            import traceback
+            traceback.print_exc()
             continue
 
     if not all_dfs:
@@ -281,7 +306,25 @@ def main():
         sys.exit(1)
 
     combined = pd.concat(all_dfs, ignore_index=True)
-    LOG.info("Combined: %d bars", len(combined))
+
+    # Sort by timestamp to interleave symbols (critical for multi-symbol backtest)
+    if "timestamp" in combined.columns:
+        combined = combined.sort_values("timestamp", ignore_index=True)
+
+    LOG.info("Combined: %d bars  columns=%s", len(combined),
+             [c for c in combined.columns if c in ("open","high","low","close","volume","symbol")])
+
+    # Validate combined has required columns
+    for col in ["close", "high", "low"]:
+        if col not in combined.columns:
+            LOG.error("FATAL: column '%s' missing from combined DataFrame! Available: %s",
+                      col, combined.columns.tolist())
+            sys.exit(1)
+
+    # Fill NaN in feature columns (LightGBM handles NaN natively, but fill for safety)
+    for col in feature_cols:
+        if col in combined.columns and combined[col].isna().any():
+            combined[col] = combined[col].fillna(0)
 
     # Fill trade_direction for prediction
     if "trade_direction" not in combined.columns or combined["trade_direction"].isna().all():
