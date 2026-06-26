@@ -220,6 +220,18 @@ def compute_microstructure_features(df_1m: pd.DataFrame) -> pd.DataFrame:
 # AGGREGATION (ROBUST)
 # ============================================================================
 
+def _datetime_to_ms(series: pd.Series) -> np.ndarray:
+    """Convert a datetime Series to int64 milliseconds since epoch.
+    
+    Handles both tz-aware and tz-naive datetime in all pandas versions.
+    Uses .values.astype(np.int64) which always gives nanoseconds from numpy,
+    bypassing pandas timezone quirks.
+    """
+    arr = series.values  # numpy datetime64[ns] array
+    ns = arr.astype(np.int64)  # nanoseconds since epoch
+    return (ns // 10**6).astype(np.int64)  # milliseconds
+
+
 def aggregate_1m_to_5m(df_1m: pd.DataFrame) -> pd.DataFrame:
     """Aggregate 1m candles into 5m candles. Timestamps always in int64 ms."""
     df = df_1m.copy()
@@ -240,8 +252,8 @@ def aggregate_1m_to_5m(df_1m: pd.DataFrame) -> pd.DataFrame:
     }).dropna()
     
     agg = agg.reset_index()
-    # Convert datetime back to int64 ms
-    agg["timestamp"] = agg["timestamp"].astype(np.int64) // 10**6
+    # Convert datetime back to int64 ms (robust for all pandas versions)
+    agg["timestamp"] = _datetime_to_ms(agg["timestamp"])
     
     return agg
 
@@ -263,7 +275,8 @@ def aggregate_5m_to_n(df_5m: pd.DataFrame, n: int) -> pd.DataFrame:
     }).dropna()
     
     agg = agg.reset_index()
-    agg["timestamp"] = agg["timestamp"].astype(np.int64) // 10**6
+    # Convert datetime back to int64 ms (robust for all pandas versions)
+    agg["timestamp"] = _datetime_to_ms(agg["timestamp"])
     
     return agg
 
@@ -492,7 +505,8 @@ def compute_higher_tf_features(df_5m: pd.DataFrame, btc_5m: pd.DataFrame) -> pd.
     btc_15m["btc_ema_9_15m"] = btc_15m["close"].ewm(span=9, adjust=False).mean()
     btc_15m["btc_ema_20_15m"] = btc_15m["close"].ewm(span=20, adjust=False).mean()
     btc_15m["btc_trend_15m"] = np.sign(btc_15m["btc_ema_9_15m"] - btc_15m["btc_ema_20_15m"]).astype(int)
-    df_15m["btc_trend_15m"] = btc_15m["btc_trend_15m"].values[:len(df_15m)]
+    # Use merge_asof instead of direct array assignment (avoids length mismatch)
+    df_15m = safe_merge_asof(df_15m, btc_15m[["timestamp", "btc_trend_15m"]], on="timestamp")
     
     # Merge 15m features into 5m (using merge_asof)
     htf_15m_cols = ["timestamp"] + FEATURES_15M
@@ -522,7 +536,8 @@ def compute_higher_tf_features(df_5m: pd.DataFrame, btc_5m: pd.DataFrame) -> pd.
     btc_1h["btc_ema_9_1h"] = btc_1h["close"].ewm(span=9, adjust=False).mean()
     btc_1h["btc_ema_20_1h"] = btc_1h["close"].ewm(span=20, adjust=False).mean()
     btc_1h["btc_trend_1h"] = np.sign(btc_1h["btc_ema_9_1h"] - btc_1h["btc_ema_20_1h"]).astype(int)
-    df_1h["btc_trend_1h"] = btc_1h["btc_trend_1h"].values[:len(df_1h)]
+    # Use merge_asof instead of direct array assignment (avoids length mismatch)
+    df_1h = safe_merge_asof(df_1h, btc_1h[["timestamp", "btc_trend_1h"]], on="timestamp")
     
     # Merge 1h features into 5m
     htf_1h_cols = ["timestamp", "trend_1h", "rsi_1h", "vol_regime_1h", "btc_trend_1h"]
