@@ -12,7 +12,7 @@ USAGE:
     python scripts/v12/download_1m_data.py --min-bars 100000  # re-download if fewer bars
 
 Bybit public API (no key needed):
-  - 1000 candles per request
+  - 1000 candles per request (returns 999 when last candle is partial)
   - Rate limit: ~10 req/s
   - Symbols: SOL/USDT, DOGE/USDT, AVAX/USDT, BTC/USDT, ETH/USDT
 """
@@ -38,6 +38,7 @@ DEFAULT_SYMBOLS = ["SOL", "DOGE", "AVAX", "BTC", "ETH"]
 DAYS_DEFAULT = 365  # 1 year of 1m data
 # 365 days × 24h × 60min = 525,600 expected candles
 MIN_BARS_DEFAULT = 100_000  # Force re-download if fewer than this
+PAGE_SIZE = 1000  # Bybit max per request
 
 
 def download_1m(symbol: str, days: int = 365, exchange_id: str = "bybit") -> pd.DataFrame:
@@ -60,13 +61,14 @@ def download_1m(symbol: str, days: int = 365, exchange_id: str = "bybit") -> pd.
     all_candles = []
     since = start_ms
     consecutive_errors = 0
+    last_batch_ts = None  # track last timestamp to detect stale pages
 
     LOG.info("Downloading %s 1m data: %d days from %s...",
              symbol, days, exchange_id)
 
     while since < now_ms:
         try:
-            batch = ex.fetch_ohlcv(pair, "1m", since=since, limit=1000)
+            batch = ex.fetch_ohlcv(pair, "1m", since=since, limit=PAGE_SIZE)
             consecutive_errors = 0
         except Exception as e:
             consecutive_errors += 1
@@ -78,22 +80,32 @@ def download_1m(symbol: str, days: int = 365, exchange_id: str = "bybit") -> pd.
             continue
 
         if not batch:
+            LOG.info("  %s: empty batch at %s — done", symbol,
+                     pd.to_datetime(since, unit="ms").strftime("%Y-%m-%d"))
             break
 
-        all_candles.extend(batch)
-        # Move past the last candle we got
-        since = batch[-1][0] + 60_000  # +1 minute
+        # Detect stale page: same last timestamp as previous batch
+        batch_last_ts = batch[-1][0]
+        if last_batch_ts is not None and batch_last_ts == last_batch_ts:
+            LOG.info("  %s: no new data (same last ts) — done", symbol)
+            break
+        last_batch_ts = batch_last_ts
 
-        if len(batch) < 1000:
-            break  # No more data available
+        all_candles.extend(batch)
+
+        # Advance since to just after the last candle we received
+        since = batch_last_ts + 60_000  # +1 minute
 
         # Progress
-        pct = min(100, (since - start_ms) / (now_ms - start_ms) * 100)
         n_bars = len(all_candles)
-        LOG.info("  %s: %d bars fetched (%.0f%%)", symbol, n_bars, pct)
+        pct = min(100, (since - start_ms) / (now_ms - start_ms) * 100)
+        LOG.info("  %s: %d bars fetched (up to %s, %.0f%%)",
+                 symbol, n_bars,
+                 pd.to_datetime(batch_last_ts, unit="ms").strftime("%Y-%m-%d %H:%M"),
+                 pct)
 
-        # Small delay to avoid rate limits
-        time.sleep(0.2)
+        # Rate limit
+        time.sleep(0.3)
 
     df = pd.DataFrame(all_candles, columns=["timestamp", "open", "high", "low", "close", "volume"])
 
