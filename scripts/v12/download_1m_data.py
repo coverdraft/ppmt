@@ -8,6 +8,8 @@ USAGE:
     python scripts/v12/download_1m_data.py
     python scripts/v12/download_1m_data.py --symbols SOL,DOGE,AVAX
     python scripts/v12/download_1m_data.py --days 365
+    python scripts/v12/download_1m_data.py --force          # overwrite existing cache
+    python scripts/v12/download_1m_data.py --min-bars 100000  # re-download if fewer bars
 
 Bybit public API (no key needed):
   - 1000 candles per request
@@ -34,6 +36,8 @@ CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 DEFAULT_SYMBOLS = ["SOL", "DOGE", "AVAX", "BTC", "ETH"]
 DAYS_DEFAULT = 365  # 1 year of 1m data
+# 365 days × 24h × 60min = 525,600 expected candles
+MIN_BARS_DEFAULT = 100_000  # Force re-download if fewer than this
 
 
 def download_1m(symbol: str, days: int = 365, exchange_id: str = "bybit") -> pd.DataFrame:
@@ -55,6 +59,7 @@ def download_1m(symbol: str, days: int = 365, exchange_id: str = "bybit") -> pd.
 
     all_candles = []
     since = start_ms
+    consecutive_errors = 0
 
     LOG.info("Downloading %s 1m data: %d days from %s...",
              symbol, days, exchange_id)
@@ -62,8 +67,13 @@ def download_1m(symbol: str, days: int = 365, exchange_id: str = "bybit") -> pd.
     while since < now_ms:
         try:
             batch = ex.fetch_ohlcv(pair, "1m", since=since, limit=1000)
+            consecutive_errors = 0
         except Exception as e:
-            LOG.warning("Fetch error: %s — retrying in 5s", e)
+            consecutive_errors += 1
+            if consecutive_errors >= 5:
+                LOG.error("Too many errors for %s, stopping", symbol)
+                break
+            LOG.warning("Fetch error (%d/5): %s — retrying in 5s", consecutive_errors, e)
             time.sleep(5)
             continue
 
@@ -75,22 +85,28 @@ def download_1m(symbol: str, days: int = 365, exchange_id: str = "bybit") -> pd.
         since = batch[-1][0] + 60_000  # +1 minute
 
         if len(batch) < 1000:
-            break  # No more data
+            break  # No more data available
 
         # Progress
         pct = min(100, (since - start_ms) / (now_ms - start_ms) * 100)
         n_bars = len(all_candles)
         LOG.info("  %s: %d bars fetched (%.0f%%)", symbol, n_bars, pct)
 
+        # Small delay to avoid rate limits
+        time.sleep(0.2)
+
     df = pd.DataFrame(all_candles, columns=["timestamp", "open", "high", "low", "close", "volume"])
 
     # Remove duplicates
     df = df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
 
-    LOG.info("Downloaded %s: %d 1m candles (%s to %s)",
-             symbol, len(df),
-             pd.to_datetime(df["timestamp"].iloc[0], unit="ms").strftime("%Y-%m-%d"),
-             pd.to_datetime(df["timestamp"].iloc[-1], unit="ms").strftime("%Y-%m-%d"))
+    if len(df) > 0:
+        LOG.info("Downloaded %s: %d 1m candles (%s to %s)",
+                 symbol, len(df),
+                 pd.to_datetime(df["timestamp"].iloc[0], unit="ms").strftime("%Y-%m-%d"),
+                 pd.to_datetime(df["timestamp"].iloc[-1], unit="ms").strftime("%Y-%m-%d"))
+    else:
+        LOG.warning("Downloaded %s: 0 candles!", symbol)
 
     return df
 
@@ -112,6 +128,10 @@ def main():
     parser.add_argument("--exchange", default="bybit",
                         choices=["bybit", "okx", "binance"],
                         help="Exchange to use")
+    parser.add_argument("--force", action="store_true",
+                        help="Force re-download even if cache exists")
+    parser.add_argument("--min-bars", type=int, default=MIN_BARS_DEFAULT,
+                        help="Re-download if existing cache has fewer bars (default: 100000)")
     args = parser.parse_args()
 
     symbols = [s.strip() for s in args.symbols.split(",")]
@@ -119,19 +139,35 @@ def main():
     LOG.info("=" * 50)
     LOG.info("Downloading 1m data for %d symbols × %d days", len(symbols), args.days)
     LOG.info("Cache dir: %s", CACHE_DIR)
+    LOG.info("Force: %s, Min bars: %d", args.force, args.min_bars)
     LOG.info("=" * 50)
 
     for symbol in symbols:
         pair = f"{symbol}_1m.parquet"
         existing = CACHE_DIR / pair
-        if existing.exists():
+
+        # Check if we should skip
+        if existing.exists() and not args.force:
             existing_df = pd.read_parquet(existing)
-            LOG.info("%s: cache exists (%d bars) — use --force to overwrite", symbol, len(existing_df))
-            continue
+            n_bars = len(existing_df)
+            if n_bars >= args.min_bars:
+                LOG.info("%s: cache exists with %d bars (>= %d threshold) — skipping",
+                         symbol, n_bars, args.min_bars)
+                continue
+            else:
+                LOG.info("%s: cache exists but only %d bars (< %d threshold) — re-downloading",
+                         symbol, n_bars, args.min_bars)
+        elif args.force and existing.exists():
+            existing_df = pd.read_parquet(existing)
+            LOG.info("%s: --force specified, overwriting %d existing bars",
+                     symbol, len(existing_df))
 
         try:
             df = download_1m(symbol, days=args.days, exchange_id=args.exchange)
-            save_parquet(df, symbol)
+            if len(df) > 0:
+                save_parquet(df, symbol)
+            else:
+                LOG.error("No data downloaded for %s", symbol)
         except Exception as e:
             LOG.error("Failed to download %s: %s", symbol, e)
             continue
@@ -140,7 +176,12 @@ def main():
     LOG.info("Download complete. Cache contents:")
     for p in sorted(CACHE_DIR.glob("*_1m.parquet")):
         size_mb = p.stat().st_size / 1e6
-        LOG.info("  %s (%.1f MB)", p.name, size_mb)
+        # Read and show row count
+        try:
+            n = len(pd.read_parquet(p, columns=["timestamp"]))
+            LOG.info("  %s: %d bars (%.1f MB)", p.name, n, size_mb)
+        except Exception:
+            LOG.info("  %s (%.1f MB)", p.name, size_mb)
 
 
 if __name__ == "__main__":

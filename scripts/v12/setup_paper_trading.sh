@@ -66,24 +66,10 @@ python -c "import ccxt; print(f'    ccxt {ccxt.__version__}')" 2>/dev/null || ec
 echo ""
 echo "[4a/5] Checking 1m OHLCV data cache..."
 
-CACHE_DIR="data/v10/ohlcv_cache"
-mkdir -p "$CACHE_DIR"
-
-NEED_DOWNLOAD=false
-for SYM in SOL DOGE AVAX BTC ETH; do
-    if [ ! -f "$CACHE_DIR/${SYM}_1m.parquet" ]; then
-        NEED_DOWNLOAD=true
-        break
-    fi
-done
-
-if [ "$NEED_DOWNLOAD" = true ]; then
-    echo "  Downloading 1m data from Bybit (~10-15 min)..."
-    python scripts/v12/download_1m_data.py --days 365
-else
-    echo "  1m data cache exists:"
-    ls -lh "$CACHE_DIR"/*_1m.parquet 2>/dev/null | awk '{print "    " $NF, $5}'
-fi
+# Always run download script — it checks bar count and skips if sufficient
+# min-bars=100000 ensures we have enough data (~70 days minimum)
+echo "  Downloading 1m data from Bybit (skips if cache has >= 100K bars)..."
+python scripts/v12/download_1m_data.py --days 365 --min-bars 100000
 
 # --- 4b. Train V11 models ---
 echo ""
