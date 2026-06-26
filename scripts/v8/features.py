@@ -358,7 +358,7 @@ def compute_features(
     df["squeeze_score"] = np.clip(bollinger_bw / np.maximum(df["atr_pct"].values, 1e-10), 0, 20)
 
     # Vol regime
-    df["vol_regime"] = np.digitize(np.nan_to_num(df["atr_pct"].values, 0), [0.3, 0.8, 2.0]).astype(float)
+    df["vol_regime"] = np.digitize(np.nan_to_num(df["atr_pct"].values, nan=0.0), [0.3, 0.8, 2.0]).astype(float)
 
     # Store ATR_14 in price units for label computation
     df["_atr_14_price"] = atr_14
@@ -509,7 +509,7 @@ def compute_features(
         atr_12 = pd.Series(atr_14).rolling(12, min_periods=3).mean().values
         df["atr_pct_1h"] = atr_12 / np.maximum(c_post, 1e-10) * 100
         df["vol_regime_1h"] = np.digitize(
-            np.nan_to_num(df["atr_pct_1h"].values, 0), [0.3, 0.8, 2.0]
+            np.nan_to_num(df["atr_pct_1h"].values, nan=0.0), [0.3, 0.8, 2.0]
         ).astype(float)
 
     # ── G10: Cross-sectional ───────────────────────────────────────
