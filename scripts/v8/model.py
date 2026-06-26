@@ -300,6 +300,11 @@ def build_dataset(
             btc_df = pd.DataFrame(btc, columns=["timestamp", "open", "high", "low", "close", "volume"])
             eth_df = pd.DataFrame(eth, columns=["timestamp", "open", "high", "low", "close", "volume"])
 
+            # Drop duplicate timestamps (exchange data can have duplicates)
+            ohlcv_df = ohlcv_df.drop_duplicates(subset=["timestamp"], keep="first")
+            btc_df = btc_df.drop_duplicates(subset=["timestamp"], keep="first")
+            eth_df = eth_df.drop_duplicates(subset=["timestamp"], keep="first")
+
             common_ts = set(ohlcv_df["timestamp"]) & set(btc_df["timestamp"]) & set(eth_df["timestamp"])
             ohlcv_df = ohlcv_df[ohlcv_df["timestamp"].isin(common_ts)].sort_values("timestamp").reset_index(drop=True)
             btc_df = btc_df[btc_df["timestamp"].isin(common_ts)].sort_values("timestamp").reset_index(drop=True)

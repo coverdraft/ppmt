@@ -438,6 +438,7 @@ def compute_features(
     df["ema21_bounce_score"] = ema21_bounce
 
     # ── G7: BTC lead/lag ─────────────────────────────────────────
+    # Compute BTC features on btc_df first, then merge safely
     btc = btc_df[["timestamp", "close", "high", "low", "volume"]].copy()
     btc = btc.rename(columns={
         "close": "btc_close", "volume": "btc_volume",
@@ -450,17 +451,22 @@ def compute_features(
     btc["btc_impulse_score"] = (btc["btc_ret_1m"].abs() / btc_ret_std).clip(0, 10)
 
     btc = btc[["timestamp", "btc_ret_1m", "btc_ret_5m", "btc_impulse_score"]]
+    # Drop duplicate timestamps in BTC data to prevent row multiplication
+    btc = btc.drop_duplicates(subset=["timestamp"], keep="first")
     df = df.merge(btc, on="timestamp", how="left")
 
+    # After merge, re-extract close array (length may differ if BTC had missing timestamps)
+    c_post = df["close"].values.astype(np.float64)
+
     # Alt-BTC lag
-    alt_ret_1 = pd.Series(c).pct_change(1, fill_method=None).values
+    alt_ret_1 = pd.Series(c_post).pct_change(1, fill_method=None).values
     btc_ret_1 = df["btc_ret_1m"].fillna(0).values
     df["alt_btc_lag_1"] = np.clip(
         np.sign(btc_ret_1) * (np.abs(btc_ret_1) - np.abs(alt_ret_1)), -0.1, 0.1
     )
 
     # Alt-BTC spread 5m
-    alt_ret_5 = pd.Series(c).pct_change(5, fill_method=None).values * 100
+    alt_ret_5 = pd.Series(c_post).pct_change(5, fill_method=None).values * 100
     btc_ret_5_pct = df["btc_ret_5m"].fillna(0).values * 100
     df["alt_btc_spread_5m"] = alt_ret_5 - btc_ret_5_pct
 

@@ -51,11 +51,11 @@ from scripts.v8.validation import PurgedKFold
 
 LOG = logging.getLogger("v8_runner")
 
-# Default tokens — top traded by the trader from MEXC data
+# Default tokens — available on Bybit (MEXC-only tokens like RIVER/PIPPIN/ZEC excluded)
 DEFAULT_SYMBOLS = [
-    "RIVER/USDT", "PIPPIN/USDT", "ZEC/USDT", "SUI/USDT",
-    "AVAX/USDT", "XRP/USDT", "PENGU/USDT", "HYPE/USDT",
-    "PUMP/USDT", "ADA/USDT",
+    "SOL/USDT", "AVAX/USDT", "XRP/USDT", "SUI/USDT",
+    "ADA/USDT", "DOGE/USDT", "PEPE/USDT", "LINK/USDT",
+    "WIF/USDT", "SHIB/USDT",
 ]
 
 
