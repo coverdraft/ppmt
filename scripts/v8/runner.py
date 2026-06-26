@@ -31,6 +31,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+# Force-disable Copy-on-Write — MUST be set before any pandas operation
+pd.options.mode.copy_on_write = False
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))

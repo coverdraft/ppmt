@@ -23,12 +23,16 @@ from __future__ import annotations
 import json
 import logging
 import time
+import traceback
 from pathlib import Path
 from typing import Optional
 
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
+
+# Force-disable Copy-on-Write — causes "assignment destination is read-only"
+pd.options.mode.copy_on_write = False
 
 from .features import FEATURE_NAMES, N_FEATURES
 from .labels import compute_ev_labels_fast, compute_ev_labels_both_sides, label_stats
@@ -344,7 +348,7 @@ def build_dataset(
                      np.mean(valid_short) if len(valid_short) > 0 else 0)
 
         except Exception as e:
-            LOG.error("Failed building dataset for %s: %s", symbol, e)
+            LOG.error("Failed building dataset for %s: %s\n%s", symbol, e, traceback.format_exc())
             continue
 
     if not all_dfs:

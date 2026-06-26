@@ -42,10 +42,15 @@ Total: ~61 features (pattern-informed, continuous, model-friendly)
 from __future__ import annotations
 
 import logging
+import traceback
 from typing import Optional
 
 import numpy as np
 import pandas as pd
+
+# Force-disable Copy-on-Write — causes "assignment destination is read-only"
+# errors on pandas 2.x when arrays pass through boolean indexing / merge
+pd.options.mode.copy_on_write = False
 
 LOG = logging.getLogger("v8_features")
 
