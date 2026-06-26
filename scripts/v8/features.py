@@ -298,9 +298,16 @@ def compute_features(
     accel = np.diff(ret_1_raw, prepend=0)
     df["price_acceleration"] = accel
 
-    # 20-bar high/low distance
-    h_20 = pd.Series(h).rolling(20, min_periods=1).max().values
-    l_20 = pd.Series(l).rolling(20, min_periods=1).min().values
+    # 20-bar high/low distance — SHIFTED by 1 to exclude current bar
+    # CRITICAL: without shift, h_20[i] includes h[i], so close[i] <= h_20[i]
+    # always, making breakout_strength = 0 for all bars.
+    # With shift(1), h_20 is the max of the PREVIOUS 20 bars,
+    # so close can break above it (true breakout detection).
+    h_20 = pd.Series(h).rolling(20, min_periods=1).max().shift(1).values
+    l_20 = pd.Series(l).rolling(20, min_periods=1).min().shift(1).values
+    # Fill NaN from shift with first available values
+    h_20[:20] = np.nanmax(h_20[20:40]) if len(h_20) > 40 else h_20[len(h_20)//2]
+    l_20[:20] = np.nanmin(l_20[20:40]) if len(l_20) > 40 else l_20[len(l_20)//2]
     df["dist_to_high_20"] = (c - h_20) / np.maximum(h_20, 1e-10) * 100
     df["dist_to_low_20"] = (c - l_20) / np.maximum(l_20, 1e-10) * 100
 
