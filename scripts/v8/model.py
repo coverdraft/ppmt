@@ -311,8 +311,10 @@ def build_dataset(
             eth_df = eth_df[eth_df["timestamp"].isin(common_ts)].sort_values("timestamp").reset_index(drop=True)
 
             feat_df = compute_features(ohlcv_df, btc_df, eth_df, symbol=symbol)
+            # Ensure writability — pandas 2.x CoW can make DataFrames read-only
+            feat_df = feat_df.copy()
 
-            atr_14_price = feat_df["_atr_14_price"].values
+            atr_14_price = feat_df["_atr_14_price"].values.copy()
             long_labels, short_labels = compute_ev_labels_both_sides(
                 closes=feat_df["close"].values,
                 highs=feat_df["high"].values,

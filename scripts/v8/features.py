@@ -239,11 +239,11 @@ def compute_features(
 ) -> pd.DataFrame:
     """Compute all v8 pattern-based features for a symbol's OHLCV data."""
     df = ohlcv_df.copy().reset_index(drop=True)
-    o = df["open"].values.astype(np.float64)
-    h = df["high"].values.astype(np.float64)
-    l = df["low"].values.astype(np.float64)
-    c = df["close"].values.astype(np.float64)
-    v = df["volume"].values.astype(np.float64)
+    o = df["open"].values.copy().astype(np.float64)
+    h = df["high"].values.copy().astype(np.float64)
+    l = df["low"].values.copy().astype(np.float64)
+    c = df["close"].values.copy().astype(np.float64)
+    v = df["volume"].values.copy().astype(np.float64)
     n = len(df)
 
     rng = np.maximum(h - l, 1e-10)
@@ -272,7 +272,7 @@ def compute_features(
 
     # Price acceleration
     prev_c = np.append(c[0], c[:-1])  # previous close per bar (length N)
-    ret_1_raw = np.diff(c, prepend=c[0]) / np.maximum(prev_c, 1e-10)  # prepend to keep length
+    ret_1_raw = (np.diff(c, prepend=c[0]) / np.maximum(prev_c, 1e-10)).copy()  # prepend to keep length
     ret_1_raw[0] = 0
     accel = np.diff(ret_1_raw, prepend=0)
     df["price_acceleration"] = accel
@@ -456,8 +456,11 @@ def compute_features(
     btc = btc.drop_duplicates(subset=["timestamp"], keep="first")
     df = df.merge(btc, on="timestamp", how="left")
 
+    # Deep copy after merge — pandas 2.x CoW makes merged blocks read-only
+    df = df.copy()
+
     # After merge, re-extract close array (length may differ if BTC had missing timestamps)
-    c_post = df["close"].values.astype(np.float64)
+    c_post = df["close"].values.copy().astype(np.float64)
 
     # Alt-BTC lag
     alt_ret_1 = pd.Series(c_post).pct_change(1, fill_method=None).values
