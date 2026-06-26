@@ -1,15 +1,20 @@
 """
 labels.py — v8 Pattern-Informed EV Regression Labels
 
-Based on REAL pattern analysis results:
-  BREAKOUT_UP: 88.2% WR, PF 3.10, median 7.1min → TP first = highly likely
-  BREAKOUT_DOWN: 66.3% WR, PF 0.65, median 27.9min → SL first or timeout
+Based on CORRECTED pattern analysis (446 entries, both long+short):
+  BREAKOUT long:  230 trades, 73.9% WR, PnL +251.1 → THE EDGE
+  BREAKOUT short: 165 trades, 68.5% WR, PnL -556.2 → THE HOLE
+  EMA_BOUNCE short: 14 trades, 85.7% WR, PnL +27.3  → counter-trend edge
+  LEVEL_TEST short: 11 trades, 100% WR, PnL +33.2   → support bounce edge
+
+  Winners: median 8-9min. Losers: median 21-28min (2.5-3x slower)
+  Both directions have ~72% WR but 1:3 win/loss size ratio → risk mgmt is key
 
 Label design:
-  - Lookahead = 6 bars (30min at 5m) — matches BREAKOUT_UP median duration
-  - TP = 1.5×ATR (asymmetric: winners run fast, 7min median)
-  - SL = 1.0×ATR (tight: cut BREAKOUT_DOWN entries quickly)
-  - TIME STOP at 30min — catches the slow bleed of BREAKOUT_DOWN
+  - Lookahead = 6 bars (30min at 5m) — matches winner median duration
+  - TP = 1.5×ATR (asymmetric: winners run fast, 8-9min median)
+  - SL = 1.0×ATR (tight: cut losers fast, they bleed 21-28min)
+  - TIME STOP at 30min — catches the slow bleed of losing entries
   - ATR lagged 3 bars for anti-leakage
 
 Anti-leakage:
@@ -24,10 +29,10 @@ import numpy as np
 
 LOG = logging.getLogger("v8_labels")
 
-# Default parameters — tuned from real pattern analysis
+# Default parameters — tuned from corrected pattern analysis
 DEFAULT_LOOKAHEAD = 6       # 6 bars = 30min at 5m
-DEFAULT_TP_ATR_MULT = 1.5   # Winners run fast (7min median) — give room
-DEFAULT_SL_ATR_MULT = 1.0   # Tight SL — cut losers fast (BREAKDOWN_DOWN PF 0.65)
+DEFAULT_TP_ATR_MULT = 1.5   # Winners run fast (8-9min median) — give room
+DEFAULT_SL_ATR_MULT = 1.0   # Tight SL — cut losers fast (losers bleed 21-28min)
 DEFAULT_ATR_LAG_OFFSET = 3  # 15min lag for anti-leakage
 
 

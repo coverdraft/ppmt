@@ -1,16 +1,20 @@
 """
 model.py — v8 Pattern-Informed LightGBM on EV Labels
 
-Based on REAL pattern analysis:
-  BREAKOUT_UP:  88.2% WR, PF 3.10  → model should strongly favor these entries
-  BREAKOUT_DOWN: 66.3% WR, PF 0.65 → model should filter these out
+Based on CORRECTED pattern analysis (446 entries, both long+short):
+  BREAKOUT long:  230 trades, 73.9% WR, PnL +251.1 → model should strongly favor
+  BREAKOUT short: 165 trades, 68.5% WR, PnL -556.2 → model must filter these out
+  EMA_BOUNCE short: 14 trades, 85.7% WR, PnL +27.3  → counter-trend edge
+  LEVEL_TEST short: 11 trades, 100% WR, PnL +33.2   → support bounce edge
+
+  KEY: Direction matters! Same breakout features → opposite EV per direction.
+  The `trade_direction` feature is the most critical signal.
 
 Strategy:
   1. Regression on EV labels — predict E[trade return] for 30min window
-  2. New G5 (Breakout Context) + G6 (Trend Alignment) features let the model
-     distinguish BREAKOUT_UP from BREAKOUT_DOWN internally
-  3. Sample weighting by uniqueness (López de Prado)
-  4. Two-sided expansion: each bar → LONG + SHORT rows
+  2. Two-sided expansion: each bar → LONG + SHORT rows
+  3. `trade_direction` feature lets model learn direction-dependent EV
+  4. Sample weighting by uniqueness (López de Prado)
   5. Kelly Criterion position sizing from predicted EV
   6. Hard rules: TIME STOP 30min, NO averaging down, max 3 entries
 """

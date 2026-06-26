@@ -1,13 +1,13 @@
 """
 engine.py — v8 Pattern-Informed Live Trading Engine
 
-HARD RULES from pattern analysis:
-1. TIME STOP at 30min — the #1 edge preserver
-2. NO averaging down on BREAKDOWN entries (PF 0.65 = guaranteed loss)
+HARD RULES from corrected pattern analysis (446 entries, long+short):
+1. TIME STOP at 30min — winners 8-9min, losers 21-28min → #1 edge preserver
+2. NO averaging down — both directions have 1:3 win/loss ratio
 3. Max 3 entries per trade (with EV confirmation only)
 4. Max concurrent positions = 5
 5. Position sizing proportional to model confidence (Kelly)
-6. BREAKOUT_UP filter: model should learn to favor trend-aligned breakouts
+6. Direction-aware: model learns breakout longs win, breakout shorts lose
 """
 from __future__ import annotations
 

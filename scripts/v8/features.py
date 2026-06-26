@@ -1,37 +1,35 @@
 """
 features.py — v8 Pattern-Based Features for Low-TF Multi-Token Trading
 
-DESIGN PHILOSOPHY — Based on REAL pattern analysis of 269 matched trades:
+DESIGN PHILOSOPHY — Based on CORRECTED pattern analysis of 446 matched trades:
   
-  DISCOVERED EDGE:
-    BREAKOUT_UP:    88.2% WR, PF 3.10, +156.0 USDT  ← THE EDGE
-    EMA_BOUNCE:      60% WR, PF 3.04, +3.6 USDT     ← promising (n=5)
-    BREAKOUT_DOWN:  66.3% WR, PF 0.65, -263.7 USDT  ← THE HOLE
+  DISCOVERED EDGES:
+    BREAKOUT long:     230 trades, 73.9% WR, PnL +251.1  ← THE MAIN EDGE
+    EMA_BOUNCE short:   14 trades, 85.7% WR, PnL +27.3   ← counter-trend edge
+    LEVEL_TEST short:   11 trades, 100%  WR, PnL +33.2   ← support bounce
   
-  KEY INSIGHT: The trader's edge comes from momentum breakouts UP.
-  The losses come from entering long on breakdowns (falling knives).
+  THE HOLE:
+    BREAKOUT short:    165 trades, 68.5% WR, PnL -556.2  ← THE HOLE
   
-  CRITICAL DISTINGUISHING FEATURES (from pattern analysis):
-    BREAKOUT_UP vs BREAKOUT_DOWN differ on:
-    - dist_ema21_atr:  +0.77 vs +1.45 (breakout_up closer to EMA21)
-    - ema_alignment:   +0.68 dominant (trend-aligned breakouts win)
-    - pullback_depth:  different (shallow pullback before break = good)
-    - vol_ratio:       1.41 (volume confirms real breakouts)
-    - consecutive_bars: 0.65 (strong preceding momentum)
-    - ret_3_pct:       higher for winning breakouts
+  KEY INSIGHT: Direction matters more than pattern type.
+    Breakout LONG = profitable. Breakout SHORT = catastrophic.
+    Counter-trend SHORT (EMA bounce, level test) = profitable.
+    
+  The `trade_direction` feature is CRITICAL — it lets the model learn
+  that the same breakout features predict opposite EV per direction.
   
-  FEATURE STRATEGY:
-    Instead of binary pattern flags (too coarse — 96.7% BREAKOUT),
-    encode the CONTINUOUS features that distinguish winning from losing
-    entries. Let the model learn the boundaries.
+  RISK MANAGEMENT FINDING:
+    Both directions have ~72% WR but 1:3 win/loss size ratio.
+    Winners: median 8-9min. Losers: median 21-28min.
+    → Time stop is the #1 edge preserver.
 
 Feature groups:
   G1: Price microstructure (10) — bar structure, directional conviction
   G2: Returns + momentum (9)    — multi-scale, acceleration, z-scores
   G3: Volatility regime (5)     — ATR, squeeze, regime
   G4: Volume dynamics (5)       — ratio, skew, conviction
-  G5: Breakout context (7)      — NEW: continuous breakout quality features
-  G6: Trend alignment (5)       — NEW: EMA distance, bounce, trend quality
+  G5: Breakout context (7)      — continuous breakout quality features
+  G6: Trend alignment (5)       — EMA distance, bounce, trend quality
   G7: BTC lead/lag (5)          — cross-asset signals
   G8: Derivatives (4)           — funding, OI
   G9: Multi-timeframe (4)       — 1h context

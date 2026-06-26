@@ -1,16 +1,13 @@
 """
 backtest.py — v8 Pattern-Informed Realistic Backtest
 
-KEY RULES from pattern analysis:
-1. TIME STOP at 30min (6 bars) — the most powerful filter
-2. NO averaging down on BREAKOUT_DOWN entries (PF 0.65)
+KEY RULES from corrected pattern analysis (446 entries, long+short):
+1. TIME STOP at 30min (6 bars) — winners 8-9min, losers 21-28min
+2. NO averaging down — both long and short have 1:3 win/loss ratio
 3. Max 3 entries per trade (with EV confirmation only)
 4. ATR-adaptive TP/SL matching training labels
 5. Conservative "both hit same bar" = SL wins
-
-From real pattern analysis:
-  BREAKOUT_UP:  88.2% WR, PF 3.10 → these should be our bread and butter
-  BREAKOUT_DOWN: 66.3% WR, PF 0.65 → filter aggressively
+6. Direction-aware: breakout longs win (+251), breakout shorts lose (-556)
 """
 from __future__ import annotations
 

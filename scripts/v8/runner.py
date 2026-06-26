@@ -11,11 +11,13 @@ Usage:
     # Backtest existing model
     python -m scripts.v8.runner --mode backtest --symbols DOGE/USDT --days 30
 
-Based on REAL pattern analysis (269 matched trades):
-  BREAKOUT_UP:   88.2% WR, PF 3.10  → THE EDGE — model should favor
-  BREAKOUT_DOWN:  66.3% WR, PF 0.65  → THE HOLE — model should filter
-  EMA_BOUNCE:     60% WR, PF 3.04    → promising (n=5, needs more data)
+Based on CORRECTED pattern analysis (446 entries, long+short):
+  BREAKOUT long:     230 trades, 73.9% WR, PnL +251.1  → THE EDGE
+  BREAKOUT short:    165 trades, 68.5% WR, PnL -556.2  → THE HOLE
+  EMA_BOUNCE short:   14 trades, 85.7% WR, PnL +27.3   → counter-trend edge
+  LEVEL_TEST short:   11 trades, 100%  WR, PnL +33.2   → support bounce
   
+  Risk finding: 72% WR but 1:3 win/loss ratio → time stop is key
   Hard rules: 30min time stop, no averaging down, max 3 entries
 """
 from __future__ import annotations
@@ -209,7 +211,7 @@ def main():
     print(f"  Days:     {args.days}")
     print(f"  Exchange: {args.exchange}")
     print()
-    print("  Architecture (from REAL pattern analysis):")
+    print("  Architecture (from corrected pattern analysis):")
     print(f"    Label:     EV regression (TP={TP_ATR_MULT}xATR, SL={SL_ATR_MULT}xATR)")
     print(f"    Lookahead: {LOOKAHEAD} bars ({LOOKAHEAD * 5} min)")
     print(f"    Time stop: {MAX_HOLD_BARS} bars ({MAX_HOLD_BARS * 5} min)")
@@ -217,14 +219,15 @@ def main():
     print(f"    Model:     Multi-token LightGBM regression")
     print(f"    CV:        Purged K-Fold (purge={LOOKAHEAD}, embargo=3)")
     print()
-    print("  Pattern Analysis Results:")
-    print(f"    BREAKOUT_UP:   88.2% WR, PF 3.10 = THE EDGE")
-    print(f"    BREAKOUT_DOWN: 66.3% WR, PF 0.65 = THE HOLE")
-    print(f"    EMA_BOUNCE:    60% WR, PF 3.04 = promising (n=5)")
+    print("  Pattern Analysis Results (446 entries, long+short):")
+    print(f"    BREAKOUT long:     73.9% WR, PnL +251 = THE EDGE")
+    print(f"    BREAKOUT short:    68.5% WR, PnL -556 = THE HOLE")
+    print(f"    EMA_BOUNCE short:  85.7% WR, PnL +27  = counter-trend edge")
+    print(f"    LEVEL_TEST short:  100%  WR, PnL +33  = support bounce")
     print()
     print("  Hard Rules:")
-    print(f"    + Time stop at {MAX_HOLD_BARS * 5} min")
-    print(f"    + No averaging down on breakdown entries")
+    print(f"    + Time stop at {MAX_HOLD_BARS * 5} min (winners 8-9m, losers 21-28m)")
+    print(f"    + No averaging down (1:3 win/loss ratio)")
     print(f"    + Max {MAX_ENTRIES_PER_TRADE} entries per trade (averaging UP only)")
     print(f"    + Max {MAX_CONCURRENT_POSITIONS} concurrent positions")
     print("=" * 60 + "\n")
