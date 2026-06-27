@@ -1,18 +1,18 @@
 """
-feed.py — 1m OHLCV data feed with 5m aggregation for V12 paper trading.
+feed.py — OHLCV data feed for V12 paper trading.
 
-Extends the v7 Feed to fetch 1m candles from Bybit and aggregate them into
-5m bars for the V12 feature pipeline. Also fetches BTC and ETH 1m data
-for correlation features.
+Fetches 5m candles directly from Bybit (no 1m→5m aggregation needed).
+Also fetches BTC and ETH 5m data for correlation features.
 
 Design:
-- Fetch 1m candles (Bybit public API, no key needed)
-- Aggregate to 5m OHLCV using PURE INTEGER groupby (no pd.to_datetime)
-- Return 5m DataFrames ready for feature computation
+- Fetch 5m candles directly from Bybit's 5m API (same source as wait_for_next_5m_close)
+- Paginate backward for warmup windows (up to 1000 candles per request)
+- NEVER aggregates 1m→5m — eliminates all timestamp corruption issues
+- Returns 5m DataFrames ready for feature computation
 
-CRITICAL: NEVER use pd.to_datetime on timestamp columns. It produces
-incorrect datetimes on some pandas versions/platforms (shifted ~15h).
-All aggregation uses integer division on ms timestamps.
+The 1m→5m aggregation was removed because Bybit's 1m API + pandas aggregation
+produced timestamps shifted ~15h on some platforms. Using the 5m API directly
+gives timestamps consistent with wait_for_next_5m_close.
 """
 from __future__ import annotations
 
@@ -39,16 +39,20 @@ class Feed:
         except Exception as e:
             LOG.warning("v12_feed: load_markets failed (will retry): %s", e)
 
-    def fetch_1m_history(self, symbol: str, limit: int = 1000) -> list[list]:
-        """Fetch up to `limit` most recent 1m candles. Returns oldest-first list."""
+    def fetch_5m_candles(self, symbol: str, limit: int = 1000) -> list[list]:
+        """Fetch 5m candles directly from Bybit. Returns oldest-first list.
+
+        Paginates backward if needed to get `limit` candles.
+        Bybit returns up to 1000 candles per request.
+        """
         out: list[list] = []
-        raw = self.ex.fetch_ohlcv(symbol, "1m", limit=min(limit, 1000))
+        raw = self.ex.fetch_ohlcv(symbol, "5m", limit=min(limit, 1000))
         out.extend(raw)
         # Paginate backward if needed
         while len(out) < limit:
             oldest_ts = out[0][0]
-            since = oldest_ts - 60 * 1000 * 1000  # go back 1000 candles
-            batch = self.ex.fetch_ohlcv(symbol, "1m", since=since, limit=1000)
+            since = oldest_ts - 5 * 60 * 1000 * 1000  # go back 1000 5m candles
+            batch = self.ex.fetch_ohlcv(symbol, "5m", since=since, limit=1000)
             if not batch:
                 break
             new_batch = [c for c in batch if c[0] < out[0][0]]
@@ -59,51 +63,24 @@ class Feed:
                 break
         return out[:limit]
 
-    def fetch_5m_history(self, symbol: str, limit: int = 500) -> list[list]:
-        """Fetch 5m candles directly. Used for quick checks."""
-        raw = self.ex.fetch_ohlcv(symbol, "5m", limit=min(limit, 1000))
-        return raw
-
-    def aggregate_1m_to_5m(self, candles_1m: list[list]) -> pd.DataFrame:
-        """Aggregate 1m candles into 5m OHLCV DataFrame.
-
-        Uses PURE INTEGER groupby on ms timestamps. NEVER touches pd.to_datetime.
-        This is the ONLY reliable way to aggregate across all pandas versions.
-        """
-        if not candles_1m:
-            return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
-
-        df = pd.DataFrame(candles_1m, columns=["timestamp", "open", "high", "low", "close", "volume"])
-
-        # Group by 5-minute interval using integer division on ms timestamps
-        interval_ms = 5 * 60 * 1000  # 300,000 ms
-        df["_group"] = df["timestamp"] // interval_ms
-
-        agg = df.groupby("_group").agg({
-            "open": "first",
-            "high": "max",
-            "low": "min",
-            "close": "last",
-            "volume": "sum",
-        })
-
-        # Convert group key back to ms timestamp (start of each 5m interval)
-        agg["timestamp"] = (agg.index.astype(np.int64) * interval_ms)
-        agg = agg[["timestamp", "open", "high", "low", "close", "volume"]].reset_index(drop=True)
-        return agg
-
     def fetch_5m_window(self, symbol: str, n_5m_bars: int = 400) -> pd.DataFrame:
-        """Fetch enough 1m data to produce n_5m_bars of 5m candles.
+        """Fetch n_5m_bars of 5m candles as a DataFrame.
 
-        We need ~5x 1m candles per 5m bar, plus buffer for partial bars.
+        Uses Bybit's 5m API directly — same data source as wait_for_next_5m_close.
+        No 1m→5m aggregation, so timestamps are always correct.
         """
-        n_1m_needed = n_5m_bars * 5 + 50  # extra buffer
-        candles_1m = self.fetch_1m_history(symbol, limit=n_1m_needed)
-        df_5m = self.aggregate_1m_to_5m(candles_1m)
-        # Return only the last n_5m_bars
-        if len(df_5m) > n_5m_bars:
-            df_5m = df_5m.iloc[-n_5m_bars:].reset_index(drop=True)
-        return df_5m
+        candles = self.fetch_5m_candles(symbol, limit=n_5m_bars + 10)  # small buffer
+        df = pd.DataFrame(candles, columns=["timestamp", "open", "high", "low", "close", "volume"])
+
+        # Drop the last candle (it may still be forming)
+        # The last closed candle is the one before the current one
+        if len(df) > 1:
+            df = df.iloc[:-1]
+
+        if len(df) > n_5m_bars:
+            df = df.iloc[-n_5m_bars:]
+
+        return df.reset_index(drop=True)
 
     def wait_for_next_5m_close(self, symbol: str, last_seen_ts: int | None = None,
                                 poll_secs: int = 15, max_wait_secs: int = 600) -> int | None:
@@ -114,7 +91,7 @@ class Feed:
         start = time.time()
         while time.time() - start < max_wait_secs:
             try:
-                raw = self.fetch_5m_history(symbol, limit=5)
+                raw = self.ex.fetch_ohlcv(symbol, "5m", limit=5)
             except Exception as e:
                 LOG.warning("v12_feed: fetch failed: %s — retry in %ds", e, poll_secs)
                 time.sleep(poll_secs)
