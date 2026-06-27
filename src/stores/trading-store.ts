@@ -288,21 +288,21 @@ const TOKEN_NAMES: Record<string, string> = {
 
 const defaultMoneyManager: MoneyManagerSettings = {
   riskPerTradePct: 2,
-  maxConcurrentPositions: 8,
-  maxCorrelatedPositions: 3,
-  maxDrawdownPct: 15,
-  dailyLossLimitPct: 5,
+  maxConcurrentPositions: 12,
+  maxCorrelatedPositions: 4,
+  maxDrawdownPct: 25,
+  dailyLossLimitPct: 8,
   positionSizingMethod: 'risk_parity',
   kellyFraction: 0.5,
-  defaultLeverage: 3,
-  maxLeverage: 10,
+  defaultLeverage: 1,
+  maxLeverage: 3,
   takeProfitMultiplier: 2.5,
   stopLossATR: 1.5,
   trailingStopEnabled: true,
-  trailingStopActivationPct: 1.0,
-  trailingStopDistancePct: 0.5,
+  trailingStopActivationPct: 1.5,
+  trailingStopDistancePct: 0.8,
   breakEvenEnabled: true,
-  breakEvenActivationPct: 0.5,
+  breakEvenActivationPct: 0.8,
 }
 
 const initialState = {

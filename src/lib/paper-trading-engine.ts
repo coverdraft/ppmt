@@ -2,8 +2,9 @@
  * PaperTradingEngine — Realistic paper trading with live market prices.
  *
  * Replaces DemoEngine. Key differences:
- *  - Prices come from a LivePriceFeed (Binance WebSocket), not random walk.
- *  - User can manually BUY / SELL / CLOSE positions on any token.
+ *  - Prices come from a LivePriceFeed (Coinbase WS + CoinGecko/Kraken REST),
+ *    not random walk. Spain-friendly: no Binance.com geo-block.
+ *  - User can manually BUY / SELL / CLOSE positions on any of 82 tokens.
  *  - Real fees (0.1% taker) and slippage (0.05%) applied to every fill.
  *  - PnL reflects actual market movement, not synthetic noise.
  *  - Capital starts at 10,000 USDT and can grow or shrink for real.
@@ -18,6 +19,7 @@
 
 import type { TokenState, MoneyManagerSettings } from '@/stores/trading-store'
 import type { LivePriceFeed, TickerData } from './live-price-feed'
+import { SUPPORTED_TOKENS_LIST, getTokenName } from './live-price-feed'
 
 export interface PaperTradingState {
   is_running: boolean
@@ -109,133 +111,30 @@ interface PaperOrder {
   type: 'MARKET'
 }
 
-// Expanded token universe — 50 liquid Binance USDT pairs
-export const SUPPORTED_TOKENS = [
-  // Tier 1 — mega cap
-  'BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'SOL/USDT', 'XRP/USDT',
-  // Tier 2 — large cap
-  'ADA/USDT', 'AVAX/USDT', 'DOGE/USDT', 'DOT/USDT', 'LINK/USDT',
-  'ATOM/USDT', 'LTC/USDT', 'BCH/USDT', 'NEAR/USDT', 'APT/USDT',
-  'ARB/USDT', 'OP/USDT', 'INJ/USDT', 'FIL/USDT', 'AAVE/USDT',
-  'MKR/USDT', 'SUI/USDT', 'TIA/USDT', 'RUNE/USDT', 'FTM/USDT',
-  // Tier 3 — mid cap / high beta
-  'SEI/USDT', 'STX/USDT', 'IMX/USDT', 'GRT/USDT', 'LDO/USDT',
-  'SAND/USDT', 'MANA/USDT', 'AXS/USDT', 'GALA/USDT', 'CHZ/USDT',
-  'ENJ/USDT', 'PEPE/USDT', 'WIF/USDT', 'BONK/USDT', 'FLOKI/USDT',
-  'SHIB/USDT', 'PYTH/USDT', 'JTO/USDT', 'ORDI/USDT', 'RNDR/USDT',
-  'FET/USDT', 'AGIX/USDT', 'OCEAN/USDT', 'THETA/USDT', 'ICP/USDT',
-] as const
+// Token universe comes from live-price-feed.ts (82 tokens across Coinbase + Kraken + CoinGecko).
+// Re-exported here so existing imports keep working.
+export const SUPPORTED_TOKENS = SUPPORTED_TOKENS_LIST as readonly string[]
 
-export const TOKEN_NAMES: Record<string, string> = {
-  'BTC/USDT': 'Bitcoin',
-  'ETH/USDT': 'Ethereum',
-  'BNB/USDT': 'BNB',
-  'SOL/USDT': 'Solana',
-  'XRP/USDT': 'Ripple',
-  'ADA/USDT': 'Cardano',
-  'AVAX/USDT': 'Avalanche',
-  'DOGE/USDT': 'Dogecoin',
-  'DOT/USDT': 'Polkadot',
-  'LINK/USDT': 'Chainlink',
-  'ATOM/USDT': 'Cosmos',
-  'LTC/USDT': 'Litecoin',
-  'BCH/USDT': 'Bitcoin Cash',
-  'NEAR/USDT': 'Near',
-  'APT/USDT': 'Aptos',
-  'ARB/USDT': 'Arbitrum',
-  'OP/USDT': 'Optimism',
-  'INJ/USDT': 'Injective',
-  'FIL/USDT': 'Filecoin',
-  'AAVE/USDT': 'Aave',
-  'MKR/USDT': 'Maker',
-  'SUI/USDT': 'Sui',
-  'TIA/USDT': 'Celestia',
-  'RUNE/USDT': 'Thorchain',
-  'FTM/USDT': 'Fantom',
-  'SEI/USDT': 'Sei',
-  'STX/USDT': 'Stacks',
-  'IMX/USDT': 'Immutable',
-  'GRT/USDT': 'The Graph',
-  'LDO/USDT': 'Lido DAO',
-  'SAND/USDT': 'Sandbox',
-  'MANA/USDT': 'Decentraland',
-  'AXS/USDT': 'Axie Infinity',
-  'GALA/USDT': 'Gala',
-  'CHZ/USDT': 'Chiliz',
-  'ENJ/USDT': 'Enjin',
-  'PEPE/USDT': 'Pepe',
-  'WIF/USDT': 'dogwifhat',
-  'BONK/USDT': 'Bonk',
-  'FLOKI/USDT': 'Floki',
-  'SHIB/USDT': 'Shiba Inu',
-  'PYTH/USDT': 'Pyth Network',
-  'JTO/USDT': 'Jito',
-  'ORDI/USDT': 'Ordinals',
-  'RNDR/USDT': 'Render',
-  'FET/USDT': 'Fetch.ai',
-  'AGIX/USDT': 'SingularityNET',
-  'OCEAN/USDT': 'Ocean Protocol',
-  'THETA/USDT': 'Theta',
-  'ICP/USDT': 'Internet Computer',
-}
+// Token names are also sourced from live-price-feed (single source of truth).
+export const TOKEN_NAMES: Record<string, string> = Object.fromEntries(
+  SUPPORTED_TOKENS_LIST.map(s => [s, getTokenName(s)])
+)
 
-const TOKEN_COLORS: Record<string, string> = {
-  'BTC/USDT': '#F7931A',
-  'ETH/USDT': '#627EEA',
-  'BNB/USDT': '#F3BA2F',
-  'SOL/USDT': '#9945FF',
-  'XRP/USDT': '#23292F',
-  'ADA/USDT': '#0033AD',
-  'AVAX/USDT': '#E84142',
-  'DOGE/USDT': '#C3A634',
-  'DOT/USDT': '#E6007A',
-  'LINK/USDT': '#2A5ADA',
-  'ATOM/USDT': '#2E3148',
-  'LTC/USDT': '#A6A9AA',
-  'BCH/USDT': '#0AC18E',
-  'NEAR/USDT': '#00EC97',
-  'APT/USDT': '#06FC99',
-  'ARB/USDT': '#28A0F0',
-  'OP/USDT': '#FF0420',
-  'INJ/USDT': '#00D2FF',
-  'FIL/USDT': '#0090FF',
-  'AAVE/USDT': '#B6509E',
-  'MKR/USDT': '#1AAB9B',
-  'SUI/USDT': '#4DA2FF',
-  'TIA/USDT': '#7B2BF9',
-  'RUNE/USDT': '#33FF99',
-  'FTM/USDT': '#13B5EC',
-  'SEI/USDT': '#8A2BE2',
-  'STX/USDT': '#5546FF',
-  'IMX/USDT': '#0A0A0A',
-  'GRT/USDT': '#6F4CFF',
-  'LDO/USDT': '#00A3FF',
-  'SAND/USDT': '#00ADEF',
-  'MANA/USDT': '#FF2A55',
-  'AXS/USDT': '#0055D4',
-  'GALA/USDT': '#0C0C0C',
-  'CHZ/USDT': '#CD0A24',
-  'ENJ/USDT': '#624DBF',
-  'PEPE/USDT': '#3D8E2D',
-  'WIF/USDT': '#E8B547',
-  'BONK/USDT': '#FF7A00',
-  'FLOKI/USDT': '#FFB300',
-  'SHIB/USDT': '#FFA409',
-  'PYTH/USDT': '#2D68FF',
-  'JTO/USDT': '#39E0BB',
-  'ORDI/USDT': '#FFD700',
-  'RNDR/USDT': '#CF0E0F',
-  'FET/USDT': '#1F4180',
-  'AGIX/USDT': '#7C3AED',
-  'OCEAN/USDT': '#7B1173',
-  'THETA/USDT': '#2AB8E6',
-  'ICP/USDT': '#3B00B9',
+// Deterministic color per token (hash-based, stable across renders)
+function hashColor(s: string): string {
+  let h = 0
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0
+  const hue = Math.abs(h) % 360
+  return `hsl(${hue}, 70%, 55%)`
 }
+const TOKEN_COLORS: Record<string, string> = Object.fromEntries(
+  SUPPORTED_TOKENS_LIST.map(s => [s, hashColor(s)])
+)
 
 const DEFAULT_MONEY_MANAGER: MoneyManagerSettings = {
   riskPerTradePct: 2,
-  maxConcurrentPositions: 8,
-  maxCorrelatedPositions: 3,
+  maxConcurrentPositions: 12,
+  maxCorrelatedPositions: 4,
   maxDrawdownPct: 25,
   dailyLossLimitPct: 8,
   positionSizingMethod: 'risk_parity',
@@ -579,96 +478,101 @@ export class PaperTradingEngine {
   }
 
   /**
-   * Auto-mode: actively hunts for entries every ~15s.
+   * Auto-mode: aggressively hunts for entries every ~5s.
    * Strategy:
-   *   1. Scan all active tokens with live prices + >$10M volume
-   *   2. Pick top mover by |24h change| (>=1.5% threshold)
-   *   3. If not in position for that token and under maxConcurrent,
-   *      open LONG (positive momentum) or SHORT (negative)
-   *   4. Attach SL/TP based on money manager settings
-   * Designed to be visible: should produce 2-4 trades per hour
+   *   1. Scan all active tokens with live prices + >$1M volume (low bar)
+   *   2. Pick top movers by |24h change| (>=0.3% threshold — very loose)
+   *   3. Open positions for top 3 candidates at once (up to maxConcurrent)
+   *   4. LONG for positive momentum, SHORT for negative
+   *   5. Attach SL/TP based on money manager settings
+   * Designed to actually trade: should produce 5-15 trades per hour
    * in normal market conditions.
    */
   private maybeAutoTrade() {
     if (!this.autoMode || !this.tradingEnabled) return
     const now = Date.now()
-    if (now - this.lastAutoSignalTime < 10000) return
+    if (now - this.lastAutoSignalTime < 5000) return
     this.lastAutoSignalTime = now
 
-    // Find strongest mover among active tokens with live prices
+    // Find strongest movers among active tokens with live prices
     const candidates = this.activeTokens
       .map(sym => this.priceFeed.getData(sym))
-      .filter((t): t is TickerData => t !== null && t.quoteVolume > 5_000_000)
+      .filter((t): t is TickerData => t !== null && t.quoteVolume > 1_000_000)
+      .filter(t => Math.abs(t.changePct) >= 0.3)
       .sort((a, b) => Math.abs(b.changePct) - Math.abs(a.changePct))
+      .slice(0, 5)
 
     if (candidates.length === 0) {
       console.log('[Paper/Auto] No candidates with live prices yet')
       return
     }
-    const top = candidates[0]
-    if (Math.abs(top.changePct) < 0.8) {
-      console.log(`[Paper/Auto] Top mover ${top.symbol} only ${top.changePct.toFixed(2)}% — below 0.8% threshold`)
-      return
-    }
 
-    // Don't open if already in a position for this symbol
-    if (this.positions.has(top.symbol)) {
-      console.log(`[Paper/Auto] Already in position for ${top.symbol}, skipping`)
-      return
-    }
+    // Try to open positions for as many candidates as possible, up to maxConcurrent
+    let opened = 0
+    for (const top of candidates) {
+      // Don't open if already in a position for this symbol
+      if (this.positions.has(top.symbol)) continue
 
-    // Don't exceed max concurrent positions
-    if (this.positions.size >= this.moneyManager.maxConcurrentPositions) {
-      console.log(`[Paper/Auto] Max concurrent positions reached (${this.positions.size}/${this.moneyManager.maxConcurrentPositions})`)
-      return
-    }
-
-    const usdtAmount = Math.min(
-      this.cash * (this.moneyManager.riskPerTradePct / 100) * 5,
-      this.cash * 0.10
-    )
-    if (usdtAmount < 10) {
-      console.log('[Paper/Auto] Insufficient cash for new entry')
-      return
-    }
-
-    const direction = top.changePct > 0 ? 'LONG' : 'SHORT'
-    const signal = {
-      timestamp: new Date().toISOString(),
-      direction,
-      symbol: top.symbol,
-      confidence: Math.min(0.95, 0.55 + Math.abs(top.changePct) / 20),
-      ev_score: 0.7 + Math.abs(top.changePct) / 30,
-      pattern_path: `AUTO_MOMENTUM_24H_${direction}`,
-      expected_move_pct: Math.abs(top.changePct) * 0.3,
-    }
-    this.signals.unshift(signal)
-    if (this.signals.length > 50) this.signals = this.signals.slice(0, 50)
-
-    console.log(`[Paper/Auto] Signal: ${direction} ${top.symbol} (${top.changePct.toFixed(2)}% 24h, vol ${(top.quoteVolume/1e6).toFixed(1)}M)`)
-
-    const result = direction === 'LONG'
-      ? this.marketBuy(top.symbol, usdtAmount)
-      : this.marketSell(top.symbol, usdtAmount)
-
-    if (result.success) {
-      console.log(`[Paper/Auto] OPENED ${direction} ${top.symbol} @ ${result.fillPrice?.toFixed(4)} (${usdtAmount.toFixed(2)} USDT)`)
-      const pos = this.positions.get(top.symbol)
-      if (pos) {
-        const mm = this.moneyManager
-        const move = pos.entry_price * (signal.expected_move_pct / 100)
-        pos.current_sl = direction === 'LONG'
-          ? pos.entry_price - move * mm.stopLossATR
-          : pos.entry_price + move * mm.stopLossATR
-        pos.current_tp = direction === 'LONG'
-          ? pos.entry_price + move * mm.takeProfitMultiplier
-          : pos.entry_price - move * mm.takeProfitMultiplier
-        pos.catastrophic_sl = direction === 'LONG'
-          ? pos.entry_price - move * 3
-          : pos.entry_price + move * 3
+      // Don't exceed max concurrent positions
+      if (this.positions.size >= this.moneyManager.maxConcurrentPositions) {
+        console.log(`[Paper/Auto] Max concurrent positions reached (${this.positions.size}/${this.moneyManager.maxConcurrentPositions})`)
+        break
       }
-    } else {
-      console.warn(`[Paper/Auto] Entry failed: ${result.error}`)
+
+      // Position size: risk % * 5, capped at 10% of cash
+      const usdtAmount = Math.min(
+        this.cash * (this.moneyManager.riskPerTradePct / 100) * 5,
+        this.cash * 0.10
+      )
+      if (usdtAmount < 10) {
+        console.log('[Paper/Auto] Insufficient cash for new entry')
+        break
+      }
+
+      const direction = top.changePct > 0 ? 'LONG' : 'SHORT'
+      const signal = {
+        timestamp: new Date().toISOString(),
+        direction,
+        symbol: top.symbol,
+        confidence: Math.min(0.95, 0.5 + Math.abs(top.changePct) / 20),
+        ev_score: 0.6 + Math.abs(top.changePct) / 30,
+        pattern_path: `AUTO_MOMENTUM_24H_${direction}`,
+        expected_move_pct: Math.max(0.5, Math.abs(top.changePct) * 0.3),
+      }
+      this.signals.unshift(signal)
+      if (this.signals.length > 50) this.signals = this.signals.slice(0, 50)
+
+      console.log(`[Paper/Auto] Signal: ${direction} ${top.symbol} (${top.changePct.toFixed(2)}% 24h, vol ${(top.quoteVolume/1e6).toFixed(1)}M)`)
+
+      const result = direction === 'LONG'
+        ? this.marketBuy(top.symbol, usdtAmount)
+        : this.marketSell(top.symbol, usdtAmount)
+
+      if (result.success) {
+        opened++
+        console.log(`[Paper/Auto] OPENED ${direction} ${top.symbol} @ ${result.fillPrice?.toFixed(4)} (${usdtAmount.toFixed(2)} USDT)`)
+        const pos = this.positions.get(top.symbol)
+        if (pos) {
+          const mm = this.moneyManager
+          const move = pos.entry_price * (signal.expected_move_pct / 100)
+          pos.current_sl = direction === 'LONG'
+            ? pos.entry_price - move * mm.stopLossATR
+            : pos.entry_price + move * mm.stopLossATR
+          pos.current_tp = direction === 'LONG'
+            ? pos.entry_price + move * mm.takeProfitMultiplier
+            : pos.entry_price - move * mm.takeProfitMultiplier
+          pos.catastrophic_sl = direction === 'LONG'
+            ? pos.entry_price - move * 3
+            : pos.entry_price + move * 3
+        }
+      } else {
+        console.warn(`[Paper/Auto] Entry failed: ${result.error}`)
+      }
+    }
+    if (opened === 0 && candidates.length > 0) {
+      console.log(`[Paper/Auto] ${candidates.length} candidates, 0 opened (already in position or no cash)`)
+    } else if (opened > 0) {
+      console.log(`[Paper/Auto] Opened ${opened} new positions this cycle (total ${this.positions.size})`)
     }
   }
 
