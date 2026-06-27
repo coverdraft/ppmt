@@ -101,7 +101,16 @@ class Engine:
 
     def _load_state(self) -> dict:
         if self.state_path.exists():
-            return json.loads(self.state_path.read_text())
+            state = json.loads(self.state_path.read_text())
+            # Validate last_closed_candle_ts — if corrupted, reset it
+            last_ts = state.get("last_closed_candle_ts")
+            if last_ts is not None and isinstance(last_ts, (int, float)):
+                if last_ts < 1e12:
+                    LOG.warning("v12_engine: corrupted last_closed_candle_ts=%d — resetting", last_ts)
+                    state["last_closed_candle_ts"] = None
+                    # Also reset recent_preds since they were computed from corrupted data
+                    state["recent_preds"] = []
+            return state
         return {
             "symbol": self.symbol,
             "profile": self.profile,
@@ -205,6 +214,15 @@ class Engine:
         latest_ts = int(sym_5m["timestamp"].iloc[-1])
         latest_close = float(sym_5m["close"].iloc[-1])
         self.state["last_closed_candle_ts"] = latest_ts
+
+        # Validate timestamp is in ms range (should be > 1e12 for recent dates)
+        if latest_ts < 1e12:
+            LOG.warning("v12_engine: timestamp looks corrupted (%d) — attempting fix", latest_ts)
+            # Try to detect format and fix
+            if latest_ts > 1e9:
+                latest_ts = latest_ts * 1000  # seconds → ms
+            elif latest_ts > 1e6:
+                latest_ts = latest_ts * 1000 * 1000  # micro → ms? unlikely
 
         LOG.info("v12_engine: ts=%s close=%.4f",
                  dt.datetime.utcfromtimestamp(latest_ts / 1000).isoformat(), latest_close)

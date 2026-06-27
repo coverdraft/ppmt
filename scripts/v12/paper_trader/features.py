@@ -219,14 +219,14 @@ def compute_5m_features(df_5m: pd.DataFrame, btc_5m: pd.DataFrame, eth_5m: pd.Da
     btc = btc[["timestamp", "btc_ret_1m", "btc_ret_5m", "btc_ret_15m",
                "btc_vol_z", "btc_trend_50", "btc_volatility_regime"]]
 
-    df = df.merge(btc, on="timestamp", how="left")
+    df = _safe_merge_asof(df, btc, on="timestamp")
 
     alt_ret_15m_pct = df["close"].pct_change(15) * 100
     btc_ret_15m_pct = df["btc_ret_15m"] * 100
     df["btc_alt_spread_15m"] = alt_ret_15m_pct - btc_ret_15m_pct
 
     eth = eth_5m[["timestamp", "close"]].copy().rename(columns={"close": "eth_close"})
-    df = df.merge(eth, on="timestamp", how="left")
+    df = _safe_merge_asof(df, eth, on="timestamp")
     alt_ret = df["close"].pct_change()
     eth_ret = df["eth_close"].pct_change()
     df["eth_corr_30"] = alt_ret.rolling(30).corr(eth_ret)
@@ -266,6 +266,27 @@ def compute_5m_features(df_5m: pd.DataFrame, btc_5m: pd.DataFrame, eth_5m: pd.Da
     return df
 
 
+def _safe_merge_asof(left: pd.DataFrame, right: pd.DataFrame,
+                     on: str = "timestamp") -> pd.DataFrame:
+    """Merge using merge_asof — never duplicates rows or creates NaN mismatches."""
+    left = left.copy()
+    right = right.copy()
+    left[on] = left[on].astype(np.int64)
+    right[on] = right[on].astype(np.int64)
+    left_sorted = left.sort_values(on).reset_index(drop=True)
+    right_sorted = right.sort_values(on).reset_index(drop=True)
+    right_sorted = right_sorted.drop_duplicates(subset=[on], keep="last")
+    merged = pd.merge_asof(left_sorted, right_sorted, on=on, direction="backward")
+    return merged
+
+
+def _datetime_to_ms(series: pd.Series) -> np.ndarray:
+    """Convert datetime Series to int64 ms. Robust for tz-aware datetime."""
+    arr = series.values  # numpy datetime64[ns]
+    ns = arr.astype(np.int64)  # nanoseconds since epoch
+    return (ns // 10**6).astype(np.int64)  # milliseconds
+
+
 def _aggregate_5m_to_n(df_5m: pd.DataFrame, n: int) -> pd.DataFrame:
     """Aggregate 5m candles into n-minute candles."""
     df = df_5m.copy()
@@ -276,7 +297,7 @@ def _aggregate_5m_to_n(df_5m: pd.DataFrame, n: int) -> pd.DataFrame:
         "close": "last", "volume": "sum",
     }).dropna()
     agg = agg.reset_index()
-    agg["timestamp"] = agg["timestamp"].astype(np.int64) // 10**6
+    agg["timestamp"] = _datetime_to_ms(agg["timestamp"])
     return agg
 
 
@@ -304,7 +325,8 @@ def compute_htf_features(df_5m: pd.DataFrame, btc_5m: pd.DataFrame) -> pd.DataFr
     btc_15m["btc_ema_9_15m"] = btc_15m["close"].ewm(span=9, adjust=False).mean()
     btc_15m["btc_ema_20_15m"] = btc_15m["close"].ewm(span=20, adjust=False).mean()
     btc_15m["btc_trend_15m"] = np.sign(btc_15m["btc_ema_9_15m"] - btc_15m["btc_ema_20_15m"]).astype(int)
-    df_15m["btc_trend_15m"] = btc_15m["btc_trend_15m"].values[:len(df_15m)] if len(btc_15m) >= len(df_15m) else 0
+    # Use merge_asof instead of direct array assignment
+    df_15m = _safe_merge_asof(df_15m, btc_15m[["timestamp", "btc_trend_15m"]], on="timestamp")
 
     # Merge 15m -> 5m using merge_asof
     df["timestamp"] = df["timestamp"].astype(np.int64)
@@ -334,7 +356,8 @@ def compute_htf_features(df_5m: pd.DataFrame, btc_5m: pd.DataFrame) -> pd.DataFr
     btc_1h["btc_ema_9_1h"] = btc_1h["close"].ewm(span=9, adjust=False).mean()
     btc_1h["btc_ema_20_1h"] = btc_1h["close"].ewm(span=20, adjust=False).mean()
     btc_1h["btc_trend_1h"] = np.sign(btc_1h["btc_ema_9_1h"] - btc_1h["btc_ema_20_1h"]).astype(int)
-    df_1h["btc_trend_1h"] = btc_1h["btc_trend_1h"].values[:len(df_1h)] if len(btc_1h) >= len(df_1h) else 0
+    # Use merge_asof instead of direct array assignment
+    df_1h = _safe_merge_asof(df_1h, btc_1h[["timestamp", "btc_trend_1h"]], on="timestamp")
 
     # Merge 1h -> 5m
     df_1h_sorted = df_1h[["timestamp", "trend_1h", "rsi_1h", "vol_regime_1h", "btc_trend_1h"]].sort_values("timestamp")

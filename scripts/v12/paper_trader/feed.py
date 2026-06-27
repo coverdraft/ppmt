@@ -75,7 +75,10 @@ class Feed:
         }).dropna()
 
         agg = agg.reset_index()
-        agg["timestamp"] = agg["timestamp"].astype(np.int64) // 10**6
+        # Robust datetime→ms conversion (bypasses pandas tz-aware quirks)
+        arr = agg["timestamp"].values  # numpy datetime64[ns]
+        ns = arr.astype(np.int64)  # nanoseconds
+        agg["timestamp"] = (ns // 10**6).astype(np.int64)  # milliseconds
         return agg
 
     def fetch_5m_window(self, symbol: str, n_5m_bars: int = 400) -> pd.DataFrame:
