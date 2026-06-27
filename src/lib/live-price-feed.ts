@@ -24,6 +24,7 @@ export interface TickerData {
 }
 
 const BINANCE_WS_URL = 'wss://stream.binance.com:9443/stream?streams='
+const BINANCE_REST_URL = 'https://api.binance.com/api/v3/ticker/24hr'
 
 // Binance combined stream supports up to 1024 streams per connection.
 // We'll use one connection for all symbols.
@@ -36,6 +37,10 @@ export class LivePriceFeed {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private connected = false
   private intentionallyClosed = false
+  private restFallbackActive = false
+  private restInterval: ReturnType<typeof setInterval> | null = null
+  private lastWsErrorTime = 0
+  private wsErrorCount = 0
 
   constructor(symbols: string[]) {
     this.symbols = [...new Set(symbols)] // dedupe
@@ -91,7 +96,28 @@ export class LivePriceFeed {
       }
 
       this.ws.onerror = (e: Event) => {
-        console.error('[PriceFeed] WS error:', e)
+        // Binance WS error events don't carry a message — log a meaningful
+        // summary instead of dumping the empty object. Common causes:
+        //   - Network blocking WSS
+        //   - Browser mixed-content policy
+        //   - Geo-restriction on Binance
+        //   - Too many streams in URL (limit: 1024)
+        // We count errors and switch to REST fallback after 3 failures.
+        this.wsErrorCount++
+        const now = Date.now()
+        // Throttle logs to one per 5s to avoid spam
+        if (now - this.lastWsErrorTime > 5000) {
+          this.lastWsErrorTime = now
+          console.warn(
+            `[PriceFeed] WS error #${this.wsErrorCount} (type=${e.type}). ` +
+            `Likely cause: network/firewall/geo-block. ` +
+            `Will ${this.reconnectAttempts >= 3 ? 'switch to REST fallback' : 'retry WS'}.`
+          )
+        }
+        // After 3 failed attempts, start REST fallback in parallel
+        if (this.reconnectAttempts >= 3 && !this.restFallbackActive) {
+          this.startRestFallback()
+        }
       }
 
       this.ws.onclose = () => {
@@ -122,6 +148,65 @@ export class LivePriceFeed {
     if (raw.endsWith('BTC')) return raw.slice(0, -3) + '/BTC'
     if (raw.endsWith('ETH')) return raw.slice(0, -3) + '/ETH'
     return raw
+  }
+
+  /**
+   * REST API fallback: polls Binance /api/v3/ticker/24hr every 5s.
+   * Returns ALL tickers in one request (~1MB), so we filter to our
+   * subscribed symbols. Less efficient than WS but works when the
+   * WebSocket is blocked.
+   */
+  private startRestFallback() {
+    if (this.restFallbackActive) return
+    this.restFallbackActive = true
+    console.log('[PriceFeed] Starting REST API fallback (polling every 5s)')
+
+    const poll = async () => {
+      if (this.intentionallyClosed) return
+      try {
+        const resp = await fetch(BINANCE_REST_URL)
+        if (!resp.ok) {
+          console.warn(`[PriceFeed] REST fallback HTTP ${resp.status}`)
+          return
+        }
+        const arr = await resp.json() as any[]
+        const subscribedSet = new Set(this.symbols.map(s => s.replace('/', '').toUpperCase()))
+        for (const t of arr) {
+          if (!subscribedSet.has(t.symbol)) continue
+          const symWithSlash = this.normalizeSymbol(t.symbol)
+          const data: TickerData = {
+            symbol: symWithSlash,
+            rawSymbol: t.symbol,
+            price: parseFloat(t.lastPrice),
+            changePct: parseFloat(t.priceChangePercent),
+            volume: parseFloat(t.volume),
+            quoteVolume: parseFloat(t.quoteVolume),
+            high: parseFloat(t.highPrice),
+            low: parseFloat(t.lowPrice),
+            timestamp: t.closeTime,
+          }
+          this.prices.set(symWithSlash, data)
+          this.subscribers.forEach(cb => cb(symWithSlash, data))
+        }
+        if (!this.connected) {
+          this.connected = true
+          console.log(`[PriceFeed] REST fallback active — ${this.prices.size} symbols streaming`)
+        }
+      } catch (e: any) {
+        console.warn('[PriceFeed] REST fallback fetch failed:', e?.message || e)
+      }
+    }
+
+    poll() // immediate first poll
+    this.restInterval = setInterval(poll, 5000)
+  }
+
+  private stopRestFallback() {
+    if (this.restInterval) {
+      clearInterval(this.restInterval)
+      this.restInterval = null
+    }
+    this.restFallbackActive = false
   }
 
   isConnected(): boolean {
@@ -187,6 +272,7 @@ export class LivePriceFeed {
       clearTimeout(this.reconnectTimer)
       this.reconnectTimer = null
     }
+    this.stopRestFallback()
     if (this.ws) {
       try { this.ws.close() } catch {}
       this.ws = null

@@ -109,13 +109,21 @@ interface PaperOrder {
   type: 'MARKET'
 }
 
-// Expanded token universe — 25 liquid Binance pairs
+// Expanded token universe — 50 liquid Binance USDT pairs
 export const SUPPORTED_TOKENS = [
+  // Tier 1 — mega cap
   'BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'SOL/USDT', 'XRP/USDT',
+  // Tier 2 — large cap
   'ADA/USDT', 'AVAX/USDT', 'DOGE/USDT', 'DOT/USDT', 'LINK/USDT',
   'ATOM/USDT', 'LTC/USDT', 'BCH/USDT', 'NEAR/USDT', 'APT/USDT',
   'ARB/USDT', 'OP/USDT', 'INJ/USDT', 'FIL/USDT', 'AAVE/USDT',
   'MKR/USDT', 'SUI/USDT', 'TIA/USDT', 'RUNE/USDT', 'FTM/USDT',
+  // Tier 3 — mid cap / high beta
+  'SEI/USDT', 'STX/USDT', 'IMX/USDT', 'GRT/USDT', 'LDO/USDT',
+  'SAND/USDT', 'MANA/USDT', 'AXS/USDT', 'GALA/USDT', 'CHZ/USDT',
+  'ENJ/USDT', 'PEPE/USDT', 'WIF/USDT', 'BONK/USDT', 'FLOKI/USDT',
+  'SHIB/USDT', 'PYTH/USDT', 'JTO/USDT', 'ORDI/USDT', 'RNDR/USDT',
+  'FET/USDT', 'AGIX/USDT', 'OCEAN/USDT', 'THETA/USDT', 'ICP/USDT',
 ] as const
 
 export const TOKEN_NAMES: Record<string, string> = {
@@ -144,6 +152,31 @@ export const TOKEN_NAMES: Record<string, string> = {
   'TIA/USDT': 'Celestia',
   'RUNE/USDT': 'Thorchain',
   'FTM/USDT': 'Fantom',
+  'SEI/USDT': 'Sei',
+  'STX/USDT': 'Stacks',
+  'IMX/USDT': 'Immutable',
+  'GRT/USDT': 'The Graph',
+  'LDO/USDT': 'Lido DAO',
+  'SAND/USDT': 'Sandbox',
+  'MANA/USDT': 'Decentraland',
+  'AXS/USDT': 'Axie Infinity',
+  'GALA/USDT': 'Gala',
+  'CHZ/USDT': 'Chiliz',
+  'ENJ/USDT': 'Enjin',
+  'PEPE/USDT': 'Pepe',
+  'WIF/USDT': 'dogwifhat',
+  'BONK/USDT': 'Bonk',
+  'FLOKI/USDT': 'Floki',
+  'SHIB/USDT': 'Shiba Inu',
+  'PYTH/USDT': 'Pyth Network',
+  'JTO/USDT': 'Jito',
+  'ORDI/USDT': 'Ordinals',
+  'RNDR/USDT': 'Render',
+  'FET/USDT': 'Fetch.ai',
+  'AGIX/USDT': 'SingularityNET',
+  'OCEAN/USDT': 'Ocean Protocol',
+  'THETA/USDT': 'Theta',
+  'ICP/USDT': 'Internet Computer',
 }
 
 const TOKEN_COLORS: Record<string, string> = {
@@ -172,6 +205,31 @@ const TOKEN_COLORS: Record<string, string> = {
   'TIA/USDT': '#7B2BF9',
   'RUNE/USDT': '#33FF99',
   'FTM/USDT': '#13B5EC',
+  'SEI/USDT': '#8A2BE2',
+  'STX/USDT': '#5546FF',
+  'IMX/USDT': '#0A0A0A',
+  'GRT/USDT': '#6F4CFF',
+  'LDO/USDT': '#00A3FF',
+  'SAND/USDT': '#00ADEF',
+  'MANA/USDT': '#FF2A55',
+  'AXS/USDT': '#0055D4',
+  'GALA/USDT': '#0C0C0C',
+  'CHZ/USDT': '#CD0A24',
+  'ENJ/USDT': '#624DBF',
+  'PEPE/USDT': '#3D8E2D',
+  'WIF/USDT': '#E8B547',
+  'BONK/USDT': '#FF7A00',
+  'FLOKI/USDT': '#FFB300',
+  'SHIB/USDT': '#FFA409',
+  'PYTH/USDT': '#2D68FF',
+  'JTO/USDT': '#39E0BB',
+  'ORDI/USDT': '#FFD700',
+  'RNDR/USDT': '#CF0E0F',
+  'FET/USDT': '#1F4180',
+  'AGIX/USDT': '#7C3AED',
+  'OCEAN/USDT': '#7B1173',
+  'THETA/USDT': '#2AB8E6',
+  'ICP/USDT': '#3B00B9',
 }
 
 const DEFAULT_MONEY_MANAGER: MoneyManagerSettings = {
@@ -213,11 +271,25 @@ export class PaperTradingEngine {
   private autoMode: boolean = false
   private interval: ReturnType<typeof setInterval> | null = null
   private priceFeed: LivePriceFeed
-  private activeTokens: string[] = [...SUPPORTED_TOKENS.slice(0, 10)]
+  private activeTokens: string[] = [...SUPPORTED_TOKENS.slice(0, 12)]
   private selectedToken: string = 'BTC/USDT'
   private moneyManager: MoneyManagerSettings = { ...DEFAULT_MONEY_MANAGER }
   private lastAutoSignalTime: number = 0
   private startedAt: number = Date.now() / 1000
+
+  // ─── Pattern Buffer + Living Trie (real learning) ────────
+  // SAX-like encoding of recent price moves per token.
+  // Each tick: encode the move since last tick as a symbol:
+  //   U = up > +0.05%, D = down < -0.05%, F = flat
+  // Pattern buffer is the last N symbols for the selected token.
+  // Living trie counts unique observed patterns (sequences of
+  // length 3-6) and grows over time as more ticks are processed.
+  private lastTickPrices: Map<string, number> = new Map()
+  private patternBufferPerToken: Map<string, string[]> = new Map()
+  private livingTrie: Map<string, number> = new Map() // pattern -> count
+  private candlesProcessed: number = 0
+  private maxPatternDepthObserved: number = 0
+  private lastTriePruneTime: number = 0
 
   constructor(priceFeed: LivePriceFeed) {
     this.priceFeed = priceFeed
@@ -505,39 +577,58 @@ export class PaperTradingEngine {
   }
 
   /**
-   * Optional auto-mode: every ~30s, picks the top-1 token by 24h
-   * momentum (positive or negative) above a volume threshold and
-   * opens a small position. Closes positions that hit TP/SL.
-   * This is intentionally conservative — manual trading is the
-   * primary use case. User can toggle via header.
+   * Auto-mode: actively hunts for entries every ~15s.
+   * Strategy:
+   *   1. Scan all active tokens with live prices + >$10M volume
+   *   2. Pick top mover by |24h change| (>=1.5% threshold)
+   *   3. If not in position for that token and under maxConcurrent,
+   *      open LONG (positive momentum) or SHORT (negative)
+   *   4. Attach SL/TP based on money manager settings
+   * Designed to be visible: should produce 2-4 trades per hour
+   * in normal market conditions.
    */
   private maybeAutoTrade() {
     if (!this.autoMode || !this.tradingEnabled) return
     const now = Date.now()
-    if (now - this.lastAutoSignalTime < 30000) return
+    if (now - this.lastAutoSignalTime < 15000) return
     this.lastAutoSignalTime = now
 
     // Find strongest mover among active tokens with live prices
     const candidates = this.activeTokens
       .map(sym => this.priceFeed.getData(sym))
-      .filter((t): t is TickerData => t !== null && t.quoteVolume > 50_000_000)
+      .filter((t): t is TickerData => t !== null && t.quoteVolume > 10_000_000)
       .sort((a, b) => Math.abs(b.changePct) - Math.abs(a.changePct))
 
-    if (candidates.length === 0) return
+    if (candidates.length === 0) {
+      console.log('[Paper/Auto] No candidates with live prices yet')
+      return
+    }
     const top = candidates[0]
-    if (Math.abs(top.changePct) < 2) return // not enough momentum
+    if (Math.abs(top.changePct) < 1.5) {
+      console.log(`[Paper/Auto] Top mover ${top.symbol} only ${top.changePct.toFixed(2)}% — below 1.5% threshold`)
+      return
+    }
 
     // Don't open if already in a position for this symbol
-    if (this.positions.has(top.symbol)) return
+    if (this.positions.has(top.symbol)) {
+      console.log(`[Paper/Auto] Already in position for ${top.symbol}, skipping`)
+      return
+    }
 
     // Don't exceed max concurrent positions
-    if (this.positions.size >= this.moneyManager.maxConcurrentPositions) return
+    if (this.positions.size >= this.moneyManager.maxConcurrentPositions) {
+      console.log(`[Paper/Auto] Max concurrent positions reached (${this.positions.size}/${this.moneyManager.maxConcurrentPositions})`)
+      return
+    }
 
     const usdtAmount = Math.min(
       this.cash * (this.moneyManager.riskPerTradePct / 100) * 5,
       this.cash * 0.10
     )
-    if (usdtAmount < 10) return
+    if (usdtAmount < 10) {
+      console.log('[Paper/Auto] Insufficient cash for new entry')
+      return
+    }
 
     const direction = top.changePct > 0 ? 'LONG' : 'SHORT'
     const signal = {
@@ -546,17 +637,20 @@ export class PaperTradingEngine {
       symbol: top.symbol,
       confidence: Math.min(0.95, 0.55 + Math.abs(top.changePct) / 20),
       ev_score: 0.7 + Math.abs(top.changePct) / 30,
-      pattern_path: 'MOMENTUM_24H',
+      pattern_path: `AUTO_MOMENTUM_24H_${direction}`,
       expected_move_pct: Math.abs(top.changePct) * 0.3,
     }
     this.signals.unshift(signal)
     if (this.signals.length > 50) this.signals = this.signals.slice(0, 50)
+
+    console.log(`[Paper/Auto] Signal: ${direction} ${top.symbol} (${top.changePct.toFixed(2)}% 24h, vol ${(top.quoteVolume/1e6).toFixed(1)}M)`)
 
     const result = direction === 'LONG'
       ? this.marketBuy(top.symbol, usdtAmount)
       : this.marketSell(top.symbol, usdtAmount)
 
     if (result.success) {
+      console.log(`[Paper/Auto] OPENED ${direction} ${top.symbol} @ ${result.fillPrice?.toFixed(4)} (${usdtAmount.toFixed(2)} USDT)`)
       const pos = this.positions.get(top.symbol)
       if (pos) {
         const mm = this.moneyManager
@@ -571,6 +665,8 @@ export class PaperTradingEngine {
           ? pos.entry_price - move * 3
           : pos.entry_price + move * 3
       }
+    } else {
+      console.warn(`[Paper/Auto] Entry failed: ${result.error}`)
     }
   }
 
@@ -630,7 +726,59 @@ export class PaperTradingEngine {
     }
   }
 
+  /**
+   * Update the pattern buffer + living trie based on price changes
+   * since the last tick. This is the real "learning" mechanism:
+   *   - Encode each token's move as U/D/F (SAX alphabet of size 3)
+   *   - Append to per-token pattern buffer (circular, last 12 symbols)
+   *   - For each suffix length 3..6, count the pattern in the trie
+   *   - This grows the trie organically as more candles stream in.
+   */
+  private updatePatternsAndTrie() {
+    const now = Date.now() / 1000
+    for (const sym of this.activeTokens) {
+      const t = this.priceFeed.getData(sym)
+      if (!t) continue
+      const last = this.lastTickPrices.get(sym)
+      this.lastTickPrices.set(sym, t.price)
+      if (last === undefined) continue // skip first tick (no reference)
+
+      const pct = ((t.price - last) / last) * 100
+      const sym_char = pct > 0.05 ? 'U' : pct < -0.05 ? 'D' : 'F'
+
+      // Append to per-token pattern buffer
+      let buf = this.patternBufferPerToken.get(sym) || []
+      buf.push(sym_char)
+      if (buf.length > 12) buf = buf.slice(-12)
+      this.patternBufferPerToken.set(sym, buf)
+
+      // Update living trie with all suffixes length 3..6
+      const bufStr = buf.join('')
+      for (let len = 3; len <= 6; len++) {
+        if (buf.length < len) break
+        const pattern = bufStr.slice(-len)
+        const cur = this.livingTrie.get(pattern) || 0
+        this.livingTrie.set(pattern, cur + 1)
+        if (len > this.maxPatternDepthObserved) {
+          this.maxPatternDepthObserved = len
+        }
+      }
+
+      this.candlesProcessed++
+    }
+
+    // Prune trie periodically if it gets too large (keep top 5000)
+    if (now - this.lastTriePruneTime > 60 && this.livingTrie.size > 5000) {
+      const entries = Array.from(this.livingTrie.entries())
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 5000)
+      this.livingTrie = new Map(entries)
+      this.lastTriePruneTime = now
+    }
+  }
+
   private snapshot(): PaperTradingState {
+    this.updatePatternsAndTrie()
     this.checkStops()
     this.maybeAutoTrade()
 
@@ -753,7 +901,7 @@ export class PaperTradingEngine {
       symbol: this.selectedToken,
       timeframe: 'live',
       exchange: 'BINANCE',
-      pattern_buffer: ['LIVE', 'MOMENTUM', regime.toUpperCase()],
+      pattern_buffer: this.patternBufferPerToken.get(this.selectedToken) || [],
       entropy: parseFloat(entropy.toFixed(3)),
       regime,
       latest_signal: this.signals[0] || null,
@@ -790,16 +938,16 @@ export class PaperTradingEngine {
         verdict: dd < mm.maxDrawdownPct ? 'PASS' : 'WARN',
       },
       living_trie_stats: {
-        pattern_count: 0,
-        max_depth: 0,
-        trading_observations: this.totalTrades,
+        pattern_count: this.livingTrie.size,
+        max_depth: this.maxPatternDepthObserved,
+        trading_observations: this.candlesProcessed,
         last_update: new Date().toISOString(),
       },
       trade_history: this.trades.slice(0, 20).map(t => ({
         ...t,
         status: 'CLOSED',
       })),
-      candles_processed: this.totalTrades,
+      candles_processed: this.candlesProcessed,
       websocket_status: wsConnected ? 'connected' : 'reconnecting',
       reconnect_count: 0,
       token_states: tokenStates,
