@@ -5,7 +5,7 @@
 
 import { useTradingStore } from '@/stores/trading-store'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { TrendingUp, Target, Shield, BarChart3, Dice5 } from 'lucide-react'
+import { TrendingUp, TrendingDown, Target, Shield, BarChart3, Dice5 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 
 export function PerformancePanel() {
@@ -158,11 +158,3 @@ export function PerformancePanel() {
   )
 }
 
-function TrendingDown(props: React.SVGProps<SVGSVGElement> & { className?: string }) {
-  return (
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...props}>
-      <polyline points="23 18 13.5 8.5 8.5 13.5 1 6" />
-      <polyline points="17 18 23 18 23 12" />
-    </svg>
-  )
-}
