@@ -2141,3 +2141,46 @@ Stage Summary:
 - Documentation updated across all key files
 - V12 now has proper traceability in the repo
 - Paper trading engine being built for OOS validation
+
+---
+Task ID: 1
+Agent: super-z (main)
+Task: Push V12 work to GitHub and prepare paper trading for user's computer
+
+Work Log:
+- Reviewed current state: 77 modified/new files, all data properly gitignored
+- Created scripts/v12/download_1m_data.py: downloads 1m OHLCV from Bybit public API
+- Created scripts/v12/setup_paper_trading.sh: one-time setup (clone, deps, data, train, smoke test)
+- Created scripts/v12/run_paper_trading.sh: quick launcher for paper trading
+- Committed 77 files with detailed message documenting V12 results
+- Pushed to https://github.com/coverdraft/ppmt (main branch, commit 006ae72)
+
+Stage Summary:
+- All V11/V12 code, docs, and runbooks are now on GitHub
+- Data directories (models, cache, logs) are gitignored — user must download/train
+- Setup script handles: venv, deps, 1m data download from Bybit, V11 model training, smoke test
+- Paper trading ready to run on user's computer with: bash scripts/v12/setup_paper_trading.sh
+---
+Task ID: v12-quant-cycle
+Agent: main
+Task: Implement complete quantitative trading cycle for V12 paper trader
+
+Work Log:
+- Created database.py: SQLite with 6 tables (signals, trades, equity, predictions, model_versions, drift_events)
+- Created metrics.py: Win Rate, Sharpe, Drawdown, Profit Factor, regime-aware metrics, stability scores
+- Created drift.py: 4 drift detectors (WR decline, prediction shift, Sharpe decline, regime change)
+- Created rolling_retrain.py: Full retrain pipeline adapted from V7 with acceptance gate and atomic deploy
+- Created monitor.py: CLI dashboard with status, report, drift-check, model-history, backfill, watch modes
+- Modified engine.py: Integrated SQLite as primary storage, CSV as backup, periodic drift checks, prediction tracking
+- Modified runner.py: Added CLI commands (--report, --drift, --retrain, --monitor, --model-history, --backfill)
+- Updated __init__.py with new architecture documentation
+- All tests passed: DB creation, signal/trade/prediction insertion, metrics generation, drift detection, monitor output
+
+Stage Summary:
+- Complete quantitative trading cycle implemented
+- SQLite replaces CSV/JSON as primary storage (CSV kept as backup)
+- Drift detection runs automatically every ~8 hours during trading
+- Prediction outcomes backfilled every ~4 hours
+- Rolling retrain pipeline ready with acceptance gate (AUC-based)
+- Monitor CLI provides real-time visibility into system health
+- All new modules tested and working correctly

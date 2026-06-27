@@ -1,20 +1,23 @@
 """
-engine.py — V12 paper trading engine.
+engine.py — V12 paper trading engine with SQLite persistence.
 
 On each 5m candle close:
-1. Fetch 1m data for target symbol + BTC + ETH
-2. Aggregate to 5m bars and compute 80 features
+1. Fetch 5m data for target symbol + BTC + ETH
+2. Compute 80 features
 3. Predict P(UP in 1h) with V11 LightGBM model
 4. Apply V12 quantile-based signal generation with direction+trend filters
 5. Manage position: hold for H=12 bars (1h), close on reverse or expiry
-6. Log to CSV and persist state
+6. Log to SQLite (primary) + CSV (backup) and persist state
 
-Key differences from v7 engine:
-- HORIZON=12 (1h) instead of 288 (24h)
-- direction_mode: "both", "long_only", "short_only"
-- trend_filter: "none" or "aligned"
-- Uses 1m OHLCV data aggregated to 5m (not native 5m)
-- 80 features including microstructure
+Storage architecture:
+  - SQLite (primary): signals, trades, equity, predictions, model_versions, drift_events
+  - CSV (backup): signals + equity logs in v12_logs/
+  - JSON (state): engine state in v12_state/
+
+Drift detection:
+  - Every 100 cycles, run drift check
+  - Every 50 cycles, backfill prediction outcomes
+  - Log drift events to SQLite
 """
 from __future__ import annotations
 
@@ -35,6 +38,8 @@ from .model import (
     get_symbol_config, HORIZON, COST_PCT, PROB_LONG, PROB_SHORT,
     V12_SYMBOL_CONFIG, DEFAULT_PROFILE,
 )
+from .database import TradeDB
+from .drift import run_drift_check, should_retrain
 
 LOG = logging.getLogger("v12_engine")
 
@@ -47,13 +52,17 @@ SIGNAL_CSV_HEADER = [
     "ts_utc", "ts_iso", "symbol", "close",
     "pred", "decision", "q_high", "q_low",
     "direction_mode", "trend_filter",
-    "action",  # OPEN_LONG, OPEN_SHORT, CLOSE_LONG, CLOSE_SHORT, HOLD, NO_ACTION
+    "action",
     "position_side", "position_bars_held",
     "entry_price", "exit_price", "pnl_pct", "cost_pct", "pnl_net_pct",
     "equity_pct",
 ]
 
 EQUITY_CSV_HEADER = ["ts_utc", "ts_iso", "equity_pct", "n_trades", "n_wins", "win_rate"]
+
+# Drift check intervals (in cycles)
+DRIFT_CHECK_INTERVAL = 100   # Every ~8 hours (100 * 5min)
+BACKFILL_INTERVAL = 50       # Every ~4 hours
 
 
 class Engine:
@@ -95,9 +104,28 @@ class Engine:
         self._ensure_csv_header(self.signal_log_path, SIGNAL_CSV_HEADER)
         self._ensure_csv_header(self.equity_log_path, EQUITY_CSV_HEADER)
 
+        # SQLite database (primary storage)
+        self.db = TradeDB(self.symbol)
+        self.model_version = self.db.get_active_model_version()
+
         self.state = self._load_state()
         self.bst = None
         self.meta = None
+
+        # Cycle counter for periodic tasks
+        self._cycle_count = 0
+
+        # Track open trade ID in SQLite
+        self._open_trade_id = None
+        self._sync_open_trade_from_db()
+
+    def _sync_open_trade_from_db(self) -> None:
+        """Sync open trade from SQLite (in case engine restarted)."""
+        open_trade = self.db.get_open_trade()
+        if open_trade:
+            self._open_trade_id = open_trade["id"]
+        else:
+            self._open_trade_id = None
 
     def _load_state(self) -> dict:
         if self.state_path.exists():
@@ -108,7 +136,6 @@ class Engine:
                 if last_ts < 1e12:
                     LOG.warning("v12_engine: corrupted last_closed_candle_ts=%d — resetting", last_ts)
                     state["last_closed_candle_ts"] = None
-                    # Also reset recent_preds since they were computed from corrupted data
                     state["recent_preds"] = []
             return state
         return {
@@ -135,10 +162,10 @@ class Engine:
         if is_trained(self.symbol):
             self.bst = load_model(self.symbol)
             self.meta = load_metadata(self.symbol)
-            LOG.info("v12_engine: loaded V11 model for %s", self.symbol)
+            LOG.info("v12_engine: loaded V11 model for %s (version: %s)",
+                     self.symbol, self.model_version or "initial")
             return
 
-        # Check common naming
         raise FileNotFoundError(
             f"no V11 model for {self.symbol}; train first:\n"
             f"  python scripts/v11/v11_train.py --symbol {self.symbol} --horizon 12"
@@ -148,7 +175,6 @@ class Engine:
         """Compute quantile-based decision with V12 direction+trend filters."""
         recent = self.state.get("recent_preds", [])
         if len(recent) < 20:
-            # Fallback to fixed thresholds
             if pred > PROB_LONG:
                 decision = "LONG"
             elif pred < PROB_SHORT:
@@ -214,18 +240,14 @@ class Engine:
         latest_close = float(sym_5m["close"].iloc[-1])
 
         # ALWAYS use feed's confirmed timestamp as source of truth.
-        # The DataFrame's timestamps may be wrong due to pandas datetime bugs,
-        # but the feed's new_ts comes directly from Bybit's 5m API — always correct.
         latest_ts = new_ts
 
         # Cross-check: warn if DataFrame timestamp disagrees with feed
         df_ts = int(sym_5m["timestamp"].iloc[-1])
-        if abs(df_ts - new_ts) > 5 * 60 * 1000:  # more than 5 min apart
+        if abs(df_ts - new_ts) > 5 * 60 * 1000:
             LOG.warning("v12_engine: DataFrame ts=%d != feed ts=%d (diff=%d min) — using feed",
                         df_ts, new_ts, (new_ts - df_ts) / 60000)
 
-        # CRITICAL: always use feed's confirmed timestamp for dedup tracking.
-        # This prevents infinite loops if DataFrame timestamps are unreliable.
         self.state["last_closed_candle_ts"] = new_ts
 
         LOG.info("v12_engine: ts=%s close=%.4f",
@@ -256,15 +278,49 @@ class Engine:
 
         # 7. Act on decision
         result = self._act_on_decision(decision, pred, q_high, q_low, trend_1h,
-                                        latest_ts, latest_close)
+                                        latest_ts, latest_close, feat_row)
 
-        # 8. Persist state
+        # 8. Store prediction in SQLite (for drift detection)
+        self.db.insert_prediction(
+            ts_utc=latest_ts,
+            pred=pred,
+            trend_1h=trend_1h,
+            vol_regime_1h=feat_row.get("vol_regime_1h", 0.0),
+            rsi_14=feat_row.get("rsi_14", 0.0),
+            model_version=self.model_version,
+        )
+
+        # 9. Periodic tasks
+        self._cycle_count += 1
+
+        # Backfill prediction outcomes
+        if self._cycle_count % BACKFILL_INTERVAL == 0:
+            try:
+                filled = self.db.backfill_outcomes(horizon_bars=HORIZON)
+                if filled > 0:
+                    LOG.info("v12_engine: backfilled %d prediction outcomes", filled)
+            except Exception as e:
+                LOG.warning("v12_engine: backfill failed: %s", e)
+
+        # Drift check
+        if self._cycle_count % DRIFT_CHECK_INTERVAL == 0:
+            try:
+                events = run_drift_check(self.db)
+                if events:
+                    critical = [e for e in events if e["severity"] == "critical"]
+                    if critical:
+                        LOG.warning("v12_engine: DRIFT DETECTED — %d critical events. "
+                                    "Consider retraining.", len(critical))
+            except Exception as e:
+                LOG.warning("v12_engine: drift check failed: %s", e)
+
+        # 10. Persist state
         self._save_state()
         return result
 
     def _act_on_decision(self, decision: str, pred: float,
                          q_high: float, q_low: float, trend_1h: float,
-                         ts: int, close: float) -> dict:
+                         ts: int, close: float, feat_row: dict | None = None) -> dict:
         pos = self.state["position"]
         action = "NO_ACTION"
         entry_price = exit_price = pnl_pct = pnl_net_pct = 0.0
@@ -272,9 +328,7 @@ class Engine:
         if pos is not None:
             pos["bars_held"] = pos.get("bars_held", 0) + 1
             side = pos["side"]
-            # Force-close after HORIZON bars (H=12 = 1h)
             time_up = pos["bars_held"] >= HORIZON
-            # Disagreement: position direction vs signal
             disagree = (side == "LONG" and decision == "SHORT") or (side == "SHORT" and decision == "LONG")
 
             if time_up or disagree:
@@ -290,9 +344,29 @@ class Engine:
                 self.state["n_trades"] += 1
                 if pnl_net_pct > 0:
                     self.state["n_wins"] += 1
-                LOG.info("CLOSE %s entry=%.4f exit=%.4f pnl=%.3f%% net=%.3f%% equity=%.3f%%",
-                         side, entry_price, exit_price, pnl_pct, pnl_net_pct, self.state["equity_pct"])
+
+                exit_reason = "horizon" if time_up else "reverse"
+                LOG.info("CLOSE %s entry=%.4f exit=%.4f pnl=%.3f%% net=%.3f%% equity=%.3f%% reason=%s",
+                         side, entry_price, exit_price, pnl_pct, pnl_net_pct,
+                         self.state["equity_pct"], exit_reason)
+
+                # Close trade in SQLite
+                if self._open_trade_id:
+                    self.db.close_trade(
+                        trade_id=self._open_trade_id,
+                        exit_ts=ts,
+                        exit_price=exit_price,
+                        pnl_pct=pnl_pct,
+                        cost_pct=self.trade_cost,
+                        pnl_net_pct=pnl_net_pct,
+                        bars_held=pos["bars_held"],
+                        exit_reason=exit_reason,
+                        equity_after=self.state["equity_pct"],
+                    )
+                    self._open_trade_id = None
+
                 self.state["position"] = None
+
                 # If disagree, immediately open opposite
                 if disagree and decision in ("LONG", "SHORT"):
                     self._open_position(decision, ts, close)
@@ -305,7 +379,7 @@ class Engine:
                 self._open_position(decision, ts, close)
                 action = f"OPEN_{decision}"
 
-        # Log signal row
+        # Build signal row
         row = {
             "ts_utc": ts,
             "ts_iso": dt.datetime.utcfromtimestamp(ts / 1000).isoformat(),
@@ -326,21 +400,50 @@ class Engine:
             "cost_pct": self.trade_cost if action.startswith("CLOSE") or action.startswith("REVERSE") else 0.0,
             "pnl_net_pct": pnl_net_pct,
             "equity_pct": self.state["equity_pct"],
+            "model_version": self.model_version,
         }
-        with open(self.signal_log_path, "a", newline="") as f:
-            csv.writer(f).writerow([row[h] for h in SIGNAL_CSV_HEADER])
+
+        # Log to SQLite (primary)
+        try:
+            self.db.insert_signal(row)
+        except Exception as e:
+            LOG.warning("v12_engine: SQLite signal insert failed: %s", e)
+
+        # Log to CSV (backup)
+        try:
+            with open(self.signal_log_path, "a", newline="") as f:
+                csv.writer(f).writerow([row.get(h, "") for h in SIGNAL_CSV_HEADER])
+        except Exception as e:
+            LOG.warning("v12_engine: CSV signal write failed: %s", e)
 
         # Log equity snapshot
         eq_row = {
             "ts_utc": ts,
             "ts_iso": row["ts_iso"],
+            "symbol": self.symbol,
             "equity_pct": self.state["equity_pct"],
             "n_trades": self.state["n_trades"],
             "n_wins": self.state["n_wins"],
             "win_rate": (self.state["n_wins"] / self.state["n_trades"]) if self.state["n_trades"] > 0 else 0.0,
+            "drawdown_pct": 0.0,  # Computed properly in metrics.py
+            "position_side": pos["side"] if pos else "",
+            "unrealized_pnl": 0.0,
+            "model_version": self.model_version,
         }
-        with open(self.equity_log_path, "a", newline="") as f:
-            csv.writer(f).writerow([eq_row[h] for h in EQUITY_CSV_HEADER])
+
+        # Log equity to SQLite (primary)
+        try:
+            self.db.insert_equity(eq_row)
+        except Exception as e:
+            LOG.warning("v12_engine: SQLite equity insert failed: %s", e)
+
+        # Log equity to CSV (backup)
+        try:
+            csv_eq = {k: v for k, v in eq_row.items() if k in EQUITY_CSV_HEADER}
+            with open(self.equity_log_path, "a", newline="") as f:
+                csv.writer(f).writerow([csv_eq.get(h, "") for h in EQUITY_CSV_HEADER])
+        except Exception as e:
+            LOG.warning("v12_engine: CSV equity write failed: %s", e)
 
         return row
 
@@ -352,6 +455,18 @@ class Engine:
             "bars_held": 0,
         }
         LOG.info("OPEN %s @ %.4f ts=%s", side, close, ts)
+
+        # Open trade in SQLite
+        try:
+            self._open_trade_id = self.db.open_trade(
+                side=side,
+                entry_ts=ts,
+                entry_price=close,
+                model_version=self.model_version,
+            )
+        except Exception as e:
+            LOG.warning("v12_engine: SQLite open_trade failed: %s", e)
+            self._open_trade_id = None
 
     def run_forever(self, max_cycles: int | None = None) -> None:
         cycles = 0
@@ -376,7 +491,10 @@ class Engine:
             "config": self.cfg,
             "model_loaded": self.bst is not None,
             "model_meta": self.meta,
+            "model_version": self.model_version,
             "state": self.state,
             "signal_log": str(self.signal_log_path),
             "equity_log": str(self.equity_log_path),
+            "db_path": str(self.db.db_path),
+            "cycle_count": self._cycle_count,
         }
