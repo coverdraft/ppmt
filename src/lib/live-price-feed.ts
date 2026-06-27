@@ -160,8 +160,13 @@ export function getTokenName(symbol: string): string {
 }
 
 const COINBASE_WS_URL = 'wss://ws-feed.exchange.coinbase.com'
-const COINGECKO_MARKETS_URL = 'https://api.coingecko.com/api/v3/coins/markets'
-const KRAKEN_TICKER_URL = 'https://api.kraken.com/0/public/Ticker'
+// Use our own Next.js API route as a proxy. The browser cannot call
+// api.coingecko.com directly because CoinGecko does not send
+// Access-Control-Allow-Origin (CORS). The proxy route runs server-side
+// where CORS does not apply, and caches the response for 30s.
+const COINGECKO_MARKETS_URL = '/api/coingecko/markets'
+// Use our own Next.js API route as a proxy (same reason as CoinGecko).
+const KRAKEN_TICKER_URL = '/api/kraken/ticker'
 
 export class LivePriceFeed {
   private ws: WebSocket | null = null
@@ -301,7 +306,8 @@ export class LivePriceFeed {
     try {
       // Request all tokens in one batch. CoinGecko allows up to 250 ids per call.
       const idsParam = ALL_COINGECKO_IDS.join(',')
-      const url = `${COINGECKO_MARKETS_URL}?vs_currency=usd&ids=${encodeURIComponent(idsParam)}&order=market_cap_desc&per_page=250&page=1&sparkline=false&price_change_percentage=24h`
+      const url = `${COINGECKO_MARKETS_URL}?ids=${encodeURIComponent(idsParam)}`
+      // Same-origin request to our /api/coingecko proxy — no CORS issue.
       const resp = await fetch(url, {
         headers: { 'Accept': 'application/json' },
       })
