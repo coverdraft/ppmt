@@ -150,6 +150,12 @@ export class DemoEngine {
   private winningTrades: number = 0
   private realizedPnl: number = 0
   private running: boolean = false
+  // tradingEnabled controls whether NEW positions can be opened.
+  // The ticker (this.running) keeps flowing regardless, so prices,
+  // signals, equity curve, and open-position management continue
+  // even after Stop Trading or Kill Switch. This guarantees the
+  // terminal is ALWAYS in real-time, per user requirement.
+  private tradingEnabled: boolean = true
   private patterns: string[] = ['a', 'b', 'c', 'd', 'e']
   private patternIdx: number = 0
   private activePosition: any = null
@@ -246,8 +252,8 @@ export class DemoEngine {
       sim.signals.unshift(signal)
       if (sim.signals.length > 50) sim.signals = sim.signals.slice(0, 50)
 
-      // Open position based on money manager
-      if (!sim.activePosition && signal.confidence > 0.6) {
+      // Open position based on money manager (only if trading is enabled)
+      if (this.tradingEnabled && !sim.activePosition && signal.confidence > 0.6) {
         const entry = sim.price
         const move = entry * (signal.expected_move_pct / 100)
         // Use money manager settings for position sizing
@@ -376,8 +382,8 @@ export class DemoEngine {
       this.signals.unshift(signal)
       if (this.signals.length > 50) this.signals = this.signals.slice(0, 50)
 
-      // Maybe open position from signal
-      if (!this.activePosition && signal.confidence > 0.6) {
+      // Maybe open position from signal (only if trading is enabled)
+      if (this.tradingEnabled && !this.activePosition && signal.confidence > 0.6) {
         const entry = this.price
         const move = entry * (signal.expected_move_pct / 100)
         const mm = this.moneyManager
@@ -489,7 +495,11 @@ export class DemoEngine {
     const suggestedPositionSize = kellyPercent * mm.kellyFraction * totalValue
 
     return {
-      is_running: this.running,
+      // is_running reflects whether NEW positions can be opened.
+      // The ticker itself (this.running) keeps the terminal alive
+      // even when trading is disabled, so the user always sees
+      // real-time data flowing.
+      is_running: this.tradingEnabled,
       mode: 'demo',
       started_at: this.timestamps[0],
       current_price: parseFloat(this.price.toFixed(4)),
@@ -583,12 +593,21 @@ export class DemoEngine {
         sim.positions = []
       }
     }
-    this.running = false
+    // IMPORTANT: do NOT stop the ticker. Only disable new entries.
+    // The user can resume by clicking Start Trading. Prices, signals,
+    // and chart updates keep flowing — terminal stays in real-time.
+    this.tradingEnabled = false
   }
 
   setSymbol(s: string) { this.symbol = s; this.selectedToken = s }
   setTimeframe(tf: string) { this.timeframe = tf }
   setActiveTokens(tokens: string[]) { this.activeTokens = tokens }
+  /**
+   * Enable/disable opening of NEW positions.
+   * The ticker keeps running regardless — only new entries are gated.
+   * Use this for Start/Stop Trading without freezing the terminal.
+   */
+  setTradingEnabled(enabled: boolean) { this.tradingEnabled = enabled }
   setMoneyManager(settings: Partial<MoneyManagerSettings>) {
     this.moneyManager = { ...this.moneyManager, ...settings }
   }
