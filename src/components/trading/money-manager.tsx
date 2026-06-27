@@ -230,7 +230,7 @@ export function MoneyManager() {
               <span className="text-[9px] text-gray-500 font-mono">RISK PER TRADE</span>
               <span className="text-[10px] text-white font-mono font-bold">{mm.riskPerTradePct}%</span>
             </div>
-            <Slider
+            <Slider aria-label="RISK PER TRADE"
               value={[mm.riskPerTradePct]}
               min={0.5}
               max={5}
@@ -251,7 +251,7 @@ export function MoneyManager() {
                 <span className="text-[9px] text-gray-500 font-mono">KELLY FRACTION</span>
                 <span className="text-[10px] text-white font-mono font-bold">{(mm.kellyFraction * 100).toFixed(0)}%</span>
               </div>
-              <Slider
+              <Slider aria-label="KELLY FRACTION"
                 value={[mm.kellyFraction]}
                 min={0.25}
                 max={1.0}
@@ -304,7 +304,7 @@ export function MoneyManager() {
               <span className="text-[9px] text-gray-500 font-mono">TAKE PROFIT (x Risk)</span>
               <span className="text-[10px] text-emerald-400 font-mono font-bold">{mm.takeProfitMultiplier}x</span>
             </div>
-            <Slider
+            <Slider aria-label="TRADE PARAMETERS"
               value={[mm.takeProfitMultiplier]}
               min={1.0}
               max={5.0}
@@ -324,7 +324,7 @@ export function MoneyManager() {
               <span className="text-[9px] text-gray-500 font-mono">STOP LOSS (ATR)</span>
               <span className="text-[10px] text-red-400 font-mono font-bold">{mm.stopLossATR}x</span>
             </div>
-            <Slider
+            <Slider aria-label="STOP LOSS (ATR)"
               value={[mm.stopLossATR]}
               min={0.5}
               max={3.0}
@@ -340,7 +340,7 @@ export function MoneyManager() {
               <span className="text-[9px] text-gray-500 font-mono">DEFAULT LEVERAGE</span>
               <span className="text-[10px] text-amber-400 font-mono font-bold">{mm.defaultLeverage}x</span>
             </div>
-            <Slider
+            <Slider aria-label="DEFAULT LEVERAGE"
               value={[mm.defaultLeverage]}
               min={1}
               max={mm.maxLeverage}
@@ -356,7 +356,7 @@ export function MoneyManager() {
               <span className="text-[9px] text-gray-500 font-mono">MAX LEVERAGE</span>
               <span className="text-[10px] text-red-400 font-mono font-bold">{mm.maxLeverage}x</span>
             </div>
-            <Slider
+            <Slider aria-label="MAX LEVERAGE"
               value={[mm.maxLeverage]}
               min={1}
               max={20}
@@ -372,7 +372,7 @@ export function MoneyManager() {
               <span className="text-[9px] text-gray-500 font-mono">MAX POSITIONS</span>
               <span className="text-[10px] text-white font-mono font-bold">{mm.maxConcurrentPositions}</span>
             </div>
-            <Slider
+            <Slider aria-label="MAX POSITIONS"
               value={[mm.maxConcurrentPositions]}
               min={1}
               max={10}
@@ -403,7 +403,7 @@ export function MoneyManager() {
               <span className="text-[9px] text-gray-500 font-mono">MAX DRAWDOWN</span>
               <span className="text-[10px] text-red-400 font-mono font-bold">{mm.maxDrawdownPct}%</span>
             </div>
-            <Slider
+            <Slider aria-label="MAX DRAWDOWN"
               value={[mm.maxDrawdownPct]}
               min={5}
               max={30}
@@ -423,7 +423,7 @@ export function MoneyManager() {
               <span className="text-[9px] text-gray-500 font-mono">DAILY LOSS LIMIT</span>
               <span className="text-[10px] text-amber-400 font-mono font-bold">{mm.dailyLossLimitPct}%</span>
             </div>
-            <Slider
+            <Slider aria-label="DAILY LOSS LIMIT"
               value={[mm.dailyLossLimitPct]}
               min={1}
               max={15}
@@ -439,7 +439,7 @@ export function MoneyManager() {
               <span className="text-[9px] text-gray-500 font-mono">MAX CORRELATED POSITIONS</span>
               <span className="text-[10px] text-white font-mono font-bold">{mm.maxCorrelatedPositions}</span>
             </div>
-            <Slider
+            <Slider aria-label="MAX CORRELATED POSITIONS"
               value={[mm.maxCorrelatedPositions]}
               min={1}
               max={5}
@@ -466,7 +466,7 @@ export function MoneyManager() {
               <span className="text-[10px] text-gray-300 font-mono">Trailing Stop</span>
               <Info className="w-3 h-3 text-gray-600" />
             </div>
-            <Switch
+            <Switch aria-label="EXIT MANAGEMENT"
               checked={mm.trailingStopEnabled}
               onCheckedChange={(val) => updateMM({ trailingStopEnabled: val })}
             />
@@ -483,7 +483,7 @@ export function MoneyManager() {
                   <span className="text-[9px] text-gray-500 font-mono">ACTIVATE AFTER</span>
                   <span className="text-[10px] text-amber-400 font-mono">{mm.trailingStopActivationPct}% profit</span>
                 </div>
-                <Slider
+                <Slider aria-label="ACTIVATE AFTER"
                   value={[mm.trailingStopActivationPct]}
                   min={0.3}
                   max={3.0}
@@ -497,7 +497,7 @@ export function MoneyManager() {
                   <span className="text-[9px] text-gray-500 font-mono">TRAIL DISTANCE</span>
                   <span className="text-[10px] text-amber-400 font-mono">{mm.trailingStopDistancePct}%</span>
                 </div>
-                <Slider
+                <Slider aria-label="TRAIL DISTANCE"
                   value={[mm.trailingStopDistancePct]}
                   min={0.2}
                   max={2.0}
@@ -533,7 +533,7 @@ export function MoneyManager() {
                 <span className="text-[9px] text-gray-500 font-mono">ACTIVATE AFTER</span>
                 <span className="text-[10px] text-cyan-400 font-mono">{mm.breakEvenActivationPct}% profit</span>
               </div>
-              <Slider
+              <Slider aria-label="ACTIVATE AFTER"
                 value={[mm.breakEvenActivationPct]}
                 min={0.2}
                 max={2.0}
