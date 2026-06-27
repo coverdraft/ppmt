@@ -277,7 +277,7 @@ export class DemoEngine {
       const pos = sim.activePosition
       const isLong = pos.direction === 'LONG'
       const pnlPct = isLong
-        ? ((sim.price - pos.entry_price) / sim.entry_price || (sim.price - pos.entry_price) / pos.entry_price) * 100
+        ? ((sim.price - pos.entry_price) / pos.entry_price) * 100
         : ((pos.entry_price - sim.price) / pos.entry_price) * 100
 
       pos.pnl_pct = pnlPct
