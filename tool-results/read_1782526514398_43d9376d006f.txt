@@ -1,0 +1,2002 @@
+     1→"""
+     2→Paper Trading Engine - Simulated Trading with PPMT Predictions
+     3→
+     4→Runs a simulated trading loop using PPMT predictions on historical data
+     5→without real money. This enables:
+     6→
+     7→  1. Validating PPMT prediction quality in real-time
+     8→  2. Testing the full pipeline: SAX → Trie Match → Signal → Risk → Trade
+     9→  3. Building a track record before going live
+    10→  4. Monte Carlo simulation from paper trading results
+    11→
+    12→The paper trader steps through historical candles one at a time,
+    13→generating predictions and executing simulated trades with the
+    14→RiskManager's adaptive sizing system.
+    15→
+    16→Usage:
+    17→    from ppmt.engine.paper_trader import PaperTrader, PaperTraderConfig
+    18→
+    19→    trader = PaperTrader(config=PaperTraderConfig(symbol="BTC/USDT"))
+    20→    result = trader.run()
+    21→    print(result.format_summary())
+    22→"""
+    23→
+    24→from __future__ import annotations
+    25→
+    26→import time
+    27→from dataclasses import dataclass, field
+    28→from typing import Optional
+    29→
+    30→from rich.console import Console
+    31→from rich.table import Table
+    32→from rich.live import Live
+    33→from rich.panel import Panel
+    34→from rich.text import Text
+    35→
+    36→import numpy as np
+    37→
+    38→from ppmt.data.storage import PPMTStorage
+    39→from ppmt.data.classifier import AssetClassifier
+    40→from ppmt.core.trie import PPMTTrie
+    41→from ppmt.core.sax import SAXEncoder
+    42→from ppmt.core.regime import RegimeDetector, RegimeInfo
+    43→from ppmt.core.profiles import TokenProfile, TIMEFRAME_ALPHA_DEFAULTS, TradingCalibrationEngine
+    44→from ppmt.core.matcher import FuzzyMatcher
+    45→from ppmt.engine.ppmt import PPMT
+    46→from ppmt.engine.prediction import PredictionEngine
+    47→from ppmt.engine.signal import SignalType, Signal
+    48→from ppmt.engine.divergence_monitor import PatternDivergenceMonitor
+    49→from ppmt.risk.manager import RiskManager, RiskConfig
+    50→
+    51→
+    52→console = Console()
+    53→
+    54→
+    55→def compute_atr_pct(df, period: int = 14) -> np.ndarray:
+    56→    """
+    57→    Compute ATR (Average True Range) as a percentage of close price.
+    58→
+    59→    ATR measures volatility — higher ATR = more volatile = wider stops needed.
+    60→    Expressing ATR as % of price makes it comparable across price levels.
+    61→
+    62→    Args:
+    63→        df: OHLCV DataFrame
+    64→        period: ATR lookback period (default 14)
+    65→
+    66→    Returns:
+    67→        numpy array of ATR % values, same length as df
+    68→    """
+    69→    high = df['high'].values.astype(float)
+    70→    low = df['low'].values.astype(float)
+    71→    close = df['close'].values.astype(float)
+    72→
+    73→    # True Range = max(H-L, |H-prev_C|, |L-prev_C|)
+    74→    prev_close = np.roll(close, 1)
+    75→    prev_close[0] = close[0]
+    76→    tr = np.maximum(
+    77→        high - low,
+    78→        np.maximum(
+    79→            np.abs(high - prev_close),
+    80→            np.abs(low - prev_close)
+    81→        )
+    82→    )
+    83→
+    84→    # Wilder's smoothing (exponential moving average)
+    85→    atr = np.zeros_like(tr)
+    86→    if len(tr) >= period:
+    87→        atr[period - 1] = np.mean(tr[:period])
+    88→        for i in range(period, len(tr)):
+    89→            atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
+    90→
+    91→    # Convert to percentage of close price
+    92→    atr_pct = np.where(close > 0, atr / close * 100, 0)
+    93→    return atr_pct
+    94→
+    95→
+    96→def _record_observation(
+    97→    trie: "PPMTTrie",
+    98→    trade: PaperTrade,
+    99→    exit_sym_idx: int,
+   100→    next_symbol: Optional[str] = None,
+   101→    fuzzy_matcher: Optional["FuzzyMatcher"] = None,
+   102→) -> dict:
+   103→    """
+   104→    Living Trie: Record a trade's outcome back into the Trie.
+   105→
+   106→    This is the core of the "Living Trie" concept — the Trie learns from
+   107→    its own trading results. Every closed trade becomes a new observation
+   108→    that updates the node's metadata, creating a feedback loop:
+   109→
+   110→      Trie predicts → Trade executes → Outcome observed → Trie updated
+   111→
+   112→    v0.6.6 FIX: Read/Write Path Alignment
+   113→    Previously, the READ path used FuzzyMatcher (allowing 1-edit matches)
+   114→    but the WRITE path used trie.search() (exact match only). When a trade
+   115→    was entered via fuzzy match, _record_observation couldn't find the exact
+   116→    pattern and created a NEW branch — causing node proliferation.
+   117→
+   118→    Now, if fuzzy_matcher is provided:
+   119→    - Path A: Use best_match() to find the closest existing node instead
+   120→      of creating a new branch for patterns that are 1-edit away.
+   121→    - Path B: Use check_continuation() to find fuzzy-close children
+   122→      instead of always creating new children for unseen continuations.
+   123→
+   124→    Two things happen:
+   125→    1. The entry node's metadata is updated with the actual outcome
+   126→       (win/loss, actual move, duration)
+   127→    2. If a pattern break occurred with a new symbol, that symbol is
+   128→       added as a new child node — the Trie literally grows
+   129→
+   130→    Args:
+   131→        trie: The PPMT Trie to update
+   132→        trade: The closed PaperTrade with outcome data
+   133→        exit_sym_idx: SAX symbol index at trade exit
+   134→        next_symbol: The SAX symbol that followed (especially important
+   135→                     for pattern breaks — this is the NEW symbol)
+   136→        fuzzy_matcher: Optional FuzzyMatcher for read/write alignment.
+   137→            When provided, uses fuzzy matching to find the closest
+   138→            existing node instead of creating new branches.
+   139→
+   140→    Returns:
+   141→        Dict with 'observations' and 'new_nodes' counts
+   142→    """
+   143→    from ppmt.core.metadata import BlockLifecycleMetadata
+   144→
+   145→    observations = 0
+   146→    new_nodes = 0
+   147→
+   148→    if not trade.matched_pattern:
+   149→        return {"observations": 0, "new_nodes": 0}
+   150→
+   151→    # 1. Find the Trie node for the matched entry pattern
+   152→    #    v0.6.6: Try exact match first, then fuzzy, then prefix fallback.
+   153→    #    This aligns the WRITE path with the READ path — if a trade was
+   154→    #    entered via fuzzy match, we find the same node to write back to.
+   155→    node = trie.search(trade.matched_pattern)
+   156→    matched_via_fuzzy = False
+   157→    matched_pattern = trade.matched_pattern  # Track which pattern we matched
+   158→
+   159→    if node is None and fuzzy_matcher is not None:
+   160→        # v0.6.6 FIX: Use FuzzyMatcher to find closest existing node.
+   161→        # This prevents creating duplicate branches for patterns that
+   162→        # are 1-edit away from existing patterns. The trade was likely
+   163→        # entered via a fuzzy match, so we should write back to the
+   164→        # same node that generated the entry signal.
+   165→        fuzzy_result = fuzzy_matcher.best_match(trie, trade.matched_pattern)
+   166→        if fuzzy_result.matched and fuzzy_result.node is not None:
+   167→            node = fuzzy_result.node
+   168→            matched_via_fuzzy = True
+   169→            matched_pattern = fuzzy_result.symbols
+   170→
+   171→    if node is None:
+   172→        # Try shorter prefixes (the prediction may have used a prefix match)
+   173→        for prefix_len in range(len(trade.matched_pattern) - 1, 0, -1):
+   174→            node = trie.search(trade.matched_pattern[:prefix_len])
+   175→            if node is not None:
+   176→                matched_pattern = trade.matched_pattern[:prefix_len]
+   177→                break
+   178→
+   179→    if node is None:
+   180→        # Pattern not in Trie at all — create the entry as a new pattern
+   181→        # V4.4: Pass regime/regime_confidence so new nodes inherit regime context.
+   182→        # Previously these were missing, causing newly-created Living Trie nodes
+   183→        # to have empty regime info, which broke regime-aware confidence scoring.
+   184→        #
+   185→        # v0.6.6 NOTE: This should be RARE with fuzzy_matcher enabled.
+   186→        # Only truly novel patterns (no fuzzy match) create new branches.
+   187→        trie.insert_with_observations(
+   188→            symbols=trade.matched_pattern,
+   189→            move_pct=trade.actual_move_pct,
+   190→            drawdown_pct=min(trade.actual_move_pct, 0) if trade.actual_move_pct < 0 else 0,
+   191→            favorable_pct=max(trade.actual_move_pct, 0) if trade.actual_move_pct > 0 else 0,
+   192→            duration=max(1, exit_sym_idx - trade.entry_sym_idx) if trade.entry_sym_idx > 0 else 1,
+   193→            # v0.40.23 (P7-FaseC): outcome-SL/TP based won (see update above).
+   194→            won=(trade.exit_reason == "take_profit"),
+   195→            next_symbol=next_symbol,
+   196→            regime=trade.regime if trade.regime else None,
+   197→            regime_confidence=trade.regime_confidence if trade.regime_confidence > 0 else None,
+   198→        )
+   199→        new_nodes += 1
+   200→        observations += 1
+   201→        trie.trading_observations += 1
+   202→        trade.trie_updated = True
+   203→        return {"observations": observations, "new_nodes": new_nodes}
+   204→
+   205→    # 2. Update the node's metadata with the actual trade outcome
+   206→    duration = max(1, exit_sym_idx - trade.entry_sym_idx) if trade.entry_sym_idx > 0 else 1
+   207→    # v0.40.23 (P7-FaseC): `won` is now outcome-SL/TP based. The trade already
+   208→    # knows its exit_reason, so we just map it: take_profit → win, anything else
+   209→    # (stop_loss / trailing_stop / pattern_break / end_of_data / catastrophic_stop)
+   210→    # → loss. This replaces the legacy `trade.pnl_pct > 0` check which conflated
+   211→    # "barely positive exit" with "TP touched first" — the two are very different:
+   212→    # a trade that grazed SL before recovering to +0.01% PnL is NOT a clean win.
+   213→    won = (trade.exit_reason == "take_profit")
+   214→
+   215→    # Drawdown: SL distance is max drawdown estimate
+   216→    if trade.sl_price > 0 and trade.entry_price > 0:
+   217→        if trade.direction == "LONG":
+   218→            max_dd_pct = -(trade.entry_price - trade.sl_price) / trade.entry_price * 100
+   219→        else:
+   220→            max_dd_pct = -(trade.sl_price - trade.entry_price) / trade.entry_price * 100
+   221→    else:
+   222→        max_dd_pct = min(trade.actual_move_pct, 0)
+   223→
+   224→    # Favorable: TP distance is max favorable estimate
+   225→    if trade.tp_price > 0 and trade.entry_price > 0:
+   226→        if trade.direction == "LONG":
+   227→            max_fav_pct = (trade.tp_price - trade.entry_price) / trade.entry_price * 100
+   228→        else:
+   229→            max_fav_pct = (trade.entry_price - trade.tp_price) / trade.entry_price * 100
+   230→    else:
+   231→        max_fav_pct = max(trade.actual_move_pct, 0)
+   232→
+   233→    # Update entry node metadata
+   234→    node.metadata.update_from_observation(
+   235→        move_pct=trade.actual_move_pct,
+   236→        drawdown_pct=max_dd_pct,
+   237→        favorable_pct=max_fav_pct,
+   238→        duration=duration,
+   239→        won=won,
+   240→        next_symbol=next_symbol,
+   241→        regime=trade.regime if trade.regime else None,
+   242→        regime_confidence=trade.regime_confidence if trade.regime_confidence > 0 else None,
+   243→    )
+   244→    observations += 1
+   245→    trie.trading_observations += 1
+   246→
+   247→    # 3. If next_symbol is NOT already a child, add it — the Trie GROWS
+   248→    #    v0.6.6 FIX: Check fuzzy continuation before creating new child.
+   249→    #    If a fuzzy-close symbol already exists as a child, write the
+   250→    #    observation to THAT child instead of creating a new branch.
+   251→    if next_symbol:
+   252→        if node.has_child(next_symbol):
+   253→            # Exact child exists — update it
+   254→            child_node = node.get_child(next_symbol)
+   255→            child_node.metadata.update_from_observation(
+   256→                move_pct=trade.actual_move_pct * 0.5,
+   257→                drawdown_pct=max_dd_pct,
+   258→                favorable_pct=max_fav_pct,
+   259→                duration=duration,
+   260→                won=won,
+   261→                next_symbol=None,
+   262→                regime=trade.regime if trade.regime else None,
+   263→                regime_confidence=trade.regime_confidence if trade.regime_confidence > 0 else None,
+   264→            )
+   265→        elif fuzzy_matcher is not None:
+   266→            # v0.6.6: Check if a fuzzy-close continuation exists.
+   267→            # If the next symbol is similar to an existing child,
+   268→            # write to that child instead of creating a new one.
+   269→            cont_result = fuzzy_matcher.check_continuation(
+   270→                trie, matched_pattern, next_symbol
+   271→            )
+   272→            if cont_result.matched and cont_result.node is not None:
+   273→                # Fuzzy continuation found — write to existing child
+   274→                cont_result.node.metadata.update_from_observation(
+   275→                    move_pct=trade.actual_move_pct * 0.5,
+   276→                    drawdown_pct=max_dd_pct,
+   277→                    favorable_pct=max_fav_pct,
+   278→                    duration=duration,
+   279→                    won=won,
+   280→                    next_symbol=None,
+   281→                    regime=trade.regime if trade.regime else None,
+   282→                    regime_confidence=trade.regime_confidence if trade.regime_confidence > 0 else None,
+   283→                )
+   284→            else:
+   285→                # No fuzzy continuation — create new child (genuinely novel)
+   286→                extended_pattern = matched_pattern + [next_symbol]
+   287→                child_node = trie.insert(extended_pattern)
+   288→                child_node.metadata.update_from_observation(
+   289→                    move_pct=trade.actual_move_pct * 0.5,
+   290→                    drawdown_pct=max_dd_pct,
+   291→                    favorable_pct=max_fav_pct,
+   292→                    duration=duration,
+   293→                    won=won,
+   294→                    next_symbol=None,
+   295→                    regime=trade.regime if trade.regime else None,
+   296→                    regime_confidence=trade.regime_confidence if trade.regime_confidence > 0 else None,
+   297→                )
+   298→                new_nodes += 1
+   299→        else:
+   300→            # No fuzzy matcher — original behavior (always create new child)
+   301→            extended_pattern = matched_pattern + [next_symbol]
+   302→            child_node = trie.insert(extended_pattern)
+   303→            child_node.metadata.update_from_observation(
+   304→                move_pct=trade.actual_move_pct * 0.5,
+   305→                drawdown_pct=max_dd_pct,
+   306→                favorable_pct=max_fav_pct,
+   307→                duration=duration,
+   308→                won=won,
+   309→                next_symbol=None,
+   310→                regime=trade.regime if trade.regime else None,
+   311→                regime_confidence=trade.regime_confidence if trade.regime_confidence > 0 else None,
+   312→            )
+   313→            new_nodes += 1
+   314→
+   315→    trade.trie_updated = True
+   316→    return {"observations": observations, "new_nodes": new_nodes}
+   317→
+   318→
+   319→@dataclass
+   320→class PaperTraderConfig:
+   321→    """Configuration for paper trading simulation."""
+   322→    symbol: str = "BTC/USDT"
+   323→    """Trading pair to simulate."""
+   324→
+   325→    timeframe: str = "1h"
+   326→    """Candle timeframe."""
+   327→
+   328→    initial_capital: float = 10_000.0
+   329→    """Starting capital for simulation."""
+   330→
+   331→    pattern_length: int = 5
+   332→    """SAX blocks per pattern."""
+   333→
+   334→    sax_alphabet_size: int = 0
+   335→    """SAX alphabet size. 0 = auto from TokenProfile (timeframe-adaptive).
+   336→    v0.6.4: Changed from hardcoded 8 to auto. Previous default alpha=8 was
+   337→    OUTSIDE the calibration grid (3-5) and caused zero trades at 1m/5m.
+   338→    Now uses TokenProfile.from_timeframe() which selects alpha based on
+   339→    validated timeframe-alpha mapping: 1h→3, 5m→4, 1m→5."""
+   340→
+   341→    sax_window_size: int = 0
+   342→    """SAX window size. 0 = auto from TokenProfile (timeframe-adaptive).
+   343→    v0.6.4: Changed from hardcoded 10 to auto. Validated mapping:
+   344→    1h→7, 5m→7, 1m→7."""
+   345→
+   346→    sax_strategy: str = "ohlcv"
+   347→    """SAX encoding strategy."""
+   348→
+   349→    use_token_profile: bool = True
+   350→    """v0.6.4: Use TokenProfile for automatic parameter selection.
+   351→    When True (default), SAX alpha/window, catastrophic_loss_pct,
+   352→    short_allowed, short_confidence_multiplier, and fuzzy_threshold
+   353→    are all automatically set from TokenProfile based on asset class
+   354→    + timeframe. This replaces manual per-token tuning with
+   355→    data-driven auto-configuration validated across 22 token-TF combos.
+   356→    When False, falls back to explicit config values (backward compat)."""
+   357→
+   358→    auto_calibrate: bool = True
+   359→    """v0.6.8: Auto-calibrate SAX α/W using TradingCalibrationEngine.
+   360→    When True (default) and use_token_profile=True, runs a mini-backtest
+   361→    grid search (alpha x window) on the available data to discover the
+   362→    best α/W for this specific token, overriding the timeframe defaults.
+   363→    This replaces the generic timeframe→alpha mapping (1h→3, 5m→4, 1m→5)
+   364→    with a data-driven selection that can produce alpha=4 or alpha=5
+   365→    for 1h data when trading results justify it.
+   366→    When False, uses TokenProfile.from_timeframe() defaults (no calibration).
+   367→    Requires at least 1000 candles of data to calibrate."""
+   368→
+   369→    recalibration_interval: int = 0
+   370→    """v0.6.8: Re-calibrate every N candles during trading. 0 = no recalibration.
+   371→    When set to a positive value (e.g. 2000), the paper trader will
+   372→    re-run TradingCalibrationEngine every N candles with the latest
+   373→    data. If the calibrated α/W changes, it rebuilds the trie with the
+   374→    new parameters. This adapts to regime changes where different
+   375→    granularity is optimal.
+   376→    WARNING: Recalibration is expensive (re-encodes all data). Use
+   377→    conservatively (every 2000+ candles for 1h, 10000+ for 5m).
+   378→    v0.11.0: NOW FULLY IMPLEMENTED — previously defined but never used
+   379→    in the trading loop. Now triggers live recalibration that updates
+   380→    SAX encoder, rebuilds tries, and adjusts all dependent engines."""
+   381→
+   382→    pruning_interval: int = 1000
+   383→    """v0.12.0: Prune trie every N SAX symbol steps during trading. 0 = no pruning.
+   384→    When set to a positive value (default 1000), the paper trader will
+   385→    prune stale/low-quality leaf nodes from the Living Trie every N
+   386→    symbol steps. Pruning removes:
+   387→    - Leaf nodes with < min_observations (default 2) — statistical noise
+   388→    - Leaf nodes with near-zero confidence — unreliable patterns
+   389→    - Stale branches not observed recently (if max_staleness_hours set)
+   390→    Established patterns (>= 10 observations) and traded nodes are
+   391→    ALWAYS preserved for safety.
+   392→    This prevents unbounded trie growth during long trading sessions,
+   393→    keeping the trie focused on patterns that produce reliable signals.
+   394→    Previously hardcoded to 1000; now configurable for different
+   395→    timeframes (e.g. 5000 for 1m, 500 for 1h)."""
+   396→
+   397→    min_confidence: float = 0.20
+   398→    """Minimum confidence to generate entry signal.
+   399→    v0.6.2: Raised from 0.15 to 0.20 based on Cycle 5 regression analysis.
+   400→    Cycle 5 (v0.6.0 with probability bonus) allowed 10% confidence trades
+   401→    via the bonus loophole, resulting in +86.82% P&L vs Cycle 4's +1434%.
+   402→    v0.6.1 removed the bonus but min_confidence stayed at 15%. Raising
+   403→    to 20% further filters low-quality entries. Cycle 5 data shows trades
+   404→    with 15-19% confidence had WR of ~38% — removing these should
+   405→    improve overall quality. The SHORT gate is also relaxed (1.2x vs 1.5x)
+   406→    to compensate and allow SHORT diversification."""
+   407→
+   408→    min_quality_score: float = 0.0
+   409→    """Minimum quality score to enter a trade.
+   410→    v0.4.2: Reverted to 0.0 (v0.4.0 value). The v0.4.1 quality filter
+   411→    (0.10) removed valid entries that were profitable. Quality filtering
+   412→    is better handled by the Living Trie metadata and min_confidence.
+   413→    Explicit quality thresholds have historically caused more harm
+   414→    than good by filtering valid entries."""
+   415→
+   416→    min_risk_reward: float = 1.0
+   417→    """Minimum risk:reward ratio for entry.
+   418→    Kept at 1.0 to allow SHORT trades with R:R=1.5."""
+   419→
+   420→    start_offset: int = 200
+   421→    """Number of initial candles to skip (warm-up for SAX encoding)."""
+   422→
+   423→    end_offset: int = 0
+   424→    """Maximum candle index for trading (0 = use all data).
+   425→    v0.6.2: Added for out-of-sample validation. When set to a non-zero
+   426→    value, the paper trader will only trade up to this candle index.
+   427→    This allows building a trie on full data but only trading on a
+   428→    specific portion (e.g., the last 30% for OOS testing)."""
+   429→
+   430→    paa_mean: float | None = None
+   431→    """SAX normalization mean from training data. v0.6.3: When set (along
+   432→    with paa_std), the SAX encoder uses encode_with_normalization() with
+   433→    these training stats instead of computing z-scores from current data.
+   434→    This ensures consistent symbol mapping between training and test periods,
+   435→    which is critical for out-of-sample validation."""
+   436→
+   437→    paa_std: float | None = None
+   438→    """SAX normalization std from training data. See paa_mean docs."""
+   439→
+   440→    living_trie: bool = True
+   441→    """Whether to update the Trie with observations during paper trading.
+   442→    When True, every trade outcome updates the Trie node's metadata,
+   443→    and pattern breaks create new child nodes. This makes the Trie
+   444→    'alive' — it learns and improves from its own trading results."""
+   445→
+   446→    pattern_break_grace: int = 2
+   447→    """Number of consecutive pattern breaks before closing position.
+   448→    v0.2.9+: instead of closing on the first pattern break, wait
+   449→    for N consecutive breaks. This avoids closing on temporary noise.
+   450→    A single break may be a false signal; two consecutive breaks
+   451→    confirm the pattern has actually changed."""
+   452→
+   453→    reentry_cooldown: int = 1
+   454→    """Number of SAX symbol steps to wait after a losing trade before
+   455→    entering a new position. v0.2.10: reduced from 3 to 1 — v0.2.9's
+   456→    cooldown of 3 blocked 358 entries, which was too aggressive.
+   457→    A cooldown of 1 still prevents immediate revenge trading while
+   458→    allowing the system to capture the next valid signal."""
+   459→
+   460→    catastrophic_loss_pct: float = 0.0
+   461→    """Catastrophic loss threshold (percentage). 0.0 = use TokenProfile value.
+   462→    v0.6.4: Changed from hardcoded 8.0 to 0.0 (auto from TokenProfile).
+   463→    When use_token_profile=True, this is overridden by the asset-class-
+   464→    specific value from TokenProfile:
+   465→      blue_chip: 8%, large_cap: 10%, defi: 12%, meme: 15%, new_launch: 20%
+   466→    When use_token_profile=False or explicit value > 0, uses that value.
+   467→    Previous versions hardcoded 8.0%, which was too tight for meme tokens
+   468→    and too loose for blue chips."""
+   469→
+   470→    regime_aware: bool = True
+   471→    """v0.8.0: Enable regime-aware position sizing. When True, the paper
+   472→    trader detects the current market regime at each SAX boundary and
+   473→    adjusts position sizing accordingly. Regime multipliers:
+   474→    - trending_up: 1.2x (favorable, increase exposure)
+   475→    - ranging:     1.0x (neutral, base sizing)
+   476→    - trending_down: 0.6x (unfavorable, reduce exposure)
+   477→    - volatile:    0.4x (dangerous, minimal exposure)
+   478→    The AdvancedPositionSizer already supports these multipliers;
+   479→    this flag activates the regime detection that feeds them."""
+   480→
+   481→    use_multi_level: bool = True
+   482→    """v0.10.0: Enable 4-level matching (N1+N2+N3+N4) with adaptive weights.
+   483→    When True and all 4 tries are available, uses PPMT.match_raw() to compute
+   484→    weighted confidence across all 4 trie levels. When False or when only N3
+   485→    is available, falls back to single-trie PredictionEngine (backward
+   486→    compatible). This is the fix for GAP-1: PaperTrader previously only
+   487→    used N3, ignoring N1/N2/N4 entirely."""
+   488→
+   489→    verbose: bool = True
+   490→    """Whether to print step-by-step details."""
+   491→
+   492→    divergence_monitor_enabled: bool = True
+   493→    """v0.41.0 (FASE 2, Tarea 2.2): Enable pattern divergence monitoring.
+   494→    When True, the divergence monitor compares real SAX sequences with
+   495→    the expected_sequences from the entry node. If divergence exceeds
+   496→    threshold, triggers an exit with reason='pattern_broken'.
+   497→    This is complementary to the existing pattern-break check (which
+   498→    only checks if the next symbol exists as a child node). The
+   499→    divergence monitor checks the full forward sequence prediction."""
+   500→
+   501→    divergence_threshold: float = 0.667
+   502→    """v0.41.0 (FASE 2, Tarea 2.2): Fraction of symbols that must differ
+   503→    to trigger pattern_broken via divergence monitor. 0.667 = 2/3 symbols
+   504→    different from the expected sequence."""
+   505→
+   506→
+   507→@dataclass
+   508→class PaperTrade:
+   509→    """Record of a single paper trade."""
+   510→    trade_id: int = 0
+   511→    symbol: str = ""
+   512→    direction: str = ""  # "LONG" or "SHORT"
+   513→    entry_price: float = 0.0
+   514→    exit_price: float = 0.0
+   515→    entry_time: str = ""
+   516→    exit_time: str = ""
+   517→    size: float = 0.0
+   518→    pnl: float = 0.0
+   519→    pnl_pct: float = 0.0
+   520→    confidence: float = 0.0
+   521→    quality_score: float = 0.0
+   522→    sizing_multiplier: float = 1.0
+   523→    win_rate: float = 0.0
+   524→    risk_reward_ratio: float = 0.0
+   525→    expected_move_pct: float = 0.0
+   526→    actual_move_pct: float = 0.0
+   527→    matched_pattern: list[str] = field(default_factory=list)
+   528→    exit_reason: str = ""
+   529→    """Why the trade closed: 'take_profit', 'stop_loss', 'trailing_stop', 'pattern_break', 'end_of_data'"""
+   530→    sl_price: float = 0.0
+   531→    """Stop loss price at entry."""
+   532→    tp_price: float = 0.0
+   533→    """Take profit price at entry."""
+   534→    trailing_activated: bool = False
+   535→    """Whether trailing stop was activated during this trade."""
+   536→    entry_sym_idx: int = 0
+   537→    """SAX symbol index at entry (for duration calculation)."""
+   538→    trie_updated: bool = False
+   539→    """Whether this trade's outcome was recorded in the Trie (living Trie)."""
+   540→    regime: str = ""
+   541→    """Market regime at entry time. v0.8.0: One of trending_up, trending_down, ranging, volatile."""
+   542→    regime_confidence: float = 0.0
+   543→    """Confidence of the regime detection at entry time."""
+   544→
+   545→
+   546→@dataclass
+   547→class PaperTraderResult:
+   548→    """Result of a paper trading simulation run."""
+   549→    symbol: str = ""
+   550→    timeframe: str = ""
+   551→    initial_capital: float = 10_000.0
+   552→    final_capital: float = 10_000.0
+   553→    total_trades: int = 0
+   554→    winning_trades: int = 0
+   555→    losing_trades: int = 0
+   556→    win_rate: float = 0.0
+   557→    total_pnl: float = 0.0
+   558→    total_pnl_pct: float = 0.0
+   559→    max_drawdown: float = 0.0
+   560→    sharpe_ratio: float = 0.0
+   561→    profit_factor: float = 0.0
+   562→    avg_trade_pnl_pct: float = 0.0
+   563→    best_trade_pnl_pct: float = 0.0
+   564→    worst_trade_pnl_pct: float = 0.0
+   565→    avg_confidence: float = 0.0
+   566→    avg_quality_score: float = 0.0
+   567→    trades: list[PaperTrade] = field(default_factory=list)
+   568→    equity_curve: list[float] = field(default_factory=list)
+   569→    capital_history: list[float] = field(default_factory=list)
+   570→    recalibrations: int = 0
+   571→    """v0.11.0: Number of live recalibrations performed during trading."""
+   572→    recalibration_details: list[dict] = field(default_factory=list)
+   573→    """v0.11.0: Details of each recalibration event (alpha_before/after, etc)."""
+   574→    pruning_runs: int = 0
+   575→    """v0.12.0: Number of pruning cycles executed during trading."""
+   576→    pruning_total_nodes: int = 0
+   577→    """v0.12.0: Total nodes pruned across all pruning cycles."""
+   578→    pruning_total_obs_lost: int = 0
+   579→    """v0.12.0: Total observations lost from pruned nodes."""
+   580→
+   581→    def format_summary(self) -> str:
+   582→        """Format as a Rich panel summary."""
+   583→        pnl_color = "green" if self.total_pnl >= 0 else "red"
+   584→        pnl_sign = "+" if self.total_pnl >= 0 else ""
+   585→
+   586→        lines = []
+   587→        lines.append(f"[bold]Paper Trading Results: {self.symbol} ({self.timeframe})[/bold]")
+   588→        lines.append("")
+   589→        lines.append(f"  Capital:  ${self.initial_capital:,.2f} -> ${self.final_capital:,.2f}  [{pnl_color}]{pnl_sign}{self.total_pnl_pct:.2f}%[/{pnl_color}]")
+   590→        lines.append(f"  P&L:      [{pnl_color}]${self.total_pnl:+,.2f}[/{pnl_color}]")
+   591→        lines.append("")
+   592→        lines.append(f"  Trades:   {self.total_trades}  (W:{self.winning_trades} L:{self.losing_trades})")
+   593→        lines.append(f"  Win Rate: {self.win_rate:.1%}")
+   594→        lines.append(f"  Profit Factor: {self.profit_factor:.2f}")
+   595→        lines.append(f"  Max DD:   {self.max_drawdown:.1%}")
+   596→        lines.append(f"  Sharpe:   {self.sharpe_ratio:.2f}")
+   597→        lines.append("")
+   598→        lines.append(f"  Avg Trade:  {self.avg_trade_pnl_pct:+.2f}%")
+   599→        lines.append(f"  Best Trade: {self.best_trade_pnl_pct:+.2f}%")
+   600→        lines.append(f"  Worst Trade: {self.worst_trade_pnl_pct:+.2f}%")
+   601→        lines.append(f"  Avg Confidence: {self.avg_confidence:.1%}")
+   602→        lines.append(f"  Avg Quality:    {self.avg_quality_score:.2f}")
+   603→
+   604→        # v0.11.0: Recalibration info
+   605→        if self.recalibrations > 0:
+   606→            param_changes = sum(1 for d in self.recalibration_details if d.get("params_changed", False))
+   607→            lines.append("")
+   608→            lines.append(f"  Recalibrations: {self.recalibrations} ({param_changes} parameter changes)")
+   609→            for detail in self.recalibration_details:
+   610→                if detail.get("params_changed", False):
+   611→                    lines.append(f"    @ candle {detail['candle_idx']}: "
+   612→                                 f"α={detail['alpha_before']}→{detail['alpha_after']}, "
+   613→                                 f"W={detail['window_before']}→{detail['window_after']}")
+   614→
+   615→        # v0.12.0: Pruning info
+   616→        if self.pruning_runs > 0:
+   617→            lines.append("")
+   618→            lines.append(f"  Pruning: {self.pruning_runs} cycles, "
+   619→                         f"{self.pruning_total_nodes} nodes removed, "
+   620→                         f"{self.pruning_total_obs_lost} observations lost")
+   621→
+   622→        return "\n".join(lines)
+   623→
+   624→    def format_trades_table(self) -> Table:
+   625→        """Format trades as a Rich table."""
+   626→        table = Table(title=f"Paper Trades: {self.symbol}")
+   627→        table.add_column("#", justify="right", style="cyan", width=4)
+   628→        table.add_column("Dir", width=5)
+   629→        table.add_column("Entry", justify="right", width=12)
+   630→        table.add_column("Exit", justify="right", width=12)
+   631→        table.add_column("PnL%", justify="right", width=8)
+   632→        table.add_column("Conf", justify="right", width=6)
+   633→        table.add_column("Quality", justify="right", width=6)
+   634→        table.add_column("WR", justify="right", width=5)
+   635→        table.add_column("Exit Reason", width=15)
+   636→        table.add_column("Regime", width=8)
+   637→
+   638→        for t in self.trades:
+   639→            pnl_style = "green" if t.pnl_pct >= 0 else "red"
+   640→            dir_style = "green" if t.direction == "LONG" else "red"
+   641→            table.add_row(
+   642→                str(t.trade_id),
+   643→                f"[{dir_style}]{t.direction}[/{dir_style}]",
+   644→                f"${t.entry_price:,.2f}",
+   645→                f"${t.exit_price:,.2f}",
+   646→                f"[{pnl_style}]{t.pnl_pct:+.2f}%[/{pnl_style}]",
+   647→                f"{t.confidence:.0%}",
+   648→                f"{t.quality_score:.2f}",
+   649→                f"{t.win_rate:.0%}",
+   650→                t.exit_reason,
+   651→                t.regime or "-",
+   652→            )
+   653→
+   654→        return table
+   655→
+   656→
+   657→class PaperTrader:
+   658→    """
+   659→    Paper Trading Engine using PPMT predictions.
+   660→
+   661→    Steps through historical candles, generating predictions and
+   662→    executing simulated trades with adaptive position sizing.
+   663→
+   664→    This is the key validation tool: run paper trading on historical
+   665→    data to verify PPMT predictions before risking real capital.
+   666→    """
+   667→
+   668→    def __init__(self, config: Optional[PaperTraderConfig] = None):
+   669→        self.config = config or PaperTraderConfig()
+   670→        self.risk_config = RiskConfig(
+   671→            base_position_size_pct=0.01,  # 1% risk per trade (conservative while tuning)
+   672→            max_position_size_pct=0.04,
+   673→            min_position_size_pct=0.005,
+   674→            min_risk_reward=1.0,         # v0.2.9: lowered from 1.5 to allow SHORT R:R=1.5
+   675→            max_daily_loss_pct=0.10,      # 10% daily loss limit
+   676→            # v0.40.6 FIX-8 (CAPA 5 audit): lowered from 0.80 to 0.20.
+   677→            # 0.80 allowed losing 80% of capital before blocking new trades
+   678→            # (80 trades @ 1% loss each). 0.20 is still generous for paper
+   679→            # trading but prevents catastrophic drawdowns from going unblocked.
+   680→            # For real trading, recommend 0.15 (15%).
+   681→            max_drawdown_pct=0.20,        # 20% max drawdown (was 0.80)
+   682→            min_quality_score=0.0,        # Checked in paper_trader, not RiskManager
+   683→            # min_confidence is checked in PaperTrader.run(), not RiskManager
+   684→        )
+   685→
+   686→    def run(self) -> PaperTraderResult:
+   687→        """
+   688→        Run paper trading simulation on stored historical data.
+   689→
+   690→        v0.6.4: TokenProfile integration.
+   691→        The paper trader now auto-configures from TokenProfile:
+   692→        - SAX alpha/window from timeframe-adaptive mapping (1h→3, 5m→4, 1m→5)
+   693→        - catastrophic_loss_pct from asset class (blue_chip:8%, meme:15%, etc.)
+   694→        - short_allowed / short_confidence_multiplier from asset class
+   695→        - fuzzy_threshold from asset class
+   696→        This replaces manual per-token tuning with data-driven
+   697→        auto-configuration validated across 22 token-TF combos with
+   698→        6+ months of real Binance data each.
+   699→
+   700→        v0.3.0: Revert to v0.2.8 SL/TP behavior for maximum P&L.
+   701→        v0.2.10's "improvements" reduced P&L from +1578% to +371%:
+   702→        - Catastrophic protection (5%) cut trades that would reach TP
+   703→        - Trailing stop activated too early (50% of TP distance)
+   704→        - LONG SL floor of 2.0% was too wide vs v0.2.8's 1.5%
+   705→        - min_confidence 0.12 filtered valid entries
+   706→
+   707→        v0.3.0 changes (back to v0.2.8 baseline):
+   708→        - SL/TP checked at SAX window boundaries ONLY (no intra-window)
+   709→        - No catastrophic protection (disabled by default)
+   710→        - LONG SL: max(ATR*1.5, 1.5%), cap 5% (v0.2.8 values)
+   711→        - SHORT SL: max(ATR*2.0, 2.0%), cap 7% (v0.2.8 values)
+   712→        - Trailing stop activates at 75% of TP distance (not 50%)
+   713→        - min_confidence = 0.10 (v0.2.8 value)
+   714→        - min_quality_score = 0.0 (removed, Living Trie handles this)
+   715→
+   716→        Kept from v0.2.9/v0.2.10:
+   717→        - Pattern break grace period (2 consecutive)
+   718→        - Re-entry cooldown = 1 symbol step
+   719→        - Living Trie (ON by default)
+   720→        - Direction-specific SL/TP (SHORT gets wider stops)
+   721→        """
+   722→        cfg = self.config
+   723→        storage = PPMTStorage()
+   724→
+   725→        # Load data
+   726→        df = storage.load_ohlcv(cfg.symbol, cfg.timeframe)
+   727→        if df.empty:
+   728→            console.print(f"[red]No data for {cfg.symbol}. Run 'ppmt ingest' first.[/red]")
+   729→            return PaperTraderResult(symbol=cfg.symbol, timeframe=cfg.timeframe)
+   730→
+   731→        # Classify asset
+   732→        classifier = AssetClassifier()
+   733→        info = classifier.classify(cfg.symbol)
+   734→
+   735→        # ================================================================
+   736→        # v0.6.4: TokenProfile integration
+   737→        # Auto-configure SAX parameters, risk params, and gating from
+   738→        # the TokenProfile based on asset class + timeframe.
+   739→        # ================================================================
+   740→        token_profile = None
+   741→        if cfg.use_token_profile:
+   742→            # v0.11.0: Try to load a previously saved calibrated profile
+   743→            # This skips the expensive TradingCalibrationEngine grid search
+   744→            # when a profile was already calibrated in a previous run.
+   745→            saved_profile_dict = storage.load_token_profile(cfg.symbol, cfg.timeframe)
+   746→
+   747→            if saved_profile_dict is not None:
+   748→                try:
+   749→                    token_profile = TokenProfile.from_dict(saved_profile_dict)
+   750→                    console.print(f"[bold green]TokenProfile restored from storage:[/bold green] "
+   751→                                  f"{token_profile.asset_class} @ {cfg.timeframe} → "
+   752→                                  f"alpha={token_profile.sax_alphabet_size}, "
+   753→                                  f"window={token_profile.sax_window_size}, "
+   754→                                  f"calibrated={token_profile.calibration_date}, "
+   755→                                  f"changes={token_profile.profile_changes}")
+   756→                except Exception as e:
+   757→                    console.print(f"[yellow]Saved profile corrupt ({e}) — creating fresh[/yellow]")
+   758→                    token_profile = None
+   759→
+   760→            if token_profile is None:
+   761→                token_profile = TokenProfile.from_timeframe(
+   762→                    symbol=cfg.symbol,
+   763→                    asset_class=info.asset_class,
+   764→                    timeframe=cfg.timeframe,
+   765→                )
+   766→
+   767→            # Override SAX params from profile (unless explicitly set)
+   768→            if cfg.sax_alphabet_size == 0:
+   769→                cfg.sax_alphabet_size = token_profile.sax_alphabet_size
+   770→            if cfg.sax_window_size == 0:
+   771→                cfg.sax_window_size = token_profile.sax_window_size
+   772→            # Override catastrophic_loss from profile (unless explicitly set)
+   773→            if cfg.catastrophic_loss_pct == 0.0:
+   774→                cfg.catastrophic_loss_pct = token_profile.catastrophic_loss_pct * 100.0
+   775→
+   776→            console.print(f"[bold green]TokenProfile loaded:[/bold green] "
+   777→                          f"{info.asset_class} @ {cfg.timeframe} → "
+   778→                          f"alpha={token_profile.sax_alphabet_size}, "
+   779→                          f"window={token_profile.sax_window_size}, "
+   780→                          f"cat_loss={token_profile.catastrophic_loss_pct:.0%}, "
+   781→                          f"short_allowed={token_profile.short_allowed}, "
+   782→                          f"fuzzy={token_profile.fuzzy_threshold:.2f}")
+   783→
+   784→            # ================================================================
+   785→            # v0.6.8: Auto-calibration with TradingCalibrationEngine
+   786→            # Run a mini-backtest grid search on the available data to
+   787→            # discover the best α/W for THIS specific token, overriding
+   788→            # the generic timeframe defaults. This fixes the structural
+   789→            # bias of the old CalibrationEngine (always α=3/W=5) by
+   790→            # selecting based on actual trading PnL.
+   791→            #
+   792→            # v0.11.0: Skip calibration if a profile was already restored
+   793→            # from storage (calibration_date is set). This saves significant
+   794→            # startup time on subsequent runs. The recalibration_interval
+   795→            # mechanism handles periodic re-verification during trading.
+   796→            # ================================================================
+   797→            profile_already_calibrated = (
+   798→                token_profile.calibration_date != ""
+   799→                and token_profile.calibration_metric > 0
+   800→            )
+   801→            if profile_already_calibrated:
+   802→                console.print(f"[green]Profile already calibrated on "
+   803→                              f"{token_profile.calibration_date} "
+   804→                              f"(metric={token_profile.calibration_metric:.4f}, "
+   805→                              f"changes={token_profile.profile_changes}) — "
+   806→                              f"skipping calibration[/green]")
+   807→            elif cfg.auto_calibrate and len(df) >= 1000:
+   808→                console.print(f"[bold cyan]Auto-calibrating α/W...[/bold cyan] "
+   809→                              f"({len(df)} candles, this may take a moment)")
+   810→                try:
+   811→                    calibrator = TradingCalibrationEngine(
+   812→                        train_ratio=0.70,
+   813→                        pattern_length=cfg.pattern_length,
+   814→                        timeframe=cfg.timeframe,
+   815→                    )
+   816→                    cal_profile, cal_results = calibrator.calibrate(
+   817→                        df, symbol=cfg.symbol, verbose=False
+   818→                    )
+   819→                    cal_alpha = cal_profile.sax_alphabet_size
+   820→                    cal_window = cal_profile.sax_window_size
+   821→
+   822→                    # Find the best result for display
+   823→                    cal_best = [r for r in cal_results
+   824→                                if r.alphabet_size == cal_alpha
+   825→                                and r.window_size == cal_window][0]
+   826→
+   827→                    # Only override if calibration found a different α/W
+   828→                    if cal_alpha != cfg.sax_alphabet_size or cal_window != cfg.sax_window_size:
+   829→                        old_alpha, old_window = cfg.sax_alphabet_size, cfg.sax_window_size
+   830→                        cfg.sax_alphabet_size = cal_alpha
+   831→                        cfg.sax_window_size = cal_window
+   832→
+   833→                        # Update the token profile with calibrated values
+   834→                        grid = {
+   835→                            f"a{r.alphabet_size}_w{r.window_size}": {
+   836→                                "trading_metric": round(r.trading_metric, 4),
+   837→                                "total_pnl_pct": round(r.total_pnl_pct, 2),
+   838→                                "win_rate": round(r.win_rate, 4),
+   839→                                "total_trades": r.total_trades,
+   840→                            }
+   841→                            for r in cal_results
+   842→                        }
+   843→                        token_profile.update_from_calibration(
+   844→                            best_alpha=cal_alpha,
+   845→                            best_window=cal_window,
+   846→                            metric=cal_best.trading_metric,
+   847→                            grid=grid,
+   848→                            n_samples=len(df),
+   849→                        )
+   850→
+   851→                        console.print(f"[bold green]Calibrated:[/bold green] "
+   852→                                      f"α={old_alpha}→{cal_alpha}, W={old_window}→{cal_window} "
+   853→                                      f"(PnL={cal_best.total_pnl_pct:+.1f}%, "
+   854→                                      f"WR={cal_best.win_rate:.1%}, "
+   855→                                      f"Trades={cal_best.total_trades}, "
+   856→                                      f"SL/TP={calibrator.sl_pct}%/{calibrator.tp_pct}%)")
+   857→                    else:
+   858→                        console.print(f"[green]Calibration confirms default: "
+   859→                                      f"α={cal_alpha}/W={cal_window} "
+   860→                                      f"(PnL={cal_best.total_pnl_pct:+.1f}%, "
+   861→                                      f"WR={cal_best.win_rate:.1%})[/green]")
+   862→                except Exception as e:
+   863→                    console.print(f"[yellow]Calibration failed: {e} — "
+   864→                                  f"using default α/W[/yellow]")
+   865→
+   866→            # v0.11.0: Save calibrated profile to storage for next run
+   867→            if token_profile is not None and token_profile.calibration_date:
+   868→                try:
+   869→                    storage.save_token_profile(cfg.symbol, cfg.timeframe, token_profile.to_dict())
+   870→                    console.print(f"[dim]  TokenProfile saved to storage "
+   871→                                  f"(α={token_profile.sax_alphabet_size}, "
+   872→                                  f"W={token_profile.sax_window_size})[/dim]")
+   873→                except Exception as e:
+   874→                    console.print(f"[dim]  Failed to save profile: {e}[/dim]")
+   875→        else:
+   876→            # Fallback: use timeframe alpha defaults even without full profile
+   877→            if cfg.sax_alphabet_size == 0 or cfg.sax_window_size == 0:
+   878→                tf_defaults = TIMEFRAME_ALPHA_DEFAULTS.get(
+   879→                    cfg.timeframe, TIMEFRAME_ALPHA_DEFAULTS["1h"]
+   880→                )
+   881→                if cfg.sax_alphabet_size == 0:
+   882→                    cfg.sax_alphabet_size = tf_defaults["sax_alphabet_size"]
+   883→                if cfg.sax_window_size == 0:
+   884→                    cfg.sax_window_size = tf_defaults["sax_window_size"]
+   885→
+   886→            if cfg.catastrophic_loss_pct == 0.0:
+   887→                cfg.catastrophic_loss_pct = 8.0  # safe default
+   888→
+   889→        # v0.40.6 FIX-9 (CAPA 5 audit): Guarantee catastrophic protection
+   890→        # is at least 3.0% when not explicitly disabled. Previously when
+   891→        # use_token_profile=False and catastrophic_loss_pct defaulted to 0.0,
+   892→        # the system had NO intra-window protection — a flash crash within
+   893→        # a SAX window (5 candles of 1m = 5 min) would not be detected
+   894→        # until the window closed. For TF 1m/5m with maximum entry frequency,
+   895→        # this is critical. 3.0% is conservative — production should tune
+   896→        # per asset class via TokenProfile.
+   897→        if cfg.catastrophic_loss_pct < 3.0:
+   898→            cfg.catastrophic_loss_pct = 3.0
+   899→
+   900→        # Try to load existing Tries, or build new ones
+   901→        # v0.10.0: Load all 4 levels for GAP-1 4-level matching
+   902→        # v0.40.4 FIX-1D: pass asset_class so N1/N2 load from cross-asset pools.
+   903→        all_tries = storage.load_all_tries(cfg.symbol, asset_class=info.asset_class)
+   904→        trie_n1 = all_tries["n1"]
+   905→        trie_n2 = all_tries["n2"]
+   906→        trie_n3 = all_tries["n3"]
+   907→        trie_n4 = all_tries["n4"]
+   908→
+   909→        initial_pattern_count = 0
+   910→        has_multi_level = (
+   911→            cfg.use_multi_level
+   912→            and trie_n1 is not None
+   913→            and trie_n2 is not None
+   914→            and trie_n4 is not None
+   915→        )
+   916→
+   917→        # v0.6.4: Get fuzzy_threshold from TokenProfile if available
+   918→        fuzzy_threshold = 0.80  # safe default
+   919→        if token_profile is not None:
+   920→            fuzzy_threshold = token_profile.fuzzy_threshold
+   921→
+   922→        if trie_n3 is None:
+   923→            console.print(f"[yellow]No Trie for {cfg.symbol}. Building from data...[/yellow]")
+   924→            engine = PPMT(
+   925→                symbol=cfg.symbol,
+   926→                asset_class=info.asset_class,
+   927→                sax_alphabet_size=cfg.sax_alphabet_size,
+   928→                sax_window_size=cfg.sax_window_size,
+   929→                sax_strategy=cfg.sax_strategy,
+   930→                fuzzy_threshold=fuzzy_threshold,
+   931→                weight_profile=info.weight_profile,
+   932→            )
+   933→            # FIX-1D: contribute to universal N1 + class N2 pools
+   934→            engine.attach_storage(storage)
+   935→            engine.build(df, pattern_length=cfg.pattern_length)
+   936→            # Reload N1/N2 from cross-asset pools (engine.trie_n1/2 are empty
+   937→            # in storage mode)
+   938→            # v0.41.0 FIX-1B: DO NOT fall back to engine.trie_n1/n2 — those
+   939→            # are empty in storage mode and would mask a missing shared pool.
+   940→            # Empty pools correctly get 0 confidence, allowing weight
+   941→            # redistribution to N2/N3 via AdaptiveWeights.
+   942→            all_tries = storage.load_all_tries(cfg.symbol, asset_class=info.asset_class)
+   943→            trie_n1 = all_tries.get("n1")
+   944→            trie_n2 = all_tries.get("n2")
+   945→            if trie_n1 is None:
+   946→                console.print("[yellow]WARNING: N1 universal pool is empty after build. Only N2/N3/N4 available.[/yellow]")
+   947→                trie_n1 = PPMTTrie(name="universal_empty")
+   948→            if trie_n2 is None:
+   949→                console.print(f"[yellow]WARNING: N2 class pool for {info.asset_class} is empty after build.[/yellow]")
+   950→                trie_n2 = PPMTTrie(name=f"class_empty:{info.asset_class}")
+   951→            trie_n3 = engine.trie_n3
+   952→            trie_n4 = engine.trie_n4
+   953→            has_multi_level = True
+   954→        else:
+   955→            initial_pattern_count = trie_n3.pattern_count
+   956→            console.print(f"[green]Loaded N3 Trie for {cfg.symbol} ({trie_n3.pattern_count} patterns)[/green]")
+   957→            # v0.41.0 FIX-1B: Replace None N1/N2 with empty tries instead of
+   958→            # running in single-level mode. This ensures the 4-level matching
+   959→            # pipeline always runs, with empty levels getting 0 confidence.
+   960→            if trie_n1 is None:
+   961→                console.print("[yellow]WARNING: N1 universal pool not found. Using empty trie.[/yellow]")
+   962→                trie_n1 = PPMTTrie(name="universal_empty")
+   963→            if trie_n2 is None:
+   964→                console.print(f"[yellow]WARNING: N2 class pool for {info.asset_class} not found. Using empty trie.[/yellow]")
+   965→                trie_n2 = PPMTTrie(name=f"class_empty:{info.asset_class}")
+   966→            if has_multi_level:
+   967→                console.print(f"[green]All 4 levels loaded: N1={trie_n1.pattern_count}, "
+   968→                              f"N2={trie_n2.pattern_count}, N3={trie_n3.pattern_count}, "
+   969→                              f"N4={trie_n4.pattern_count}[/green]")
+   970→            else:
+   971→                console.print(f"[yellow]N1/N2 loaded (possibly empty). N4 unavailable — running 3-level mode.[/yellow]")
+   972→
+   973→        # Primary trie for PredictionEngine + Living Trie
+   974→        trie = trie_n3
+   975→
+   976→        # CRITICAL: Propagate metadata so intermediate nodes have statistics
+   977→        trie.propagate_metadata()
+   978→        if has_multi_level:
+   979→            for t in [trie_n1, trie_n2, trie_n4]:
+   980→                t.propagate_metadata()
+   981→        console.print(f"[green]Metadata propagated: root now has {trie.root.metadata.historical_count} aggregated observations[/green]")
+   982→
+   983→        # Compute ATR for dynamic SL/TP sizing
+   984→        atr_pct = compute_atr_pct(df, period=14)
+   985→        valid_atr = atr_pct[atr_pct > 0]
+   986→        if len(valid_atr) > 0:
+   987→            console.print(f"  ATR(14): avg={np.mean(valid_atr):.2f}%, recent={atr_pct[-1]:.2f}%")
+   988→
+   989→        # Create SAX encoder
+   990→        sax_encoder = SAXEncoder(
+   991→            alphabet_size=cfg.sax_alphabet_size,
+   992→            window_size=cfg.sax_window_size,
+   993→            strategy=cfg.sax_strategy,
+   994→        )
+   995→
+   996→        # v0.6.5: Create FuzzyMatcher for pattern break checks
+   997→        # This replaces direct trie.check_continuation() with fuzzy-aware
+   998→        # continuation that computes pattern_break_score for graduated exits
+   999→        fuzzy_matcher = FuzzyMatcher(
+  1000→            sax_encoder=sax_encoder,
+  1001→            threshold=fuzzy_threshold,
+  1002→            max_edit_distance=2,
+  1003→        )
+  1004→
+  1005→        # Encode the FULL DataFrame
+  1006→        # v0.6.3: Use encode_with_normalization() when training stats are provided.
+  1007→        # This ensures consistent symbol mapping between train and test periods.
+  1008→        if cfg.paa_mean is not None and cfg.paa_std is not None:
+  1009→            all_sax_symbols, _, _ = sax_encoder.encode_with_normalization(
+  1010→                df, paa_mean=cfg.paa_mean, paa_std=cfg.paa_std
+  1011→            )
+  1012→            console.print(f"  SAX encoding: using training normalization "
+  1013→                          f"(mean={cfg.paa_mean:.6f}, std={cfg.paa_std:.6f})")
+  1014→        else:
+  1015→            all_sax_symbols = sax_encoder.encode(df)
+  1016→
+  1017→        if not all_sax_symbols:
+  1018→            console.print(f"[red]Could not SAX encode data for {cfg.symbol}.[/red]")
+  1019→            return PaperTraderResult(symbol=cfg.symbol, timeframe=cfg.timeframe)
+  1020→
+  1021→        console.print(f"  SAX symbols: {len(all_sax_symbols)} (from {len(df)} candles)")
+  1022→
+  1023→        # Create engines
+  1024→        # FIX-14 (v0.40.10): pass trie_n4 as regime_trie when available
+  1025→        # so PredictionEngine can route lookups by current regime.
+  1026→        pred_engine = PredictionEngine(
+  1027→            trie,
+  1028→            prediction_depth=cfg.pattern_length,
+  1029→            regime_trie=trie_n4 if (has_multi_level and trie_n4 is not None) else None,
+  1030→        )
+  1031→        risk_mgr = RiskManager(capital=cfg.initial_capital, config=self.risk_config)
+  1032→
+  1033→        # v0.10.0: Create PPMT engine for 4-level matching (GAP-1 fix)
+  1034→        ppmt_engine = None
+  1035→        if has_multi_level:
+  1036→            ppmt_engine = PPMT(
+  1037→                symbol=cfg.symbol,
+  1038→                asset_class=info.asset_class,
+  1039→                sax_alphabet_size=cfg.sax_alphabet_size,
+  1040→                sax_window_size=cfg.sax_window_size,
+  1041→                sax_strategy=cfg.sax_strategy,
+  1042→                fuzzy_threshold=fuzzy_threshold,
+  1043→                weight_profile=info.weight_profile,
+  1044→            )
+  1045→            # Inject loaded tries instead of building new ones
+  1046→            ppmt_engine.set_tries(trie_n1, trie_n2, trie_n3, trie_n4)
+  1047→            # Adapt weights based on available data
+  1048→            ppmt_engine.adapt_weights()
+  1049→            console.print(f"  [bold cyan]4-level matching enabled[/bold cyan]: weights={ppmt_engine.weights}")
+  1050→
+  1051→        # v0.3.3: Reverted adaptive confidence scaling (was raising min_confidence
+  1052→        # to 0.20 for fresh tries). v0.3.2 proved this was COUNTERPRODUCTIVE:
+  1053→        # fresh WR dropped from 45.3% (v0.3.1, no scaling) to 43.9% (v0.3.2, 20%).
+  1054→        # The fix is NOT a higher threshold but better build-time metadata.
+  1055→        # v0.3.3's trade-simulation "won" classification during build produces
+  1056→        # more differentiated win_rates, so confidence scores are naturally
+  1057→        # more meaningful even for fresh tries.
+  1058→        if trie.trading_observations == 0:
+  1059→            console.print(f"  [yellow]Fresh trie detected (0 trading observations) — "
+  1060→                          f"v0.3.3 trade-simulation build should provide better metadata[/yellow]")
+  1061→        else:
+  1062→            console.print(f"  [green]Trie has {trie.trading_observations} trading observations "
+  1063→                          f"— metadata quality: good[/green]")
+  1064→
+  1065→        # Timeframe to hours
+  1066→        tf_hours = {
+  1067→            "1m": 1/60, "5m": 5/60, "15m": 15/60,
+  1068→            "1h": 1, "4h": 4, "1d": 24,
+  1069→        }.get(cfg.timeframe, 1)
+  1070→
+  1071→        # Simulation state
+  1072→        result = PaperTraderResult(
+  1073→            symbol=cfg.symbol,
+  1074→            timeframe=cfg.timeframe,
+  1075→            initial_capital=cfg.initial_capital,
+  1076→            final_capital=cfg.initial_capital,
+  1077→        )
+  1078→        result.equity_curve = [cfg.initial_capital]
+  1079→        result.capital_history = [cfg.initial_capital]
+  1080→
+  1081→        current_position = None  # PaperTrade when in position
+  1082→        trade_counter = 0
+  1083→        peak_capital = cfg.initial_capital
+  1084→
+  1085→        # v0.2.9: Pattern break grace period tracking
+  1086→        consecutive_breaks = 0
+  1087→
+  1088→        # v0.41.0 (FASE 2, Tarea 2.2): Pattern divergence monitor
+  1089→        divergence_monitor = PatternDivergenceMonitor(
+  1090→            divergence_threshold=cfg.divergence_threshold
+  1091→        ) if cfg.divergence_monitor_enabled else None
+  1092→        # Track how many post-entry symbols we've seen for divergence checking
+  1093→        post_entry_symbols: list[str] = []
+  1094→
+  1095→        # v0.2.9: Re-entry cooldown after losing trades
+  1096→        last_losing_trade_sym_idx = -999  # Symbol index of last losing trade
+  1097→        cooldown_filter_count = 0
+  1098→
+  1099→        # Start from warm-up offset (in candle space)
+  1100→        start_candle = cfg.start_offset
+  1101→        if start_candle >= len(df):
+  1102→            console.print(f"[red]Not enough data. Need at least {start_candle} candles, have {len(df)}.[/red]")
+  1103→            return result
+  1104→
+  1105→        # v0.6.2: End offset for out-of-sample validation
+  1106→        end_candle = cfg.end_offset if cfg.end_offset > 0 else len(df)
+  1107→        if end_candle > len(df):
+  1108→            end_candle = len(df)
+  1109→
+  1110→        living_trie_status = "ON" if cfg.living_trie else "OFF"
+  1111→        oos_status = f", ending at index {end_candle}" if cfg.end_offset > 0 else ""
+  1112→        console.print(f"\n[bold cyan]Starting Paper Trading: {cfg.symbol} ({cfg.timeframe})[/bold cyan]")
+  1113→        console.print(f"  Capital: ${cfg.initial_capital:,.2f}")
+  1114→        console.print(f"  Data: {len(df)} candles, starting from index {start_candle}{oos_status}")
+  1115→        console.print(f"  Trading range: candles {start_candle}-{end_candle} ({end_candle - start_candle} candles)")
+  1116→        console.print(f"  Trie: {trie.pattern_count} patterns")
+  1117→        console.print(f"  Min confidence: {cfg.min_confidence:.0%} | Min quality: {cfg.min_quality_score:.2f}")
+  1118→        console.print(f"  Entry: move > 1.0%, probability > 20%, ATR-based SL/TP")
+  1119→        console.print(f"  LONG SL: max(ATR*1.5, 1.5%) cap 5% | SHORT SL: max(ATR*2.0, 2.0%) cap 7%")
+  1120→        cat_status = f"{cfg.catastrophic_loss_pct:.0f}%" if cfg.catastrophic_loss_pct > 0 else "OFF"
+  1121→        console.print(f"  Catastrophic protection: {cat_status}")
+  1122→        console.print(f"  Trailing stop: activates at 75% of TP distance")
+  1123→        console.print(f"  Pattern break grace: {cfg.pattern_break_grace} consecutive")
+  1124→        console.print(f"  Re-entry cooldown: {cfg.reentry_cooldown} symbols after loss")
+  1125→        console.print(f"  Living Trie: [bold]{living_trie_status}[/bold]")
+  1126→        console.print(f"  Regime-aware sizing: [bold]{'ON' if cfg.regime_aware else 'OFF'}[/bold]")
+  1127→        console.print(f"  4-level matching: [bold]{'ON' if has_multi_level else 'OFF'}[/bold]")
+  1128→        pruning_status = f"every {cfg.pruning_interval} steps" if cfg.pruning_interval > 0 else "OFF"
+  1129→        console.print(f"  Trie pruning: [bold]{pruning_status}[/bold]\n")
+  1130→
+  1131→        # v0.8.0: Regime detection
+  1132→        regime_detector = None
+  1133→        current_regime = "ranging"
+  1134→        regime_info = None
+  1135→        regime_stats = {"trending_up": 0, "trending_down": 0, "ranging": 0, "volatile": 0}
+  1136→        if cfg.regime_aware:
+  1137→            regime_detector = RegimeDetector(lookback=50, vol_threshold=0.6, trend_threshold=0.005)
+  1138→            console.print(f"  [dim]Regime detector initialized (lookback=50)[/dim]")
+  1139→
+  1140→        # We iterate over SAX symbol positions
+  1141→        start_sym_idx = start_candle // cfg.sax_window_size
+  1142→        if start_sym_idx < cfg.pattern_length:
+  1143→            start_sym_idx = cfg.pattern_length
+  1144→
+  1145→        # v0.6.2: End symbol index for out-of-sample
+  1146→        end_sym_idx = end_candle // cfg.sax_window_size
+  1147→
+  1148→        # Track prediction statistics
+  1149→        pred_count = 0
+  1150→        pred_with_direction = 0
+  1151→        pred_passed_threshold = 0
+  1152→        risk_reject_reasons = {}  # reason -> count
+  1153→
+  1154→        # Living Trie: track how many observations are recorded
+  1155→        trie_observations_recorded = 0
+  1156→        trie_new_nodes_created = 0
+  1157→        trie_metadata_propagations = 0
+  1158→
+  1159→        # Track current date for daily P&L reset
+  1160→        current_date = None
+  1161→
+  1162→        # v0.11.0: Track candles since last calibration for live recalibration
+  1163→        candles_since_calibration = 0
+  1164→        current_alpha = cfg.sax_alphabet_size
+  1165→        current_window = cfg.sax_window_size
+  1166→
+  1167→        # Pre-extract arrays for fast intra-symbol access
+  1168→        df_high = df['high'].values.astype(float)
+  1169→        df_low = df['low'].values.astype(float)
+  1170→        df_close = df['close'].values.astype(float)
+  1171→
+  1172→        for sym_idx in range(start_sym_idx, end_sym_idx):
+  1173→            # Candle range for this SAX symbol
+  1174→            candle_start = sym_idx * cfg.sax_window_size
+  1175→            candle_end = min((sym_idx + 1) * cfg.sax_window_size, len(df))
+  1176→            last_candle_idx = candle_end - 1
+  1177→
+  1178→            # v0.11.0: Track candles for recalibration
+  1179→            candles_in_window = candle_end - candle_start
+  1180→            candles_since_calibration += candles_in_window
+  1181→
+  1182→            # Date check for daily P&L reset (use last candle of window)
+  1183→            current_time = str(df.index[last_candle_idx]) if hasattr(df.index, 'strftime') else str(last_candle_idx)
+  1184→            candle_date = current_time[:10] if len(current_time) >= 10 else None
+  1185→            if candle_date and candle_date != current_date:
+  1186→                if current_date is not None:
+  1187→                    risk_mgr.reset_daily()
+  1188→                current_date = candle_date
+  1189→
+  1190→            # Current SAX pattern
+  1191→            if sym_idx < cfg.pattern_length:
+  1192→                continue
+  1193→            current_symbols = all_sax_symbols[sym_idx - cfg.pattern_length:sym_idx]
+  1194→
+  1195→            # ================================================================
+  1196→            # v0.8.0: Regime detection at each SAX boundary
+  1197→            # Detect market regime from recent prices and adjust position
+  1198→            # sizing accordingly. Regime is updated once per SAX window
+  1199→            # (not per candle) to match the trading decision cadence.
+  1200→            # ================================================================
+  1201→            if regime_detector is not None:
+  1202→                # Use last 200 candles for regime detection (enough for lookback=50)
+  1203→                regime_candle_start = max(0, last_candle_idx - 200)
+  1204→                regime_prices = df_close[regime_candle_start:last_candle_idx + 1]
+  1205→                if len(regime_prices) >= 50:
+  1206→                    regime_info = regime_detector.detect_detailed(regime_prices)
+  1207→                    current_regime = regime_info.regime
+  1208→                    regime_stats[current_regime] = regime_stats.get(current_regime, 0) + 1
+  1209→
+  1210→                    # v0.10.0: Update PPMT engine's regime for N4 matching (GAP-1)
+  1211→                    if ppmt_engine is not None:
+  1212→                        ppmt_engine.set_regime(current_regime)
+  1213→
+  1214→            # ================================================================
+  1215→            # PHASE 1: SL/TP checking
+  1216→            # v0.2.10: SAX-boundary checking (like v0.2.8) with catastrophic
+  1217→            # intra-window protection. v0.2.9 checked every candle with
+  1218→            # HIGH/LOW which was too aggressive — it triggered on candle
+  1219→            # wicks before the price actually closed there, cutting winners
+  1220→            # short. Only 1 take_profit in 380 trades proved this was wrong.
+  1221→            #
+  1222→            # New approach:
+  1223→            # 1. Check SL/TP at SAX window boundary (like v0.2.8) using
+  1224→            #    close price — this lets trades breathe and reach TP
+  1225→            # 2. Scan intra-window candles for catastrophic losses only
+  1226→            #    (unrealized loss > catastrophic_loss_pct, default 5%)
+  1227→            #    This prevents the -9.39% type losses from v0.2.8
+  1228→            # ================================================================
+  1229→            if current_position is not None:
+  1230→                pos = risk_mgr._positions.get(cfg.symbol)
+  1231→                if pos is None:
+  1232→                    current_position = None
+  1233→                    continue
+  1234→
+  1235→                current_price = df_close[last_candle_idx]
+  1236→
+  1237→                # === Step 1: Catastrophic intra-window protection ===
+  1238→                # v0.3.0: DISABLED by default (catastrophic_loss_pct=0.0).
+  1239→                # v0.2.10's catastrophic protection at 5% cut trades that
+  1240→                # would have reached take_profit. The v0.2.8 baseline with
+  1241→                # NO intra-window checking produced +1578% P&L.
+  1242→                # Only enable if catastrophic_loss_pct > 0.
+  1243→                catastrophic_close = False
+  1244→                if cfg.catastrophic_loss_pct > 0:
+  1245→                    for ci in range(candle_start, candle_end):
+  1246→                        if ci >= len(df_close):
+  1247→                            break
+  1248→                        candle_c = df_close[ci]
+  1249→                        if pos.direction == "LONG":
+  1250→                            unrealized_loss_pct = (pos.entry_price - candle_c) / pos.entry_price * 100
+  1251→                        else:
+  1252→                            unrealized_loss_pct = (candle_c - pos.entry_price) / pos.entry_price * 100
+  1253→                        if unrealized_loss_pct >= cfg.catastrophic_loss_pct:
+  1254→                            # Catastrophic move — close immediately
+  1255→                            cat_time = str(df.index[ci]) if hasattr(df.index, 'strftime') else str(ci)
+  1256→                            _, pnl = risk_mgr.close_position(cfg.symbol, candle_c)
+  1257→                            current_position.exit_price = candle_c
+  1258→                            current_position.exit_time = cat_time
+  1259→                            current_position.pnl = pnl
+  1260→                            if current_position.direction == "LONG":
+  1261→                                current_position.pnl_pct = (candle_c - current_position.entry_price) / current_position.entry_price * 100
+  1262→                            else:
+  1263→                                current_position.pnl_pct = (current_position.entry_price - candle_c) / current_position.entry_price * 100
+  1264→                            current_position.actual_move_pct = current_position.pnl_pct
+  1265→                            current_position.exit_reason = "catastrophic_stop"
+  1266→
+  1267→                            if cfg.living_trie and current_position.matched_pattern:
+  1268→                                next_sym = all_sax_symbols[sym_idx] if sym_idx < len(all_sax_symbols) else None
+  1269→                                obs_result = _record_observation(
+  1270→                                    trie, current_position, sym_idx, next_sym,
+  1271→                                    fuzzy_matcher=fuzzy_matcher,
+  1272→                                )
+  1273→                                trie_observations_recorded += obs_result["observations"]
+  1274→                                trie_new_nodes_created += obs_result["new_nodes"]
+  1275→
+  1276→                            if current_position.pnl_pct <= 0:
+  1277→                                last_losing_trade_sym_idx = sym_idx
+  1278→
+  1279→                            result.trades.append(current_position)
+  1280→                            trade_counter += 1
+  1281→                            current_position = None
+  1282→                            catastrophic_close = True
+  1283→                            consecutive_breaks = 0
+  1284→
+  1285→                            result.equity_curve.append(risk_mgr.capital)
+  1286→                            result.capital_history.append(risk_mgr.capital)
+  1287→                            if risk_mgr.capital > peak_capital:
+  1288→                                peak_capital = risk_mgr.capital
+  1289→                            break
+  1290→
+  1291→                if catastrophic_close:
+  1292→                    continue  # Skip to next SAX symbol
+  1293→
+  1294→                # === Step 2: Trailing stop update (at SAX boundary) ===
+  1295→                # Update trailing SL once per SAX window, using close price.
+  1296→                # This is the same as v0.2.8 — gives trades room to breathe.
+  1297→                if pos.tp_price is not None:
+  1298→                    entry = pos.entry_price
+  1299→                    if pos.direction == "LONG":
+  1300→                        unrealized_pct = (current_price - entry) / entry * 100
+  1301→                        tp_distance_pct = (pos.tp_price - entry) / entry * 100
+  1302→                    else:
+  1303→                        unrealized_pct = (entry - current_price) / entry * 100
+  1304→                        tp_distance_pct = (entry - pos.tp_price) / entry * 100
+  1305→
+  1306→                    # v0.3.0: Trailing stop activates at 75% of TP distance
+  1307→                    # (v0.2.10's 50% was too aggressive — it triggered on normal
+  1308→                    # retracements, locking in tiny gains instead of letting
+  1309→                    # winners run to full TP). At 75%, we only trail when
+  1310→                    # the trade is deep in profit and close to TP.
+  1311→                    if not current_position.trailing_activated and tp_distance_pct > 0 and unrealized_pct >= tp_distance_pct * 0.75:
+  1312→                        current_position.trailing_activated = True
+  1313→
+  1314→                    if current_position.trailing_activated:
+  1315→                        # v0.3.0: Use 1.5*ATR for trailing distance (wider)
+  1316→                        # v0.2.10's 1*ATR was too tight — with avg ATR=0.84%,
+  1317→                        # the trailing SL was only 0.84% away, getting hit
+  1318→                        # by normal noise. 1.5*ATR = 1.26% gives breathing room.
+  1319→                        current_atr = atr_pct[last_candle_idx] if last_candle_idx < len(atr_pct) else 2.0
+  1320→                        trailing_distance = current_atr * 1.5
+  1321→                        if pos.direction == "LONG":
+  1322→                            new_sl = max(pos.sl_price, current_price * (1 - trailing_distance / 100))
+  1323→                        else:
+  1324→                            new_sl = min(pos.sl_price, current_price * (1 + trailing_distance / 100))
+  1325→                        pos.sl_price = new_sl
+  1326→
+  1327→                # === Step 3: Check SL/TP at SAX boundary (like v0.2.8) ===
+  1328→                sl_hit = risk_mgr.check_stop_loss(cfg.symbol, current_price)
+  1329→                tp_hit = risk_mgr.check_take_profit(cfg.symbol, current_price)
+  1330→
+  1331→                if sl_hit:
+  1332→                    # Close at stop loss (or trailing stop)
+  1333→                    _, pnl = risk_mgr.close_position(cfg.symbol, current_price)
+  1334→                    current_position.exit_price = current_price
+  1335→                    current_position.exit_time = current_time
+  1336→                    current_position.pnl = pnl
+  1337→                    if current_position.direction == "LONG":
+  1338→                        current_position.pnl_pct = (current_price - current_position.entry_price) / current_position.entry_price * 100
+  1339→                    else:
+  1340→                        current_position.pnl_pct = (current_position.entry_price - current_price) / current_position.entry_price * 100
+  1341→                    current_position.actual_move_pct = current_position.pnl_pct
+  1342→                    current_position.exit_reason = "trailing_stop" if current_position.trailing_activated else "stop_loss"
+  1343→
+  1344→                    # Living Trie: record this trade outcome
+  1345→                    if cfg.living_trie and current_position.matched_pattern:
+  1346→                        next_sym = all_sax_symbols[sym_idx] if sym_idx < len(all_sax_symbols) else None
+  1347→                        obs_result = _record_observation(
+  1348→                            trie, current_position, sym_idx, next_sym,
+  1349→                            fuzzy_matcher=fuzzy_matcher,
+  1350→                        )
+  1351→                        trie_observations_recorded += obs_result["observations"]
+  1352→                        trie_new_nodes_created += obs_result["new_nodes"]
+  1353→
+  1354→                    if current_position.pnl_pct <= 0:
+  1355→                        last_losing_trade_sym_idx = sym_idx
+  1356→
+  1357→                    result.trades.append(current_position)
+  1358→                    trade_counter += 1
+  1359→                    current_position = None
+  1360→                    consecutive_breaks = 0
+  1361→
+  1362→                    result.equity_curve.append(risk_mgr.capital)
+  1363→                    result.capital_history.append(risk_mgr.capital)
+  1364→                    if risk_mgr.capital > peak_capital:
+  1365→                        peak_capital = risk_mgr.capital
+  1366→                    continue
+  1367→
+  1368→                elif tp_hit:
+  1369→                    # Close at take profit
+  1370→                    _, pnl = risk_mgr.close_position(cfg.symbol, current_price)
+  1371→                    current_position.exit_price = current_price
+  1372→                    current_position.exit_time = current_time
+  1373→                    current_position.pnl = pnl
+  1374→                    if current_position.direction == "LONG":
+  1375→                        current_position.pnl_pct = (current_price - current_position.entry_price) / current_position.entry_price * 100
+  1376→                    else:
+  1377→                        current_position.pnl_pct = (current_position.entry_price - current_price) / current_position.entry_price * 100
+  1378→                    current_position.actual_move_pct = current_position.pnl_pct
+  1379→                    current_position.exit_reason = "take_profit"
+  1380→
+  1381→                    # Living Trie: record this trade outcome
+  1382→                    if cfg.living_trie and current_position.matched_pattern:
+  1383→                        next_sym = all_sax_symbols[sym_idx] if sym_idx < len(all_sax_symbols) else None
+  1384→                        obs_result = _record_observation(
+  1385→                            trie, current_position, sym_idx, next_sym,
+  1386→                            fuzzy_matcher=fuzzy_matcher,
+  1387→                        )
+  1388→                        trie_observations_recorded += obs_result["observations"]
+  1389→                        trie_new_nodes_created += obs_result["new_nodes"]
+  1390→
+  1391→                    result.trades.append(current_position)
+  1392→                    trade_counter += 1
+  1393→                    current_position = None
+  1394→                    consecutive_breaks = 0
+  1395→
+  1396→                    result.equity_curve.append(risk_mgr.capital)
+  1397→                    result.capital_history.append(risk_mgr.capital)
+  1398→                    if risk_mgr.capital > peak_capital:
+  1399→                        peak_capital = risk_mgr.capital
+  1400→                    continue
+  1401→
+  1402→                # Update position unrealized P&L (at end of window)
+  1403→                risk_mgr.update_position(cfg.symbol, current_price)
+  1404→
+  1405→                # v0.41.0 (FASE 2, Tarea 2.2): Pattern divergence monitoring.
+  1406→                # After the position is open, collect post-entry SAX symbols
+  1407→                # and compare with the expected_sequences from the entry node.
+  1408→                # If divergence exceeds threshold → exit with pattern_broken.
+  1409→                if divergence_monitor is not None and divergence_monitor.expected_sequence is not None:
+  1410→                    # Accumulate post-entry symbols (skip the first symbol = entry symbol)
+  1411→                    if current_symbols:
+  1412→                        post_entry_symbols.append(current_symbols[-1])
+  1413→                    # Only check once we have at least 1 real symbol to compare
+  1414→                    if len(post_entry_symbols) >= 1:
+  1415→                        div_result = divergence_monitor.check_divergence(post_entry_symbols)
+  1416→                        if div_result['diverged']:
+  1417→                            current_price = df_close[last_candle_idx]
+  1418→                            _, pnl = risk_mgr.close_position(cfg.symbol, current_price)
+  1419→                            current_position.exit_price = current_price
+  1420→                            current_position.exit_time = current_time
+  1421→                            current_position.pnl = pnl
+  1422→                            if current_position.direction == "LONG":
+  1423→                                current_position.pnl_pct = (current_price - current_position.entry_price) / current_position.entry_price * 100
+  1424→                            else:
+  1425→                                current_position.pnl_pct = (current_position.entry_price - current_price) / current_position.entry_price * 100
+  1426→                            current_position.actual_move_pct = current_position.pnl_pct
+  1427→                            current_position.exit_reason = "pattern_broken"
+  1428→
+  1429→                            if cfg.living_trie and current_position.matched_pattern:
+  1430→                                next_sym = all_sax_symbols[sym_idx] if sym_idx < len(all_sax_symbols) else None
+  1431→                                obs_result = _record_observation(
+  1432→                                    trie, current_position, sym_idx, next_sym,
+  1433→                                    fuzzy_matcher=fuzzy_matcher,
+  1434→                                )
+  1435→                                trie_observations_recorded += obs_result["observations"]
+  1436→                                trie_new_nodes_created += obs_result["new_nodes"]
+  1437→
+  1438→                            if current_position.pnl_pct <= 0:
+  1439→                                last_losing_trade_sym_idx = sym_idx
+  1440→
+  1441→                            result.trades.append(current_position)
+  1442→                            trade_counter += 1
+  1443→                            current_position = None
+  1444→                            consecutive_breaks = 0
+  1445→                            post_entry_symbols = []  # Reset for next position
+  1446→
+  1447→                            result.equity_curve.append(risk_mgr.capital)
+  1448→                            result.capital_history.append(risk_mgr.capital)
+  1449→                            if risk_mgr.capital > peak_capital:
+  1450→                                peak_capital = risk_mgr.capital
+  1451→                            continue
+  1452→
+  1453→            # ================================================================
+  1454→            # PHASE 2: Pattern break check with fuzzy matcher + grace period
+  1455→            # v0.6.5: Uses FuzzyMatcher.check_continuation() instead of
+  1456→            # trie.check_continuation() directly. This provides:
+  1457→            #   - Fuzzy symbol matching (not just exact)
+  1458→            #   - pattern_break_score for graduated exit decisions
+  1459→            #   - All 4 trie levels checked (not just trie_n3)
+  1460→            #
+  1461→            # v0.2.9: Grace period — instead of closing on the FIRST pattern
+  1462→            # break, we wait for N consecutive breaks (default 2). A single
+  1463→            # break may be noise; two consecutive breaks confirm the pattern
+  1464→            # has actually changed.
+  1465→            # ================================================================
+  1466→            if current_position is not None and len(current_symbols) >= 2:
+  1467→                pattern_to_check = current_symbols[:-1]
+  1468→                latest_symbol = current_symbols[-1]
+  1469→
+  1470→                # v0.6.5: Check all 4 trie levels, pick best break score
+  1471→                cont_results = []
+  1472→                for cont_trie in [trie_n1, trie_n2, trie_n3, trie_n4]:
+  1473→                    if cont_trie is not None:
+  1474→                        cr = fuzzy_matcher.check_continuation(cont_trie, pattern_to_check, latest_symbol)
+  1475→                        cont_results.append(cr)
+  1476→
+  1477→                if cont_results:
+  1478→                    best_cont = max(cont_results, key=lambda c: c.pattern_break_score)
+  1479→                    continues = best_cont.matched
+  1480→                    break_score = best_cont.pattern_break_score
+  1481→                else:
+  1482→                    # Fallback to exact match on main trie
+  1483→                    continues, _ = trie.check_continuation(pattern_to_check, latest_symbol)
+  1484→                    break_score = 0.0 if not continues else 1.0
+  1485→
+  1486→                if not continues and current_position.confidence > 0:
+  1487→                    consecutive_breaks += 1
+  1488→                    # v0.6.5: Use break_score to modulate grace period
+  1489→                    # If break_score is high (close match), give more grace
+  1490→                    effective_grace = cfg.pattern_break_grace
+  1491→                    if break_score >= 0.4:
+  1492→                        # Pattern is weakening but not broken — add extra grace
+  1493→                        effective_grace = cfg.pattern_break_grace + 1
+  1494→
+  1495→                    if consecutive_breaks >= effective_grace:
+  1496→                        # N consecutive breaks → close position
+  1497→                        current_price = df_close[last_candle_idx]
+  1498→                        _, pnl = risk_mgr.close_position(cfg.symbol, current_price)
+  1499→                        current_position.exit_price = current_price
+  1500→                        current_position.exit_time = current_time
+  1501→                        current_position.pnl = pnl
+  1502→                        if current_position.direction == "LONG":
+  1503→                            current_position.pnl_pct = (current_price - current_position.entry_price) / current_position.entry_price * 100
+  1504→                        else:
+  1505→                            current_position.pnl_pct = (current_position.entry_price - current_price) / current_position.entry_price * 100
+  1506→                        current_position.actual_move_pct = current_position.pnl_pct
+  1507→                        current_position.exit_reason = "pattern_break"
+  1508→
+  1509→                        # Living Trie: record AND create new child for the break symbol
+  1510→                        if cfg.living_trie and current_position.matched_pattern:
+  1511→                            obs_result = _record_observation(
+  1512→                                trie, current_position, sym_idx,
+  1513→                                latest_symbol,  # The symbol that broke the pattern
+  1514→                                fuzzy_matcher=fuzzy_matcher,
+  1515→                            )
+  1516→                            trie_observations_recorded += obs_result["observations"]
+  1517→                            trie_new_nodes_created += obs_result["new_nodes"]
+  1518→
+  1519→                        if current_position.pnl_pct <= 0:
+  1520→                            last_losing_trade_sym_idx = sym_idx
+  1521→
+  1522→                        result.trades.append(current_position)
+  1523→                        trade_counter += 1
+  1524→                        current_position = None
+  1525→                        consecutive_breaks = 0
+  1526→
+  1527→                        result.equity_curve.append(risk_mgr.capital)
+  1528→                        result.capital_history.append(risk_mgr.capital)
+  1529→                        if risk_mgr.capital > peak_capital:
+  1530→                            peak_capital = risk_mgr.capital
+  1531→                        continue
+  1532→                else:
+  1533→                    # Pattern continues → reset break counter
+  1534→                    consecutive_breaks = 0
+  1535→
+  1536→            # ================================================================
+  1537→            # PHASE 3: Entry signal generation
+  1538→            # v0.2.10 parameters:
+  1539→            # - min_confidence = 0.12 (compromise)
+  1540→            # - min_quality_score = 0.05 (less strict than v0.2.9's 0.10)
+  1541→            # - SHORT uses wider SL (ATR*2.0, min 2.5%) and lower TP (SL*1.5)
+  1542→            # - Re-entry cooldown = 1 symbol step (reduced from 3)
+  1543→            # ================================================================
+  1544→            if current_position is None:
+  1545→                # v0.2.9: Re-entry cooldown — skip if too soon after a losing trade
+  1546→                if sym_idx - last_losing_trade_sym_idx < cfg.reentry_cooldown:
+  1547→                    cooldown_filter_count += 1
+  1548→                    continue
+  1549→
+  1550→                # V0.6.2: Regime filter — skip entries in volatile regime.
+  1551→                # Walk-forward OOS showed 16.7% WR in adverse periods.
+  1552→                # Volatile regime = high uncertainty = don't enter new positions.
+  1553→                # NOTE: Currently disabled — testing showed mixed results.
+  1554→                # BTC got worse with the filter, ETH improved slightly.
+  1555→                # More sophisticated regime-aware logic needed before enabling.
+  1556→                # if current_regime == "volatile":
+  1557→                #     continue
+  1558→
+  1559→                pred_count += 1
+  1560→
+  1561→                current_price = df_close[last_candle_idx]
+  1562→
+  1563→                try:
+  1564→                    prediction = pred_engine.predict(
+  1565→                        current_symbols=current_symbols,
+  1566→                        entry_price=current_price,
+  1567→                        timeframe_hours=tf_hours,
+  1568→                        symbol=cfg.symbol,
+  1569→                        current_regime=current_regime,  # V4.1: regime-aware confidence
+  1570→                    )
+  1571→                except Exception:
+  1572→                    continue
+  1573→
+  1574→                if prediction.direction == "FLAT" or prediction.confidence <= 0:
+  1575→                    continue
+  1576→
+  1577→                pred_with_direction += 1
+  1578→
+  1579→                # v0.10.0: Get weighted confidence from 4-level matching (GAP-1)
+  1580→                # If multi-level is available, use PPMT.match_raw() to compute
+  1581→                # confidence across N1/N2/N3/N4 with adaptive weights.
+  1582→                # Otherwise, fall back to single-trie prediction confidence.
+  1583→                weighted_confidence = prediction.confidence  # default: single-trie
+  1584→                match_result = None
+  1585→                best_trie_level = "n3"
+  1586→
+  1587→                if ppmt_engine is not None:
+  1588→                    ppmt_result = ppmt_engine.match_raw(
+  1589→                        current_symbols=current_symbols,
+  1590→                        current_price=current_price,
+  1591→                    )
+  1592→                    weighted_confidence = ppmt_result.weighted_confidence
+  1593→                    match_result = ppmt_result
+  1594→
+  1595→                    # Determine which level had the best match
+  1596→                    level_confs = {
+  1597→                        "n1": ppmt_result.n1_confidence,
+  1598→                        "n2": ppmt_result.n2_confidence,
+  1599→                        "n3": ppmt_result.n3_confidence,
+  1600→                        "n4": ppmt_result.n4_confidence,
+  1601→                    }
+  1602→                    best_trie_level = max(level_confs, key=level_confs.get)
+  1603→
+  1604→                    # Graceful degradation: if 4-level confidence is 0 but
+  1605→                    # PredictionEngine found a direction, fall back to N3-only
+  1606→                    if weighted_confidence <= 0 and prediction.confidence > 0:
+  1607→                        weighted_confidence = prediction.confidence
+  1608→                        best_trie_level = "n3"
+  1609→
+  1610→                    # v0.44.0: Weighted Direction Vote overrides
+  1611→                    # prediction.direction. Each level votes with its
+  1612→                    # P7 direction (±1 × confidence), weighted by the
+  1613→                    # weight profile.
+  1614→                    if ppmt_result.direction != "FLAT":
+  1615→                        prediction.direction = ppmt_result.direction
+  1616→                    elif prediction.direction != "FLAT":
+  1617→                        # Direction vote is FLAT but prediction has a
+  1618→                        # direction — levels disagree. Use FLAT (no trade).
+  1619→                        prediction.direction = "FLAT"
+  1620→
+  1621→                # Effective minimum confidence
+  1622→                effective_min_conf = cfg.min_confidence
+  1623→
+  1624→                # v0.6.1: REMOVED probability bonus that was undermining min_confidence.
+  1625→                # The bonus lowered threshold from 15% to 7.5% when prob>50%, allowing
+  1626→                # 10% confidence trades that had WR of only 32.6%. This defeated the
+  1627→                # entire purpose of raising min_confidence.
+  1628→
+  1629→                # SHORT signals require regime-aware confidence gating.
+  1630→                # V4.3: Replaced the fixed 1.2x multiplier with a regime-aware gate.
+  1631→                # Previous versions used a fixed SHORT penalty (1.2x or 1.5x), which
+  1632→                # either eliminated all SHORTs (1.5x was too strict) or let bad SHORTs
+  1633→                # through (1.2x was too lenient in trending_up). The new approach:
+  1634→                #
+  1635→                # - trending_down: SHORT is FAVORABLE → lower threshold (0.85x)
+  1636→                # - ranging:       SHORT is NEUTRAL   → slight penalty (1.1x)
+  1637→                # - trending_up:   SHORT is ADVERSE   → strict penalty (1.5x)
+  1638→                # - volatile:      SHORT is DANGEROUS  → hard gate (1.8x)
+  1639→                #
+  1640→                # The floor of 0.20 always applies regardless of regime, ensuring
+  1641→                # minimum quality. This replaces the tautological check that existed
+  1642→                # in earlier versions (confidence < max(confidence * 1.2, 0.20) was
+  1643→                # always false for conf >= 0.167).
+  1644→                if prediction.direction == "SHORT":
+  1645→                    # v0.6.4: TokenProfile SHORT gating
+  1646→                    # v0.43.0: meme short_allowed changed to True (was False — caused
+  1647→                    # 100% LONG bug). The confidence_multiplier=2.0 still provides
+  1648→                    # a quality gate for meme SHORT signals.
+  1649→                    if token_profile is not None and not token_profile.short_allowed:
+  1650→                        continue
+  1651→
+  1652→                    short_regime_mult = {
+  1653→                        "trending_down": 0.85,  # SHORTs favored in downtrend
+  1654→                        "ranging": 1.1,         # slight caution
+  1655→                        "trending_up": 1.5,     # fighting the trend — strict
+  1656→                        "volatile": 1.8,        # high risk — very strict
+  1657→                    }.get(current_regime, 1.2)   # default: moderate penalty
+  1658→                    effective_min_conf = max(effective_min_conf * short_regime_mult, 0.20)
+  1659→
+  1660→                    # v0.6.4: Apply TokenProfile's short_confidence_multiplier
+  1661→                    # This makes SHORTs harder for tokens where SHORT WR is low.
+  1662→                    # blue_chip: 1.5x, large_cap: 1.8x, defi: 2.0x, meme: 99x (disabled)
+  1663→                    if token_profile is not None:
+  1664→                        effective_min_conf = max(
+  1665→                            effective_min_conf * token_profile.short_confidence_multiplier,
+  1666→                            effective_min_conf  # don't lower below current
+  1667→                        )
+  1668→
+  1669→                # V4.1: Regime-aware confidence adjustment
+  1670→                # If the current regime is unfavorable for this pattern (e.g.,
+  1671→                # the pattern was observed in trending_up but current regime is
+  1672→                # volatile), reduce confidence. This uses the matched node's
+  1673→                # regime_match_score() to adjust. The prediction already has
+  1674→                # regime-aware confidence from PredictionEngine, but we also
+  1675→                # apply the regime effect to the THRESHOLD — making it harder
+  1676→                # to enter trades in unfavorable regimes.
+  1677→                regime_adjustment = 1.0  # neutral
+  1678→                if cfg.regime_aware and current_regime and prediction.confidence > 0:
+  1679→                    try:
+  1680→                        matched_node = trie.search(current_symbols)
+  1681→                        if matched_node and matched_node.metadata.regime_distribution:
+  1682→                            regime_adjustment = matched_node.metadata.regime_match_score(current_regime)
+  1683→                    except Exception:
+  1684→                        pass
+  1685→                # Adjust effective min_confidence inversely to regime match:
+  1686→                # If regime is favorable (score > 1.0), LOWER the threshold (easier to enter)
+  1687→                # If regime is unfavorable (score < 1.0), RAISE the threshold (harder to enter)
+  1688→                # This is equivalent to adjusting confidence but via the threshold.
+  1689→                if regime_adjustment > 0:
+  1690→                    effective_min_conf = effective_min_conf / regime_adjustment
+  1691→
+  1692→                # Entry conditions
+  1693→                # v0.6.1: Reverted probability threshold from >0.25 back to >0.20.
+  1694→                # The >0.25 threshold was too aggressive, cutting pass rate from 32.5%
+  1695→                # to 13.8% and reducing trades by 32%.
+  1696→                # v0.6.2: Lowered expected_total_move from >1.0% to >0.3% for alpha=3.
+  1697→                # With alpha=3, cumulative predicted moves are typically 0.3-0.8%.
+  1698→                # The 1.0% threshold blocked ALL entries with alpha=3.
+  1699→                if (prediction.direction != "FLAT"
+  1700→                    and weighted_confidence >= effective_min_conf
+  1701→                    and abs(prediction.expected_total_move_pct) > 0.3
+  1702→                    and prediction.overall_probability > 0.20):
+  1703→
+  1704→                    pred_passed_threshold += 1
+  1705→
+  1706→                    # Create signal
+  1707→                    from ppmt.engine.signal import Signal, SignalType
+  1708→                    from ppmt.core.metadata import BlockLifecycleMetadata
+  1709→
+  1710→                    signal_type = (
+  1711→                        SignalType.ENTRY_LONG if prediction.direction == "LONG"
+  1712→                        else SignalType.ENTRY_SHORT
+  1713→                    )
+  1714→
+  1715→                    # === Direction-specific SL/TP ===
+  1716→                    # v0.2.10: LONG SL floor raised to 2.0% (was 1.5% in v0.2.8/9).
+  1717→                    # v0.2.9 had almost all SL exits at exactly -1.50%, proving
+  1718→                    # the 1.5% floor was too tight. With avg ATR=0.84%,
+  1719→                    # ATR*1.5 = 1.26% → floored to 1.5% → too many hits.
+  1720→                    # Raising to 2.0% gives trades room to survive noise.
+  1721→                    #
+  1722→                    # LONG:
+  1723→                    #   SL = max(ATR * 1.5, 2.0%), capped at 5%
+  1724→                    #   TP = SL * 2.0 (R:R = 2.0)
+  1725→                    #
+  1726→                    # SHORT:
+  1727→                    #   SL = max(ATR * 2.0, 2.5%), capped at 7%
+  1728→                    #   TP = SL * 1.5 (R:R = 1.5)
+  1729→                    #
+  1730→                    current_atr_pct = atr_pct[last_candle_idx] if last_candle_idx < len(atr_pct) else 2.0
+  1731→
+  1732→                    # V0.6.2 CRITICAL FIX: Prediction-Aware SL/TP
+  1733→                    #
+  1734→                    # Previous ATR-based SL/TP had fixed floors (1.5% SL, 3% TP
+  1735→                    # for LONG). With alpha=3, the average expected move is only
+  1736→                    # ~0.3-0.5%. TP at 3% = 11x expected move! Almost no trade
+  1737→                    # ever reached TP, so they all hit SL or pattern break →
+  1738→                    # guaranteed losing system despite 54% directional accuracy.
+  1739→                    #
+  1740→                    # OOS validation showed this was THE #1 cause of losses:
+  1741→                    #   Before fix: BTC -28.98%, WR 29.1%, PF 0.67
+  1742→                    #   After fix:  BTC -11.81%, WR 38.1%, PF 0.88
+  1743→                    #   After fix:  ETH  -6.79%, WR 42.2%, PF 0.99
+  1744→                    #
+  1745→                    # v0.40.6 FIX-6 (CAPA 5 audit): Unify SL/TP rule with
+  1746→                    # metadata.compute_sl_tp(). CAPA 5 H1 showed 100% of folds
+  1747→                    # had DISCREPANCY between paper_trader.py hardcoded rule
+  1748→                    # and meta.compute_sl_tp() (which had FIX-4 applied).
+  1749→                    # This meant FIX-4 was bypassed in production.
+  1750→                    # Now we use the metadata-driven rule, with the old
+  1751→                    # hardcoded rule as fallback only when no node metadata
+  1752→                    # is available.
+  1753→                    expected_move_abs = abs(prediction.expected_total_move_pct)
+  1754→
+  1755→                    # v0.40.6 FIX-6: Use meta.compute_sl_tp() when available
+  1756→                    matched_node_for_sltp = None
+  1757→                    try:
+  1758→                        matched_node_for_sltp = trie.search(current_symbols)
+  1759→                    except Exception:
+  1760→                        pass
+  1761→
+  1762→                    if matched_node_for_sltp and matched_node_for_sltp.metadata:
+  1763→                        meta_for_sltp = matched_node_for_sltp.metadata
+  1764→                        meta_for_sltp.compute_sl_tp(current_price)
+  1765→                        if meta_for_sltp.sl_price and meta_for_sltp.tp_price:
+  1766→                            sl_distance_pct = abs(
+  1767→                                ((meta_for_sltp.sl_price - current_price) / current_price) * 100.0
+  1768→                            )
+  1769→                            tp_distance_pct = abs(
+  1770→                                ((meta_for_sltp.tp_price - current_price) / current_price) * 100.0
+  1771→                            )
+  1772→                            # Safety floor: ensure SL/TP are at least 0.1% away
+  1773→                            sl_distance_pct = max(sl_distance_pct, 0.1)
+  1774→                            tp_distance_pct = max(tp_distance_pct, 0.1)
+  1775→                        else:
+  1776→                            # compute_sl_tp returned None — fallback
+  1777→                            sl_distance_pct = max(expected_move_abs * 1.5, 0.1)
+  1778→                            tp_distance_pct = max(expected_move_abs * 2.5, 0.15)
+  1779→                            if tp_distance_pct < sl_distance_pct * 1.5:
+  1780→                                tp_distance_pct = sl_distance_pct * 1.5
+  1781→                    else:
+  1782→                        # v0.42.0 ERROR 3 FIX: SL/TP based on expected_move
+  1783→                        # No static floors. If expected_move is tiny, SL/TP are tiny.
+  1784→                        # The metadata.compute_sl_tp() path above handles normal cases;
+  1785→                        # this fallback only fires when no metadata exists (very rare).
+  1786→                        sl_distance_pct = max(expected_move_abs * 1.5, 0.1)  # min 0.1%
+  1787→                        tp_distance_pct = max(expected_move_abs * 2.5, 0.15)  # min 0.15%
+  1788→                        # Ensure R:R >= 1.5
+  1789→                        if tp_distance_pct < sl_distance_pct * 1.5:
+  1790→                            tp_distance_pct = sl_distance_pct * 1.5
+  1791→
+  1792→                    if prediction.direction == "LONG":
+  1793→                        sl_price = current_price * (1 - sl_distance_pct / 100)
+  1794→                        tp_price = current_price * (1 + tp_distance_pct / 100)
+  1795→                    else:
+  1796→                        sl_price = current_price * (1 + sl_distance_pct / 100)
+  1797→                        tp_price = current_price * (1 - tp_distance_pct / 100)
+  1798→
+  1799→                    # Risk:Reward ratio
+  1800→                    sl_distance_pct = abs(current_price - sl_price) / current_price * 100
+  1801→                    tp_distance_pct = abs(tp_price - current_price) / current_price * 100
+  1802→                    risk_reward = tp_distance_pct / sl_distance_pct if sl_distance_pct > 0 else 0
+  1803→
+  1804→                    # V4.3: Get actual historical_count from the matched Trie node
+  1805→                    # BEFORE creating the Signal. The previous version created the
+  1806→                    # Signal with hardcoded historical_count=100, then tried to fix
+  1807→                    # it with a separate mock_meta — but the Signal's own
+  1808→                    # compute_quality_score() and compute_sizing_multiplier() had
+  1809→                    # already used the wrong count. This distorted sizing by making
+  1810→                    # rarely-observed patterns appear more reliable than they are.
+  1811→                    actual_historical_count = 10  # conservative default if no node found
+  1812→                    matched_node_for_sizing = None
+  1813→                    try:
+  1814→                        matched_node_for_sizing = trie.search(current_symbols)
+  1815→                        if matched_node_for_sizing and matched_node_for_sizing.metadata.historical_count > 0:
+  1816→                            actual_historical_count = matched_node_for_sizing.metadata.historical_count
+  1817→                    except Exception:
+  1818→                        pass
+  1819→
+  1820→                    signal = Signal(
+  1821→                        signal_type=signal_type,
+  1822→                        confidence=weighted_confidence,  # v0.10.0: 4-level weighted confidence (GAP-1)
+  1823→                        symbol=cfg.symbol,
+  1824→                        entry_price=current_price,
+  1825→                        sl_price=sl_price,
+  1826→                        tp_price=tp_price,
+  1827→                        expected_move_pct=prediction.expected_total_move_pct,
+  1828→                        risk_reward_ratio=risk_reward,
+  1829→                        win_rate=prediction.overall_probability,
+  1830→                        historical_count=actual_historical_count,
+  1831→                        matched_pattern=current_symbols,
+  1832→                        trie_level=best_trie_level,  # v0.10.0: Which level won
+  1833→                    )
+  1834→                    signal.quality_score = signal.compute_quality_score()
+  1835→                    signal.sizing_multiplier = signal.compute_sizing_multiplier()
+  1836→
+  1837→                    # v0.3.0: Quality score filter only if min_quality_score > 0
+  1838→                    # (default is 0.0 = disabled). The Living Trie metadata
+  1839→                    # naturally handles quality filtering through confidence.
+  1840→                    if cfg.min_quality_score > 0 and signal.quality_score < cfg.min_quality_score:
+  1841→                        risk_reject_reasons["low_quality"] = risk_reject_reasons.get("low_quality", 0) + 1
+  1842→                        continue
+  1843→
+  1844→                    # Metadata sizing — use the real historical_count for sizing
+  1845→                    # The Signal already has the correct count, but we create
+  1846→                    # a dedicated BlockLifecycleMetadata for precise Bayesian
+  1847→                    # sizing calculations (probability_of_success, sizing_signal).
+  1848→                    # V4.3: No longer duplicates the historical_count fix — it's
+  1849→                    # already correct in the Signal from creation.
+  1850→                    mock_meta = BlockLifecycleMetadata(
+  1851→                        win_rate=signal.win_rate,
+  1852→                        expected_move_pct=signal.expected_move_pct,
+  1853→                        max_drawdown_pct=-sl_distance_pct,
+  1854→                        historical_count=actual_historical_count,
+  1855→                    )
+  1856→                    signal.probability_of_success = mock_meta.probability_of_success
+  1857→                    signal.expected_profit_ahead = mock_meta.expected_profit_ahead
+  1858→                    signal.metadata_sizing_signal = mock_meta.sizing_signal
+  1859→
+  1860→                    # Risk check
+  1861→                    can_open, reason = risk_mgr.can_open(signal, info.asset_class)
+  1862→                    if can_open:
+  1863→                        size = risk_mgr.calculate_position_size(signal)
+  1864→                        position = risk_mgr.open_position(signal, size)
+  1865→
+  1866→                        # V4: Use matched node's regime info when available
+  1867→                        # If the matched Trie node has regime metadata, use it
+  1868→                        # as the node-level regime instead of the global regime.
+  1869→                        # This provides more granular regime awareness — a pattern
+  1870→                        # that historically worked in trending_up should get a
+  1871→                        # confidence boost when the current regime is trending_up.
+  1872→                        node_regime = current_regime  # default to global
+  1873→                        node_regime_conf = regime_info.confidence if regime_info else 0.0
+  1874→                        try:
+  1875→                            # v0.10.0: Use best-match node from 4-level matching if available
+  1876→                            if match_result is not None:
+  1877→                                best_match = None
+  1878→                                for m in [match_result.n3_match, match_result.n2_match,
+  1879→                                          match_result.n1_match, match_result.n4_match]:
+  1880→                                    if m is not None and m.node is not None and m.node.metadata.dominant_regime:
+  1881→                                        best_match = m
+  1882→                                        break
+  1883→                                if best_match and best_match.node:
+  1884→                                    node_regime = best_match.node.metadata.dominant_regime
+  1885→                                    node_regime_conf = best_match.node.metadata.regime_confidence
+  1886→                            else:
+  1887→                                # Fallback: search N3 trie directly (backward compatible)
+  1888→                                matched_node = trie.search(current_symbols)
+  1889→                                if matched_node and matched_node.metadata.dominant_regime:
+  1890→                                    node_regime = matched_node.metadata.dominant_regime
+  1891→                                    node_regime_conf = matched_node.metadata.regime_confidence
+  1892→                        except Exception:
+  1893→                            pass
+  1894→
+  1895→                        current_position = PaperTrade(
+  1896→                            trade_id=trade_counter + 1,
+  1897→                            symbol=cfg.symbol,
+  1898→                            direction=signal.direction or "LONG",
+  1899→                            entry_price=current_price,
+  1900→                            exit_price=0.0,
+  1901→                            entry_time=current_time,
+  1902→                            size=size,
+  1903→                            confidence=signal.confidence,
+  1904→                            quality_score=signal.quality_score,
+  1905→                            sizing_multiplier=signal.sizing_multiplier,
+  1906→                            win_rate=signal.win_rate,
+  1907→                            risk_reward_ratio=signal.risk_reward_ratio,
+  1908→                            expected_move_pct=signal.expected_move_pct,
+  1909→                            matched_pattern=current_symbols,
+  1910→                            sl_price=sl_price,
+  1911→                            tp_price=tp_price,
+  1912→                            entry_sym_idx=sym_idx,
+  1913→                            regime=node_regime,
+  1914→                            regime_confidence=node_regime_conf,
+  1915→                        )
+  1916→
+  1917→                        # v0.41.0 (FASE 2, Tarea 2.2): Set divergence monitor's
+  1918→                        # expected sequence from the entry node's metadata.
+  1919→                        if divergence_monitor is not None:
+  1920→                            try:
+  1921→                                # Look up the matched node's metadata
+  1922→                                entry_node = trie.search(current_symbols)
+  1923→                                if entry_node and entry_node.metadata.expected_sequences:
+  1924→                                    divergence_monitor.set_expected(entry_node.metadata)
+  1925→                                    post_entry_symbols = []  # Reset for new position
+  1926→                            except Exception:
+  1927→                                pass
+  1928→                    else:
+  1929→                        risk_reject_reasons[reason] = risk_reject_reasons.get(reason, 0) + 1
+  1930→
+  1931→            # Record equity curve periodically
+  1932→            if sym_idx % 10 == 0:
+  1933→                unrealized_capital = risk_mgr.capital
+  1934→                result.equity_curve.append(unrealized_capital)
+  1935→                result.capital_history.append(unrealized_capital)
+  1936→
+  1937→            # Living Trie: re-propagate metadata every 200 symbol steps
+  1938→            if cfg.living_trie and trie_observations_recorded > 0 and sym_idx % 200 == 0:
+  1939→                trie.propagate_metadata()
+  1940→                trie_metadata_propagations += 1
+  1941→
+  1942→            # v0.12.0: Prune stale branches every pruning_interval symbol steps
+  1943→            # The Living Trie grows from observations, but not all branches
+  1944→            # are useful. Pruning removes single-observation nodes (noise)
+  1945→            # while preserving established patterns and traded nodes.
+  1946→            # Interval is configurable via cfg.pruning_interval (default 1000).
+  1947→            if (cfg.pruning_interval > 0
+  1948→                and cfg.living_trie
+  1949→                and trie_observations_recorded > 0
+  1950→                and sym_idx % cfg.pruning_interval == 0):
+  1951→                from ppmt.core.trie import PruningConfig
+  1952→                prune_config = PruningConfig(min_observations=2, preserve_traded=True)
+  1953→                prune_stats = trie.prune(**prune_config.to_prune_kwargs())
+  1954→                if prune_stats["nodes_pruned"] > 0:
+  1955→                    console.print(f"  [dim]Pruned {prune_stats['nodes_pruned']} stale nodes "
+  1956→                                  f"({prune_stats['observations_lost']} obs lost, "
+  1957→                                  f"{trie.pattern_count} patterns remain)[/dim]")
+  1958→                    result.pruning_runs += 1
+  1959→                    result.pruning_total_nodes += prune_stats["nodes_pruned"]
+  1960→                    result.pruning_total_obs_lost += prune_stats["observations_lost"]
+  1961→
+  1962→            # ================================================================
+  1963→            # v0.11.0: Live Recalibration
+  1964→            # Re-run TradingCalibrationEngine every recalibration_interval
+  1965→            # candles. If α/W change, rebuild SAX encoder, re-encode all
+  1966→            # data, and rebuild tries with new parameters. This adapts to
+  1967→            # regime changes where different granularity is optimal.
+  1968→            #
+  1969→            # Design decisions:
+  1970→            # - Recalibration only fires when NO position is open (safety)
+  1971→            # - Uses data up to current candle (not full dataset)
+  1972→            # - Rebuilds all 4 trie levels + PPMT engine
+  1973→            # - Updates TokenProfile with new α/W and metadata
+  1974→            # - Resets candle counter after each recalibration
+  1975→            # ================================================================
+  1976→            if (cfg.recalibration_interval > 0
+  1977→                and cfg.auto_calibrate
+  1978→                and cfg.use_token_profile
+  1979→                and token_profile is not None
+  1980→                and candles_since_calibration >= cfg.recalibration_interval
+  1981→                and current_position is None):
+  1982→
+  1983→                console.print(f"\n[bold cyan]LIVE RECALIBRATION[/bold cyan] "
+  1984→                              f"at candle {last_candle_idx} "
+  1985→                              f"({candles_since_calibration} candles since last calibration)")
+  1986→
+  1987→                try:
+  1988→                    # Use data up to current candle for recalibration
+  1989→                    # (simulates live trading where future data is unknown)
+  1990→                    recal_df = df.iloc[:last_candle_idx + 1]
+  1991→
+  1992→                    if len(recal_df) < 1000:
+  1993→                        console.print(f"  [yellow]Insufficient data for recalibration "
+  1994→                                      f"({len(recal_df)} < 1000 candles) — skipping[/yellow]")
+  1995→                        candles_since_calibration = 0  # Reset anyway to avoid re-triggering
+  1996→                    else:
+  1997→                        recalibrator = TradingCalibrationEngine(
+  1998→                            train_ratio=0.70,
+  1999→                            pattern_length=cfg.pattern_length,
+  2000→                            timeframe=cfg.timeframe,
+
+[showing lines 1-2000 of 2324; use offset=2001 with limit to continue reading]

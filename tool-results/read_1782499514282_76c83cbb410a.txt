@@ -1,0 +1,626 @@
+   300→    else:
+   301→        feat["v_reversal"] = 0.0
+   302→
+   303→    trend = feat["ema_alignment"].values
+   304→    high_6 = pd.Series(h).rolling(6, min_periods=2).max().values
+   305→    low_6 = pd.Series(l).rolling(6, min_periods=2).min().values
+   306→    range_6 = np.maximum(high_6 - low_6, 1e-10)
+   307→    pullback = np.where(
+   308→        trend > 0, (high_6 - c) / range_6, (c - low_6) / range_6
+   309→    )
+   310→    feat["pullback_depth"] = np.clip(pullback, 0, 1)
+   311→
+   312→    # G9: Temporal
+   313→    ts_col = df["timestamp"] if "timestamp" in df.columns else df.index
+   314→    try:
+   315→        ts_dt = pd.to_datetime(ts_col, unit="ms", utc=True)
+   316→        hour = ts_dt.dt.hour
+   317→        dow = ts_dt.dt.dayofweek
+   318→        feat["hour_sin"] = np.sin(2 * np.pi * hour / 24).values
+   319→        feat["hour_cos"] = np.cos(2 * np.pi * hour / 24).values
+   320→        feat["dow_sin"] = np.sin(2 * np.pi * dow / 7).values
+   321→        feat["dow_cos"] = np.cos(2 * np.pi * dow / 7).values
+   322→    except Exception:
+   323→        feat["hour_sin"] = 0.0
+   324→        feat["hour_cos"] = 0.0
+   325→        feat["dow_sin"] = 0.0
+   326→        feat["dow_cos"] = 0.0
+   327→
+   328→    # ── G11: Multi-timeframe features (5m / 15m from 1m data) ──
+   329→    # Aggregate 1m OHLCV into 5m and 15m bars, compute trend features,
+   330→    # then map back to 1m bar positions.
+   331→    try:
+   332→        # 5-minute aggregation (every 5 bars)
+   333→        df_5m = pd.DataFrame({"open": o, "high": h, "low": l, "close": c, "volume": v})
+   334→        # Assign 5m group (based on bar index modulo 5)
+   335→        group5 = np.arange(n) // 5
+   336→        agg5 = df_5m.groupby(group5).agg(
+   337→            open=("open", "first"), high=("high", "max"),
+   338→            low=("low", "min"), close=("close", "last"), volume=("volume", "sum")
+   339→        )
+   340→        c5 = agg5["close"].values
+   341→        h5 = agg5["high"].values
+   342→        l5 = agg5["low"].values
+   343→        v5 = agg5["volume"].values
+   344→        n5 = len(agg5)
+   345→
+   346→        if n5 >= 50:
+   347→            ema9_5 = _ema(c5, 9)
+   348→            ema21_5 = _ema(c5, 21)
+   349→            atr5_14 = _atr(h5, l5, c5, 14)
+   350→            vol_ma5_20 = pd.Series(v5).rolling(20, min_periods=5).mean().values
+   351→
+   352→            # Compute per 5m bar
+   353→            mtf5_ema_align = np.sign(ema9_5 - ema21_5)
+   354→            mtf5_trend_str = (ema9_5 - ema21_5) / np.maximum(np.abs(ema21_5), 1e-10) * 100
+   355→            mtf5_ret3 = pd.Series(c5).pct_change(3, fill_method=None).values
+   356→            mtf5_vol_ratio = v5 / np.maximum(vol_ma5_20, 1e-10)
+   357→            mtf5_atr_pct = atr5_14 / np.maximum(c5, 1e-10) * 100
+   358→
+   359→            # Map back to 1m: each 1m bar gets the value of its 5m group
+   360→            bar_to_group5 = np.arange(n) // 5
+   361→            # Clamp to valid range (some groups at the end may be incomplete)
+   362→            bar_to_group5 = np.clip(bar_to_group5, 0, n5 - 1)
+   363→
+   364→            feat["mtf5_ema_align"] = mtf5_ema_align[bar_to_group5]
+   365→            feat["mtf5_trend_str"] = mtf5_trend_str[bar_to_group5]
+   366→            feat["mtf5_ret_3"] = mtf5_ret3[bar_to_group5]
+   367→            feat["mtf5_vol_ratio"] = mtf5_vol_ratio[bar_to_group5]
+   368→            feat["mtf5_atr_pct"] = mtf5_atr_pct[bar_to_group5]
+   369→        else:
+   370→            for col in ["mtf5_ema_align", "mtf5_trend_str", "mtf5_ret_3",
+   371→                        "mtf5_vol_ratio", "mtf5_atr_pct"]:
+   372→                feat[col] = 0.0
+   373→
+   374→        # 15-minute aggregation (every 15 bars)
+   375→        group15 = np.arange(n) // 15
+   376→        agg15 = df_5m.groupby(group15).agg(
+   377→            open=("open", "first"), high=("high", "max"),
+   378→            low=("low", "min"), close=("close", "last"), volume=("volume", "sum")
+   379→        )
+   380→        c15 = agg15["close"].values
+   381→        h15 = agg15["high"].values
+   382→        l15 = agg15["low"].values
+   383→        n15 = len(agg15)
+   384→
+   385→        if n15 >= 50:
+   386→            ema9_15 = _ema(c15, 9)
+   387→            ema21_15 = _ema(c15, 21)
+   388→            atr15_14 = _atr(h15, l15, c15, 14)
+   389→
+   390→            mtf15_ema_align = np.sign(ema9_15 - ema21_15)
+   391→            mtf15_trend_str = (ema9_15 - ema21_15) / np.maximum(np.abs(ema21_15), 1e-10) * 100
+   392→            mtf15_ret3 = pd.Series(c15).pct_change(3, fill_method=None).values
+   393→            mtf15_atr_pct = atr15_14 / np.maximum(c15, 1e-10) * 100
+   394→
+   395→            # Map back to 1m
+   396→            bar_to_group15 = np.clip(np.arange(n) // 15, 0, n15 - 1)
+   397→
+   398→            feat["mtf15_ema_align"] = mtf15_ema_align[bar_to_group15]
+   399→            feat["mtf15_trend_str"] = mtf15_trend_str[bar_to_group15]
+   400→            feat["mtf15_ret_3"] = mtf15_ret3[bar_to_group15]
+   401→            feat["mtf15_atr_pct"] = mtf15_atr_pct[bar_to_group15]
+   402→        else:
+   403→            for col in ["mtf15_ema_align", "mtf15_trend_str", "mtf15_ret_3", "mtf15_atr_pct"]:
+   404→                feat[col] = 0.0
+   405→
+   406→        # Trend agreement: 1m, 5m, 15m all aligned
+   407→        ema1_align = feat["ema_alignment"].values  # 1m EMA alignment
+   408→        mtf_trend_agree = np.where(
+   409→            (ema1_align * feat["mtf5_ema_align"].values > 0) &
+   410→            (ema1_align * feat["mtf15_ema_align"].values > 0),
+   411→            1.0,  # all aligned
+   412→            np.where(
+   413→                (ema1_align * feat["mtf5_ema_align"].values > 0) |
+   414→                (ema1_align * feat["mtf15_ema_align"].values > 0),
+   415→                0.5,  # partial alignment
+   416→                0.0   # no alignment
+   417→            )
+   418→        )
+   419→        feat["mtf_trend_agree"] = mtf_trend_agree
+   420→
+   421→    except Exception as e:
+   422→        LOG.warning("  %s: MTF feature computation failed: %s", symbol, str(e)[:80])
+   423→        for col in ["mtf5_ema_align", "mtf5_trend_str", "mtf5_ret_3",
+   424→                    "mtf5_vol_ratio", "mtf5_atr_pct",
+   425→                    "mtf15_ema_align", "mtf15_trend_str", "mtf15_ret_3",
+   426→                    "mtf15_atr_pct", "mtf_trend_agree"]:
+   427→            feat[col] = 0.0
+   428→
+   429→    # Placeholders for direction + label (filled later)
+   430→    feat["trade_direction"] = np.nan
+   431→    feat["label"] = np.nan
+   432→    feat["_atr_14_price"] = atr_14
+   433→    feat["symbol"] = symbol
+   434→
+   435→    # Clean inf/nan
+   436→    for col in FEATURE_NAMES:
+   437→        if col in feat.columns:
+   438→            feat[col] = feat[col].replace([np.inf, -np.inf], np.nan)
+   439→
+   440→    return feat
+   441→
+   442→
+   443→# ── Robust timestamp-to-milliseconds conversion ──
+   444→
+   445→def _ts_to_ms(series: pd.Series) -> pd.Series:
+   446→    """Convert tz-aware datetime Series to milliseconds (int64).
+   447→    
+   448→    CRITICAL: In pandas 2.x, astype(np.int64) on tz-aware DatetimeIndex
+   449→    returns SECONDS (not nanoseconds). We use .dt.as_unit('ms') which
+   450→    is the reliable cross-version method, with fallbacks.
+   451→    """
+   452→    # Method 1: .dt.as_unit('ms') — pandas 2.0+ recommended
+   453→    try:
+   454→        ms_series = series.dt.as_unit("ms")
+   455→        return ms_series.view("int64").astype(np.int64)
+   456→    except (TypeError, ValueError, AttributeError):
+   457→        pass
+   458→
+   459→    # Method 2: .apply with .timestamp() — always correct, slower
+   460→    try:
+   461→        return series.apply(lambda ts: int(ts.timestamp() * 1000)).astype(np.int64)
+   462→    except (TypeError, ValueError, AttributeError):
+   463→        pass
+   464→
+   465→    # Method 3: convert to naive UTC first, then as_unit
+   466→    try:
+   467→        naive = series.dt.tz_convert(None)
+   468→        ms_series = naive.as_unit("ms")
+   469→        return ms_series.view("int64").astype(np.int64)
+   470→    except (TypeError, ValueError, AttributeError):
+   471→        pass
+   472→
+   473→    # Method 4: astype(int64) — in pandas 2.x gives seconds, multiply by 1000
+   474→    try:
+   475→        val = series.astype(np.int64)
+   476→        # Check if values look like seconds (~1.7e9) or nanoseconds (~1.7e18)
+   477→        sample = int(val.iloc[0]) if len(val) > 0 else 0
+   478→        if 1e9 < sample < 2e9:
+   479→            # Seconds since epoch — multiply by 1000
+   480→            return (val * 1000).astype(np.int64)
+   481→        elif 1e18 < sample < 2e18:
+   482→            # Nanoseconds since epoch — divide by 1e6
+   483→            return (val // 1_000_000).astype(np.int64)
+   484→        else:
+   485→            raise ValueError(f"Unexpected timestamp value: {sample}")
+   486→    except (TypeError, ValueError):
+   487→        pass
+   488→
+   489→    raise ValueError("Cannot convert tz-aware datetime to milliseconds — all methods failed!")
+   490→
+   491→
+   492→# ── Download 1m OHLCV with proper pagination ──
+   493→
+   494→def download_1m(symbol: str, start_ts_ms: int, end_ts_ms: int) -> pd.DataFrame:
+   495→    """Download 1m OHLCV with caching. Paginates correctly across the full date range.
+   496→    
+   497→    Key fixes vs v1:
+   498→      - Don't break pagination when len(ohlcv) < 1000; only break when
+   499→        the response is truly empty OR last_ts >= end_ts_ms
+   500→      - Different exchanges have different max limits per request
+   501→    """
+   502→    cache_file = CACHE_DIR / f"{symbol}_1m.parquet"
+   503→
+   504→    # ── Check cache with overlap validation ──
+   505→    if cache_file.exists():
+   506→        cached = pd.read_parquet(cache_file)
+   507→        if len(cached) > 0:
+   508→            cache_start = int(cached["timestamp"].min())
+   509→            cache_end = int(cached["timestamp"].max())
+   510→
+   511→            # Check if cache covers our range (with 1-day tolerance on each side)
+   512→            if cache_start <= start_ts_ms + 86400000 and cache_end >= end_ts_ms - 86400000:
+   513→                mask = (cached["timestamp"] >= start_ts_ms) & (cached["timestamp"] <= end_ts_ms)
+   514→                result = cached[mask].copy()
+   515→                if len(result) > 0:
+   516→                    LOG.info("  %s: %d bars from cache (1m)  [%s → %s]",
+   517→                             symbol, len(result),
+   518→                             pd.to_datetime(result["timestamp"].min(), unit="ms").strftime("%Y-%m-%d"),
+   519→                             pd.to_datetime(result["timestamp"].max(), unit="ms").strftime("%Y-%m-%d"))
+   520→                    return result
+   521→            else:
+   522→                # Cache exists but doesn't cover our range — log it
+   523→                LOG.info("  %s: cache exists but doesn't cover needed range", symbol)
+   524→                LOG.info("    Need:    %s → %s",
+   525→                         pd.to_datetime(start_ts_ms, unit="ms").strftime("%Y-%m-%d"),
+   526→                         pd.to_datetime(end_ts_ms, unit="ms").strftime("%Y-%m-%d"))
+   527→                LOG.info("    Have:    %s → %s",
+   528→                         pd.to_datetime(cache_start, unit="ms").strftime("%Y-%m-%d"),
+   529→                         pd.to_datetime(cache_end, unit="ms").strftime("%Y-%m-%d"))
+   530→                # Fall through to download — will merge with existing cache
+   531→
+   532→    import ccxt
+   533→
+   534→    # Binance FIRST — supports 1000 bars/request (5x faster than Bybit 200)
+   535→    for exchange_id in ["binance", "bybit", "mexc"]:
+   536→        try:
+   537→            exchange = getattr(ccxt, exchange_id)({"enableRateLimit": True})
+   538→            exchange.load_markets()
+   539→
+   540→            # Try multiple ticker variants: SOL/USDT, SOLUSDT, SOL/USDT:USDT
+   541→            candidates = [
+   542→                f"{symbol}/USDT",
+   543→                f"{symbol}/USDT:USDT",  # Binance futures
+   544→                f"{symbol}USDT",         # Some exchanges use this format
+   545→            ]
+   546→            ccxt_sym = None
+   547→            for cand in candidates:
+   548→                if cand in exchange.markets:
+   549→                    ccxt_sym = cand
+   550→                    break
+   551→
+   552→            if ccxt_sym is None:
+   553→                # Fuzzy match: find any market containing this symbol
+   554→                for market_id in exchange.markets:
+   555→                    base = exchange.markets[market_id].get("base", "")
+   556→                    if base.upper() == symbol and "USDT" in market_id.upper():
+   557→                        ccxt_sym = market_id
+   558→                        LOG.info("  %s: found as %s on %s", symbol, market_id, exchange_id)
+   559→                        break
+   560→
+   561→            if ccxt_sym is None:
+   562→                LOG.info("  %s: not listed on %s", symbol, exchange_id)
+   563→                continue
+   564→
+   565→            # Binance/Bybit both support 1000 bars/request via ccxt
+   566→            limit = 1000
+   567→
+   568→            all_ohlcv = []
+   569→            since = start_ts_ms
+   570→            max_iterations = 2000  # safety limit (covers ~375 days of 1m data)
+   571→            iteration = 0
+   572→            last_fetched_count = limit  # track to detect truly no more data
+   573→
+   574→            total_days = (end_ts_ms - start_ts_ms) / 86400000
+   575→            LOG.info("  %s: fetching from %s (%.0f days, ~%d requests)...",
+   576→                     symbol, exchange_id, total_days,
+   577→                     int(total_days * 1440 / limit) + 1)
+   578→
+   579→            while since < end_ts_ms and iteration < max_iterations:
+   580→                iteration += 1
+   581→                try:
+   582→                    ohlcv = exchange.fetch_ohlcv(ccxt_sym, "1m", since=since, limit=limit)
+   583→                except Exception as e:
+   584→                    LOG.warning("  %s on %s: fetch error at %s: %s",
+   585→                                symbol, exchange_id,
+   586→                                pd.to_datetime(since, unit="ms").strftime("%Y-%m-%d"),
+   587→                                str(e)[:80])
+   588→                    time.sleep(3)
+   589→                    # Retry once
+   590→                    try:
+   591→                        ohlcv = exchange.fetch_ohlcv(ccxt_sym, "1m", since=since, limit=limit)
+   592→                    except Exception:
+   593→                        break
+   594→
+   595→                if not ohlcv or len(ohlcv) == 0:
+   596→                    # Truly no more data
+   597→                    break
+   598→
+   599→                all_ohlcv.extend(ohlcv)
+   600→                last_ts = ohlcv[-1][0]
+   601→
+   602→                # If last timestamp is past our range, we're done
+   603→                if last_ts >= end_ts_ms:
+   604→                    break
+   605→
+   606→                # FIX: Don't break when len < limit!
+   607→                # Some exchanges return slightly fewer bars than requested.
+   608→                # Only stop if we get truly empty response or past end_ts.
+   609→                # However, if we got much fewer than expected, the exchange
+   610→                # might not have data for this period at all.
+   611→                if len(ohlcv) < 5:
+   612→                    # Very few bars — probably no more data available
+   613→                    break
+   614→
+   615→                # Move since to the next bar after the last one we got
+   616→                since = last_ts + 60000  # +1 minute
+   617→
+   618→                # Rate limit
+   619→                time.sleep(exchange.rateLimit / 1000)
+   620→
+   621→            if all_ohlcv:
+   622→                df = pd.DataFrame(all_ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
+   623→                df = df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+   624→
+   625→                # Merge with existing cache (keep all unique timestamps)
+   626→                if cache_file.exists():
+   627→                    try:
+   628→                        old = pd.read_parquet(cache_file)
+   629→                        df = pd.concat([old, df]).drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+   630→                    except Exception:
+   631→                        pass  # If cache is corrupted, just use new data
+   632→
+   633→                # Save full cache (all data we have)
+   634→                df.to_parquet(cache_file, index=False)
+   635→
+   636→                # Filter to requested range BEFORE returning
+   637→                result = df[(df["timestamp"] >= start_ts_ms) & (df["timestamp"] <= end_ts_ms)].copy()
+   638→                LOG.info("  %s: %d bars from %s (1m)  [%s → %s]",
+   639→                         symbol, len(result), exchange_id,
+   640→                         pd.to_datetime(result["timestamp"].min(), unit="ms").strftime("%Y-%m-%d"),
+   641→                         pd.to_datetime(result["timestamp"].max(), unit="ms").strftime("%Y-%m-%d"))
+   642→                return result
+   643→
+   644→        except Exception as e:
+   645→            LOG.warning("  %s on %s: %s", symbol, exchange_id, str(e)[:80])
+   646→            time.sleep(2)
+   647→
+   648→    LOG.warning("  %s: no 1m data available on any exchange", symbol)
+   649→    return pd.DataFrame()
+   650→
+   651→
+   652→def main():
+   653→    parser = argparse.ArgumentParser(description="v9 Build Dataset")
+   654→    parser.add_argument("--neg-ratio", type=float, default=3.0,
+   655→                        help="Ratio of negative samples per positive (default: 3)")
+   656→    parser.add_argument("--big-loss", type=float, default=5.0,
+   657→                        help="Re-filter with this threshold (default: $5)")
+   658→    parser.add_argument("--max-symbols", type=int, default=50,
+   659→                        help="Max symbols to process (default: 50 = all)")
+   660→    parser.add_argument("--clear-cache", action="store_true",
+   661→                        help="Delete all cached OHLCV data and re-download")
+   662→    args = parser.parse_args()
+   663→
+   664→    logging.basicConfig(level=logging.INFO,
+   665→                        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+   666→                        datefmt="%H:%M:%S")
+   667→
+   668→    # Optional: clear cache
+   669→    if args.clear_cache:
+   670→        LOG.info("Clearing OHLCV cache...")
+   671→        for f in CACHE_DIR.glob("*.parquet"):
+   672→            f.unlink()
+   673→        LOG.info("Cache cleared")
+   674→
+   675→    # Load filtered trades
+   676→    trades_path = DATA_DIR / "filtered_trades.json"
+   677→    if not trades_path.exists():
+   678→        LOG.error("No filtered_trades.json. Run parse_trades.py first!")
+   679→        sys.exit(1)
+   680→
+   681→    with open(trades_path) as f:
+   682→        trades = json.load(f)
+   683→
+   684→    LOG.info("Loaded %d filtered trades", len(trades))
+   685→    tdf = pd.DataFrame(trades)
+   686→
+   687→    # ── FIX: Robust timestamp conversion ──
+   688→    tdf["entry_ts"] = pd.to_datetime(tdf["entry_time"], utc=True)
+   689→    tdf["exit_ts"] = pd.to_datetime(tdf["exit_time"], utc=True)
+   690→
+   691→    # Use robust conversion method
+   692→    tdf["entry_ts_ms"] = _ts_to_ms(tdf["entry_ts"])
+   693→    tdf["exit_ts_ms"] = _ts_to_ms(tdf["exit_ts"])
+   694→
+   695→    # Verify timestamps are sane (should be ~1.7e12 for 2024-2025, ~1.75e12 for 2025-2026)
+   696→    sample_ts = int(tdf["entry_ts_ms"].iloc[0]) if len(tdf) > 0 else 0
+   697→    sample_date = pd.to_datetime(sample_ts, unit="ms").strftime("%Y-%m-%d %H:%M")
+   698→    LOG.info("Sample entry_ts_ms: %d (%s)", sample_ts, sample_date)
+   699→
+   700→    if sample_ts < 1e12 or sample_ts > 2e12:
+   701→        LOG.error("Timestamp conversion looks wrong! Expected ~1.7-1.8e12 for 2024-2026, got %d", sample_ts)
+   702→        LOG.error("Raw entry_time: %s", tdf["entry_time"].iloc[0] if len(tdf) > 0 else "N/A")
+   703→        sys.exit(1)
+   704→
+   705→    # Log overall trade date range
+   706→    trade_min = int(tdf["entry_ts_ms"].min())
+   707→    trade_max = int(tdf["entry_ts_ms"].max())
+   708→    LOG.info("Trade dates: %s → %s (%.0f days)",
+   709→             pd.to_datetime(trade_min, unit="ms").strftime("%Y-%m-%d"),
+   710→             pd.to_datetime(trade_max, unit="ms").strftime("%Y-%m-%d"),
+   711→             (trade_max - trade_min) / 86400000)
+   712→
+   713→    # Top symbols
+   714→    sym_counts = tdf["symbol"].value_counts()
+   715→    top_syms = sym_counts.head(args.max_symbols).index.tolist()
+   716→    LOG.info("Processing %d symbols: %s", len(top_syms), top_syms[:10])
+   717→
+   718→    # Build lookup: symbol → list of (entry_ts_ms_rounded, entry_ts_ms_exact, direction, is_win)
+   719→    # We use the ROUNDED timestamp for primary lookup and EXACT for fallback
+   720→    entry_lookup = {}
+   721→    for sym in top_syms:
+   722→        sym_trades = tdf[tdf["symbol"] == sym]
+   723→        lookup = []
+   724→        for _, row in sym_trades.iterrows():
+   725→            exact_ms = int(row["entry_ts_ms"])
+   726→            # Round DOWN to minute boundary (OHLCV bars are at minute boundaries)
+   727→            rounded_ms = (exact_ms // 60000) * 60000
+   728→            direction = row["direction"]
+   729→            is_win = bool(row.get("is_win", True))
+   730→            lookup.append((rounded_ms, exact_ms, direction, is_win))
+   731→        entry_lookup[sym] = lookup
+   732→
+   733→    # Download 1m data per symbol
+   734→    all_features = []
+   735→
+   736→    for i_sym, symbol in enumerate(top_syms):
+   737→        sym_trades = tdf[tdf["symbol"] == symbol]
+   738→        LOG.info("[%d/%d] %s: %d trades", i_sym + 1, len(top_syms), symbol, len(sym_trades))
+   739→
+   740→        # Time range for download (with 3 days buffer before first trade for warmup)
+   741→        start_ts = int(sym_trades["entry_ts_ms"].min()) - 3 * 86400000
+   742→        end_ts = int(sym_trades["exit_ts_ms"].max()) + 86400000
+   743→
+   744→        LOG.info("  %s: downloading from %s to %s (%.0f days)",
+   745→                 symbol,
+   746→                 pd.to_datetime(start_ts, unit="ms").strftime("%Y-%m-%d"),
+   747→                 pd.to_datetime(end_ts, unit="ms").strftime("%Y-%m-%d"),
+   748→                 (end_ts - start_ts) / 86400000)
+   749→
+   750→        ohlcv = download_1m(symbol, start_ts, end_ts)
+   751→        if len(ohlcv) < 100:
+   752→            LOG.warning("  %s: insufficient data (%d bars), skipping", symbol, len(ohlcv))
+   753→            continue
+   754→
+   755→        # Verify OHLCV date range overlaps with trades
+   756→        ohlcv_min = int(ohlcv["timestamp"].min())
+   757→        ohlcv_max = int(ohlcv["timestamp"].max())
+   758→        trade_min_sym = int(sym_trades["entry_ts_ms"].min())
+   759→        trade_max_sym = int(sym_trades["entry_ts_ms"].max())
+   760→        overlap = ohlcv_min <= trade_max_sym and ohlcv_max >= trade_min_sym
+   761→        LOG.info("  %s: OHLCV [%s → %s]  Trades [%s → %s]  Overlap: %s",
+   762→                 symbol,
+   763→                 pd.to_datetime(ohlcv_min, unit="ms").strftime("%Y-%m-%d"),
+   764→                 pd.to_datetime(ohlcv_max, unit="ms").strftime("%Y-%m-%d"),
+   765→                 pd.to_datetime(trade_min_sym, unit="ms").strftime("%Y-%m-%d"),
+   766→                 pd.to_datetime(trade_max_sym, unit="ms").strftime("%Y-%m-%d"),
+   767→                 "✅" if overlap else "❌ NO OVERLAP")
+   768→
+   769→        if not overlap:
+   770→            LOG.warning("  %s: OHLCV data doesn't overlap with trades! Try --clear-cache", symbol)
+   771→            continue
+   772→
+   773→        # Compute features for ALL bars
+   774→        feat_df = compute_features_1m(ohlcv, symbol=symbol)
+   775→        if len(feat_df) == 0:
+   776→            LOG.warning("  %s: no features computed, skipping", symbol)
+   777→            continue
+   778→
+   779→        # ── Mark POSITIVE samples (trader entry bars) ──
+   780→        feat_ts = feat_df["timestamp"].values.astype(np.int64)
+   781→
+   782→        # Build index of timestamp → bar position for fast lookup
+   783→        feat_ts_index = {int(ts): i for i, ts in enumerate(feat_ts)}
+   784→
+   785→        sym_lookup = entry_lookup.get(symbol, [])
+   786→        n_matched = 0
+   787→        n_exact = 0
+   788→        n_closest = 0
+   789→        n_winners = 0
+   790→        n_losers = 0
+   791→
+   792→        for rounded_ms, exact_ms, direction, is_win in sym_lookup:
+   793→            matched = False
+   794→
+   795→            # Try 1: Exact match on the rounded (minute-boundary) timestamp
+   796→            if rounded_ms in feat_ts_index:
+   797→                bar_idx = feat_ts_index[rounded_ms]
+   798→                feat_df.iloc[bar_idx, feat_df.columns.get_loc("trade_direction")] = 1.0 if direction == "long" else -1.0
+   799→                feat_df.iloc[bar_idx, feat_df.columns.get_loc("label")] = 1.0 if is_win else -1.0
+   800→                n_matched += 1
+   801→                n_exact += 1
+   802→                n_winners += int(is_win)
+   803→                n_losers += int(not is_win)
+   804→                matched = True
+   805→
+   806→            if not matched:
+   807→                # Try 2: Exact match on the original (unrounded) timestamp
+   808→                if exact_ms in feat_ts_index:
+   809→                    bar_idx = feat_ts_index[exact_ms]
+   810→                    feat_df.iloc[bar_idx, feat_df.columns.get_loc("trade_direction")] = 1.0 if direction == "long" else -1.0
+   811→                    feat_df.iloc[bar_idx, feat_df.columns.get_loc("label")] = 1.0 if is_win else -1.0
+   812→                    n_matched += 1
+   813→                    n_exact += 1
+   814→                    n_winners += int(is_win)
+   815→                    n_losers += int(not is_win)
+   816→                    matched = True
+   817→
+   818→            if not matched:
+   819→                # Try 3: Closest bar within 2 minutes
+   820→                diffs = np.abs(feat_ts - exact_ms)
+   821→                bar_idx = int(np.argmin(diffs))
+   822→                if diffs[bar_idx] <= 120000:  # within 2 minutes
+   823→                    feat_df.iloc[bar_idx, feat_df.columns.get_loc("trade_direction")] = 1.0 if direction == "long" else -1.0
+   824→                    feat_df.iloc[bar_idx, feat_df.columns.get_loc("label")] = 1.0 if is_win else -1.0
+   825→                    n_matched += 1
+   826→                    n_closest += 1
+   827→                    n_winners += int(is_win)
+   828→                    n_losers += int(not is_win)
+   829→                    matched = True
+   830→
+   831→            if not matched and n_matched == 0:
+   832→                # Debug: log why first trade didn't match
+   833→                diffs = np.abs(feat_ts - exact_ms)
+   834→                closest_idx = int(np.argmin(diffs))
+   835→                LOG.warning("  %s: First unmatched trade — entry=%s (%s)  closest_bar=%s (diff=%.1f min)",
+   836→                            symbol, exact_ms,
+   837→                            pd.to_datetime(exact_ms, unit="ms").strftime("%Y-%m-%d %H:%M:%S"),
+   838→                            pd.to_datetime(int(feat_ts[closest_idx]), unit="ms").strftime("%Y-%m-%d %H:%M:%S"),
+   839→                            diffs[closest_idx] / 60000)
+   840→
+   841→        LOG.info("  %s: matched %d / %d trades (exact=%d, closest=%d)  winners=%d losers=%d",
+   842→                 symbol, n_matched, len(sym_trades), n_exact, n_closest, n_winners, n_losers)
+   843→
+   844→        # ── Mark NEGATIVE samples ──
+   845→        # Random bars that are NOT within ±15min of any entry
+   846→        # (loser entries are already labeled as -1.0 above — those are hard negatives)
+   847→        entry_ms_set = set()
+   848→        for rounded_ms, exact_ms, _, _ in sym_lookup:
+   849→            entry_ms_set.add(int(rounded_ms))
+   850→            entry_ms_set.add(int(exact_ms))
+   851→
+   852→        # Create windows around ALL entries (winners + losers) — exclude from random sampling
+   853→        entry_windows = set()
+   854→        for ems in entry_ms_set:
+   855→            low_ms = ems - 900000
+   856→            high_ms = ems + 900000
+   857→            window_mask = (feat_ts >= low_ms) & (feat_ts <= high_ms)
+   858→            window_ts = feat_ts[window_mask]
+   859→            entry_windows.update(window_ts.tolist())
+   860→
+   861→        non_entry_mask = ~feat_df["timestamp"].astype(np.int64).isin(entry_windows)
+   862→        non_entry_bars = feat_df[non_entry_mask]
+   863→
+   864→        # Sample random negatives — ratio relative to WINNERS only
+   865→        n_winners = int((feat_df["label"] == 1.0).sum())
+   866→        n_losers = int((feat_df["label"] == -1.0).sum())
+   867→        n_random_neg = min(int(n_winners * args.neg_ratio), len(non_entry_bars))
+   868→
+   869→        if n_random_neg > 0 and n_winners > 0:
+   870→            neg_sample = non_entry_bars.sample(n=n_random_neg, random_state=42)
+   871→            for idx in neg_sample.index:
+   872→                feat_df.loc[idx, "trade_direction"] = np.random.choice([1.0, -1.0])
+   873→                feat_df.loc[idx, "label"] = 0.0
+   874→
+   875→        # Collect all labeled samples: winners (1.0) + losers (-1.0) + random (0.0)
+   876→        labeled = feat_df[feat_df["label"].notna() & feat_df["trade_direction"].notna()].copy()
+   877→        n_win_sym = int((labeled["label"] == 1.0).sum())
+   878→        n_lose_sym = int((labeled["label"] == -1.0).sum())
+   879→        n_rand_sym = int((labeled["label"] == 0.0).sum())
+   880→        LOG.info("  %s: %d winners + %d losers + %d random = %d total",
+   881→                 symbol, n_win_sym, n_lose_sym, n_rand_sym, len(labeled))
+   882→
+   883→        all_features.append(labeled)
+   884→
+   885→    if not all_features:
+   886→        LOG.error("No features computed! Check that OHLCV data was downloaded successfully.")
+   887→        LOG.error("Try running with --clear-cache to force re-download")
+   888→        sys.exit(1)
+   889→
+   890→    combined = pd.concat(all_features, ignore_index=True)
+   891→    n_total = len(combined)
+   892→    n_win_total = int((combined["label"] == 1.0).sum())
+   893→    n_lose_total = int((combined["label"] == -1.0).sum())
+   894→    n_rand_total = int((combined["label"] == 0.0).sum())
+   895→
+   896→    LOG.info("Combined dataset: %d rows (winners=%d / losers=%d / random=%d)",
+   897→             n_total, n_win_total, n_lose_total, n_rand_total)
+   898→
+   899→    # Save
+   900→    output_path = DATA_DIR / "dataset.parquet"
+   901→    combined.to_parquet(output_path, index=False)
+   902→    LOG.info("Saved to %s", output_path)
+   903→
+   904→    # Feature columns for training
+   905→    feat_cols_path = DATA_DIR / "feature_columns.json"
+   906→    with open(feat_cols_path, "w") as f:
+   907→        json.dump([c for c in FEATURE_NAMES if c != "label"], f, indent=2)
+   908→
+   909→    print(f"\n{'='*70}")
+   910→    print(f"V9 DATASET BUILT (v2 — Winners-Only Labels)")
+   911→    print(f"{'='*70}")
+   912→    print(f"  Total: {n_total} rows")
+   913→    print(f"  Winners (label=1.0):  {n_win_total}")
+   914→    print(f"  Losers  (label=-1.0): {n_lose_total} (hard negatives)")
+   915→    print(f"  Random  (label=0.0):  {n_rand_total} (easy negatives)")
+   916→    print(f"  Ratio: {(n_lose_total + n_rand_total) / max(n_win_total, 1):.1f}:1 neg/pos")
+   917→    print(f"  Features: {N_FEATURES}")
+   918→    print(f"  Output: {output_path}")
+   919→    print(f"{'='*70}")
+   920→
+   921→
+   922→if __name__ == "__main__":
+   923→    main()
+
+[showing lines 300-923 of 924; use offset=924 with limit to continue reading]

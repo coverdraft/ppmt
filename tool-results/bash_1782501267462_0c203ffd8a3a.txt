@@ -1,0 +1,547 @@
+e5a58be feat(v9): multi-timeframe features (5m/15m) + fix --exchange arg in pipeline
+9660dfa feat(v9): winners-only labels — teach model what WINNING entries look like
+9f556c0 fix(v9): backtest diagnostics + download_1m range filter + empty stats
+dce3cc3 fix(v9): robust backtest — use download_1m, validate OHLCV, temporal sort
+9256f63 fix(v9): backtest crash — merge OHLCV columns into feature DataFrame
+74929ec fix(v9): try multiple ticker variants (futures/spot), process all symbols
+48bceeb fix(v9): Binance first (1000 bars/req = 5x faster), Bybit limit=1000
+2abb8c7 fix(v9): _ts_to_ms — pandas 2.x astype(int64) returns SECONDS not ns
+7d0dea8 fix(v9): timestamp conversion off by 1000x, pagination breaks early, minute-boundary matching
+3b990d3 fix(v9): 3 critical bugs causing 0-row dataset
+079c40c v9: supervised trader clone — classifier on actual entries + mechanical exits
+f5233c3 add: pure pattern backtest (no model) — baseline test
+3036969 fix: read-only array + ema_alignment filter bugs
+8ea8a4f fix: CRITICAL — rolling(20) included current bar, making breakout_strength always 0
+cece2ce feat: parametric grid search — build dataset once, test 48 configs
+f8a3d9a feat: direction-aware training + relaxed breakout signals + lower EV threshold
+9b90e5d feat: pattern-gated trading — only trade when signal detected
+61d562c fix: np.nan_to_num positional arg 0 was copy=False, not nan=0
+65203eb fix: force-disable pandas CoW + add full traceback to error logging
+cc095a7 fix: nuclear fix for pandas read-only arrays — reconstruct DataFrames from fresh numpy copies
+37ba2cc fix: pandas 2.x CoW read-only arrays — add .copy() after merge and before assignments
+d609b0b fix: off-by-one broadcasting error in features.py (28512 vs 28511)
+1a96ecc fix: Bybit symbols + broadcast shape mismatch
+08315f9 update: v8 docstrings with corrected pattern analysis (446 entries, long+short)
+5098f63 fix: correct MEXC short order semantics (buy short=open, sell short=close)
+3c7ca1e feat(v8): rebuild all modules with pattern analysis insights
+25c41a8 feat(v8): add trader pattern recognition analysis script + MEXC order data
+103c29f update worklog: session 8
+4194d12 FIX: train ALL data 500 rounds no early stopping
+9c6a5f0 fix: model.train() walk-forward 83/10/7 split — fixes best_iter=1
+a8a8600 feat: v7 paper trading engine — quantile rolling, multi-token, per-symbol config
+00d2e09 feat: update system with deep opt results for all 4 tokens (180d, 5040 configs)
+e44a26b feat: deep optimization results + per-symbol SYMBOL_CONFIG with HP presets
+2cf0808 fix: auto-create output directory in deep_optimize.py
+d2dd9b1 feat: add deep_optimize.py for multi-dimensional parameter search
+737916f feat: comprehensive multi-token sweep + per-symbol Q config overrides
+dd6937f feat: update config to Q90/Q10 L+S per rolling sweep results
+9286958 feat: rolling_sweep.py — multi-window validation
+d1bf324 feat: L+S quantile backtest (Q80/Q20 hold=288) + sweep results
+5015b1f feat: sweep_backtest.py — test multiple configs in one run
+fec518e tune: back to 83/10/7 + 2000 trees es=150 (best_iter=29 combo)
+43e4615 tune: 70/10/20 split + 200 trees with early stopping
+060ff9d feat: LONG-only sequential backtest, larger test window
+1e5fd8c feat: horizon-aligned sequential backtest
+14bbe03 feat: fixed 50 trees, quantile-based trading, dedup PnL
+3768040 fix: cambiar PROB_LONG 0.55->0.51, PROB_SHORT 0.40->0.46 + pred diagnostics
+f06fe28 docs: actualizar ESTADO_PROYECTO y worklog sesion 2
+2e6e19b v7: binary classification H=288 (24h), tuned params
+00fc91a feat: regression → binary classification — predict P(UP in 24h)
+5fd5847 fix: remove subsampling — strong regularization handles autocorrelation instead
+c6619c5 feat: subsample train/val every HORIZON bars + remove 'dow' + default 90d window
+473dd18 feat: HORIZON 12→288 (1h→24h) + stronger regularization
+3b7a13f feat: HORIZON 3→12 (15min→1h forward) — diagnostic confirmed 15min is pure noise
+6549f90 fix(diagnose): pasar Feed object a fetch_30d_data + label en % como entrenamiento
+b22ffc0 diagnóstico v7: señal ausente + script de diagnóstico + estado
+f8fc741 diagnóstico: pipeline mecánico OK, señal ausente — pre-featuring-fix checkpoint
+627cff2 fix(portable-paths): replace hardcoded /home/z/my-project with repo-relative paths
+f10872f feat(v7/f9): Layer 2 rolling retrain — 6h cadence, 30d window, atomic swap
+538b003 Merge remote v7.5 + F8 work; resolve worklog/master-plan conflicts
+dffb135 feat(v7.5/paper-trader): live paper trading harness with v6-LONG LightGBM
+ecfa591 b6588f10-9569-4db1-895d-b3d77b8cb988
+06dd901 feat(v7/f8): Online Trie Layer 1 — insert-after-predict + ensemble simulation
+0d88e10 feat(v7.5): SHIP CRITERIA 3/3 PASSED — Optuna-tuned + asymmetric thresholds
+cffb3d6 fix(v7.5): correct Sharpe + MaxDD formulas in tuning script, add --model-suffix to backtest
+dadce76 feat(v7.5): Optuna hyperparameter tuning + threshold sweep
+4b24ab9 docs(v7.5): macOS full reproduction — Sharpe 1.47, PnL +76.48%, ship 2/3 criteria
+cdcafa3 fix(v6): max_seconds default 0 (unlimited) — was silently truncating OHLCV downloads
+1402d08 fix: portable paths — replace hardcoded /home/z/my-project with auto-detected _PROJECT_ROOT
+f9d5856 docs(v7.5): add RUNBOOK_v75.md — step-by-step instructions to run v7.5 locally
+5fd8526 docs: v7.5 Option D complete — beats v6 by 3-4x, ship recommendation
+0a21eed feat(v6): parquet-based walk-forward train+backtest for baseline comparison
+a79732c feat(v7.5): walk-forward backtest — Sharpe 2.80, PnL +333.76%, MaxDD -7.09%
+79920a3 feat(v7.5): Option D — single regression on ALL labels, 71 features, 5 walk-forward windows trained
+540e79c docs(worklog): rebuild v7 environment after F5b-F7b loss — DB rebuilt, ready for Option D
+13fcd38 f21d50c4-87e8-4e53-92f8-828b41d13ac7
+7e59710 1ecc2e87-d9de-47c1-8f87-f1739573ea99
+a4c1b14 1752b05d-7319-4153-9ea0-e252aa13e160
+fdb12c6 4037b36a-2667-406b-b902-83b975404716
+4c18944 83df0eeb-473a-4984-a117-b2fc717820dd
+b2e4f89 f44f678b-eddd-4cb1-8d2d-bccdf5ab1f57
+17ac1ce feat(v7): F5a — LightGBM LONG expert (5 walk-forward windows, WR=72-80%, PF=14-26)
+74854cd feat(v7/f4): features extras - funding rate, OI, sector one-hot, day-of-week
+be0a507 feat(v7/f3): 4 sectorial tries + RegimePartitionedTrie (N1/N2)
+abf8088 feat(v7/f2): OHLCV composite encoder with sectorized quantization
+6bc488c feat(v7/f1): TrieNodeV6Metadata with 8 fields, no SAX/LONG-SHORT
+16a6703 chore(v7/f0): final cleanup pass — remove files that snuck back in
+f98ffef feat(v7/f0): cleanup repo + master plan + v7 structure
+bea1b43 eb7af7da-3fed-4553-a300-ff283c7f907a
+5bf12ae fc22353e-27ff-45de-b0fb-50755f6254f4
+d893871 54cb394d-228b-43b6-9637-1e5929334d5a
+0758908 docs: remove obsolete v5_cb_v2 and audit_alternative docs (superseded by v6)
+c5532bf chore: remove scripts_external/ (obsolete v2.x test scripts)
+ee1e8de chore: remove obsolete rebuild logs from root
+6895a0a chore: remove _archive/ (obsolete v0.38.6 code, 440 files)
+c30a427 chore: remove broken ppmt submodule ref + scratch patch files from download/
+425adf2 chore: remove personal MEXC xlsx from HEAD, gitignore upload/ and data/personal/
+cf91ec8 chore: gitignore config/github_token.txt (never commit secrets)
+203e57f 2746d878-cad0-4ae5-b4b8-9aa43c5ead15
+c0299b1 33e9c105-059e-4d3c-bbb9-535f5328f3ad
+17ad4f7 docs(worklog): Fase 3 complete — 15m TF reduces SHORT losses 98%
+6b41dcd exp(v6/fase3): 15m filtered backtest — combined LONG+SHORT +$230, but 5m LONG still wins
+fc51522 exp(v6/fase3): 15m TF reduces SHORT losses by 98% — first POSITIVE combined result
+4fd9b1d feat(v6/fase3): add 15m TF support to v6_extract_features.py
+bfc33d5 feat(v6/fase3): add 15m TF support to v6_download_ohlcv.py
+6803300 exp(v6): Fase 1 FAILED — more bear data made SHORT WORSE
+bfb7f56 feat(v6): add 3 historical bear windows for SHORT expert training
+0229387 feat(v6): SHORT-expert v2 (sample_weight, not filter) — also FAILS
+4e61fe3 c70d6418-0107-4ed4-a885-e0dfa4f6ac28
+80d06b0 feat(v6): SHORT-expert v1 (drops-only filter) — FAILS, redesigning
+a56cd10 docs(worklog): v6 steps 5-8 complete + final status + decision point
+84b3471 feat(v6): alt-label pilot — fwd_ret_3 (15m) wins, longer horizons FAIL
+9819047 feat(v6): LONG+SHORT backtest — SHORT side fails, model is asymmetric
+17a859d feat(v6): walk-forward filtered backtest — k=12 hours filter is robust
+d8e4e13 feat(v6): edge breakdown analysis — strong hour-21 +.8K, hour-22 -K
+2190192 feat(v6): backtest with threshold sweep — small edge only at high threshold
+52fc269 feat(v6): walk-forward training complete — 5 windows, all anti-leakage guards pass
+366a45d feat(v6): pilot trainer + walk-forward trainer — LightGBM regression
+f360e45 feat(v6): feature extractor — 59 features, regression label, anti-leakage guards
+4ee2671 feat(v6): OHLCV downloader — Coinbase 5m, 12 tokens, 4 windows
+e03b58b f334febf-4a37-4d61-b90e-517ab380d024
+0a28851 docs(worklog): add Option C finalize entry
+ae46de2 ops(v5_cb_v2): add DB wipe script for contaminated feature_observations_cb
+b99da5f fix(v5_cb_v2): rename fwd_ret_{H} to prevent feature/label name collision
+86b5e6e diag: add 3 diagnostic scripts for paper trader proba investigation
+2c70c82 feat(paper-trader): Step 9 — live TUI dashboard with rich
+e2e339d docs(v5_cb_v2): Step 8 post-deployment — fixes, troubleshooting, live status, Step 9 plan
+916bb15 feat(paper-trader): add run_paper.sh launcher script
+b11b4ee fix(paper-trader): load risk gate via importlib to bypass ppmt.risk.__init__
+921ec1b fix(paper-trader): make paths portable — resolve model/state/logs relative to repo root
+74de926 feat(v5_cb_v2): Step 8 — live paper-trading harness on Coinbase Advanced
+448cccf docs: append Step 7 entry to worklog
+b8b7ffc feat(v5_cb_v2): Step 7 — remove BAD_HOURS + ASIA_HOURS boost, +25% trades
+6d6cac9 docs: append Step 6 entry to worklog
+f8bfe12 feat(v5_cb_v2): walk-forward validation — AUC 0.9341±0.0075, all 6 windows profitable
+d70949f docs: append Step 5 entry to worklog
+89894cf docs(v5_cb_v2): Step 5 concurrent backtest analysis — +12,272% on capital-at-risk
+8f15419 docs: append Step 4 entry to worklog
+db320a4 fix(v5_cb_v2): wire cb_v2 risk gate into backtest — +3.65x trades, +3.5x total PnL
+4311133 feat(v5_cb_v2): re-tuned risk gate + concurrent backtest with capital allocation
+18def9f feat(v5_cb_v2): realistic backtest + diagnostic scripts
+74065be feat(v5_cb_v2): add complete Coinbase v5 model pipeline + trained artifacts
+cbe3722 v2.5: Add production scripts (download_ohlcv_extended, v24_adaptive, v25_hold48, pure_edge, hold_compare)
+4505099 v2.5: BREAKTHROUGH — +107% PnL aggregate, 9/9 tokens profitable
+ce66446 v2.3 final: V6 config + fee analysis + filter comparison
+f8d9126 v2.3: REVERSE direction + walk-forward + stat filter + alpha ensemble + multi-TF
+74ef281 v2.2: LONG/SHORT fix + exhaustive optimization + ATR SL/TP + reverse-direction test
+0870f8d [TERMINAL-v2.1] Fix backtest: use same replay logic as script + debug logging
+137d6a9 [TERMINAL-v2.1] Fix backtest SQLite thread error + verify replay produces trades
+5026571 [TERMINAL-v2.1] Fix backtest button not working
+e507356 [TERMINAL-v2.1] Fix N3/N4 sticky in JSON + add backtesting endpoint and UI
+400e200 [TERMINAL-v2.1] Apply Config F as 5m default + all UI fixes
+836058e [TERMINAL-v2.1] Complete fix: N3/N4 UI + viable 5m config
+28b2be7 [TERMINAL-v2.1] Fix live price update + N3/N4 confidence in UI
+6006c13 [TERMINAL-v2.1] Fix regime detection + direction vote + SHORT enable in 5m
+9587f66 [TERMINAL-v2.1] Fix hard_move_floor per timeframe + enable SHORT for meme class
+dc11320 [TERMINAL-v2.1] Add alpha diagnostic script — α=3/5/7 comparison for 5m
+b2fcc00 [TERMINAL-v2.1] Add EV gate diagnostic script — per-signal breakdown
+e34831b [TERMINAL-v2.1] Add replay benchmark script for 5m tries
+3f1a0ee [TERMINAL-v2.1] Fix live price: fetch real-time price from Binance ticker
+20eadc1 [TERMINAL-v2.1] Fix real-time price + chart live updates + live indicator
+4100ec1 [TERMINAL-v2.1] Fix trie loading after schema migration + fix log filter
+a32f288 [TERMINAL-v2.1] Fix live matching: use correct pattern_length per level + remove N3 early exit blocking N1/N2
+9eec3dc [TERMINAL-v2.1] Fix save_trie ON CONFLICT + add --clean option
+042d630 [TERMINAL-v2.1] Add bulk_build script to root scripts/ dir
+5425300 [TERMINAL-v2.1] Fix ppmt build CLI: pass timeframe to engine + add bulk_build script
+ccebb31 [TERMINAL-v2.1] Add trade history endpoint and panel
+2ea2b8c [TERMINAL-v2.1] Add trading chart panel with lightweight-charts
+f733150 [TERMINAL-v2.1] Add pattern divergence exit logic
+db964d3 fix: completely rewrite start.sh and verify html serving works
+819a166 docs: update TRAZABILIDAD for v0.59.0 TAREA 22
+ca631a5 fix: emergency cleanup — point start.sh to new terminal, verify DB has post-fix data
+d81b536 55437a76-3edd-4c4f-a2d4-3b38d73e7cc7
+b63a25c feat: build professional PPMT terminal with trie brain viz, sequence tracker, and learning feed
+37cbafd 5ff05b21-9900-447f-a722-080906baecfd
+cb0ad8e a43fedab-cb37-4b5d-88ed-1a50b0460d50
+61f2da0 feat: add start.sh for mac, MEXC execution diagnostic, and live risk control endpoints
+bbc1335 feat: implement net EV gate (friction-aware) and multi-timeframe execution with anti-overlap
+4972f02 91012dd2-0516-4382-92d5-16159a0fce74
+e1e03a1 test: portfolio velocity OOS on 5m and 15m — proving multi-asset execution volume
+89753a1 b5c72eff-0eca-4429-97b8-05997f2ff869
+58d3ef7 docs: update Trazabilidad with TAREA 17 EV Gate verdict (v0.56.0)
+c34a838 test: apply institutional EV gate to 1m — final scientific verdict on 1m execution edge
+fcaf760 c986ebf6-5661-433c-bd3f-9fca61280af1
+e25f19c docs: update Trazabilidad with TAREA 16 results (v0.55.0)
+04c6f2d feat: enhance 1m SAX inputs with volume dimension and candle anatomy (body/wick ratio)
+23703c2 docs: update TRAZABILIDAD to v0.54.0 — TAREA 15 directional outcome fix
+504141d fix: replace artificial 0.15% SL/TP with real directional outcome during build — true predictive power unlocked
+2150fe7 12424ac0-082c-4aca-abf2-37d6b59d1b51
+516a363 9e6d5f03-9e57-4431-9bdf-1b15f6477be5
+7ed40bd 73cfed19-446d-4297-8f29-14f9ec76f84a
+3b51052 a13ed724-cd5f-413e-abbd-0f293baafe19
+0d5ba83 7df1d8fe-3814-420b-9f5a-975564ae91a1
+2ebdd7c fix: nuclear rebuild of all timeframes using corrected compute_outcome_won formula
+49bb399 perf: rebalance 1m weight profile to prioritize dense N3/N4 over sparse N2
+6c04c22 perf: aggressively tune 1m SAX parameters to achieve >0.45 confidence baseline
+f0735e4 docs: update changelog/handoff with v0.50.0 architecture overhaul
+88215ea feat: add BTC cache, cold start, v2 fixes, and initial portfolio build script (Phase 3)
+f3759fa feat: add N5 BTC context level (1m only) and fix pattern divergence tuple mismatch (Phase 2B)
+6908750 feat: add per-level window/pattern configs and timeframe-based regime thresholds (Phase 2A)
+98d44ba v0.47.1 FIX: Dynamic recent_prices buffer + stricter match_raw row check
+f0b2827 v0.47.0: FIX string/tuple mismatch in match + learning loop
+f506f12 FIX: SAX freeze + N1/N2 0 patterns + DOGE price decimals (3 bugs)
+7764e4a ENTREGABLE 13: Token selection matrix — 10 cards (5 tokens × 2 TFs)
+5ecf9c8 FIX: Pantalla negra — coerce candle time to integer (lightweight-charts requires int)
+710270e ENTREGABLE 12: start.sh — First Run Wizard (macOS)
+5c5ef1b ENTREGABLE 11: URL flexible (proxy/VPN) + Mock Live Test
+67c7dce ENTREGABLE 10: WAF bypass investigation + base_url parametrization
+e3ca227 ENTREGABLE 9: MEXC testnet integration + ENTREGABLE 8
+404f729 v0.46.0: ENTREGABLE 7 — Type fix + Live Trading UI (AuthModal)
+4fa0057 v0.45.0: ENTREGABLE 6 — Credential encryption + Walk-Forward Loop
+994960c worklog: ENTREGABLE 5 — Execution routing
+060ca6e v0.44.1: ENTREGABLE 5 — Execution routing (Paper vs Live)
+f55c7f8 worklog: ENTREGABLE 4 — MEXC Futures Executor
+d88664c v0.44.0: ENTREGABLE 4 — MEXC Futures Executor architecture
+b2d2186 FIX: ENTREGABLE 3 - 3 critical integration bugs fixed
+65068cd docs: TRAZABILIDAD updated for ENTREGABLE 3
+a5bfa0e feat(v2): ENTREGABLE 3 — FastAPI + WebSocket bridge for PAPER LIVE
+a138392 feat(v2): ENTREGABLE 2 — RightPanel + D3.js Trie Lab + layout 60/40
+c6b43aa feat(terminal-v2): ENTREGABLE 1 — React + Vite + lightweight-charts + animated SL/TP
+e6d5642 chore: consolidate all PPMT files into single repo — worklog + missing scripts
+5ef279c docs(v0.43.1): ARCHITECTURE_V1.md + TRAZABILIDAD cleanup + environment unification
+f207662 docs(v0.43.1): TRAZABILIDAD — N2 price-only, PEPE OOS weighted conf 0.463 > 0.40 ✅
+335ea08 docs(v0.43.0): TRAZABILIDAD — v0.42.0 SAX Dual fix + v0.43.0 SAX Estratificado N1 price-only
+bbc67f5 feat(v0.43.1): N2 price-only for all classes + 90d data pipeline + PEPE OOS conf>0.40
+d3e33b0 3d98867e-1a06-4063-aca0-19f5c252fc21
+f505717 v0.43.0: Stratified SAX Dual — N1 price-only (243 patterns, conf=0.72)
+f0721b8 docs(v0.41.0): TRAZABILIDAD - OOS PEPE results +25.91% PnL, 90% win rate
+d9a0b95 feat(v0.41.0): OOS PEPE replay + critical merge fix
+a82d906 chore(v0.41.0): cleanup obsolete scripts + TRAZABILIDAD update with physical validation
+297f9ee fix(v0.41.0): PASO 1-4 validación física de arquitectura
+fd0bc78 feat(v0.41.0): FASE 4-5 - data pipeline + terminal API preparation
+da8c210 feat(v0.41.0): FASE 3 - robustez para cualquier token (Tareas 3.1-3.3)
+c57d75b feat(v0.41.0): FASE 2 - decision intelligence (Tareas 2.1-2.4)
+1ab7bbb feat(v0.41.0): SAX Dual encoder - independent price + volume symbols (FASE 1 Tarea 1.3)
+490fc8c fix(v0.41.0): activate shared N1/N2 pools - remove dangerous fallbacks (FASE 1 Tarea 1.2)
+cf3f8b2 feat(v0.41.0): per-level alphabet size for 4-level trie (FASE 1 Tarea 1.1)
+f20094e docs: add PPMT 4-Level Trie Architecture Deep Analysis - 6 fatal failures audit
+4fbb9a2 docs: actualizar header TRAZABILIDAD.md a v0.40.34 + puntero a GUÍA DEL MOTOR (línea 9914+)
+6cf4fde docs(v0.40.34): append motor PPMT handoff guide + worklog v0.40.28-v0.40.34
+385b723 fix(v0.40.34): state push after warmup + live ticker + UI header fixes
+3e77386 fix(v0.40.33): requests-based _DirectPollExchange, no aiohttp
+6d5e2e7 fix(v0.40.32): direct HTTP polling, bypass ccxt load_markets entirely
+5b95525 fix(v0.40.31): skip load_markets, inject symbol stub
+d6323fe fix(v0.40.30): bump __version__ in __init__.py + server.py FastAPI
+d35d420 fix(v0.40.29): MEXC default + Binance→MEXC auto-fallback
+9b834aa chore(v0.40.28): persist fix script as recoverable artifact
+dd9caf5 fix(v0.40.28): spot-only ccxt + real-time chart ticker + state-desync fixes
+7dca381 chore(v0.40.27): add worklog + persisted patch script
+daceb34 fix(v0.40.27): real-time chart + capital allocation + multi-start
+221b694 fix(v0.40.26): token list stuck — script tag + TDZ bugs
+a7c93eb feat(v0.40.26-trading-redesign): 3-col HIG layout + chart fix + responsive
+36db21b feat(v0.40.25-terminal-cleanup): remove Discovery tab + Sweep History
+94207fc feat(v0.40.24-terminal-cleanup): limpieza UI + multi-token + TF 1m-1h
+fe7e220 feat(v0.40.24-paper-cleanup): cleanup_config.sh + paper_v1 group + trazabilidad
+9d13f14 feat(v0.40.24-bis): verify_all.sh — verificar que FaseC quedó aplicada
+fb83087 feat(v0.40.24-bis): rebuild_all.sh + fix CLI version
+68aa09f docs(v0.41.0-plan): dashboard refactor + PortfolioManager wiring plan
+97da9fa fix(v0.40.24): P7-FaseC FIX — post-pattern candles en compute_outcome_won
+93c1d22 docs(trazabilidad): v0.40.23 — FIX-A P7-FaseC outcome-SL/TP wins integrado
+8d9f5ec fix(v0.40.23): FIX-A P7-FaseC — outcome-SL/TP wins integrado al motor
+d227018 docs(trazabilidad): v0.40.22 — FIX-A P7 integrado al motor
+ce544f1 fix(v0.40.22): FIX-A P7 — directional_edge policy integrada al motor
+b164a8c audit(v0.40.22-audit): validación P1 vs P6 vs P7 — P7 ROBUSTO y SUPERIOR
+54bb087 docs(trazabilidad): v0.40.21-audit — validación P6 vs P1 con SL/TP y fees
+f5bec08 audit(v0.40.21-audit): validación P6 vs P1 con SL/TP + fees producción
+3a9975e docs(trazabilidad): v0.40.20-audit — análisis separación LONG/SHORT con veredicto
+7ba7e41 audit(v0.40.20-audit): análisis separación LONG/SHORT — medir antes de integrar FIX-A al motor
+e13be4c fix(v0.40.19): FIX-A — DirectionStats por dirección en metadata
+ba187c6 audit(v0.40.18-audit): análisis crítico de 7 criticidades estructurales
+724145d audit(v0.40.17-audit): LONG vs confidence — verdict NEGATIVO
+1464032 audit(v0.40.16): experimento crítico — particionar por régimen NO aporta
+95aefbb audit(v0.40.15-audit): comparativa 5 detectores régimen (pre-FIX-17)
+614eb5e v0.40.14: auditoría RegimeDetector — VEREDICTO B) detector degenerado
+dbfbc5d v0.40.12: validación diversidad regímenes — detector degenerado (99.79% ranging)
+2265ea9 fix(v0.40.11): dataset expandido v4 — 5 majors + 4 memes + 7 alts × 200k velas
+0bb8671 fix(v0.40.10): FIX-14 — routing por régimen (N4 RegimePartitionedTrie) + auditoría saturación
+6143ed5 docs(v0.40.9): auditoría extendida 14 tokens x 100k velas 1m
+9bfa44c fix(v0.40.8): FIX-13 — SAX α=5→α=4 en TF 1m + audit empírico sobre 50k velas reales
+5c2c07f docs(audit): alternative N1-N4 analysis (Opcion C) — record of path not taken
+4c33e4c fix(v0.40.7): FIX-10 + FIX-11 + FIX-12 — unlock signal pipeline en TF bajos
+ec7560d fix(v0.40.6): FIX-6 + FIX-7 + FIX-8 + FIX-9 — CAPA 5 audit fixes
+84c3194 fix(v0.40.5): FIX-5 — eliminate bogus zero-outcome observations in _living_trie_update
+5f112c8 fix(v0.40.4): FIX-1D — wire up attach_storage + load_all_tries(asset_class) in 4 production code paths
+0225837 fix(v0.40.3): FIX-1B + FIX-1C — cross-asset pools + polymorphic trie persistence
+341c994 v0.40.2: FIX-1 — N4 RegimePartitionedTrie rompe identidad N1=N2=N3=N4
+d19ff40 v0.40.1: FIX-2 + FIX-3 + FIX-4 — capa por capa audit fixes
+b1c9838 docs(trazabilidad): CAPA 3 audit — signal generation + entry/SL/TP + path conflict
+f56de7f docs(trazabilidad): CAPA 1 + CAPA 2 audit findings — motor completo, walk-forward 4x4x4
+a45428d v0.40.0: full audit + stress test + 4 P0 fixes + HIG reorder
+8e74a5a feat(ui): v0.39.7 — LONG/SHORT visibility + By Direction panel + Duration
+1038dad feat(ws): v0.39.6 — real-time push of closed-trade events
+25c6110 feat(ui): v0.39.5 — chart markers per-token + % of account per operation
+be15c5b feat(ui): v0.39.4 — Apple HIG-inspired 'Operaciones' tab + bump
+d6f81cb fix(engine): v0.39.3 — root cause 'bot not operating' + backtest signals persistence
+10a1c5f fix(dashboard): v0.39.2 — Fase 2E fix 'Bot not operating' (Bug #7b root cause)
+a1593c1 fix(dashboard): v0.39.1 — Fase 2D fixes de bugs pendientes + endpoints de borrado
+41c9665 feat(chart): v0.39.0 — Fase 2B chart markers + Fase 2C UI/UX polish
+b5ab34c fix(dashboard): v0.38.9 — Fase 2A bug fixes operativos
+3881646 chore: bump v0.38.7 -> v0.38.8 (Fase 1 completa)
+45215af refactor(regime): unify _detect_simple_regime (Commit 4/5)
+5dd90de refactor(realtime): use SignalThresholds (Commit 3/5)
+a89c365 refactor(signal): use SignalThresholds (Commit 2/5)
+07bab3f refactor(thresholds): add core/thresholds.py (Commit 1/5)
+edd94b6 chore: bump v0.38.6 -> v0.38.7 (Fase 0 completa)
+c9fb7d2 chore(archive): move redundant docs to _archive/ (Etapa 6/6)
+1bc024e chore(archive): move TS tests to _archive/ (Etapa 5/6)
+fc60480 chore(archive): move debug artifacts to _archive/ (Etapa 4/6)
+def15ef chore(archive): move obsolete root scripts to _archive/ (Etapa 3/6)
+e34ab98 chore(archive): move TS/JS configs to _archive/ (Etapa 2/6)
+3bacb8a chore(archive): move Next.js code to _archive/ (Etapa 1/6)
+5155503 chore(archive): scaffold _archive/v0.38.6_pre_cleanup/ structure
+306a65b docs: add HANDOFF.md + index 'EMPEZAR AQUÍ' en TRAZABILIDAD
+be1da58 v0.38.6: REST polling por defecto — fix Binance WS rate limit
+ef54dd9 v0.38.5: Move floors 0.05% en validation_mode — fix STALE/0-trades
+66778b0 fix(diagnostic): correct imports + use v0.38.4 thresholds in script
+a496595 v0.38.4: Paper trading bypass — validation gate + skip filters relajados
+fdb7c35 v0.38.3: RiskConfig hardcoded + validation_mode paper + signal skip logs
+b1792cc v0.38.2: headless mode + rich escape pattern + precio real-time + signals_generated real
+3414759 v0.38.1: Fix Pattern empty (broken buffer sync) + Trades=0 (risk thresholds too high)
+56d48d3 docs: update TRAZABILIDAD version line to v0.38.0
+7b2d0eb v0.38.0: Fix Pattern empty in REST polling + SL/TP $0 + chart auto-load + binance_top_200
+0de3cd3 v0.37.0: fix SAX streaming buffer sync + clear-history endpoint
+f627817 v0.36.2: Fix Pattern 'N N N', multi-session state tracking, validation explainer
+e420d42 v0.36.1: Expand token groups (memes 20->65, gaming 8->61, etc.) + exchange-aware filtering
+04a6803 v0.36.0: Fix candles stuck, real multi-token trading, auto-populate Trading tab
+6afd6ef v0.35.0: switch default exchange to Binance, fix NoneType cursor errors, add multi-token trading UI, pipeline activity log
+9e8a877 v0.34.3: Fix NoneType cursor bug, WS keepalive, UI tabs
+ba14a8f v0.34.2: aplica patches reales que faltaban + UNKNOWN->FAIL con error visible
+9eeaa22 v0.34.1: UI scroll fix + MEXC WS retry + Sweep checkboxes + Start Paper feedback
+8182ee6 v0.34.0: dynamic recalibration by TF + min_dias filter + sweep cache + history module + scoring
+0984749 v0.33.1: +Recién Listados +Alta Liquidez/Spread +Sweep All Groups +PF sort
+10e3d93 v0.33.0: Dynamic Token Groups + improved low-TF samples
+48289f2 v0.32.6: Fix state pollution between tokens + Sweep All Tokens feature
+94512aa v0.32.5: Fix dashboard — selecting a token didn't load chart or trade history
+bb4c2cc v0.32.4: Fix MEXC WebSocket — live trading stuck at 49 candles / 0 signals
+581ef0d fix: v0.32.3 — 4 root causes of 'siempre FAIL' validation
+ad8c78c fix: v0.32.2 — root cause of 'always FAIL': RiskManager hardcoded confidence=0.20
+cf7ab03 fix: v0.32.1 — MonteCarloSimulator instantiation bug + validation gate improvements
+4b7bf7d fix: replace --lite (does not exist) with 'ppmt terminal' in setup messages
+55c6fd3 fix: setup_fresh.sh now works on macOS (uses python3 -m pip, no Next.js required)
+19e52be docs: TRAZABILIDAD — :8420 FastAPI is official dashboard, :3000 Next.js deprecated
+fd88a91 docs: add TRAZABILIDAD.md — Spanish executive summary with pending tasks list
+76fab2e feat: Phase 4.6 E2E complete, all 4 phases done, technical debt migrated
+ebaca81 v0.32.0: Professional terminal UI, trade logging, multi-token, multi-TF
+0c380ca v0.31.0: Professional terminal + trade history + validation gate + auto-setup
+125b53d v0.30.0: Critical bug fixes + UI improvements + traceability audit
+9fd087b v0.29.0: Fix Binance WebSocket 404 (testnet=False default) + UI/UX redesign
+a747aef v0.28.0: Dashboard paper trading with start/stop + auto-ingest + auto-build Trie
+5d84f5d v0.27.0: Real candlestick chart + MEXC data + paper trading + bug fixes
+3477fce v0.26.0: Complete dashboard with Money Management + Node Control + Backtest
+8a8e030 v0.25.0: Fix nodes leverage bug + aggressive strategy improvement
+fc89fa3 v0.24.0: Fix Monte Carlo verdict + improve strategy + version sync
+7864528 docs: update TRACEABILITY.md for v0.23.0
+bc38d75 v0.23.0: Bug fixes, strategy improvements, Parent-Child Node Architecture
+778cb8a v0.21.0: Fix WebSocketFeed ExchangeWS enum handling
+3dbf0cb v0.21.0: Fix signal generation, scan, backtest, monte-carlo
+cf2b651 v0.20.1: ATR fix, TerminalState enhancements, dashboard v0.20.0
+df36e29 v0.20.0: PPMT Terminal Strategy Lifecycle Engine - Full Integration
+2731b9c v0.19.1: Fix 5 critical/medium bugs from audit
+aefbaae docs: update TRACEABILITY — build works, TS errors fixed, bridge verified
+f2dce7a docs: update TRACEABILITY — Phase 4 real status (5/6 done), bugs fixed, dead code removed
+a91a100 feat: Phase 4.3-4.4 — backtest API + async PortfolioBacktester + runner enhancements
+d3251de v0.18.2: Add /ws/trading WebSocket endpoint for live trading signals
+508e8b1 v0.17.0: Phase 4.1 — PortfolioRunner (multi-engine orchestrator)
+db8c3fd docs: TRACEABILITY Phase 4 in progress — 4.3 Auto-Rebalance + 4.5 Monte Carlo done
+9b589b9 docs: TRACEABILITY v0.16.4 polish fixes — key normalization, header clarity, code cleanup
+53ec724 docs: bump version to v0.16.4 in TRACEABILITY header
+0b99efd docs: update TRACEABILITY.md with v0.16.4 hotfix — Intelligence works with 0 open positions
+9ec1830 v0.16.2: Update TRACEABILITY — Phase 2 verified, dashboard connection fix documented
+212ce52 v0.16.1: Update TRACEABILITY — Phase 2 Bridge API marked COMPLETE
+c243fd5 v0.16.1: Detailed Phase 1-4 roadmap in TRACEABILITY.md, all 38 tests passing
+3092ce3 v0.16.0: Portfolio Management System - Multi-token slots, correlation engine, regime-aware allocation, portfolio backtester, API bridge
+96b7400 v0.15.0: Connect TerminalState to RealtimeTrader - engine feeds live data to dashboard
+06e1b37 fix: auto-kill process on occupied port before starting Next.js dashboard
+565316f v0.14.1: Auto-setup Next.js dashboard (npm install, Prisma DB, .env)
+70e298a v0.14.1: Fix 0 trades issue, use Next.js dashboard as primary terminal
+f50a31a Add fresh setup script for local computer installation
+da42c2e v0.14.0: PPMT Terminal — Standalone trading terminal with Money Manager, web dashboard, asset scanning
+3a82803 v0.13.0: Phase 1 Operational - Streaming Buffer, Living Trie, CLI Commands
+ec5548b v0.12.0: Real-time pipeline — WebSocket streaming + process_new_candle() + CLI ppmt run
+51c428b feat: PPMT realtime integration - predict_live, signal_daemon, regime-adaptive thresholds, API routes
+04468e4 fix: portable Python bridge — auto-detect ppmt path, remove hardcoded server paths
+fcf4a76 fix: portable .env with relative DB path, remove prisma.config.ts
+53aa4e7 v0.13.0: PPMT Strategy Terminal Dashboard — lifecycle pipeline, CRUD, deploy, Python bridge, Prisma schema
+e843a79 docs: add dashboard GitHub repo link to TRACEABILITY
+f840e71 v0.13.0: PPMT Strategy Terminal Dashboard — full web UI with lifecycle pipeline
+21aee07 v0.12.0: Configurable pruning_interval + CSV 1m import
+977dd39 v0.11.0: RealtimeTrader full TokenProfile integration
+90326c4 v0.11.0: Calibrated profile persistence — save/load TokenProfile from storage
+b9f1a41 v0.11.0: Live recalibration — pass calibrated α/W from TradingCalibrationEngine to paper_trader
+799ae89 v0.6.8: Living Trie node pruning — remove stale/low-quality branches
+4d4f10b v0.6.8: TokenProfile integration — auto-calibrate α/W in PaperTrader
+cacd7f9 v0.6.8: Fix CalibrationEngine structural bias (alpha=3/window=5 convergence)
+b8fd4d6 feat: TradingCalibrationEngine — fix alpha=3 bias (v0.6.7)
+cc66903 feat: Add v0.6.6 pre-fix vs post-fix comparison analysis (Section 18)
+0adfbda v0.6.6: Multi-exchange data pipeline + full validation
+447e54b v0.6.6: Fix read/write path alignment in Living Trie
+5b186c1 feat(v0.6.4): TokenProfile integration + timeframe-adaptive calibration + 1m WF complete
+8eec1b3 feat: low timeframe validation (5m + 1m) with 6+ months real Binance data
+61b0bec merge: resolve conflicts, keep local changes
+8606be3 v0.6.2c: fix OHLCV additive composite + multi-timeframe validation (5m, 1m)
+a71c38d feat(v0.6.3): bug fixes + trading-calibrated selection + multi-timeframe analysis
+4d212ea feat: massive 12-token validation across 4 asset classes
+3c87d04 feat(v0.6.2): Walk-forward validation + weight sensitivity analysis
+90ddc19 feat(v0.6.2): Additive OHLCV composite + auto-calibration + cross-token OOS validation
+6bf48c2 feat(v0.6.2): Add TRACEABILITY.md + trie.py fixes (trading_observations, propagate_metadata)
+a7cc6b4 docs(v0.6.2): regime filter exploration - mixed results, disabled by default
+2c8759d fix(v0.6.2): prediction-aware SL/TP + comprehensive OOS validation
+7c95af6 docs: update TRACEABILITY.md with 4 critical bug fixes and alpha=3 threshold adjustments
+9cd6581 fix(v0.6.2): 4 critical bugs that blocked PaperTrader from generating trades
+4295746 docs: OOS validation results - additive composite WINS across BTC/ETH/SOL
+faefbab docs: update TRACEABILITY.md - OHLCV composite fix documented
+47b34e2 fix(sax): replace degenerate multiplicative OHLCV composite with additive
+92f5f15 feat(v0.6.2): Add TRACEABILITY.md + trie.py fixes (trading_observations, propagate_metadata)
+c750612 feat(v0.6.2): Add TRACEABILITY.md + trie.py fixes (trading_observations, propagate_metadata)
+2bcee91 v0.11.0: Real data validation, 3 bug fixes, OOS edge detected
+4032eb9 V4.5: Add 24 synthetic OOS validation tests, update cross_token_diagnostic.py
+ff0b9d3 TRACEABILITY: Update with GAP-1 fixed, version synced, all tests pass
+f6f7af3 v0.10.0 GAP-1: Integrate 4-level matching into PaperTrader
+d363685 v0.10.0: Session 2 re-verification, version sync, TRACEABILITY update
+c22b5b8 V4.4-audit: Full source audit verified all 5 bugs fixed, metadata complete, SAX breakpoints complete
+6fd7a30 V4.4: Fix regime in new node creation, remove duplicate function, add TRACEABILITY.md
+0a763de docs: TRACEABILITY.md complete audit + cross-token diagnostic suite
+4e16fe1 V4.3: SHORT gate redesign, historical_count fix, 49 robust tests
+fd538f8 V4.2: Metadata audit fixes & observation freshness
+d1839c8 V4.1: Fix critical regime_match_score bug + add RegimeStats + move variance
+bcb888e v0.12.0: V4 Regime-Aware Node Metadata — fix corrupted node data
+5035c1e v0.11.0: V4 Regime-Aware Enhancement - Fix corrupted node metadata
+a5b38e9 v0.10.0: regime-in-metadata architecture — independent vs dependent nodes
+621498f v0.9.0: real-time trading engine with replay + live modes
+fcbb7d5 v0.8.1: fix regime multiplier not applied to position sizing
+01c46f3 v0.8.0: regime-aware position sizing — connect RegimeDetector to PaperTrader
+e67efee v0.7.1: sync source code, add TRACEABILITY.md, update version
+afff845 fix: numpy JSON serialization in validate-all --json-output
+23229d1 docs: add CHANGELOG.md with v0.5.0→v0.7.1 traceability
+d4442ad chore: update .gitignore with egg-info exclusion
+5372811 v0.7.1: Add PPMT Python package files (fix submodule issue)
+ceb038d chore: move ppmt/ to .gitignore (has own git repo), prepare for merge
+9ce12cf v0.7.0: Validation Suite — One-click OOS + MC + WF with composite scoring
+949d64b v0.6.3: SAX z-score propagation + strict OOS reveals look-ahead bias
+2919c15 v0.6.2: Validation — OOS +295%, MC 0% ruin, WF 6/6 profitable
+9001469 v0.6.2: P0 optimizations — min_conf 20%, SHORT gate relaxed, catastrophic 8%
+af76a72 v0.6.1: Fix v0.6.0 regression — remove probability bonus, revert SHORT gate, keep min_confidence 15%
+d1b2952 v0.6.0: Data-driven entry filter tightening — raise min_confidence to 15%, SHORT gate to 2x/20%, probability threshold to >25%
+15f408f worklog: Cycle 4 — bootstrap confirmed essential (+1434% P&L, 50.5% WR with 2-pass bootstrap vs -18.77% without)
+c71f01e analysis: Cycle 3 Living Trie regression — 5 root causes documented
+0310aec worklog: v0.5.3 merge cycle 2 — REGRESSION, bootstrap obs poisoning Living Trie (47.6% WR, +465% P&L)
+a7f4708 worklog: v0.5.3 merge cycle 1 — +4401% P&L, 54.0% WR, 598 trades (3x improvement over --force)
+e03a26a worklog: v0.5.3 test results — confirmed revert to v0.5.0 baseline (+1434% P&L, 50.5% WR, 519 trades)
+57f294e worklog: v0.5.3 — full revert to v0.5.0 baseline (SAX window=10, alphabet=8, 2-pass bootstrap)
+8e08ab9 v0.5.3: Revert to v0.5.0 baseline — SAX window=10, alphabet=8, 2-pass bootstrap, original entry filters
+4eb5b95 worklog: v0.5.2 test results — worst version ever, -29.52% P&L, 5-pass bootstrap poisons trie after pass 2
+ee98cf3 worklog: v0.5.1 test results + v0.5.2 changes
+18e0f9d v0.5.2: Loosen entry filters for window=5 regime, increase bootstrap passes to 5, reduce SHORT multiplier
+0bb4711 v0.5.1: SAX granularity (window 10→5, alphabet 8→10), bootstrap 2→3 passes, fix merge logic
+977567f Update worklog-new.md with v0.5.0 changes
+452d8ac v0.5.0: Multi-pass bootstrap for more accumulated observations
+22a7812 worklog: v0.4.1 regression (+3665%→+347% P&L) + v0.4.2 revert
+0b7e9c8 v0.4.2: Revert v0.4.1 tighter filters — massive regression +3665%→+347% P&L, 53.1%→46.6% WR
+f3d00a4 v0.4.1: Tighter entry filters for higher WR — adaptive confidence floor, quality score filter, stricter SHORT and probability thresholds
+1b7ca42 worklog: v0.4.0 bootstrap test results — 5.7x P&L improvement over cold start (+283% vs +50%)
+f8d4c33 worklog: v0.4.0 Backtesting Bootstrap implementation + v0.3.2 results from user test
+f9af47f v0.4.0: Backtesting Bootstrap — automatic paper trading during build to pre-populate Living Trie metadata
+d34da58 v0.3.3: trade-simulation 'won' classification during build — align build-time win_rate with trading reality + revert counterproductive 20% adaptive threshold
+c6c3f8d worklog: v0.3.2 results — adaptive confidence fix did NOT improve fresh builds (43.9% WR vs 45.3%), merged build +12,113% P&L
+fe14a0f v0.3.2: fix broken adaptive confidence — use trading_observations instead of root_meta.confidence
+761caca v0.3.1: Living Trie preservation + adaptive confidence + more SHORT trades
+bae4f68 v0.3.0: revert to v0.2.8 SL/TP baseline — fix P&L regression from +1578% to +371%
+7c12adf worklog: v0.2.10 results — WR 59.7% (near 60% target!), PF 2.05, Sharpe 5.11
+b068100 v0.2.10: fix v0.2.9 regression — revert intra-candle HIGH/LOW checking, add catastrophic protection, tune parameters
+bfc7a2a worklog: add v0.2.8 run #2 results — 54.7% WR, +1578% P&L (Living Trie accumulated)
+ab4f1f7 v0.2.9: 5 major improvements targeting 60%+ WR
+31a0211 worklog: add v0.2.7 crash details and v0.2.8 Living Trie entry with full traceability
+acbd896 worklog: v0.2.8 results — FIRST PROFITABLE PAPER TRADING (+20.11%)
+0052ad5 v0.2.8: Fix np crash + Living Trie (incremental learning from trade outcomes)
+10b415a v0.2.7: ATR-based SL/TP, trailing stop, expected-value path walking
+99fd1e6 v0.2.6: Improve trade quality - wider SL, SHORT filter, better signals
+9fcaa8b v0.2.5: Fix max drawdown circuit breaker + R:R for small moves + worklog
+d6bcb5f v0.2.4: Fix SL/TP calculation and daily loss limit reset
+b9c2f2a v0.2.3: Fix daily loss limit bug and R:R calculation
+38ba447 v0.2.2: Fix RiskManager blocking all trades with hardcoded thresholds
+8015caf v0.2.1: Fix paper trading 0 trades - propagate Trie metadata upward
+8b15e98 fix: SAX encoding context mismatch causing 0 trades
+0ecc17e fix: prediction confidence=0% and paper trading 0 trades
+bfb1c44 v0.2.0: Add monte-carlo command and --paper flag
+1e91dcd feat: add PaperTrader engine + risk/monte_carlo module (v0.2.0)
+9b93d77 PPMT v0.3.0 — Add Monte Carlo simulation, regime detection, improved risk management
+5cdc547 fix: dashboard bug fixes and improvements
+2b9c098 V9.0: Add Flask web dashboard for backtest visualization
+67b765a feat: backtest commands now support SQLite DB (no CSV required)
+4a5d79d feat: V8.0 rolling walk-forward backtest + V7.9 normalization fix
+1ce7410 fix: use python -m ppmt.cli.main instead of ppmt command
+b971b6e 681a6e91-11b0-4b31-a18a-2c3ac2933282
+bb905a6 feat: add bulk_ingest script and scripts/__init__.py
+e373b23 feat: add bulk ingest pipeline for 20 pairs
+640e7dc chore: remove generated files and databases from repo
+bb056fd chore: remove data/db from repo, clean up gitignore
+3596560 af9b7e81-faa9-47f5-9114-b4be9170c82b
+237e8fa feat: PPMT Command Center dashboard with Monte Carlo + Multi-Asset Backtesting
+a1891c4 feat: enhanced dashboard with Command Center, Monte Carlo, Multi-Asset Backtest
+caea40d feat: enhanced dashboard with Command Center, Monte Carlo, Multi-Asset Backtest
+b0e1aae 311dd030-15de-424e-ae73-da752c339ba9
+858f83f feat: add web dashboard with candlestick charts, backtesting, and management zones
+2f4a930 cce830c4-09ba-4649-a4a8-499a28560c7d
+163b052 d463ade6-c47b-4267-bee7-aca3fa260985
+be2fe6a ea40ed40-e475-43b5-a519-52f5a9f88a03
+4e7d9f8 0fd3ea9f-df40-465a-a19a-8b6beb7e7233
+14e9eac 97a18658-c32c-45b9-b0f0-09c65eb7069c
+67f62f9 2025905d-72a6-414e-a8fb-324daad936f8
+fe5108b ba711e98-69d8-4848-a06b-3b1044495927
+581504a 33b5272d-ca1e-48ee-a8ea-8a23e08dba66
+1edb6a3 8f4bbba8-097a-4760-a2ca-f3c8dbda0c47
+496a753 d7b676ee-3351-4ef0-bf3d-ee9b60e6503a
+79238d8 0994a141-66ce-497b-b9cd-7c172a5bfdac
+1ec748a 2e03203c-f526-42e9-910f-e5ffd83ee518
+c57231d fix: Turbopack panic - extract dynamic imports to lazy-tabs.tsx, static providers, --no-turbopack flag
+4e26c7a merge: resolve conflicts - meta-model getState fix, smart-money polling, trader-intelligence refetch
+c489989 11a36310-404b-4544-a41b-19f2180c6cee
+531c6ca 6437489c-a3a3-4dfe-bcb9-097ea601d869
+1dcb598 fix: Turbopack panic, Smart Money, Meta-Model, Predictive, Multi-Chain panels
+7612188 6658dfd9-7cd1-4475-881f-672dec34822f
+a7bdc8f 94a3d20f-974a-4396-b5cb-262bdb24773a
+0fa8fb5 fix: critical bug fixes across all dashboard panels
+5fd2e48 94a3d20f-974a-4396-b5cb-262bdb24773a
+4556450 6be83d4c-6360-4f6b-b03b-1b7d30539f07
+1489dfd fix: add missing MetaModelReport/MetaModelEngine store types, fix multi-chain DexScreener enrichment, add Check icon import
+01e904a 6be83d4c-6360-4f6b-b03b-1b7d30539f07
+fc2dd73 fix: reconnect all panels - multi-chain, signals, brain, alpha ranking, risk, portfolio, execution, regime, capital allocation, strategy lab, paper trading
+bf019d2 chore: remove secret-containing file and add to gitignore
+793dd7a docs: update README with Two-Mode workflow, 26 tabs, and tested API status
+d14b5ec fix: add postinstall script for automatic Prisma client generation
+9212181 deef6f1b-3130-4147-90a5-e82cac7fc2ef
+7fbbeea feat: Two-Mode workflow (Research/Operation) with step-by-step guided pipeline
+c13e514 cfa666ad-6a3e-4e8f-827b-ab9ac331d550
+01e23f0 0c71e419-7c12-4b62-b640-ffa8f80d49c0
+77a814c 52780721-8fff-433f-976b-679391dfeb9f
+af6f74a 3d814490-50e9-4511-92c9-c35f59446514
+1510611 8a32303f-a04c-4f0a-86ce-cde22456e066
+944523d 76a36d35-cb78-436a-be82-a6126119c1a8
+f387360 dbd329ef-9ca8-4f28-844b-5c8dd89b926c
+7580d68 4d1f59bb-50b1-4545-88f2-6e6b7614e7a4
+028ade5 6f1f06bd-fad8-41e2-8821-c52fdd583713
+1caa598 9472d982-2b02-48bc-b461-3aea0a4c3c39
+3166661 29009a97-7898-4697-a6bb-d8e2946a1367
+e868612 2559dcd9-f9d6-4b75-9153-2ac1efc15c15
+dd75082 b854df90-46df-4b8f-88fc-3837322bff65
+87b2263 Initial commit

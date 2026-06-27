@@ -1,0 +1,705 @@
+     1→     1→"""
+     2→     2→v11_build_dataset.py — Build dataset for low-timeframe trading (1h-6h horizons).
+     3→     3→
+     4→     4→KEY INNOVATIONS vs v7.5:
+     5→     5→  1. 1m candle base — microstructure features (volume delta, CVD, price impact)
+     6→     6→  2. Multi-timeframe aggregation from 1m (5m/15m/1h all from 1m data)
+     7→     7→  3. Intermediate horizons: H=12 (1h), H=36 (3h), H=72 (6h) — the "marginal" zone
+     8→     8→  4. Microstructure features: CVD, volume delta, order flow acceleration
+     9→     9→  5. Maker fees (0.04%) — essential for short horizons
+    10→    10→
+    11→    11→DATA SOURCES:
+    12→    12→  - 1m OHLCV from v10 cache (data/v10/ohlcv_cache/{SYMBOL}_1m.parquet)
+    13→    13→  - BTC 1m as reference
+    14→    14→  - All features computed from 1m candles, aggregated into multi-timeframe
+    15→    15→
+    16→    16→OUTPUT:
+    17→    17→  - data/v11/v11_dataset.parquet — full dataset with all features + labels
+    18→    18→
+    19→    19→USAGE:
+    20→    20→    python scripts/v11/v11_build_dataset.py
+    21→    21→    python scripts/v11/v11_build_dataset.py --symbols SOL,DOGE,AVAX
+    22→    22→    python scripts/v11/v11_build_dataset.py --horizons 12,36,72
+    23→    23→"""
+    24→    24→from __future__ import annotations
+    25→    25→
+    26→    26→import argparse
+    27→    27→import logging
+    28→    28→import os
+    29→    29→import sys
+    30→    30→import time
+    31→    31→from pathlib import Path
+    32→    32→
+    33→    33→import numpy as np
+    34→    34→import pandas as pd
+    35→    35→
+    36→    36→PROJECT_ROOT = Path(__file__).resolve().parents[2]
+    37→    37→DATA_DIR = PROJECT_ROOT / "data"
+    38→    38→CACHE_DIR = DATA_DIR / "v10" / "ohlcv_cache"
+    39→    39→OUTPUT_DIR = DATA_DIR / "v11"
+    40→    40→OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    41→    41→
+    42→    42→LOG = logging.getLogger("v11_build")
+    43→    43→logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    44→    44→
+    45→    45→# Symbols with 1m data available
+    46→    46→DEFAULT_SYMBOLS = ["SOL", "DOGE", "AVAX"]  # BTC excluded (dead end), ETH not in cache
+    47→    47→
+    48→    48→# Horizons on 5m bars (we aggregate 1m→5m for trading)
+    49→    49→# H=12 means 12 × 5min = 1h forward, H=36 = 3h, H=72 = 6h
+    50→    50→DEFAULT_HORIZONS = [12, 36, 72, 288]  # 1h, 3h, 6h, 24h
+    51→    51→
+    52→    52→# ============================================================================
+    53→    53→# FEATURE SPECIFICATION
+    54→    54→# ============================================================================
+    55→    55→
+    56→    56→# Group 1: 1m microstructure features (computed on 1m candles)
+    57→    57→FEATURES_MICRO_1M = [
+    58→    58→    "ret_1m", "ret_3m", "ret_5m",           # micro momentum
+    59→    59→    "vol_delta_1m", "vol_delta_5m",          # volume change acceleration
+    60→    60→    "body_pct_1m", "wick_ratio_1m",          # 1m candle shape
+    61→    61→    "cvd_1m", "cvd_5m",                      # cumulative volume delta
+    62→    62→    "price_impact_1m",                        # move per unit volume
+    63→    63→    "micro_momentum_5m",                      # 5m directional strength
+    64→    64→    "vol_clustering_10m",                     # vol regime shift
+    65→    65→    "order_flow_accel_5m",                    # CVD change rate
+    66→    66→]
+    67→    67→
+    68→    68→# Group 2: 5m OHLCV features (from v7 paper trader, 58 features)
+    69→    69→FEATURES_5M_V5 = [
+    70→    70→    "body_pct", "upper_wick", "lower_wick", "body_abs", "close_pos", "range_pct",
+    71→    71→    "ret_1", "ret_3", "ret_5", "ret_10", "log_ret_1",
+    72→    72→    "atr_pct", "vol_std_10", "rsi_14",
+    73→    73→    "ema_9_20_cross", "ema_20_50_cross", "ema_9_slope", "ema_20_slope", "ema_50_slope",
+    74→    74→    "price_vs_ema20", "price_vs_ema50", "vol_ratio", "vol_z",
+    75→    75→    "last_3_body_sum", "last_3_range_sum",
+    76→    76→    "bullish_engulf_2", "hammer_like", "shooting_star",
+    77→    77→    "breakout_up", "breakout_down", "dist_to_high_20", "dist_to_low_20",
+    78→    78→    "trend_50", "vol_regime", "trending",
+    79→    79→    "hour_sin", "hour_cos",
+    80→    80→]
+    81→    81→
+    82→    82→FEATURES_5M_V6 = [
+    83→    83→    "btc_ret_1m", "btc_ret_5m", "btc_ret_15m", "btc_vol_z",
+    84→    84→    "btc_trend_50", "eth_corr_30", "btc_alt_spread_15m", "btc_volatility_regime",
+    85→    85→    "vol_delta_3", "wick_imbalance_3", "body_consistency_5",
+    86→    86→    "range_expansion_3", "close_persistence_5", "vol_acceleration",
+    87→    87→    "atr_percentile_50", "trend_strength_50", "regime_vol_trend", "hour_quantile",
+    88→    88→    "alt_lead_5m", "alt_lag_signal", "momentum_dispersion",
+    89→    89→]
+    90→    90→
+    91→    91→# Group 3: 15m aggregate features (trend context)
+    92→    92→FEATURES_15M = [
+    93→    93→    "trend_15m",          # 15m EMA direction
+    94→    94→    "rsi_15m",            # 15m RSI
+    95→    95→    "vol_regime_15m",     # 15m volatility regime
+    96→    96→    "btc_trend_15m",      # BTC 15m trend alignment
+    97→    97→]
+    98→    98→
+    99→    99→# Group 4: 1h aggregate features (higher timeframe filter)
+   100→   100→FEATURES_1H = [
+   101→   101→    "trend_1h",           # 1h EMA direction
+   102→   102→    "rsi_1h",             # 1h RSI
+   103→   103→    "vol_regime_1h",      # 1h volatility regime
+   104→   104→    "btc_trend_1h",       # BTC 1h trend
+   105→   105→    "mtf_alignment",      # 5m/15m/1h trend alignment score
+   106→   106→]
+   107→   107→
+   108→   108→# All feature groups
+   109→   109→ALL_FEATURE_GROUPS = {
+   110→   110→    "micro_1m": FEATURES_MICRO_1M,
+   111→   111→    "5m_v5": FEATURES_5M_V5,
+   112→   112→    "5m_v6": FEATURES_5M_V6,
+   113→   113→    "15m": FEATURES_15M,
+   114→   114→    "1h": FEATURES_1H,
+   115→   115→}
+   116→   116→
+   117→   117→ALL_FEATURE_NAMES = (
+   118→   118→    FEATURES_MICRO_1M + FEATURES_5M_V5 + FEATURES_5M_V6 +
+   119→   119→    FEATURES_15M + FEATURES_1H
+   120→   120→)
+   121→   121→
+   122→   122→LABELS = ["fwd_ret_h12", "fwd_ret_h36", "fwd_ret_h72", "fwd_ret_h288"]
+   123→   123→
+   124→   124→
+   125→   125→# ============================================================================
+   126→   126→# 1m MICROSTRUCTURE FEATURES
+   127→   127→# ============================================================================
+   128→   128→
+   129→   129→def compute_microstructure_features(df_1m: pd.DataFrame) -> pd.DataFrame:
+   130→   130→    """Compute microstructure features on 1m candles.
+   131→   131→    
+   132→   132→    These capture short-term order flow dynamics that are invisible on 5m+ candles.
+   133→   133→    Key insight: on 1m, we can detect:
+   134→   134→    - Buying vs selling pressure (volume delta proxy from candle shape)
+   135→   135→    - Order flow acceleration (CVD changes)
+   136→   136→    - Price impact (how much price moves per unit volume)
+   137→   137→    """
+   138→   138→    df = df_1m.copy().reset_index(drop=True)
+   139→   139→    o, h, l, c, v = df["open"], df["high"], df["low"], df["close"], df["volume"]
+   140→   140→    
+   141→   141→    # 1m returns
+   142→   142→    df["ret_1m"] = c.pct_change(1)
+   143→   143→    df["ret_3m"] = c.pct_change(3)
+   144→   144→    df["ret_5m"] = c.pct_change(5)
+   145→   145→    
+   146→   146→    # 1m candle shape
+   147→   147→    rng = (h - l).replace(0, 1e-10)
+   148→   148→    df["body_pct_1m"] = (c - o) / rng
+   149→   149→    df["wick_ratio_1m"] = ((h - np.maximum(o, c)) + (np.minimum(o, c) - l)) / rng
+   150→   150→    
+   151→   151→    # Volume delta proxy: if close > open, assume buy volume; else sell volume
+   152→   152→    # This is a rough proxy since we don't have actual tick data
+   153→   153→    direction = np.sign(c - o)
+   154→   154→    df["vol_delta_1m"] = (v * direction).diff(1)
+   155→   155→    df["vol_delta_5m"] = (v * direction).rolling(5).sum() - (v * direction).shift(1).rolling(5).sum()
+   156→   156→    
+   157→   157→    # Cumulative Volume Delta (CVD) — running sum of signed volume
+   158→   158→    signed_vol = v * direction
+   159→   159→    df["cvd_1m"] = signed_vol.rolling(60, min_periods=1).sum()  # last 60 min
+   160→   160→    df["cvd_5m"] = signed_vol.rolling(300, min_periods=1).sum()  # last 5h
+   161→   161→    
+   162→   162→    # Price impact: how much price moves per unit volume
+   163→   163→    price_move = (c - o).abs()
+   164→   164→    df["price_impact_1m"] = (price_move / v.replace(0, 1e-10)).rolling(10, min_periods=1).mean()
+   165→   165→    
+   166→   166→    # Micro momentum: directional strength over 5m
+   167→   167→    df["micro_momentum_5m"] = (c - c.shift(5)) / c.shift(5).replace(0, 1e-10) * 100
+   168→   168→    
+   169→   169→    # Vol clustering: ratio of current vol to recent average
+   170→   170→    vol_ma = v.rolling(10, min_periods=1).mean().replace(0, 1e-10)
+   171→   171→    df["vol_clustering_10m"] = (v / vol_ma).clip(0, 10)
+   172→   172→    
+   173→   173→    # Order flow acceleration: rate of change of CVD
+   174→   174→    df["order_flow_accel_5m"] = df["cvd_1m"].diff(5) / df["cvd_1m"].shift(5).replace(0, 1e-10).abs().clip(lower=1e-10)
+   175→   175→    df["order_flow_accel_5m"] = df["order_flow_accel_5m"].clip(-10, 10)
+   176→   176→    
+   177→   177→    # Replace inf/nan
+   178→   178→    for col in FEATURES_MICRO_1M:
+   179→   179→        if col in df.columns:
+   180→   180→            df[col] = df[col].replace([np.inf, -np.inf], np.nan).fillna(0)
+   181→   181→    
+   182→   182→    return df
+   183→   183→
+   184→   184→
+   185→   185→# ============================================================================
+   186→   186→# 5m OHLCV FEATURES (from v7 paper trader)
+   187→   187→# ============================================================================
+   188→   188→
+   189→   189→def aggregate_1m_to_5m(df_1m: pd.DataFrame) -> pd.DataFrame:
+   190→   190→    """Aggregate 1m candles into 5m candles."""
+   191→   191→    df = df_1m.copy()
+   192→   192→    # Ensure timestamp is datetime
+   193→   193→    if df["timestamp"].dtype in [np.float64, np.int64, float, int]:
+   194→   194→        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+   195→   195→    elif df["timestamp"].dtype == object:
+   196→   196→        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+   197→   197→    
+   198→   198→    df = df.set_index("timestamp")
+   199→   199→    
+   200→   200→    # Resample to 5min
+   201→   201→    agg = df.resample("5min").agg({
+   202→   202→        "open": "first",
+   203→   203→        "high": "max",
+   204→   204→        "low": "min",
+   205→   205→        "close": "last",
+   206→   206→        "volume": "sum",
+   207→   207→    }).dropna()
+   208→   208→    
+   209→   209→    # Reset index and convert back to ms timestamp
+   210→   210→    agg = agg.reset_index()
+   211→   211→    agg["timestamp"] = agg["timestamp"].astype(np.int64) // 10**6
+   212→   212→    
+   213→   213→    return agg
+   214→   214→
+   215→   215→
+   216→   216→def compute_5m_features(df_5m: pd.DataFrame, btc_5m: pd.DataFrame, eth_5m: pd.DataFrame) -> pd.DataFrame:
+   217→   217→    """Compute all 58 v7 features on 5m candles."""
+   218→   218→    df = df_5m.copy().reset_index(drop=True)
+   219→   219→    o, h, l, c, v = df["open"], df["high"], df["low"], df["close"], df["volume"]
+   220→   220→    
+   221→   221→    rng = (h - l).replace(0, 1e-10)
+   222→   222→    body = (c - o)
+   223→   223→    df["body_pct"]     = body / rng
+   224→   224→    df["upper_wick"]   = (h - np.maximum(o, c)) / rng
+   225→   225→    df["lower_wick"]   = (np.minimum(o, c) - l) / rng
+   226→   226→    df["body_abs"]     = body.abs() / rng
+   227→   227→    df["close_pos"]    = (c - l) / rng
+   228→   228→    df["range_pct"]    = rng / c * 100
+   229→   229→
+   230→   230→    df["ret_1"]  = c.pct_change(1)
+   231→   231→    df["ret_3"]  = c.pct_change(3)
+   232→   232→    df["ret_5"]  = c.pct_change(5)
+   233→   233→    df["ret_10"] = c.pct_change(10)
+   234→   234→    df["log_ret_1"] = np.log(c / c.shift(1))
+   235→   235→
+   236→   236→    tr = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
+   237→   237→    df["atr_14"]   = tr.rolling(14).mean()
+   238→   238→    df["atr_pct"]  = df["atr_14"] / c * 100
+   239→   239→    df["vol_std_10"] = df["log_ret_1"].rolling(10).std()
+   240→   240→
+   241→   241→    delta = c.diff()
+   242→   242→    gain = delta.where(delta > 0, 0).rolling(14).mean()
+   243→   243→    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+   244→   244→    rs = gain / loss.replace(0, 1e-10)
+   245→   245→    df["rsi_14"] = 100 - (100 / (1 + rs))
+   246→   246→
+   247→   247→    for p in [9, 20, 50]:
+   248→   248→        df[f"ema_{p}"] = c.ewm(span=p, adjust=False).mean()
+   249→   249→        df[f"ema_{p}_slope"] = df[f"ema_{p}"].pct_change(3)
+   250→   250→    df["ema_9_20_cross"] = (df["ema_9"] - df["ema_20"]) / c * 100
+   251→   251→    df["ema_20_50_cross"] = (df["ema_20"] - df["ema_50"]) / c * 100
+   252→   252→    df["price_vs_ema20"] = (c - df["ema_20"]) / c * 100
+   253→   253→    df["price_vs_ema50"] = (c - df["ema_50"]) / c * 100
+   254→   254→
+   255→   255→    vol_ma = v.rolling(20).mean().replace(0, 1e-10)
+   256→   256→    df["vol_ratio"] = v / vol_ma
+   257→   257→    df["vol_z"] = (v - vol_ma) / v.rolling(20).std().replace(0, 1e-10)
+   258→   258→
+   259→   259→    df["last_3_body_sum"] = df["body_pct"].rolling(3).sum()
+   260→   260→    df["last_3_range_sum"] = df["range_pct"].rolling(3).sum()
+   261→   261→
+   262→   262→    df["bullish_engulf_2"] = ((df["body_pct"].shift(1) < 0) & (df["body_pct"] > 0) &
+   263→   263→                              (df["close"] > df["open"].shift(1)) &
+   264→   264→                              (df["open"] < df["close"].shift(1))).astype(int)
+   265→   265→    df["hammer_like"] = ((df["lower_wick"] > 2 * df["body_abs"]) & (df["body_abs"] > 0)).astype(int)
+   266→   266→    df["shooting_star"] = ((df["upper_wick"] > 2 * df["body_abs"]) & (df["body_abs"] > 0)).astype(int)
+   267→   267→
+   268→   268→    df["high_20"] = h.rolling(20).max()
+   269→   269→    df["low_20"]  = l.rolling(20).min()
+   270→   270→    df["breakout_up"]   = (h > df["high_20"].shift(1)).astype(int)
+   271→   271→    df["breakout_down"] = (l < df["low_20"].shift(1)).astype(int)
+   272→   272→    df["dist_to_high_20"] = (c - df["high_20"]) / df["high_20"] * 100
+   273→   273→    df["dist_to_low_20"]  = (c - df["low_20"])  / df["low_20"]  * 100
+   274→   274→
+   275→   275→    df["trend_50"] = np.sign(df["ema_9"] - df["ema_50"]).astype(int)
+   276→   276→    atr_p = df["atr_pct"].fillna(0).values
+   277→   277→    bins = [0.5, 1.5, 5.0]
+   278→   278→    df["vol_regime"] = np.digitize(atr_p, bins).astype(int)
+   279→   279→    df["trending"] = (df["atr_pct"] > df["atr_pct"].rolling(50, min_periods=5).mean()).astype(int)
+   280→   280→
+   281→   281→    # Hour features
+   282→   282→    ts_dt = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+   283→   283→    df["hour_sin"] = np.sin(2 * np.pi * ts_dt.dt.hour / 24)
+   284→   284→    df["hour_cos"] = np.cos(2 * np.pi * ts_dt.dt.hour / 24)
+   285→   285→    
+   286→   286→    # V6 new features with BTC/ETH
+   287→   287→    btc = btc_5m[["timestamp", "close", "volume", "high", "low"]].copy()
+   288→   288→    btc = btc.rename(columns={
+   289→   289→        "close": "btc_close", "volume": "btc_volume",
+   290→   290→        "high": "btc_high", "low": "btc_low",
+   291→   291→    })
+   292→   292→    btc["btc_ret_1m"]  = btc["btc_close"].pct_change(1)
+   293→   293→    btc["btc_ret_5m"]  = btc["btc_close"].pct_change(5)
+   294→   294→    btc["btc_ret_15m"] = btc["btc_close"].pct_change(15)
+   295→   295→    btc_vol_ma = btc["btc_volume"].rolling(20).mean().replace(0, 1e-10)
+   296→   296→    btc["btc_vol_z"] = (btc["btc_volume"] - btc_vol_ma) / btc["btc_volume"].rolling(20).std().replace(0, 1e-10)
+   297→   297→    btc["btc_ema_9"]  = btc["btc_close"].ewm(span=9,  adjust=False).mean()
+   298→   298→    btc["btc_ema_50"] = btc["btc_close"].ewm(span=50, adjust=False).mean()
+   299→   299→    btc["btc_trend_50"] = np.sign(btc["btc_ema_9"] - btc["btc_ema_50"]).astype(int)
+   300→   300→    btc_atr = (btc["btc_high"] - btc["btc_low"]).rolling(14).mean()
+   301→   301→    btc_atr_pct = btc_atr / btc["btc_close"] * 100
+   302→   302→    btc["btc_volatility_regime"] = np.digitize(btc_atr_pct.fillna(0).values, [0.5, 1.5, 5.0]).astype(int)
+   303→   303→    btc = btc[["timestamp", "btc_ret_1m", "btc_ret_5m", "btc_ret_15m",
+   304→   304→               "btc_vol_z", "btc_trend_50", "btc_volatility_regime"]]
+   305→   305→    
+   306→   306→    df = df.merge(btc, on="timestamp", how="left")
+   307→   307→    
+   308→   308→    alt_ret_15m_pct = df["close"].pct_change(15) * 100
+   309→   309→    btc_ret_15m_pct = df["btc_ret_15m"] * 100
+   310→   310→    df["btc_alt_spread_15m"] = alt_ret_15m_pct - btc_ret_15m_pct
+   311→   311→    
+   312→   312→    eth = eth_5m[["timestamp", "close"]].copy().rename(columns={"close": "eth_close"})
+   313→   313→    df = df.merge(eth, on="timestamp", how="left")
+   314→   314→    alt_ret = df["close"].pct_change()
+   315→   315→    eth_ret = df["eth_close"].pct_change()
+   316→   316→    df["eth_corr_30"] = alt_ret.rolling(30).corr(eth_ret)
+   317→   317→    
+   318→   318→    df["vol_delta_3"] = df["volume"].pct_change(3).replace([np.inf, -np.inf], np.nan).fillna(0).clip(-5, 5)
+   319→   319→    if "lower_wick" in df.columns and "upper_wick" in df.columns:
+   320→   320→        df["wick_imbalance_3"] = (df["lower_wick"] - df["upper_wick"]).rolling(3).sum()
+   321→   321→    else:
+   322→   322→        df["wick_imbalance_3"] = 0.0
+   323→   323→    body_sign = (df["close"] - df["open"] > 0).astype(float)
+   324→   324→    df["body_consistency_5"] = body_sign.rolling(5).mean()
+   325→   325→    avg_rng_3 = df["range_pct"].rolling(3).mean()
+   326→   326→    avg_rng_20 = df["range_pct"].rolling(20).mean().replace(0, 1e-10)
+   327→   327→    df["range_expansion_3"] = (avg_rng_3 / avg_rng_20).clip(0, 10)
+   328→   328→    above_ema = (df["close"] > df["ema_20"]).astype(float)
+   329→   329→    df["close_persistence_5"] = above_ema.rolling(5).mean()
+   330→   330→    df["vol_acceleration"] = df["vol_ratio"] - df["vol_ratio"].shift(3)
+   331→   331→    
+   332→   332→    df["atr_percentile_50"] = df["atr_pct"].rolling(50, min_periods=5).rank(pct=True)
+   333→   333→    df["trend_strength_50"] = ((df["ema_9"] - df["ema_50"]).abs() / df["atr_pct"].replace(0, 1e-10)).clip(0, 20)
+   334→   334→    df["regime_vol_trend"] = df["vol_regime"] * df["trend_50"]
+   335→   335→    
+   336→   336→    ts_dt = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+   337→   337→    hour = ts_dt.dt.hour
+   338→   338→    df["hour_quantile"] = pd.cut(hour, bins=[-1, 8, 14, 22, 24], labels=[0, 1, 2, 3]).astype(int)
+   339→   339→    
+   340→   340→    df["alt_lead_5m"] = (df["close"].pct_change(5) - df["btc_ret_5m"]) * 100
+   341→   341→    df["alt_lag_signal"] = ((df["btc_ret_1m"].abs() > 0.002) &
+   342→   342→                             (df["ret_1"].abs() < 0.001)).astype(int)
+   343→   343→    df["momentum_dispersion"] = df["ret_1"].rolling(10).std()
+   344→   344→    
+   345→   345→    # Clean up
+   346→   346→    for col in FEATURES_5M_V5 + FEATURES_5M_V6:
+   347→   347→        if col in df.columns:
+   348→   348→            df[col] = df[col].replace([np.inf, -np.inf], np.nan).fillna(0)
+   349→   349→    
+   350→   350→    return df
+   351→   351→
+   352→   352→
+   353→   353→# ============================================================================
+   354→   354→# HIGHER TIMEFRAME FEATURES (15m, 1h)
+   355→   355→# ============================================================================
+   356→   356→
+   357→   357→def aggregate_5m_to_n(df_5m: pd.DataFrame, n: int) -> pd.DataFrame:
+   358→   358→    """Aggregate 5m candles into n-minute candles."""
+   359→   359→    df = df_5m.copy()
+   360→   360→    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+   361→   361→    df = df.set_index("timestamp")
+   362→   362→    
+   363→   363→    agg = df.resample(f"{n}min").agg({
+   364→   364→        "open": "first",
+   365→   365→        "high": "max",
+   366→   366→        "low": "min",
+   367→   367→        "close": "last",
+   368→   368→        "volume": "sum",
+   369→   369→    }).dropna()
+   370→   370→    
+   371→   371→    agg = agg.reset_index()
+   372→   372→    agg["timestamp"] = agg["timestamp"].astype(np.int64) // 10**6
+   373→   373→    return agg
+   374→   374→
+   375→   375→
+   376→   376→def _merge_htf_to_5m(df_5m: pd.DataFrame, htf_df: pd.DataFrame, feature_cols: list[str]) -> pd.DataFrame:
+   377→   377→    """Merge higher-timeframe features into 5m dataframe using merge_asof.
+   378→   378→    
+   379→   379→    Uses timestamps (int64 ms) for matching — no datetime index needed.
+   380→   380→    """
+   381→   381→    # Ensure timestamps are int64 ms
+   382→   382→    df_5m = df_5m.copy()
+   383→   383→    htf_df = htf_df.copy()
+   384→   384→    df_5m["timestamp"] = df_5m["timestamp"].astype(np.int64)
+   385→   385→    htf_df["timestamp"] = htf_df["timestamp"].astype(np.int64)
+   386→   386→    
+   387→   387→    # Sort by timestamp for merge_asof
+   388→   388→    df_5m_sorted = df_5m.sort_values("timestamp").reset_index(drop=True)
+   389→   389→    htf_sorted = htf_df[["timestamp"] + feature_cols].sort_values("timestamp").reset_index(drop=True)
+   390→   390→    
+   391→   391→    # Forward-fill higher TF features: each 5m bar gets the last completed HTF bar
+   392→   392→    merged = pd.merge_asof(
+   393→   393→        df_5m_sorted,
+   394→   394→        htf_sorted,
+   395→   395→        on="timestamp",
+   396→   396→        direction="backward",  # use last completed HTF bar
+   397→   397→    )
+   398→   398→    
+   399→   399→    # Fill any missing with 0
+   400→   400→    for col in feature_cols:
+   401→   401→        if col in merged.columns:
+   402→   402→            merged[col] = merged[col].fillna(0).astype(np.float32)
+   403→   403→        else:
+   404→   404→            merged[col] = 0.0
+   405→   405→    
+   406→   406→    return merged
+   407→   407→
+   408→   408→
+   409→   409→def compute_higher_tf_features(df_5m: pd.DataFrame, btc_5m: pd.DataFrame) -> pd.DataFrame:
+   410→   410→    """Compute 15m and 1h features, merge back to 5m index."""
+   411→   411→    df = df_5m.copy()
+   412→   412→    
+   413→   413→    # --- 15m features ---
+   414→   414→    df_15m = aggregate_5m_to_n(df_5m, 15)
+   415→   415→    df_15m["ema_9_15m"] = df_15m["close"].ewm(span=9, adjust=False).mean()
+   416→   416→    df_15m["ema_20_15m"] = df_15m["close"].ewm(span=20, adjust=False).mean()
+   417→   417→    df_15m["trend_15m"] = np.sign(df_15m["ema_9_15m"] - df_15m["ema_20_15m"]).astype(int)
+   418→   418→    
+   419→   419→    # 15m RSI
+   420→   420→    delta_15 = df_15m["close"].diff()
+   421→   421→    gain_15 = delta_15.where(delta_15 > 0, 0).rolling(14).mean()
+   422→   422→    loss_15 = (-delta_15.where(delta_15 < 0, 0)).rolling(14).mean()
+   423→   423→    rs_15 = gain_15 / loss_15.replace(0, 1e-10)
+   424→   424→    df_15m["rsi_15m"] = 100 - (100 / (1 + rs_15))
+   425→   425→    
+   426→   426→    # 15m vol regime
+   427→   427→    atr_15 = (df_15m["high"] - df_15m["low"]).rolling(14).mean()
+   428→   428→    atr_pct_15 = atr_15 / df_15m["close"] * 100
+   429→   429→    df_15m["vol_regime_15m"] = np.digitize(atr_pct_15.fillna(0).values, [0.5, 1.5, 5.0]).astype(int)
+   430→   430→    
+   431→   431→    # BTC 15m trend
+   432→   432→    btc_15m = aggregate_5m_to_n(btc_5m, 15)
+   433→   433→    btc_15m["btc_ema_9_15m"] = btc_15m["close"].ewm(span=9, adjust=False).mean()
+   434→   434→    btc_15m["btc_ema_20_15m"] = btc_15m["close"].ewm(span=20, adjust=False).mean()
+   435→   435→    btc_15m["btc_trend_15m"] = np.sign(btc_15m["btc_ema_9_15m"] - btc_15m["btc_ema_20_15m"]).astype(int)
+   436→   436→    
+   437→   437→    # Merge BTC trend into 15m
+   438→   438→    df_15m["btc_trend_15m"] = btc_15m["btc_trend_15m"].values[:len(df_15m)]
+   439→   439→    
+   440→   440→    # Merge 15m features into 5m
+   441→   441→    df = _merge_htf_to_5m(df, df_15m, FEATURES_15M)
+   442→   442→    
+   443→   443→    # --- 1h features ---
+   444→   444→    df_1h = aggregate_5m_to_n(df_5m, 60)
+   445→   445→    df_1h["ema_9_1h"] = df_1h["close"].ewm(span=9, adjust=False).mean()
+   446→   446→    df_1h["ema_20_1h"] = df_1h["close"].ewm(span=20, adjust=False).mean()
+   447→   447→    df_1h["trend_1h"] = np.sign(df_1h["ema_9_1h"] - df_1h["ema_20_1h"]).astype(int)
+   448→   448→    
+   449→   449→    delta_1h = df_1h["close"].diff()
+   450→   450→    gain_1h = delta_1h.where(delta_1h > 0, 0).rolling(14).mean()
+   451→   451→    loss_1h = (-delta_1h.where(delta_1h < 0, 0)).rolling(14).mean()
+   452→   452→    rs_1h = gain_1h / loss_1h.replace(0, 1e-10)
+   453→   453→    df_1h["rsi_1h"] = 100 - (100 / (1 + rs_1h))
+   454→   454→    
+   455→   455→    atr_1h = (df_1h["high"] - df_1h["low"]).rolling(14).mean()
+   456→   456→    atr_pct_1h = atr_1h / df_1h["close"] * 100
+   457→   457→    df_1h["vol_regime_1h"] = np.digitize(atr_pct_1h.fillna(0).values, [0.5, 1.5, 5.0]).astype(int)
+   458→   458→    
+   459→   459→    # BTC 1h trend
+   460→   460→    btc_1h = aggregate_5m_to_n(btc_5m, 60)
+   461→   461→    btc_1h["btc_ema_9_1h"] = btc_1h["close"].ewm(span=9, adjust=False).mean()
+   462→   462→    btc_1h["btc_ema_20_1h"] = btc_1h["close"].ewm(span=20, adjust=False).mean()
+   463→   463→    btc_1h["btc_trend_1h"] = np.sign(btc_1h["btc_ema_9_1h"] - btc_1h["btc_ema_20_1h"]).astype(int)
+   464→   464→    
+   465→   465→    df_1h["btc_trend_1h"] = btc_1h["btc_trend_1h"].values[:len(df_1h)]
+   466→   466→    
+   467→   467→    # Merge 1h features into 5m
+   468→   468→    df = _merge_htf_to_5m(df, df_1h, ["trend_1h", "rsi_1h", "vol_regime_1h", "btc_trend_1h"])
+   469→   469→    
+   470→   470→    # MTF alignment score: how many timeframes agree on direction
+   471→   471→    df["mtf_alignment"] = (
+   472→   472→        df["trend_50"].astype(float) +       # 5m trend
+   473→   473→        df["trend_15m"].astype(float) +       # 15m trend
+   474→   474→        df["trend_1h"].astype(float)          # 1h trend
+   475→   475→    ) / 3.0
+   476→   476→    
+   477→   477→    # Clean up
+   478→   478→    for col in FEATURES_15M + FEATURES_1H:
+   479→   479→        if col in df.columns:
+   480→   480→            df[col] = df[col].replace([np.inf, -np.inf], np.nan).fillna(0).astype(np.float32)
+   481→   481→    
+   482→   482→    return df
+   483→   483→
+   484→   484→
+   485→   485→# ============================================================================
+   486→   486→# FORWARD RETURN LABELS
+   487→   487→# ============================================================================
+   488→   488→
+   489→   489→def compute_labels(df_5m: pd.DataFrame, horizons: list[int]) -> pd.DataFrame:
+   490→   490→    """Compute forward returns for multiple horizons.
+   491→   491→    
+   492→   492→    Horizons are in number of 5m bars:
+   493→   493→    - H=12 → 1h forward
+   494→   494→    - H=36 → 3h forward
+   495→   495→    - H=72 → 6h forward
+   496→   496→    - H=288 → 24h forward
+   497→   497→    """
+   498→   498→    df = df_5m.copy()
+   499→   499→    c = df["close"].values
+   500→   500→    n = len(df)
+   501→   501→    
+   502→   502→    for h in horizons:
+   503→   503→        fwd = np.full(n, np.nan)
+   504→   504→        for i in range(n - h):
+   505→   505→            fwd[i] = (c[i + h] - c[i]) / c[i] * 100
+   506→   506→        df[f"fwd_ret_h{h}"] = fwd
+   507→   507→        df[f"label_h{h}"] = (fwd > 0).astype(int)
+   508→   508→    
+   509→   509→    return df
+   510→   510→
+   511→   511→
+   512→   512→# ============================================================================
+   513→   513→# MERGE 1m MICRO INTO 5m
+   514→   514→# ============================================================================
+   515→   515→
+   516→   516→def merge_micro_into_5m(df_5m: pd.DataFrame, df_1m_micro: pd.DataFrame) -> pd.DataFrame:
+   517→   517→    """Merge 1m microstructure features into 5m dataframe.
+   518→   518→    
+   519→   519→    For each 5m bar, we take the LAST 1m candle's micro features
+   520→   520→    (they represent the most recent microstructure state).
+   521→   521→    """
+   522→   522→    # Align by timestamp: for each 5m bar, find the last 1m bar within it
+   523→   523→    df_5m_ts = pd.to_datetime(df_5m["timestamp"], unit="ms", utc=True)
+   524→   524→    df_1m_ts = pd.to_datetime(df_1m_micro["timestamp"], unit="ms", utc=True)
+   525→   525→    
+   526→   526→    # Create a lookup: for each 5m timestamp, find the closest 1m timestamp <= it
+   527→   527→    df_1m_micro = df_1m_micro.copy()
+   528→   528→    df_1m_micro["dt"] = df_1m_ts
+   529→   529→    
+   530→   530→    # We need to merge: for each 5m bar, get the micro features from the 
+   531→   531→    # 1m bar that falls at the end of that 5m period
+   532→   532→    df_5m_copy = df_5m.copy()
+   533→   533→    df_5m_copy["dt"] = df_5m_ts
+   534→   534→    
+   535→   535→    # Use merge_asof to find nearest 1m timestamp <= 5m timestamp
+   536→   536→    df_1m_sorted = df_1m_micro[["dt"] + FEATURES_MICRO_1M].sort_values("dt")
+   537→   537→    df_5m_sorted = df_5m_copy.sort_values("dt")
+   538→   538→    
+   539→   539→    merged = pd.merge_asof(
+   540→   540→        df_5m_sorted,
+   541→   541→        df_1m_sorted,
+   542→   542→        on="dt",
+   543→   543→        direction="backward",  # use the last 1m bar before/at 5m bar
+   544→   544→    )
+   545→   545→    
+   546→   546→    # Drop the datetime helper
+   547→   547→    merged = merged.drop(columns=["dt"])
+   548→   548→    
+   549→   549→    # Ensure all micro features are present
+   550→   550→    for col in FEATURES_MICRO_1M:
+   551→   551→        if col not in merged.columns:
+   552→   552→            LOG.warning("Missing micro feature: %s", col)
+   553→   553→            merged[col] = 0.0
+   554→   554→        else:
+   555→   555→            merged[col] = merged[col].replace([np.inf, -np.inf], np.nan).fillna(0).astype(np.float32)
+   556→   556→    
+   557→   557→    return merged
+   558→   558→
+   559→   559→
+   560→   560→# ============================================================================
+   561→   561→# MAIN
+   562→   562→# ============================================================================
+   563→   563→
+   564→   564→def load_1m_data(symbol: str) -> pd.DataFrame:
+   565→   565→    """Load 1m OHLCV from v10 cache."""
+   566→   566→    path = CACHE_DIR / f"{symbol}_1m.parquet"
+   567→   567→    if not path.exists():
+   568→   568→        raise FileNotFoundError(f"No 1m data for {symbol} at {path}")
+   569→   569→    df = pd.read_parquet(path)
+   570→   570→    LOG.info("Loaded %s_1m: %d rows", symbol, len(df))
+   571→   571→    return df
+   572→   572→
+   573→   573→
+   574→   574→def build_symbol_dataset(
+   575→   575→    symbol: str,
+   576→   576→    horizons: list[int],
+   577→   577→    btc_1m: pd.DataFrame,
+   578→   578→    eth_5m: pd.DataFrame | None = None,
+   579→   579→) -> pd.DataFrame:
+   580→   580→    """Build complete dataset for one symbol."""
+   581→   581→    LOG.info("Building dataset for %s", symbol)
+   582→   582→    t0 = time.time()
+   583→   583→    
+   584→   584→    # Load 1m data
+   585→   585→    sym_1m = load_1m_data(symbol)
+   586→   586→    
+   587→   587→    # 1. Compute microstructure features on 1m
+   588→   588→    sym_1m_micro = compute_microstructure_features(sym_1m)
+   589→   589→    
+   590→   590→    # 2. Aggregate to 5m
+   591→   591→    sym_5m = aggregate_1m_to_5m(sym_1m)
+   592→   592→    btc_5m = aggregate_1m_to_5m(btc_1m)
+   593→   593→    
+   594→   594→    # Create a dummy ETH 5m if not available (use BTC as proxy)
+   595→   595→    if eth_5m is None:
+   596→   596→        LOG.warning("No ETH data — using BTC as ETH proxy for correlation features")
+   597→   597→        eth_5m = btc_5m.copy()
+   598→   598→        eth_5m = eth_5m.rename(columns={
+   599→   599→            "btc_close": "close" if "close" not in eth_5m.columns else "eth_close"
+   600→   600→        })
+   601→   601→        if "close" not in eth_5m.columns and "eth_close" in eth_5m.columns:
+   602→   602→            eth_5m["close"] = eth_5m["eth_close"]
+   603→   603→    
+   604→   604→    # Ensure timestamp types match
+   605→   605→    sym_5m["timestamp"] = sym_5m["timestamp"].astype(np.int64)
+   606→   606→    btc_5m["timestamp"] = btc_5m["timestamp"].astype(np.int64)
+   607→   607→    eth_5m["timestamp"] = eth_5m["timestamp"].astype(np.int64)
+   608→   608→    
+   609→   609→    # 3. Compute 5m features (v7 58 features)
+   610→   610→    sym_5m_feat = compute_5m_features(sym_5m, btc_5m, eth_5m)
+   611→   611→    
+   612→   612→    # 4. Compute higher timeframe features (15m, 1h)
+   613→   613→    sym_5m_feat = compute_higher_tf_features(sym_5m_feat, btc_5m)
+   614→   614→    
+   615→   615→    # 5. Merge 1m microstructure into 5m
+   616→   616→    sym_5m_full = merge_micro_into_5m(sym_5m_feat, sym_1m_micro)
+   617→   617→    
+   618→   618→    # 6. Compute forward return labels
+   619→   619→    sym_5m_full = compute_labels(sym_5m_full, horizons)
+   620→   620→    
+   621→   621→    # 7. Add symbol column
+   622→   622→    sym_5m_full["symbol"] = symbol
+   623→   623→    
+   624→   624→    # 8. Clean and validate
+   625→   625→    for col in ALL_FEATURE_NAMES:
+   626→   626→        if col not in sym_5m_full.columns:
+   627→   627→            LOG.warning("Missing feature: %s — filling with 0", col)
+   628→   628→            sym_5m_full[col] = 0.0
+   629→   629→        else:
+   630→   630→            sym_5m_full[col] = sym_5m_full[col].replace([np.inf, -np.inf], np.nan).fillna(0).astype(np.float32)
+   631→   631→    
+   632→   632→    elapsed = time.time() - t0
+   633→   633→    LOG.info("  %s: %d rows × %d features in %.1fs", symbol, len(sym_5m_full), len(ALL_FEATURE_NAMES), elapsed)
+   634→   634→    
+   635→   635→    return sym_5m_full
+   636→   636→
+   637→   637→
+   638→   638→def main():
+   639→   639→    parser = argparse.ArgumentParser(description="Build v11 dataset for low-timeframe trading")
+   640→   640→    parser.add_argument("--symbols", default=",".join(DEFAULT_SYMBOLS))
+   641→   641→    parser.add_argument("--horizons", default=",".join(str(h) for h in DEFAULT_HORIZONS))
+   642→   642→    parser.add_argument("--output", default=str(OUTPUT_DIR / "v11_dataset.parquet"))
+   643→   643→    args = parser.parse_args()
+   644→   644→    
+   645→   645→    symbols = args.symbols.split(",")
+   646→   646→    horizons = [int(h) for h in args.horizons.split(",")]
+   647→   647→    
+   648→   648→    print("=" * 80)
+   649→   649→    print("v11 BUILD DATASET — Low Timeframe Trading")
+   650→   650→    print(f"  Symbols: {symbols}")
+   651→   651→    print(f"  Horizons: {horizons} (5m bars → {', '.join(f'{h*5/60:.0f}h' for h in horizons)})")
+   652→   652→    print(f"  Features: {len(ALL_FEATURE_NAMES)} ({len(FEATURES_MICRO_1M)} micro + "
+   653→   653→          f"{len(FEATURES_5M_V5) + len(FEATURES_5M_V6)} 5m + "
+   654→   654→          f"{len(FEATURES_15M)} 15m + {len(FEATURES_1H)} 1h)")
+   655→   655→    print("=" * 80)
+   656→   656→    
+   657→   657→    # Load BTC 1m (reference for all symbols)
+   658→   658→    btc_1m = load_1m_data("BTC")
+   659→   659→    
+   660→   660→    # Build per-symbol datasets
+   661→   661→    all_dfs = []
+   662→   662→    for sym in symbols:
+   663→   663→        try:
+   664→   664→            df = build_symbol_dataset(sym, horizons, btc_1m)
+   665→   665→            all_dfs.append(df)
+   666→   666→        except Exception as e:
+   667→   667→            LOG.error("Failed for %s: %s", sym, e)
+   668→   668→            import traceback
+   669→   669→            traceback.print_exc()
+   670→   670→    
+   671→   671→    if not all_dfs:
+   672→   672→        LOG.error("No datasets built — exiting")
+   673→   673→        sys.exit(1)
+   674→   674→    
+   675→   675→    # Combine
+   676→   676→    combined = pd.concat(all_dfs, ignore_index=True)
+   677→   677→    
+   678→   678→    # Drop rows with NaN labels (forward returns near the end of data)
+   679→   679→    label_cols = [f"fwd_ret_h{h}" for h in horizons]
+   680→   680→    # Keep rows that have at least one valid label
+   681→   681→    valid_mask = combined[label_cols].notna().any(axis=1)
+   682→   682→    # Also require all features to be valid
+   683→   683→    feat_mask = combined[ALL_FEATURE_NAMES].notna().all(axis=1)
+   684→   684→    combined = combined[valid_mask & feat_mask].reset_index(drop=True)
+   685→   685→    
+   686→   686→    # Save
+   687→   687→    output_path = Path(args.output)
+   688→   688→    combined.to_parquet(output_path, index=False)
+   689→   689→    
+   690→   690→    print(f"\n{'='*80}")
+   691→   691→    print(f"DATASET SAVED: {output_path}")
+   692→   692→    print(f"  Total rows: {len(combined):,}")
+   693→   693→    print(f"  Total features: {len(ALL_FEATURE_NAMES)}")
+   694→   694→    print(f"  Symbols: {combined['symbol'].unique().tolist()}")
+   695→   695→    for h in horizons:
+   696→   696→        col = f"fwd_ret_h{h}"
+   697→   697→        valid = combined[col].notna().sum()
+   698→   698→        print(f"  Label {col}: {valid:,} valid rows, "
+   699→   699→              f"mean={combined[col].mean():+.4f}%, std={combined[col].std():.4f}%")
+   700→   700→    print(f"{'='*80}")
+   701→   701→
+   702→   702→
+   703→   703→if __name__ == "__main__":
+   704→   704→    main()
+   705→   705→

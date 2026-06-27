@@ -1,0 +1,11 @@
+{
+  "name": "trading-bridge",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "bun --hot index.ts"
+  },
+  "dependencies": {
+    "socket.io": "^4.7.0",
+    "ws": "^8.16.0"
+  }
+}
