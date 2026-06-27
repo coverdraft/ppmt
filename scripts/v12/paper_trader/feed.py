@@ -23,6 +23,23 @@ import pandas as pd
 LOG = logging.getLogger("v12_feed")
 
 
+def _datetime_to_ms(series: pd.Series) -> np.ndarray:
+    """Convert datetime Series to int64 milliseconds. Robust for tz-aware datetime.
+
+    In pandas 2.x, .values.astype(np.int64) on tz-aware datetime Series
+    returns incorrect values (ms instead of ns), causing results 1M× too
+    small after dividing by 10**6. Fix: strip timezone first.
+    """
+    if len(series) == 0:
+        return np.array([], dtype=np.int64)
+    if pd.api.types.is_datetime64_any_dtype(series) and series.dt.tz is not None:
+        naive = series.dt.tz_localize(None)
+    else:
+        naive = series
+    ns = naive.values.astype(np.int64)  # nanoseconds since epoch
+    return (ns // 10**6).astype(np.int64)  # milliseconds
+
+
 class Feed:
     def __init__(self, exchange_id: str = "bybit"):
         ex_cls = getattr(ccxt, exchange_id, None)
@@ -75,10 +92,9 @@ class Feed:
         }).dropna()
 
         agg = agg.reset_index()
-        # Robust datetime→ms conversion (bypasses pandas tz-aware quirks)
-        arr = agg["timestamp"].values  # numpy datetime64[ns]
-        ns = arr.astype(np.int64)  # nanoseconds
-        agg["timestamp"] = (ns // 10**6).astype(np.int64)  # milliseconds
+        # Robust datetime→ms conversion — must strip timezone before int64
+        # because .values.astype(np.int64) is unreliable on tz-aware datetime
+        agg["timestamp"] = _datetime_to_ms(agg["timestamp"])
         return agg
 
     def fetch_5m_window(self, symbol: str, n_5m_bars: int = 400) -> pd.DataFrame:

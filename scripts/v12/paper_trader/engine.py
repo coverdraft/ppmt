@@ -211,18 +211,20 @@ class Engine:
                         len(sym_5m), len(btc_5m), len(eth_5m))
             return None
 
-        latest_ts = int(sym_5m["timestamp"].iloc[-1])
         latest_close = float(sym_5m["close"].iloc[-1])
-        self.state["last_closed_candle_ts"] = latest_ts
 
-        # Validate timestamp is in ms range (should be > 1e12 for recent dates)
-        if latest_ts < 1e12:
-            LOG.warning("v12_engine: timestamp looks corrupted (%d) — attempting fix", latest_ts)
-            # Try to detect format and fix
-            if latest_ts > 1e9:
-                latest_ts = latest_ts * 1000  # seconds → ms
-            elif latest_ts > 1e6:
-                latest_ts = latest_ts * 1000 * 1000  # micro → ms? unlikely
+        # Get timestamp from DataFrame — validate against feed's confirmed new_ts
+        df_ts = int(sym_5m["timestamp"].iloc[-1])
+        if df_ts < 1e12:
+            # DataFrame timestamp is corrupted — use feed's confirmed timestamp
+            LOG.warning("v12_engine: DataFrame ts corrupted (%d) — using feed ts=%d", df_ts, new_ts)
+            latest_ts = new_ts
+        else:
+            latest_ts = df_ts
+
+        # CRITICAL: always use feed's confirmed timestamp for dedup tracking.
+        # This prevents infinite loops if DataFrame timestamps are unreliable.
+        self.state["last_closed_candle_ts"] = new_ts
 
         LOG.info("v12_engine: ts=%s close=%.4f",
                  dt.datetime.utcfromtimestamp(latest_ts / 1000).isoformat(), latest_close)

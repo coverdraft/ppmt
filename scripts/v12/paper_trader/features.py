@@ -281,9 +281,22 @@ def _safe_merge_asof(left: pd.DataFrame, right: pd.DataFrame,
 
 
 def _datetime_to_ms(series: pd.Series) -> np.ndarray:
-    """Convert datetime Series to int64 ms. Robust for tz-aware datetime."""
-    arr = series.values  # numpy datetime64[ns]
-    ns = arr.astype(np.int64)  # nanoseconds since epoch
+    """Convert datetime Series to int64 ms. Robust for tz-aware datetime.
+
+    In pandas 2.x, .values.astype(np.int64) on tz-aware datetime Series
+    returns incorrect values (already in ms instead of ns), causing
+    results 1M× too small after dividing by 10**6.
+    Fix: strip timezone first (timestamps remain at same UTC moment),
+    then convert the tz-naive datetime64[ns] array to nanoseconds.
+    """
+    if len(series) == 0:
+        return np.array([], dtype=np.int64)
+    # Strip timezone for reliable int64 conversion
+    if pd.api.types.is_datetime64_any_dtype(series) and series.dt.tz is not None:
+        naive = series.dt.tz_localize(None)
+    else:
+        naive = series
+    ns = naive.values.astype(np.int64)  # nanoseconds since epoch
     return (ns // 10**6).astype(np.int64)  # milliseconds
 
 
