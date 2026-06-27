@@ -5,6 +5,15 @@
  * Falls back to a built-in client-side DemoEngine when the bridge
  * is unreachable, so the terminal always has data flowing.
  * Now supports multi-token, portfolio, and money manager data.
+ *
+ * Behaviour:
+ *  - If NEXT_PUBLIC_BRIDGE_URL is NOT set, we never attempt a socket
+ *    connection (avoids /socket.io 404 spam against the Next.js dev
+ *    server). Demo mode starts immediately.
+ *  - If NEXT_PUBLIC_BRIDGE_URL IS set, we try socket.io. On the first
+ *    connect_error we log it once; subsequent reconnection errors are
+ *    silenced to keep the console clean. After BRIDGE_FALLBACK_DELAY
+ *    we still start demo mode in parallel so the UI always has data.
  */
 'use client'
 
@@ -19,6 +28,7 @@ export function useTradingSocket() {
   const demoRef = useRef<DemoEngine | null>(null)
   const usingDemoRef = useRef(false)
   const mountedRef = useRef(false)
+  const firstErrorLoggedRef = useRef(false)
   const setState = useTradingStore((s) => s.setState)
   const setConnected = useTradingStore((s) => s.setConnected)
   const [ready, setReady] = useState(false)
@@ -106,10 +116,20 @@ export function useTradingSocket() {
 
     // Try Socket.io connection to the bridge
     const trySocketConnection = () => {
+      const bridgeUrl = process.env.NEXT_PUBLIC_BRIDGE_URL
+
+      // If no bridge URL is configured, skip socket attempt entirely
+      // and go straight to demo mode. This prevents /socket.io 404 spam
+      // against the Next.js dev server origin.
+      if (!bridgeUrl) {
+        console.log('[Socket] No NEXT_PUBLIC_BRIDGE_URL set — using demo mode directly')
+        startDemoFallback()
+        return
+      }
+
       import('socket.io-client').then(({ io }) => {
         if (!mountedRef.current) return
 
-        const bridgeUrl = process.env.NEXT_PUBLIC_BRIDGE_URL || undefined
         socket = io(bridgeUrl, {
           path: '/socket.io',
           transports: ['polling', 'websocket'],
@@ -123,7 +143,8 @@ export function useTradingSocket() {
         socketRef.current = socket
 
         socket.on('connect', () => {
-          console.log('[Socket] Connected to Trading Bridge')
+          console.log('[Socket] Connected to Trading Bridge at', bridgeUrl)
+          firstErrorLoggedRef.current = false
           // Stop demo if it was running
           if (demoEngine) {
             demoEngine.stopTicking()
@@ -165,8 +186,16 @@ export function useTradingSocket() {
         })
 
         socket.on('connect_error', (err: any) => {
-          console.error('[Socket] Connection error:', err.message)
-          // Don't override demo state
+          // Log the FIRST connect_error once, then silence subsequent
+          // reconnection retries to keep the console clean.
+          if (!firstErrorLoggedRef.current) {
+            console.warn(
+              `[Socket] Bridge at ${bridgeUrl} unreachable: ${err.message}. ` +
+              `Falling back to demo mode. (further retries silenced)`
+            )
+            firstErrorLoggedRef.current = true
+          }
+          // Don't override demo state once demo is running
           if (!usingDemoRef.current && mountedRef.current) {
             setConnected(false, 'disconnected')
           }
@@ -178,11 +207,16 @@ export function useTradingSocket() {
     }
 
     // Schedule demo fallback in case bridge is unreachable
-    demoTimeout = setTimeout(() => {
-      if (!socket || !socket.connected) {
-        startDemoFallback()
-      }
-    }, BRIDGE_FALLBACK_DELAY)
+    // (only relevant when bridge URL IS set — otherwise trySocketConnection
+    // already starts demo synchronously)
+    const bridgeUrl = process.env.NEXT_PUBLIC_BRIDGE_URL
+    if (bridgeUrl) {
+      demoTimeout = setTimeout(() => {
+        if (!socket || !socket.connected) {
+          startDemoFallback()
+        }
+      }, BRIDGE_FALLBACK_DELAY)
+    }
 
     trySocketConnection()
 
@@ -199,6 +233,7 @@ export function useTradingSocket() {
         socketRef.current = null
       }
       usingDemoRef.current = false
+      firstErrorLoggedRef.current = false
     }
   }, [ready, setState, setConnected])
 
