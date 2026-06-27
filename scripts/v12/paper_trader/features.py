@@ -7,6 +7,10 @@ on a batch of 5m bars and returns the latest feature row for prediction.
 
 Input: 5m OHLCV DataFrames for the target symbol, BTC, and ETH
 Output: dict of 80 feature values for the latest closed 5m bar
+
+CRITICAL: NEVER use pd.to_datetime on timestamp columns. It produces
+incorrect datetimes on some pandas versions/platforms (shifted ~15h).
+All time-based operations use integer arithmetic on ms timestamps.
 """
 from __future__ import annotations
 
@@ -126,6 +130,18 @@ def compute_microstructure_from_5m(df_5m: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _ms_to_hour(ts_ms: np.ndarray) -> np.ndarray:
+    """Extract UTC hour from millisecond timestamps using pure integer arithmetic.
+
+    NEVER uses pd.to_datetime — avoids platform-specific datetime bugs.
+    """
+    # Convert ms → seconds since epoch → seconds within the day → hours
+    seconds = ts_ms.astype(np.int64) // 1000
+    hours_since_epoch = seconds // 3600
+    # Hour of day: hours_since_epoch mod 24
+    return (hours_since_epoch % 24).astype(float)
+
+
 def compute_5m_features(df_5m: pd.DataFrame, btc_5m: pd.DataFrame, eth_5m: pd.DataFrame) -> pd.DataFrame:
     """Compute all 58 v7-style features on 5m candles + microstructure."""
     # First compute microstructure
@@ -194,10 +210,10 @@ def compute_5m_features(df_5m: pd.DataFrame, btc_5m: pd.DataFrame, eth_5m: pd.Da
     df["vol_regime"] = np.digitize(atr_p, bins_atr).astype(int)
     df["trending"] = (df["atr_pct"] > df["atr_pct"].rolling(50, min_periods=5).mean()).astype(int)
 
-    # Hour features
-    ts_dt = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-    df["hour_sin"] = np.sin(2 * np.pi * ts_dt.dt.hour / 24)
-    df["hour_cos"] = np.cos(2 * np.pi * ts_dt.dt.hour / 24)
+    # Hour features — PURE INTEGER ARITHMETIC, no pd.to_datetime
+    hour = _ms_to_hour(df["timestamp"].values)
+    df["hour_sin"] = np.sin(2 * np.pi * hour / 24)
+    df["hour_cos"] = np.cos(2 * np.pi * hour / 24)
 
     # === BTC/ETH cross-asset features (v6 style, 21 features) ===
     btc = btc_5m[["timestamp", "close", "volume", "high", "low"]].copy()
@@ -246,9 +262,9 @@ def compute_5m_features(df_5m: pd.DataFrame, btc_5m: pd.DataFrame, eth_5m: pd.Da
     df["trend_strength_50"] = ((df["ema_9"] - df["ema_50"]).abs() / df["atr_pct"].replace(0, 1e-10)).clip(0, 20)
     df["regime_vol_trend"] = df["vol_regime"] * df["trend_50"]
 
-    ts_dt2 = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-    hour = ts_dt2.dt.hour
-    df["hour_quantile"] = pd.cut(hour, bins=[-1, 8, 14, 22, 24], labels=[0, 1, 2, 3]).astype(int)
+    # Hour quantile — PURE INTEGER ARITHMETIC, no pd.to_datetime
+    hour2 = _ms_to_hour(df["timestamp"].values)
+    df["hour_quantile"] = np.digitize(hour2, bins=[8, 14, 22]).astype(int)
 
     df["alt_lead_5m"] = (df["close"].pct_change(5) - df["btc_ret_5m"]) * 100
     df["alt_lag_signal"] = ((df["btc_ret_1m"].abs() > 0.002) &
@@ -280,32 +296,32 @@ def _safe_merge_asof(left: pd.DataFrame, right: pd.DataFrame,
     return merged
 
 
-def _round_ms_to_interval(ts_ms: int, interval_ms: int) -> int:
-    """Round a millisecond timestamp down to the nearest interval boundary."""
-    return (ts_ms // interval_ms) * interval_ms
-
-
 def _aggregate_5m_to_n(df_5m: pd.DataFrame, n: int) -> pd.DataFrame:
     """Aggregate 5m candles into n-minute candles.
 
-    Key design: NEVER convert datetime→ms (unreliable across pandas versions).
-    Instead, compute n-minute timestamps by rounding the preserved ms values.
+    Uses PURE INTEGER groupby on ms timestamps. NEVER touches pd.to_datetime.
+    This is the ONLY reliable way to aggregate across all pandas versions.
     """
+    if len(df_5m) == 0:
+        return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+
     df = df_5m.copy()
-    # Keep original ms timestamps — they are always correct
-    df["timestamp_ms"] = df["timestamp"]
-    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-    df = df.set_index("timestamp")
-    agg = df.resample(f"{n}min").agg({
-        "timestamp_ms": "first",
-        "open": "first", "high": "max", "low": "min",
-        "close": "last", "volume": "sum",
-    }).dropna()
-    # Compute n-minute aligned timestamps from preserved ms — no datetime→ms conversion
-    agg["timestamp"] = agg["timestamp_ms"].apply(
-        lambda x: _round_ms_to_interval(int(x), n * 60 * 1000)
-    ).astype(np.int64)
-    agg = agg.drop(columns=["timestamp_ms"]).reset_index(drop=True)
+    interval_ms = n * 60 * 1000
+
+    # Group by n-minute interval using integer division on ms timestamps
+    df["_group"] = df["timestamp"] // interval_ms
+
+    agg = df.groupby("_group").agg({
+        "open": "first",
+        "high": "max",
+        "low": "min",
+        "close": "last",
+        "volume": "sum",
+    })
+
+    # Convert group key back to ms timestamp (start of each interval)
+    agg["timestamp"] = (agg.index.astype(np.int64) * interval_ms)
+    agg = agg[["timestamp", "open", "high", "low", "close", "volume"]].reset_index(drop=True)
     return agg
 
 

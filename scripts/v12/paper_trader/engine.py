@@ -213,14 +213,16 @@ class Engine:
 
         latest_close = float(sym_5m["close"].iloc[-1])
 
-        # Get timestamp from DataFrame — validate against feed's confirmed new_ts
+        # ALWAYS use feed's confirmed timestamp as source of truth.
+        # The DataFrame's timestamps may be wrong due to pandas datetime bugs,
+        # but the feed's new_ts comes directly from Bybit's 5m API — always correct.
+        latest_ts = new_ts
+
+        # Cross-check: warn if DataFrame timestamp disagrees with feed
         df_ts = int(sym_5m["timestamp"].iloc[-1])
-        if df_ts < 1e12:
-            # DataFrame timestamp is corrupted — use feed's confirmed timestamp
-            LOG.warning("v12_engine: DataFrame ts corrupted (%d) — using feed ts=%d", df_ts, new_ts)
-            latest_ts = new_ts
-        else:
-            latest_ts = df_ts
+        if abs(df_ts - new_ts) > 5 * 60 * 1000:  # more than 5 min apart
+            LOG.warning("v12_engine: DataFrame ts=%d != feed ts=%d (diff=%d min) — using feed",
+                        df_ts, new_ts, (new_ts - df_ts) / 60000)
 
         # CRITICAL: always use feed's confirmed timestamp for dedup tracking.
         # This prevents infinite loops if DataFrame timestamps are unreliable.

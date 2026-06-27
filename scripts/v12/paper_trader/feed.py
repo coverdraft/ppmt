@@ -7,8 +7,12 @@ for correlation features.
 
 Design:
 - Fetch 1m candles (Bybit public API, no key needed)
-- Aggregate to 5m OHLCV using resample
+- Aggregate to 5m OHLCV using PURE INTEGER groupby (no pd.to_datetime)
 - Return 5m DataFrames ready for feature computation
+
+CRITICAL: NEVER use pd.to_datetime on timestamp columns. It produces
+incorrect datetimes on some pandas versions/platforms (shifted ~15h).
+All aggregation uses integer division on ms timestamps.
 """
 from __future__ import annotations
 
@@ -21,11 +25,6 @@ import numpy as np
 import pandas as pd
 
 LOG = logging.getLogger("v12_feed")
-
-
-def _round_ms_to_interval(ts_ms: int, interval_ms: int) -> int:
-    """Round a millisecond timestamp down to the nearest interval boundary."""
-    return (ts_ms // interval_ms) * interval_ms
 
 
 class Feed:
@@ -68,32 +67,29 @@ class Feed:
     def aggregate_1m_to_5m(self, candles_1m: list[list]) -> pd.DataFrame:
         """Aggregate 1m candles into 5m OHLCV DataFrame.
 
-        Key design: NEVER convert datetime→ms (unreliable across pandas versions).
-        Instead, compute 5m timestamps by rounding the original ms values.
-        Use resample only for OHLCV aggregation, discard its datetime index.
+        Uses PURE INTEGER groupby on ms timestamps. NEVER touches pd.to_datetime.
+        This is the ONLY reliable way to aggregate across all pandas versions.
         """
-        df = pd.DataFrame(candles_1m, columns=["timestamp", "open", "high", "low", "close", "volume"])
-        # Keep original ms timestamps — they are always correct from the API
-        df["timestamp_ms"] = df["timestamp"]
-        # Create datetime index for resample (only used for grouping)
-        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-        df = df.set_index("timestamp")
+        if not candles_1m:
+            return pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
 
-        agg = df.resample("5min").agg({
-            "timestamp_ms": "first",   # carry original ms timestamp
+        df = pd.DataFrame(candles_1m, columns=["timestamp", "open", "high", "low", "close", "volume"])
+
+        # Group by 5-minute interval using integer division on ms timestamps
+        interval_ms = 5 * 60 * 1000  # 300,000 ms
+        df["_group"] = df["timestamp"] // interval_ms
+
+        agg = df.groupby("_group").agg({
             "open": "first",
             "high": "max",
             "low": "min",
             "close": "last",
             "volume": "sum",
-        }).dropna()
+        })
 
-        # Compute 5m-aligned timestamps from the preserved ms values
-        # This avoids ANY datetime→ms conversion (which is unreliable)
-        agg["timestamp"] = agg["timestamp_ms"].apply(
-            lambda x: _round_ms_to_interval(int(x), 5 * 60 * 1000)
-        ).astype(np.int64)
-        agg = agg.drop(columns=["timestamp_ms"]).reset_index(drop=True)
+        # Convert group key back to ms timestamp (start of each 5m interval)
+        agg["timestamp"] = (agg.index.astype(np.int64) * interval_ms)
+        agg = agg[["timestamp", "open", "high", "low", "close", "volume"]].reset_index(drop=True)
         return agg
 
     def fetch_5m_window(self, symbol: str, n_5m_bars: int = 400) -> pd.DataFrame:
