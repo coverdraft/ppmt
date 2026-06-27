@@ -320,15 +320,26 @@ export class LivePriceFeed {
         if (!meta) continue
         const internal = meta.internal
         const price = c.current_price
+        // CoinGecko returns null current_price for illiquid / delisted coins.
+        // Storing null here would crash PaperTradingEngine.snapshot() when
+        // it calls t.price.toFixed(...). Skip these entries entirely —
+        // if no other source provides a price for this token, the engine's
+        // snapshot loop will simply skip the token (defensive guard added).
+        if (typeof price !== 'number' || !isFinite(price) || price <= 0) continue
+        const totalVol = typeof c.total_volume === 'number' && isFinite(c.total_volume)
+          ? c.total_volume : 0
+        const changePct = typeof c.price_change_percentage_24h === 'number'
+          && isFinite(c.price_change_percentage_24h)
+          ? c.price_change_percentage_24h : 0
         const data: TickerData = {
           symbol: internal,
           rawSymbol: c.id,
           price,
-          changePct: c.price_change_percentage_24h ?? 0,
-          volume: (c.total_volume ?? 0) / (price || 1), // base vol approx quote/price
-          quoteVolume: c.total_volume ?? 0,
-          high: c.high_24h ?? price,
-          low: c.low_24h ?? price,
+          changePct,
+          volume: totalVol > 0 ? totalVol / price : 0, // base vol approx quote/price
+          quoteVolume: totalVol,
+          high: (typeof c.high_24h === 'number' && isFinite(c.high_24h)) ? c.high_24h : price,
+          low: (typeof c.low_24h === 'number' && isFinite(c.low_24h)) ? c.low_24h : price,
           timestamp: Date.now(),
         }
         // Always update 24h stats from CoinGecko (authoritative source).
