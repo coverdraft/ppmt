@@ -308,7 +308,7 @@ const defaultMoneyManager: MoneyManagerSettings = {
 const initialState = {
   isConnected: false,
   engineMode: 'disconnected' as const,
-  isRunning: false,
+  isRunning: true,
   currentPrice: 0,
   // Aligned with PaperTradingEngine defaults (BTC/USDT, 'live')
   symbol: 'BTC/USDT',
@@ -329,7 +329,9 @@ const initialState = {
   exposurePct: 0,
   dailyReturnPct: 0,
   leverage: 3,
-  autoMode: false,  // matches engine default (autoMode: false)
+  // Auto-mode ON by default — engine starts scanning & trading on page load.
+  // User can toggle off via the header.
+  autoMode: true,
   circuitBreakers: { max_drawdown: false, daily_loss: false, volatility: false },
   isTradingAllowed: true,
   killSwitchActive: false,

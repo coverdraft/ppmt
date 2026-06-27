@@ -167,7 +167,9 @@ export class PaperTradingEngine {
   private realizedPnl: number = 0
   private running: boolean = false
   private tradingEnabled: boolean = true
-  private autoMode: boolean = false
+  // Auto-mode is ON by default so the engine starts scanning and trading
+  // the moment the page loads. User can toggle it off via the header.
+  private autoMode: boolean = true
   private interval: ReturnType<typeof setInterval> | null = null
   private priceFeed: LivePriceFeed
   // All 50 supported tokens are active by default — gives the auto-scanner
@@ -491,14 +493,24 @@ export class PaperTradingEngine {
   private maybeAutoTrade() {
     if (!this.autoMode || !this.tradingEnabled) return
     const now = Date.now()
-    if (now - this.lastAutoSignalTime < 5000) return
+    // 3.5s cooldown — fast enough to keep the engine visibly hunting
+    // opportunities, slow enough to not spam orders on every tick.
+    if (now - this.lastAutoSignalTime < 3500) return
     this.lastAutoSignalTime = now
 
-    // Find strongest movers among active tokens with live prices
+    // Find strongest movers among active tokens with live prices.
+    // Very loose thresholds (>$200K volume, |change%| >= 0.1%) so the
+    // engine finds candidates practically every cycle. Most crypto
+    // tokens move >0.1% over 24h — this is a momentum-following scan.
     const candidates = this.activeTokens
       .map(sym => this.priceFeed.getData(sym))
-      .filter((t): t is TickerData => t !== null && t.quoteVolume > 1_000_000)
-      .filter(t => Math.abs(t.changePct) >= 0.3)
+      .filter((t): t is TickerData =>
+        t !== null
+        && typeof t.price === 'number' && isFinite(t.price) && t.price > 0
+        && typeof t.quoteVolume === 'number' && isFinite(t.quoteVolume)
+        && t.quoteVolume > 200_000
+      )
+      .filter(t => typeof t.changePct === 'number' && isFinite(t.changePct) && Math.abs(t.changePct) >= 0.1)
       .sort((a, b) => Math.abs(b.changePct) - Math.abs(a.changePct))
       .slice(0, 5)
 
@@ -739,11 +751,21 @@ export class PaperTradingEngine {
       ? ((totalValue - this.equity[dayAgoIdx]) / this.equity[dayAgoIdx]) * 100
       : 0
 
-    // Token states from live price feed
+    // Token states from live price feed.
+    // IMPORTANT: be fully defensive against null / NaN / undefined prices.
+    // CoinGecko can return null current_price for illiquid tokens; if we
+    // call .toFixed() on null we crash the whole snapshot, which would
+    // freeze the UI and stop all auto-trading. Skip any token without a
+    // valid finite numeric price.
     const tokenStates: Record<string, TokenState> = {}
     for (const sym of this.activeTokens) {
-      const t = this.priceFeed.getData(sym)
-      if (t) {
+      try {
+        const t = this.priceFeed.getData(sym)
+        if (!t) continue
+        if (typeof t.price !== 'number' || !isFinite(t.price) || t.price <= 0) continue
+        if (typeof t.changePct !== 'number' || !isFinite(t.changePct)) continue
+        if (typeof t.quoteVolume !== 'number' || !isFinite(t.quoteVolume)) continue
+
         const pos = this.positions.get(sym)
         tokenStates[sym] = {
           symbol: t.symbol,
@@ -764,6 +786,9 @@ export class PaperTradingEngine {
           equity: this.equity,
           color: TOKEN_COLORS[sym] || '#6b7280',
         }
+      } catch {
+        // Never let one bad token crash the whole snapshot
+        continue
       }
     }
 

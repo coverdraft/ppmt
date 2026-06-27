@@ -127,6 +127,17 @@ export function useTradingSocket() {
 
       GLOBAL_FEED = new LivePriceFeed([...SUPPORTED_TOKENS])
       GLOBAL_ENGINE = new PaperTradingEngine(GLOBAL_FEED)
+      // Auto-enable trading + auto-mode so the engine starts scanning
+      // and opening positions the moment the page loads. The user can
+      // still pause via the header buttons.
+      GLOBAL_ENGINE.setTradingEnabled(true)
+      GLOBAL_ENGINE.setAutoMode(true)
+      useTradingStore.getState().setState({
+        isRunning: true,
+        autoMode: true,
+        killSwitchActive: false,
+      })
+      console.log('[Paper] Auto-mode + trading enabled on init — engine will hunt opportunities continuously')
       GLOBAL_LISTENER = (state: any) => applyState(state)
       GLOBAL_ENGINE.startTicking(GLOBAL_LISTENER, 1500)
     } else {

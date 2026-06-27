@@ -23,18 +23,28 @@ export function PerformancePanel() {
     dailyLossPct,
   } = useTradingStore()
 
-  // Equity curve chart (simple SVG)
+  // Equity curve chart (simple SVG).
   // INITIAL_CAPITAL (10000) imported as the baseline reference.
+  // Defensive: when equityCurve has 0 or 1 entries (engine hasn't ticked
+  // yet, or snapshot failed), the i/(length-1) division would produce NaN
+  // and the SVG would render <polyline points="NaN,55"> which the browser
+  // rejects. Fall back to a flat baseline at INITIAL_CAPITAL.
   const recentEquity = equityCurve.slice(-100)
-  const eqMin = Math.min(...recentEquity, INITIAL_CAPITAL)
-  const eqMax = Math.max(...recentEquity, INITIAL_CAPITAL)
-  const eqRange = eqMax - eqMin || 1
+  const safeEquity = recentEquity.length >= 2
+    ? recentEquity.filter(v => typeof v === 'number' && isFinite(v))
+    : [INITIAL_CAPITAL, INITIAL_CAPITAL]
+  const eqMin = Math.min(...safeEquity, INITIAL_CAPITAL)
+  const eqMax = Math.max(...safeEquity, INITIAL_CAPITAL)
+  const eqRange = (eqMax - eqMin) || 1
 
   const chartH = 60
   const chartW = 300
 
-  const points = recentEquity.map((v, i) => {
-    const x = (i / (recentEquity.length - 1)) * chartW
+  const points = safeEquity.map((v, i) => {
+    // Guard against zero-division when length === 1 (shouldn't happen
+    // because we forced safeEquity to >= 2 entries, but be paranoid).
+    const denom = Math.max(1, safeEquity.length - 1)
+    const x = (i / denom) * chartW
     const y = chartH - ((v - eqMin) / eqRange) * (chartH - 10) - 5
     return `${x},${y}`
   }).join(' ')
