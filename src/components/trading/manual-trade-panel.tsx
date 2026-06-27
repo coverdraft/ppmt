@@ -132,7 +132,7 @@ export function ManualTradePanel() {
             </Select>
           </div>
           <div>
-            <label className="text-[10px] text-gray-500 font-mono">PRICE</label>
+            <span className="text-[10px] text-gray-500 font-mono">PRICE</span>
             <div className="h-8 flex items-center bg-[#121a26] border border-[#1e2a3d] rounded px-2">
               <span className="text-xs text-gray-200 font-mono flex-1">
                 {livePrice > 0 ? livePrice.toFixed(livePrice < 1 ? 6 : livePrice < 100 ? 4 : 2) : '...'}

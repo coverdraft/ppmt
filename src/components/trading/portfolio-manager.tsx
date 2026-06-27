@@ -303,6 +303,7 @@ export function PortfolioManager() {
 
                     {/* Active switch */}
                     <Switch
+                      aria-label={`Toggle ${token.symbol.replace('/USDT','')} active`}
                       checked={isActive}
                       onCheckedChange={(checked) => {
                         emit('toggle-token', { symbol: token.symbol })
