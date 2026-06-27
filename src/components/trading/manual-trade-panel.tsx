@@ -117,9 +117,9 @@ export function ManualTradePanel() {
         {/* Symbol selector + live price */}
         <div className="grid grid-cols-2 gap-2">
           <div>
-            <label className="text-[10px] text-gray-500 font-mono">SYMBOL</label>
+            <label htmlFor="mt-symbol" className="text-[10px] text-gray-500 font-mono">SYMBOL</label>
             <Select value={symbol} onValueChange={handleSymbolChange}>
-              <SelectTrigger className="h-8 bg-[#121a26] border-[#1e2a3d] text-xs font-mono">
+              <SelectTrigger id="mt-symbol" className="h-8 bg-[#121a26] border-[#1e2a3d] text-xs font-mono">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent className="bg-[#121a26] border-[#1e2a3d] max-h-72">
@@ -146,8 +146,10 @@ export function ManualTradePanel() {
 
         {/* Amount input */}
         <div>
-          <label className="text-[10px] text-gray-500 font-mono">AMOUNT (USDT)</label>
+          <label htmlFor="mt-amount" className="text-[10px] text-gray-500 font-mono">AMOUNT (USDT)</label>
           <Input
+            id="mt-amount"
+            name="amount"
             type="number"
             value={amount}
             onChange={(e) => setAmount(e.target.value)}
