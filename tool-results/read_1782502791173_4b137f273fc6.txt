@@ -1,0 +1,715 @@
+     1→"""
+     2→v11_backtest.py — Comprehensive backtest for low-timeframe models.
+     3→
+     4→TESTS:
+     5→  1. Fixed-exit backtest (same as v7.5) — baseline comparison
+     6→  2. Adaptive-exit backtest — SL/TP/trailing based on predicted signal strength
+     7→  3. Multi-horizon sweep — find optimal horizon per symbol
+     8→  4. Cost sensitivity — maker vs taker fees impact
+     9→  5. MTF filter — does trend alignment improve WR?
+    10→
+    11→KEY INNOVATIONS:
+    12→  - Adaptive SL/TP: wider stops for strong signals, tighter for weak
+    13→  - Trailing stop: lock in profits on strong moves
+    14→  - MTF filter: only trade when 5m/15m/1h trends align
+    15→  - Cost analysis: maker vs taker fee impact
+    16→
+    17→USAGE:
+    18→    python scripts/v11/v11_backtest.py
+    19→    python scripts/v11/v11_backtest.py --symbol SOL --horizon 36
+    20→    python scripts/v11/v11_backtest.py --adaptive
+    21→    python scripts/v11/v11_backtest.py --sweep
+    22→"""
+    23→from __future__ import annotations
+    24→
+    25→import argparse
+    26→import json
+    27→import logging
+    28→import sys
+    29→import time
+    30→from pathlib import Path
+    31→from collections import defaultdict
+    32→
+    33→import numpy as np
+    34→import pandas as pd
+    35→import lightgbm as lgb
+    36→
+    37→PROJECT_ROOT = Path(__file__).resolve().parents[2]
+    38→DATA_DIR = PROJECT_ROOT / "data"
+    39→MODELS_DIR = DATA_DIR / "v11" / "models"
+    40→OUTPUT_DIR = DATA_DIR / "v11"
+    41→
+    42→LOG = logging.getLogger("v11_bt")
+    43→logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    44→
+    45→sys.path.insert(0, str(PROJECT_ROOT / "scripts" / "v11"))
+    46→from v11_build_dataset import ALL_FEATURE_NAMES, DEFAULT_SYMBOLS, DEFAULT_HORIZONS
+    47→from v11_train import MAKER_COST_PCT, TAKER_COST_PCT
+    48→
+    49→WF_WINDOWS = 4
+    50→POSITION_NOTIONAL = 700.0
+    51→ACCOUNT_SIZE = 10000.0
+    52→
+    53→
+    54→# ============================================================================
+    55→# DATA LOADING
+    56→# ============================================================================
+    57→
+    58→def load_dataset() -> pd.DataFrame:
+    59→    """Load v11 dataset."""
+    60→    path = DATA_DIR / "v11" / "v11_dataset.parquet"
+    61→    if not path.exists():
+    62→        LOG.error("Dataset not found: %s", path)
+    63→        sys.exit(1)
+    64→    df = pd.read_parquet(path)
+    65→    LOG.info("Loaded dataset: %d rows", len(df))
+    66→    return df
+    67→
+    68→
+    69→def make_walk_forward_splits(df: pd.DataFrame, n_windows: int = WF_WINDOWS):
+    70→    """Create rolling walk-forward splits."""
+    71→    ts = df["timestamp"].values
+    72→    ts_first, ts_last = ts[0], ts[-1]
+    73→    span_ms = ts_last - ts_first
+    74→    span_days = span_ms / (1000 * 86400)
+    75→    
+    76→    test_days = max(span_days * 0.07, 0.5)
+    77→    
+    78→    splits = []
+    79→    for w in range(n_windows):
+    80→        offset_ms = int(w * test_days * 86400 * 1000)
+    81→        test_end_ts = ts_last - offset_ms
+    82→        test_start_ts = test_end_ts - int(test_days * 86400 * 1000)
+    83→        
+    84→        if test_start_ts <= ts_first:
+    85→            break
+    86→        
+    87→        train_df = df[df["timestamp"] < test_start_ts].reset_index(drop=True)
+    88→        test_df = df[(df["timestamp"] >= test_start_ts) & (df["timestamp"] < test_end_ts)].reset_index(drop=True)
+    89→        
+    90→        if len(train_df) < 500 or len(test_df) < 50:
+    91→            continue
+    92→        
+    93→        splits.append((f"w{w+1}", train_df, test_df))
+    94→    
+    95→    return splits
+    96→
+    97→
+    98→# ============================================================================
+    99→# BACKTEST ENGINES
+   100→# ============================================================================
+   101→
+   102→def _auc(y_true, y_pred):
+   103→    order = np.argsort(-y_pred)
+   104→    y_sorted = y_true[order]
+   105→    n_pos = y_sorted.sum()
+   106→    n_neg = len(y_sorted) - n_pos
+   107→    if n_pos == 0 or n_neg == 0:
+   108→        return 0.5
+   109→    tp = auc = 0.0
+   110→    for y in y_sorted:
+   111→        if y == 1:
+   112→            tp += 1
+   113→        else:
+   114→            auc += tp
+   115→    return auc / (n_pos * n_neg)
+   116→
+   117→
+   118→def sequential_backtest_fixed(
+   119→    pred: np.ndarray,
+   120→    fwd_ret: np.ndarray,
+   121→    q_long: int,
+   122→    q_short: int,
+   123→    hold_bars: int,
+   124→    window_size: int = 200,
+   125→    cost_pct: float = MAKER_COST_PCT,
+   126→) -> dict:
+   127→    """Fixed-exit sequential backtest (v7.5 style)."""
+   128→    n_trades = 0
+   129→    n_win = 0
+   130→    pnl = 0.0
+   131→    in_trade = False
+   132→    exit_bar = 0
+   133→    recent_preds = []
+   134→    trade_returns = []
+   135→    n_long = 0
+   136→    n_short = 0
+   137→    
+   138→    for i in range(len(pred)):
+   139→        p_val = float(pred[i])
+   140→        recent_preds.append(p_val)
+   141→        if len(recent_preds) > window_size:
+   142→            recent_preds.pop(0)
+   143→        
+   144→        if in_trade:
+   145→            if i >= exit_bar:
+   146→                in_trade = False
+   147→            else:
+   148→                continue
+   149→        
+   150→        if len(recent_preds) < 20:
+   151→            continue
+   152→        
+   153→        q_high = np.percentile(recent_preds, q_long)
+   154→        q_low = np.percentile(recent_preds, q_short)
+   155→        
+   156→        sig = 0
+   157→        if p_val > q_high:
+   158→            sig = 1
+   159→            n_long += 1
+   160→        elif p_val < q_low:
+   161→            sig = -1
+   162→            n_short += 1
+   163→        
+   164→        if sig != 0 and not np.isnan(fwd_ret[i]):
+   165→            n_trades += 1
+   166→            trade_ret = sig * fwd_ret[i] - cost_pct
+   167→            pnl += trade_ret
+   168→            trade_returns.append(trade_ret)
+   169→            in_trade = True
+   170→            exit_bar = i + hold_bars
+   171→            if trade_ret > 0:
+   172→                n_win += 1
+   173→    
+   174→    return _compute_metrics(trade_returns, n_trades, n_win, n_long, n_short, pnl)
+   175→
+   176→
+   177→def sequential_backtest_adaptive(
+   178→    pred: np.ndarray,
+   179→    fwd_ret: np.ndarray,
+   180→    close_prices: np.ndarray,
+   181→    q_long: int,
+   182→    q_short: int,
+   183→    hold_bars: int,
+   184→    window_size: int = 200,
+   185→    cost_pct: float = MAKER_COST_PCT,
+   186→    # Adaptive exit parameters
+   187→    sl_atr_mult: float = 2.0,       # SL = entry ± ATR * mult
+   188→    tp_atr_mult: float = 3.0,       # TP = entry ± ATR * mult
+   189→    trail_atr_mult: float = 1.5,    # Trail activation = ATR * mult in profit
+   190→    trail_step: float = 0.5,        # Trail step in ATR units
+   191→) -> dict:
+   192→    """Adaptive-exit sequential backtest with SL/TP and trailing stop.
+   193→    
+   194→    KEY IDEA: Instead of holding for the full horizon, exit early if:
+   195→    - SL hit: price moves against us by SL_atr * ATR
+   196→    - TP hit: price moves in our favor by TP_atr * ATR
+   197→    - Trail: after moving trail_atr * ATR in profit, trail by trail_step * ATR
+   198→    
+   199→    This should improve WR by cutting losses early and letting winners run.
+   200→    """
+   201→    n_trades = 0
+   202→    n_win = 0
+   203→    pnl = 0.0
+   204→    in_trade = False
+   205→    entry_bar = 0
+   206→    entry_price = 0.0
+   207→    side = 0
+   208→    exit_bar = 0
+   209→    recent_preds = []
+   210→    trade_returns = []
+   211→    n_long = 0
+   212→    n_short = 0
+   213→    n_sl = 0
+   214→    n_tp = 0
+   215→    n_trail = 0
+   216→    n_hold = 0
+   217→    
+   218→    # Compute ATR for adaptive exits (rolling 14-bar range)
+   219→    if len(close_prices) > 14:
+   220→        atr = np.zeros(len(close_prices))
+   221→        for i in range(1, len(close_prices)):
+   222→            atr[i] = abs(close_prices[i] - close_prices[i-1])
+   223→        atr = pd.Series(atr).rolling(14, min_periods=5).mean().values
+   224→        atr = np.nan_to_num(atr, nan=0.001)
+   225→        atr = np.maximum(atr, close_prices * 0.001)  # floor at 0.1% of price
+   226→    else:
+   227→        atr = np.full(len(close_prices), close_prices.mean() * 0.01)
+   228→    
+   229→    for i in range(len(pred)):
+   230→        p_val = float(pred[i])
+   231→        recent_preds.append(p_val)
+   232→        if len(recent_preds) > window_size:
+   233→            recent_preds.pop(0)
+   234→        
+   235→        # Check exit conditions for open trade
+   236→        if in_trade:
+   237→            current_price = close_prices[i]
+   238→            atr_val = atr[i]
+   239→            
+   240→            if side == 1:  # LONG
+   241→                unrealized = current_price - entry_price
+   242→                
+   243→                # SL check
+   244→                if current_price <= entry_price - sl_atr_mult * atr_val:
+   245→                    trade_ret = (current_price - entry_price) / entry_price * 100 - cost_pct
+   246→                    trade_returns.append(trade_ret)
+   247→                    pnl += trade_ret
+   248→                    n_trades += 1
+   249→                    n_sl += 1
+   250→                    if trade_ret > 0:
+   251→                        n_win += 1
+   252→                    in_trade = False
+   253→                    continue
+   254→                
+   255→                # TP check
+   256→                if current_price >= entry_price + tp_atr_mult * atr_val:
+   257→                    trade_ret = (current_price - entry_price) / entry_price * 100 - cost_pct
+   258→                    trade_returns.append(trade_ret)
+   259→                    pnl += trade_ret
+   260→                    n_trades += 1
+   261→                    n_tp += 1
+   262→                    if trade_ret > 0:
+   263→                        n_win += 1
+   264→                    in_trade = False
+   265→                    continue
+   266→                
+   267→                # Trailing stop
+   268→                max_price = np.max(close_prices[entry_bar:i+1])
+   269→                if max_price >= entry_price + trail_atr_mult * atr_val:
+   270→                    trail_price = max_price - trail_step * atr_val
+   271→                    if current_price <= trail_price:
+   272→                        trade_ret = (current_price - entry_price) / entry_price * 100 - cost_pct
+   273→                        trade_returns.append(trade_ret)
+   274→                        pnl += trade_ret
+   275→                        n_trades += 1
+   276→                        n_trail += 1
+   277→                        if trade_ret > 0:
+   278→                            n_win += 1
+   279→                        in_trade = False
+   280→                        continue
+   281→                
+   282→                # Hold expiry
+   283→                if i >= exit_bar:
+   284→                    trade_ret = (current_price - entry_price) / entry_price * 100 - cost_pct
+   285→                    trade_returns.append(trade_ret)
+   286→                    pnl += trade_ret
+   287→                    n_trades += 1
+   288→                    n_hold += 1
+   289→                    if trade_ret > 0:
+   290→                        n_win += 1
+   291→                    in_trade = False
+   292→                    continue
+   293→            
+   294→            elif side == -1:  # SHORT
+   295→                unrealized = entry_price - current_price
+   296→                
+   297→                # SL check
+   298→                if current_price >= entry_price + sl_atr_mult * atr_val:
+   299→                    trade_ret = (entry_price - current_price) / entry_price * 100 - cost_pct
+   300→                    trade_returns.append(trade_ret)
+   301→                    pnl += trade_ret
+   302→                    n_trades += 1
+   303→                    n_sl += 1
+   304→                    if trade_ret > 0:
+   305→                        n_win += 1
+   306→                    in_trade = False
+   307→                    continue
+   308→                
+   309→                # TP check
+   310→                if current_price <= entry_price - tp_atr_mult * atr_val:
+   311→                    trade_ret = (entry_price - current_price) / entry_price * 100 - cost_pct
+   312→                    trade_returns.append(trade_ret)
+   313→                    pnl += trade_ret
+   314→                    n_trades += 1
+   315→                    n_tp += 1
+   316→                    if trade_ret > 0:
+   317→                        n_win += 1
+   318→                    in_trade = False
+   319→                    continue
+   320→                
+   321→                # Trailing stop
+   322→                min_price = np.min(close_prices[entry_bar:i+1])
+   323→                if min_price <= entry_price - trail_atr_mult * atr_val:
+   324→                    trail_price = min_price + trail_step * atr_val
+   325→                    if current_price >= trail_price:
+   326→                        trade_ret = (entry_price - current_price) / entry_price * 100 - cost_pct
+   327→                        trade_returns.append(trade_ret)
+   328→                        pnl += trade_ret
+   329→                        n_trades += 1
+   330→                        n_trail += 1
+   331→                        if trade_ret > 0:
+   332→                            n_win += 1
+   333→                        in_trade = False
+   334→                        continue
+   335→                
+   336→                # Hold expiry
+   337→                if i >= exit_bar:
+   338→                    trade_ret = (entry_price - current_price) / entry_price * 100 - cost_pct
+   339→                    trade_returns.append(trade_ret)
+   340→                    pnl += trade_ret
+   341→                    n_trades += 1
+   342→                    n_hold += 1
+   343→                    if trade_ret > 0:
+   344→                        n_win += 1
+   345→                    in_trade = False
+   346→                    continue
+   347→        
+   348→        # Entry signal
+   349→        if len(recent_preds) < 20:
+   350→            continue
+   351→        
+   352→        q_high = np.percentile(recent_preds, q_long)
+   353→        q_low = np.percentile(recent_preds, q_short)
+   354→        
+   355→        if p_val > q_high:
+   356→            side = 1
+   357→            n_long += 1
+   358→        elif p_val < q_low:
+   359→            side = -1
+   360→            n_short += 1
+   361→        else:
+   362→            continue
+   363→        
+   364→        # Enter trade
+   365→        if not np.isnan(fwd_ret[i]):
+   366→            in_trade = True
+   367→            entry_bar = i
+   368→            entry_price = close_prices[i]
+   369→            exit_bar = i + hold_bars
+   370→    
+   371→    result = _compute_metrics(trade_returns, n_trades, n_win, n_long, n_short, pnl)
+   372→    result["n_sl"] = n_sl
+   373→    result["n_tp"] = n_tp
+   374→    result["n_trail"] = n_trail
+   375→    result["n_hold"] = n_hold
+   376→    return result
+   377→
+   378→
+   379→def _compute_metrics(trade_returns, n_trades, n_win, n_long, n_short, pnl):
+   380→    """Compute standard metrics from trade returns."""
+   381→    if not trade_returns:
+   382→        return {
+   383→            "n_trades": 0, "n_long": 0, "n_short": 0,
+   384→            "win_rate": 0, "avg_ret_pct": 0, "pnl_pct": 0,
+   385→            "sharpe": 0, "max_dd_pct": 0, "profit_factor": 0,
+   386→        }
+   387→    
+   388→    trade_returns = np.array(trade_returns)
+   389→    wr = float((trade_returns > 0).mean())
+   390→    avg_ret = float(trade_returns.mean())
+   391→    sharpe = float(np.mean(trade_returns) / np.std(trade_returns)) if len(trade_returns) > 1 and np.std(trade_returns) > 0 else 0
+   392→    
+   393→    cum = np.cumsum(trade_returns)
+   394→    running_max = np.maximum.accumulate(cum)
+   395→    dd = cum - running_max
+   396→    max_dd = float(dd.min()) if len(dd) > 0 else 0
+   397→    
+   398→    gains = float(trade_returns[trade_returns > 0].sum())
+   399→    losses = float(-trade_returns[trade_returns < 0].sum())
+   400→    pf = gains / losses if losses > 0 else (99.0 if gains > 0 else 0)
+   401→    
+   402→    return {
+   403→        "n_trades": n_trades,
+   404→        "n_long": n_long,
+   405→        "n_short": n_short,
+   406→        "win_rate": round(wr, 4),
+   407→        "avg_ret_pct": round(avg_ret, 4),
+   408→        "pnl_pct": round(float(pnl), 4),
+   409→        "sharpe": round(sharpe, 4),
+   410→        "max_dd_pct": round(max_dd, 4),
+   411→        "profit_factor": round(pf, 4),
+   412→    }
+   413→
+   414→
+   415→# ============================================================================
+   416→# MAIN
+   417→# ============================================================================
+   418→
+   419→def main():
+   420→    parser = argparse.ArgumentParser(description="v11 backtest")
+   421→    parser.add_argument("--symbol", default=None)
+   422→    parser.add_argument("--horizon", type=int, default=None)
+   423→    parser.add_argument("--adaptive", action="store_true", help="Use adaptive exits")
+   424→    parser.add_argument("--sweep", action="store_true", help="Full sweep of all configs")
+   425→    parser.add_argument("--cost", choices=["maker", "taker", "both"], default="maker")
+   426→    args = parser.parse_args()
+   427→    
+   428→    symbols = [args.symbol] if args.symbol else DEFAULT_SYMBOLS
+   429→    horizons = [args.horizon] if args.horizon else DEFAULT_HORIZONS
+   430→    
+   431→    print("=" * 110)
+   432→    print("v11 BACKTEST — Low Timeframe Trading")
+   433→    print(f"  Symbols: {symbols}")
+   434→    print(f"  Horizons: {horizons}")
+   435→    print(f"  Exit mode: {'ADAPTIVE (SL/TP/Trail)' if args.adaptive else 'FIXED (hold until expiry)'}")
+   436→    print(f"  Cost: {args.cost}")
+   437→    print("=" * 110)
+   438→    
+   439→    df = load_dataset()
+   440→    
+   441→    # Cost configs
+   442→    costs = {"maker": 0.04, "taker": 0.14}
+   443→    cost_list = [args.cost] if args.cost != "both" else ["maker", "taker"]
+   444→    
+   445→    # Q configs to sweep
+   446→    q_configs = [
+   447→        (95, 5), (92, 8), (90, 10), (87, 13), (85, 15), (82, 18), (80, 20),
+   448→    ]
+   449→    
+   450→    all_results = []
+   451→    
+   452→    for symbol in symbols:
+   453→        sym_df = df[df["symbol"] == symbol].copy().reset_index(drop=True)
+   454→        if len(sym_df) < 1000:
+   455→            LOG.warning("Skipping %s: only %d rows", symbol, len(sym_df))
+   456→            continue
+   457→        
+   458→        for horizon in horizons:
+   459→            label_col = f"label_h{horizon}"
+   460→            fwd_col = f"fwd_ret_h{horizon}"
+   461→            
+   462→            if label_col not in sym_df.columns:
+   463→                continue
+   464→            
+   465→            valid_df = sym_df[sym_df[label_col].notna()].reset_index(drop=True)
+   466→            if len(valid_df) < 500:
+   467→                continue
+   468→            
+   469→            splits = make_walk_forward_splits(valid_df, WF_WINDOWS)
+   470→            if len(splits) < 2:
+   471→                continue
+   472→            
+   473→            for split_name, train_df, test_df in splits:
+   474→                X_tr = train_df[ALL_FEATURE_NAMES].values.astype(np.float32)
+   475→                y_tr = train_df[label_col].values.astype(np.float32)
+   476→                X_test = test_df[ALL_FEATURE_NAMES].values.astype(np.float32)
+   477→                y_test = test_df[label_col].values.astype(np.float32)
+   478→                fwd_ret = test_df[fwd_col].values.astype(np.float64)
+   479→                close_prices = test_df["close"].values.astype(np.float64)
+   480→                
+   481→                # Train model
+   482→                from v11_train import HP_PRESETS, SYMBOL_HP, SYMBOL_HP_OVERRIDE, BASE_PARAMS, NUM_BOOST_ROUND
+   483→                hp_name = SYMBOL_HP_OVERRIDE.get((symbol, horizon), SYMBOL_HP.get(horizon, "default"))
+   484→                hp = HP_PRESETS.get(hp_name, HP_PRESETS["default"])
+   485→                params = dict(BASE_PARAMS)
+   486→                params.update(hp)
+   487→                
+   488→                d_tr = lgb.Dataset(X_tr, label=y_tr, feature_name=ALL_FEATURE_NAMES, free_raw_data=False)
+   489→                bst = lgb.train(params, d_tr, num_boost_round=NUM_BOOST_ROUND,
+   490→                               callbacks=[lgb.log_evaluation(period=0)])
+   491→                
+   492→                pred = bst.predict(X_test)
+   493→                auc_test = float(_auc(y_test, pred))
+   494→                
+   495→                # Backtest with each config
+   496→                for cost_name in cost_list:
+   497→                    cost_pct = costs[cost_name]
+   498→                    
+   499→                    for q_long, q_short in q_configs:
+   500→                        if args.adaptive:
+   501→                            bt = sequential_backtest_adaptive(
+   502→                                pred, fwd_ret, close_prices,
+   503→                                q_long, q_short, horizon,
+   504→                                cost_pct=cost_pct,
+   505→                            )
+   506→                        else:
+   507→                            bt = sequential_backtest_fixed(
+   508→                                pred, fwd_ret,
+   509→                                q_long, q_short, horizon,
+   510→                                cost_pct=cost_pct,
+   511→                            )
+   512→                        
+   513→                        all_results.append({
+   514→                            "symbol": symbol,
+   515→                            "horizon": horizon,
+   516→                            "horizon_h": horizon * 5 / 60,
+   517→                            "split": split_name,
+   518→                            "cost": cost_name,
+   519→                            "cost_pct": cost_pct,
+   520→                            "q_long": q_long,
+   521→                            "q_short": q_short,
+   522→                            "exit_mode": "adaptive" if args.adaptive else "fixed",
+   523→                            "auc_test": round(auc_test, 4),
+   524→                            **bt,
+   525→                        })
+   526→            
+   527→            LOG.info("  %s H=%d done", symbol, horizon)
+   528→    
+   529→    if not all_results:
+   530→        LOG.error("No backtest results generated")
+   531→        sys.exit(1)
+   532→    
+   533→    # Save raw results
+   534→    results_df = pd.DataFrame(all_results)
+   535→    results_path = OUTPUT_DIR / "v11_backtest_raw.parquet"
+   536→    results_df.to_parquet(results_path, index=False)
+   537→    LOG.info("Raw results saved to %s", results_path)
+   538→    
+   539→    # Aggregate across windows
+   540→    agg = results_df.groupby(["symbol", "horizon", "horizon_h", "cost", "q_long", "q_short", "exit_mode"]).agg(
+   541→        auc_test=("auc_test", "mean"),
+   542→        n_trades=("n_trades", "sum"),
+   543→        win_rate=("win_rate", "mean"),
+   544→        avg_ret_pct=("avg_ret_pct", "mean"),
+   545→        pnl_pct=("pnl_pct", "sum"),
+   546→        sharpe=("sharpe", "mean"),
+   547→        max_dd_pct=("max_dd_pct", "min"),
+   548→        profit_factor=("profit_factor", "mean"),
+   549→        n_windows=("pnl_pct", "count"),
+   550→        pnl_positive=("pnl_pct", lambda x: (x > 0).sum()),
+   551→    ).reset_index()
+   552→    
+   553→    agg["consistency"] = agg.apply(
+   554→        lambda r: f"{int(r['pnl_positive'])}/{int(r['n_windows'])}", axis=1
+   555→    )
+   556→    
+   557→    # Save aggregated
+   558→    agg_path = OUTPUT_DIR / "v11_backtest_agg.parquet"
+   559→    agg.to_parquet(agg_path, index=False)
+   560→    
+   561→    # Print report
+   562→    _print_report(agg, args.adaptive)
+   563→    
+   564→    # Save summary JSON
+   565→    summary = {
+   566→        "config": {
+   567→            "symbols": symbols,
+   568→            "horizons": horizons,
+   569→            "exit_mode": "adaptive" if args.adaptive else "fixed",
+   570→            "cost": args.cost,
+   571→        },
+   572→        "best_per_symbol_horizon": _get_best_per_group(agg),
+   573→    }
+   574→    with open(OUTPUT_DIR / "v11_backtest_summary.json", "w") as f:
+   575→        json.dump(summary, f, indent=2, default=str)
+   576→
+   577→
+   578→def _get_best_per_group(agg: pd.DataFrame) -> list:
+   579→    """Get best config per (symbol, horizon)."""
+   580→    results = []
+   581→    for (sym, h), group in agg.groupby(["symbol", "horizon"]):
+   582→        best = group.sort_values("pnl_pct", ascending=False).iloc[0]
+   583→        results.append({
+   584→            "symbol": sym,
+   585→            "horizon": int(h),
+   586→            "horizon_h": float(best["horizon_h"]),
+   587→            "best_q": f"Q{int(best['q_long'])}/{int(best['q_short'])}",
+   588→            "best_cost": best["cost"],
+   589→            "best_exit": best["exit_mode"],
+   590→            "pnl_pct": float(best["pnl_pct"]),
+   591→            "win_rate": float(best["win_rate"]),
+   592→            "sharpe": float(best["sharpe"]),
+   593→            "profit_factor": float(best["profit_factor"]),
+   594→            "consistency": best["consistency"],
+   595→            "n_trades": int(best["n_trades"]),
+   596→        })
+   597→    return results
+   598→
+   599→
+   600→def _print_report(agg: pd.DataFrame, adaptive: bool):
+   601→    """Print comprehensive backtest report."""
+   602→    print("\n" + "=" * 130)
+   603→    mode_str = "ADAPTIVE (SL/TP/Trail)" if adaptive else "FIXED (hold until expiry)"
+   604→    print(f"v11 BACKTEST REPORT — {mode_str}")
+   605→    print("=" * 130)
+   606→    
+   607→    # 1. Best config per (symbol, horizon)
+   608→    print("\n--- BEST CONFIG PER SYMBOL × HORIZON ---")
+   609→    print(f"{'Symbol':<8} {'Horizon':>8} {'Q':>8} {'Cost':>6} {'PnL%':>9} "
+   610→          f"{'WR':>6} {'Sharpe':>7} {'PF':>6} {'Cons':>6} {'Trades':>7}")
+   611→    print("-" * 80)
+   612→    
+   613→    for (sym, h), group in agg.groupby(["symbol", "horizon"]):
+   614→        best = group.sort_values("pnl_pct", ascending=False).iloc[0]
+   615→        print(f"{sym:<8} {h:>5d}({h*5//60}h) Q{int(best['q_long'])}/{int(best['q_short']):>2d} "
+   616→              f"{best['cost']:>6} {best['pnl_pct']:>+8.2f}% "
+   617→              f"{best['win_rate']:>5.3f} {best['sharpe']:>+6.3f} "
+   618→              f"{best['profit_factor']:>5.2f} {best['consistency']:>6} "
+   619→              f"{int(best['n_trades']):>7}")
+   620→    
+   621→    # 2. Horizon comparison
+   622→    print("\n--- HORIZON COMPARISON (maker fees, best Q per group) ---")
+   623→    print(f"{'Horizon':>8} {'Avg PnL':>10} {'Avg WR':>10} {'Avg Sharpe':>12} "
+   624→          f"{'% Positive':>12} {'Best PnL':>10}")
+   625→    print("-" * 70)
+   626→    
+   627→    for h in sorted(agg["horizon"].unique()):
+   628→        h_df = agg[agg["horizon"] == h]
+   629→        # Get best per symbol within this horizon
+   630→        best_per_sym = h_df.groupby("symbol").apply(lambda x: x.sort_values("pnl_pct", ascending=False).iloc[0])
+   631→        if len(best_per_sym) == 0:
+   632→            continue
+   633→        
+   634→        print(f"{h:>5d}({h*5//60}h) {best_per_sym['pnl_pct'].mean():>+9.2f}% "
+   635→              f"{best_per_sym['win_rate'].mean():>9.3f} "
+   636→              f"{best_per_sym['sharpe'].mean():>+11.3f} "
+   637→              f"{(best_per_sym['pnl_pct'] > 0).mean()*100:>10.0f}% "
+   638→              f"{best_per_sym['pnl_pct'].max():>+9.2f}%")
+   639→    
+   640→    # 3. Cost sensitivity
+   641→    if len(agg["cost"].unique()) > 1:
+   642→        print("\n--- COST SENSITIVITY ---")
+   643→        for cost_name in ["maker", "taker"]:
+   644→            cost_df = agg[agg["cost"] == cost_name]
+   645→            best_per_sym = cost_df.groupby(["symbol", "horizon"]).apply(
+   646→                lambda x: x.sort_values("pnl_pct", ascending=False).iloc[0]
+   647→            )
+   648→            if len(best_per_sym) > 0:
+   649→                print(f"  {cost_name:>6}: avg PnL={best_per_sym['pnl_pct'].mean():+.2f}%, "
+   650→                      f"avg WR={best_per_sym['win_rate'].mean():.3f}, "
+   651→                      f"avg Sharpe={best_per_sym['sharpe'].mean():+.3f}")
+   652→    
+   653→    # 4. Top 20 configs
+   654→    print("\n--- TOP 20 CONFIGS BY PnL ---")
+   655→    top = agg.sort_values("pnl_pct", ascending=False).head(20)
+   656→    cols = ["symbol", "horizon", "q_long", "q_short", "cost", "n_trades",
+   657→            "win_rate", "pnl_pct", "sharpe", "profit_factor", "consistency"]
+   658→    print(top[cols].to_string(index=False))
+   659→    
+   660→    # 5. Honest assessment
+   661→    print("\n" + "=" * 130)
+   662→    print("HONEST ASSESSMENT")
+   663→    print("=" * 130)
+   664→    
+   665→    robust = agg[(agg["pnl_pct"] > 0) & (agg["pnl_positive"] >= 3)]
+   666→    very_robust = agg[(agg["pnl_pct"] > 5) & (agg["pnl_positive"] >= 3)]
+   667→    
+   668→    if len(very_robust) > 0:
+   669→        print(f"\n  VERY ROBUST configs (PnL>5%, >=3/4 windows): {len(very_robust)}")
+   670→        for _, r in very_robust.sort_values("pnl_pct", ascending=False).head(10).iterrows():
+   671→            print(f"    {r['symbol']:>5s} H={int(r['horizon']):>3d} Q{int(r['q_long'])}/{int(r['q_short'])} "
+   672→                  f"Cost={r['cost']:>5s} PnL={r['pnl_pct']:+.2f}% WR={r['win_rate']:.3f} "
+   673→                  f"Sharpe={r['sharpe']:+.3f} Cons={r['consistency']}")
+   674→    elif len(robust) > 0:
+   675→        print(f"\n  MODERATE configs (PnL>0, >=3/4): {len(robust)}")
+   676→    else:
+   677→        print(f"\n  NO robust configs — signal is weak")
+   678→    
+   679→    # 6. WR improvement opportunities
+   680→    print("\n--- WR IMPROVEMENT ANALYSIS ---")
+   681→    best_overall = agg.sort_values("pnl_pct", ascending=False).iloc[0]
+   682→    print(f"  Best WR: {best_overall['win_rate']:.3f} (PnL={best_overall['pnl_pct']:+.2f}%)")
+   683→    
+   684→    # Check adaptive vs fixed
+   685→    if len(agg["exit_mode"].unique()) > 1:
+   686→        for mode in agg["exit_mode"].unique():
+   687→            mode_df = agg[agg["exit_mode"] == mode]
+   688→            best = mode_df.sort_values("pnl_pct", ascending=False).iloc[0]
+   689→            print(f"  {mode:>8}: best WR={best['win_rate']:.3f}, PnL={best['pnl_pct']:+.2f}%")
+   690→    
+   691→    # v7.5 comparison
+   692→    print("\n--- COMPARISON WITH v7.5 BASELINE (H=288, 24h) ---")
+   693→    v75_row = agg[agg["horizon"] == 288]
+   694→    if len(v75_row) > 0:
+   695→        best_v75 = v75_row.sort_values("pnl_pct", ascending=False).iloc[0]
+   696→        print(f"  v11 H=288: PnL={best_v75['pnl_pct']:+.2f}% WR={best_v75['win_rate']:.3f} "
+   697→              f"Sharpe={best_v75['sharpe']:+.3f}")
+   698→        print(f"  v7.5 ref:  PnL=+333.76% WR=0.517 Sharpe=2.80")
+   699→    
+   700→    # Short horizon verdict
+   701→    short_horizons = agg[agg["horizon"] < 288]
+   702→    if len(short_horizons) > 0:
+   703→        print("\n--- SHORT HORIZON VERDICT (< 24h) ---")
+   704→        for h in sorted(short_horizons["horizon"].unique()):
+   705→            h_df = short_horizons[short_horizons["horizon"] == h]
+   706→            best = h_df.sort_values("pnl_pct", ascending=False).iloc[0]
+   707→            positive_count = (h_df.groupby(["symbol", "q_long", "q_short"])["pnl_pct"].sum() > 0).sum()
+   708→            total_count = len(h_df.groupby(["symbol", "q_long", "q_short"]))
+   709→            print(f"  H={h} ({h*5/60:.0f}h): Best PnL={best['pnl_pct']:+.2f}% WR={best['win_rate']:.3f} "
+   710→                  f"Sharpe={best['sharpe']:+.3f} — {positive_count}/{total_count} configs positive")
+   711→
+   712→
+   713→if __name__ == "__main__":
+   714→    main()
+   715→

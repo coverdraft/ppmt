@@ -1,0 +1,812 @@
+     1→"""
+     2→v11_build_dataset.py — Build dataset for low-timeframe trading (1h-6h horizons).
+     3→
+     4→KEY INNOVATIONS vs v7.5:
+     5→  1. 1m candle base — microstructure features (volume delta, CVD, price impact)
+     6→  2. Multi-timeframe aggregation from 1m (5m/15m/1h all from 1m data)
+     7→  3. Intermediate horizons: H=12 (1h), H=36 (3h), H=72 (6h) — the "marginal" zone
+     8→  4. Microstructure features: CVD, volume delta, order flow acceleration
+     9→  5. Maker fees (0.04%) — essential for short horizons
+    10→
+    11→FIXED (v2):
+    12→  - Robust timestamp handling: auto-detect ms vs seconds vs datetime
+    13→  - All cross-DataFrame merges use merge_asof (no exact merge on timestamp)
+    14→  - Deduplication after every step
+    15→  - Validation of timestamp range before saving
+    16→
+    17→DATA SOURCES:
+    18→  - 1m OHLCV from v10 cache (data/v10/ohlcv_cache/{SYMBOL}_1m.parquet)
+    19→  - BTC 1m as reference
+    20→  - All features computed from 1m candles, aggregated into multi-timeframe
+    21→
+    22→OUTPUT:
+    23→  - data/v11/v11_dataset.parquet — full dataset with all features + labels
+    24→
+    25→USAGE:
+    26→    python scripts/v11/v11_build_dataset.py
+    27→    python scripts/v11/v11_build_dataset.py --symbols SOL,DOGE,AVAX
+    28→    python scripts/v11/v11_build_dataset.py --horizons 12
+    29→"""
+    30→from __future__ import annotations
+    31→
+    32→import argparse
+    33→import logging
+    34→import os
+    35→import sys
+    36→import time
+    37→from pathlib import Path
+    38→
+    39→import numpy as np
+    40→import pandas as pd
+    41→
+    42→PROJECT_ROOT = Path(__file__).resolve().parents[2]
+    43→DATA_DIR = PROJECT_ROOT / "data"
+    44→CACHE_DIR = DATA_DIR / "v10" / "ohlcv_cache"
+    45→OUTPUT_DIR = DATA_DIR / "v11"
+    46→OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    47→
+    48→LOG = logging.getLogger("v11_build")
+    49→logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    50→
+    51→# Symbols with 1m data available
+    52→DEFAULT_SYMBOLS = ["SOL", "DOGE", "AVAX"]  # BTC excluded (dead end), ETH not in cache
+    53→
+    54→# Horizons on 5m bars (we aggregate 1m→5m for trading)
+    55→DEFAULT_HORIZONS = [12, 36, 72, 288]  # 1h, 3h, 6h, 24h
+    56→
+    57→
+    58→# ============================================================================
+    59→# FEATURE SPECIFICATION
+    60→# ============================================================================
+    61→
+    62→FEATURES_MICRO_1M = [
+    63→    "ret_1m", "ret_3m", "ret_5m",
+    64→    "vol_delta_1m", "vol_delta_5m",
+    65→    "body_pct_1m", "wick_ratio_1m",
+    66→    "cvd_1m", "cvd_5m",
+    67→    "price_impact_1m",
+    68→    "micro_momentum_5m",
+    69→    "vol_clustering_10m",
+    70→    "order_flow_accel_5m",
+    71→]
+    72→
+    73→FEATURES_5M_V5 = [
+    74→    "body_pct", "upper_wick", "lower_wick", "body_abs", "close_pos", "range_pct",
+    75→    "ret_1", "ret_3", "ret_5", "ret_10", "log_ret_1",
+    76→    "atr_pct", "vol_std_10", "rsi_14",
+    77→    "ema_9_20_cross", "ema_20_50_cross", "ema_9_slope", "ema_20_slope", "ema_50_slope",
+    78→    "price_vs_ema20", "price_vs_ema50", "vol_ratio", "vol_z",
+    79→    "last_3_body_sum", "last_3_range_sum",
+    80→    "bullish_engulf_2", "hammer_like", "shooting_star",
+    81→    "breakout_up", "breakout_down", "dist_to_high_20", "dist_to_low_20",
+    82→    "trend_50", "vol_regime", "trending",
+    83→    "hour_sin", "hour_cos",
+    84→]
+    85→
+    86→FEATURES_5M_V6 = [
+    87→    "btc_ret_1m", "btc_ret_5m", "btc_ret_15m", "btc_vol_z",
+    88→    "btc_trend_50", "eth_corr_30", "btc_alt_spread_15m", "btc_volatility_regime",
+    89→    "vol_delta_3", "wick_imbalance_3", "body_consistency_5",
+    90→    "range_expansion_3", "close_persistence_5", "vol_acceleration",
+    91→    "atr_percentile_50", "trend_strength_50", "regime_vol_trend", "hour_quantile",
+    92→    "alt_lead_5m", "alt_lag_signal", "momentum_dispersion",
+    93→]
+    94→
+    95→FEATURES_15M = [
+    96→    "trend_15m",
+    97→    "rsi_15m",
+    98→    "vol_regime_15m",
+    99→    "btc_trend_15m",
+   100→]
+   101→
+   102→FEATURES_1H = [
+   103→    "trend_1h",
+   104→    "rsi_1h",
+   105→    "vol_regime_1h",
+   106→    "btc_trend_1h",
+   107→    "mtf_alignment",
+   108→]
+   109→
+   110→ALL_FEATURE_NAMES = (
+   111→    FEATURES_MICRO_1M + FEATURES_5M_V5 + FEATURES_5M_V6 +
+   112→    FEATURES_15M + FEATURES_1H
+   113→)
+   114→
+   115→
+   116→# ============================================================================
+   117→# TIMESTAMP UTILITIES (ROBUST)
+   118→# ============================================================================
+   119→
+   120→def normalize_timestamps_ms(df: pd.DataFrame, col: str = "timestamp") -> pd.DataFrame:
+   121→    """Ensure timestamp column is int64 milliseconds since epoch.
+   122→    
+   123→    Handles all common formats:
+   124→    - int64 milliseconds (expected: values > 1e12 for recent dates)
+   125→    - int64 seconds (values ~1.7e9 for 2024-2026)
+   126→    - datetime64[ns] (pandas Timestamp type)
+   127→    - datetime64 with timezone
+   128→    """
+   129→    df = df.copy()
+   130→    ts = df[col]
+   131→    
+   132→    if pd.api.types.is_datetime64_any_dtype(ts):
+   133→        # Already datetime — convert to ms
+   134→        df[col] = ts.astype(np.int64) // 10**6
+   135→        LOG.debug("  normalize_timestamps: datetime64 → int64 ms")
+   136→    elif pd.api.types.is_numeric_dtype(ts):
+   137→        # Numeric — check if seconds or milliseconds
+   138→        median_val = ts.median()
+   139→        if median_val > 1e12:
+   140→            # Already in milliseconds (e.g., 1750975200000)
+   141→            df[col] = ts.astype(np.int64)
+   142→            LOG.debug("  normalize_timestamps: already ms int64")
+   143→        elif median_val > 1e9:
+   144→            # In seconds (e.g., 1750975200) — convert to ms
+   145→            df[col] = (ts * 1000).astype(np.int64)
+   146→            LOG.info("  normalize_timestamps: seconds → ms (multiplied by 1000)")
+   147→        else:
+   148→            # Values too small — probably corrupted, but try to handle
+   149→            LOG.warning("  normalize_timestamps: unexpected values (median=%.0f) — attempting x1000000",
+   150→                        median_val)
+   151→            df[col] = (ts * 1_000_000).astype(np.int64)
+   152→    else:
+   153→        # String or object type
+   154→        try:
+   155→            df[col] = pd.to_datetime(ts, utc=True).astype(np.int64) // 10**6
+   156→            LOG.info("  normalize_timestamps: string/object → ms")
+   157→        except Exception as e:
+   158→            raise ValueError(f"Cannot normalize timestamps: {e}")
+   159→    
+   160→    # Validate: timestamps should be in a reasonable range (2020-2030)
+   161→    ts_ms = df[col].values
+   162→    ts_min = ts_ms.min()
+   163→    ts_max = ts_ms.max()
+   164→    # 2020-01-01 = 1577836800000 ms, 2035-01-01 = 2051222400000 ms
+   165→    if ts_min < 1577836800000 or ts_max > 2051222400000:
+   166→        LOG.warning("  Timestamps out of expected range: min=%d max=%d", ts_min, ts_max)
+   167→    
+   168→    return df
+   169→
+   170→
+   171→def ts_to_datetime(ts_ms: pd.Series | np.ndarray) -> pd.DatetimeIndex:
+   172→    """Convert millisecond timestamps to datetime (UTC)."""
+   173→    return pd.to_datetime(ts_ms, unit="ms", utc=True)
+   174→
+   175→
+   176→# ============================================================================
+   177→# 1m MICROSTRUCTURE FEATURES
+   178→# ============================================================================
+   179→
+   180→def compute_microstructure_features(df_1m: pd.DataFrame) -> pd.DataFrame:
+   181→    """Compute microstructure features on 1m candles."""
+   182→    df = df_1m.copy().reset_index(drop=True)
+   183→    o, h, l, c, v = df["open"], df["high"], df["low"], df["close"], df["volume"]
+   184→    
+   185→    df["ret_1m"] = c.pct_change(1)
+   186→    df["ret_3m"] = c.pct_change(3)
+   187→    df["ret_5m"] = c.pct_change(5)
+   188→    
+   189→    rng = (h - l).replace(0, 1e-10)
+   190→    df["body_pct_1m"] = (c - o) / rng
+   191→    df["wick_ratio_1m"] = ((h - np.maximum(o, c)) + (np.minimum(o, c) - l)) / rng
+   192→    
+   193→    direction = np.sign(c - o)
+   194→    df["vol_delta_1m"] = (v * direction).diff(1)
+   195→    df["vol_delta_5m"] = (v * direction).rolling(5).sum() - (v * direction).shift(1).rolling(5).sum()
+   196→    
+   197→    signed_vol = v * direction
+   198→    df["cvd_1m"] = signed_vol.rolling(60, min_periods=1).sum()
+   199→    df["cvd_5m"] = signed_vol.rolling(300, min_periods=1).sum()
+   200→    
+   201→    price_move = (c - o).abs()
+   202→    df["price_impact_1m"] = (price_move / v.replace(0, 1e-10)).rolling(10, min_periods=1).mean()
+   203→    
+   204→    df["micro_momentum_5m"] = (c - c.shift(5)) / c.shift(5).replace(0, 1e-10) * 100
+   205→    
+   206→    vol_ma = v.rolling(10, min_periods=1).mean().replace(0, 1e-10)
+   207→    df["vol_clustering_10m"] = (v / vol_ma).clip(0, 10)
+   208→    
+   209→    df["order_flow_accel_5m"] = df["cvd_1m"].diff(5) / df["cvd_1m"].shift(5).replace(0, 1e-10).abs().clip(lower=1e-10)
+   210→    df["order_flow_accel_5m"] = df["order_flow_accel_5m"].clip(-10, 10)
+   211→    
+   212→    for col in FEATURES_MICRO_1M:
+   213→        if col in df.columns:
+   214→            df[col] = df[col].replace([np.inf, -np.inf], np.nan).fillna(0)
+   215→    
+   216→    return df
+   217→
+   218→
+   219→# ============================================================================
+   220→# AGGREGATION (ROBUST)
+   221→# ============================================================================
+   222→
+   223→def _datetime_to_ms(series: pd.Series) -> np.ndarray:
+   224→    """Convert a datetime Series to int64 milliseconds since epoch.
+   225→    
+   226→    Handles both tz-aware and tz-naive datetime in all pandas versions.
+   227→    In pandas 2.x, .values.astype(np.int64) on tz-aware datetime can return
+   228→    incorrect values. Fix: strip timezone first (timestamps stay at same UTC moment).
+   229→    """
+   230→    if len(series) == 0:
+   231→        return np.array([], dtype=np.int64)
+   232→    # Strip timezone for reliable int64 conversion
+   233→    if pd.api.types.is_datetime64_any_dtype(series) and series.dt.tz is not None:
+   234→        naive = series.dt.tz_localize(None)
+   235→    else:
+   236→        naive = series
+   237→    ns = naive.values.astype(np.int64)  # nanoseconds since epoch
+   238→    return (ns // 10**6).astype(np.int64)  # milliseconds
+   239→
+   240→
+   241→def aggregate_1m_to_5m(df_1m: pd.DataFrame) -> pd.DataFrame:
+   242→    """Aggregate 1m candles into 5m candles. Timestamps always in int64 ms."""
+   243→    df = df_1m.copy()
+   244→    
+   245→    # Ensure timestamp is int64 ms first
+   246→    df = normalize_timestamps_ms(df, "timestamp")
+   247→    
+   248→    # Convert to datetime for resample
+   249→    df["timestamp"] = ts_to_datetime(df["timestamp"])
+   250→    df = df.set_index("timestamp")
+   251→    
+   252→    agg = df.resample("5min").agg({
+   253→        "open": "first",
+   254→        "high": "max",
+   255→        "low": "min",
+   256→        "close": "last",
+   257→        "volume": "sum",
+   258→    }).dropna()
+   259→    
+   260→    agg = agg.reset_index()
+   261→    # Convert datetime back to int64 ms (robust for all pandas versions)
+   262→    agg["timestamp"] = _datetime_to_ms(agg["timestamp"])
+   263→    
+   264→    return agg
+   265→
+   266→
+   267→def aggregate_5m_to_n(df_5m: pd.DataFrame, n: int) -> pd.DataFrame:
+   268→    """Aggregate 5m candles into n-minute candles."""
+   269→    df = df_5m.copy()
+   270→    df = normalize_timestamps_ms(df, "timestamp")
+   271→    
+   272→    df["timestamp"] = ts_to_datetime(df["timestamp"])
+   273→    df = df.set_index("timestamp")
+   274→    
+   275→    agg = df.resample(f"{n}min").agg({
+   276→        "open": "first",
+   277→        "high": "max",
+   278→        "low": "min",
+   279→        "close": "last",
+   280→        "volume": "sum",
+   281→    }).dropna()
+   282→    
+   283→    agg = agg.reset_index()
+   284→    # Convert datetime back to int64 ms (robust for all pandas versions)
+   285→    agg["timestamp"] = _datetime_to_ms(agg["timestamp"])
+   286→    
+   287→    return agg
+   288→
+   289→
+   290→# ============================================================================
+   291→# MERGE UTILITY (NO ROW DUPLICATION)
+   292→# ============================================================================
+   293→
+   294→def safe_merge_asof(left: pd.DataFrame, right: pd.DataFrame,
+   295→                    on: str = "timestamp") -> pd.DataFrame:
+   296→    """Merge using merge_asof — never duplicates rows.
+   297→    
+   298→    Unlike df.merge(), merge_asof does a fuzzy time-based join
+   299→    that cannot create row multiplication.
+   300→    """
+   301→    # Ensure timestamps are int64 ms on both sides
+   302→    left = normalize_timestamps_ms(left, on)
+   303→    right = normalize_timestamps_ms(right, on)
+   304→    
+   305→    # Sort both by timestamp (required for merge_asof)
+   306→    left_sorted = left.sort_values(on).reset_index(drop=True)
+   307→    right_sorted = right.sort_values(on).reset_index(drop=True)
+   308→    
+   309→    # Remove duplicate timestamps from right (keep last)
+   310→    right_sorted = right_sorted.drop_duplicates(subset=[on], keep="last")
+   311→    
+   312→    merged = pd.merge_asof(
+   313→        left_sorted,
+   314→        right_sorted,
+   315→        on=on,
+   316→        direction="backward",  # use last completed value
+   317→    )
+   318→    
+   319→    return merged
+   320→
+   321→
+   322→# ============================================================================
+   323→# 5m OHLCV FEATURES
+   324→# ============================================================================
+   325→
+   326→def compute_5m_features(df_5m: pd.DataFrame, btc_5m: pd.DataFrame, eth_5m: pd.DataFrame) -> pd.DataFrame:
+   327→    """Compute all 5m features + BTC/ETH cross-asset features.
+   328→    
+   329→    All merges use merge_asof to prevent row duplication.
+   330→    """
+   331→    df = df_5m.copy().reset_index(drop=True)
+   332→    df = normalize_timestamps_ms(df, "timestamp")
+   333→    
+   334→    o, h, l, c, v = df["open"], df["high"], df["low"], df["close"], df["volume"]
+   335→    
+   336→    rng = (h - l).replace(0, 1e-10)
+   337→    body = (c - o)
+   338→    df["body_pct"]     = body / rng
+   339→    df["upper_wick"]   = (h - np.maximum(o, c)) / rng
+   340→    df["lower_wick"]   = (np.minimum(o, c) - l) / rng
+   341→    df["body_abs"]     = body.abs() / rng
+   342→    df["close_pos"]    = (c - l) / rng
+   343→    df["range_pct"]    = rng / c * 100
+   344→
+   345→    df["ret_1"]  = c.pct_change(1)
+   346→    df["ret_3"]  = c.pct_change(3)
+   347→    df["ret_5"]  = c.pct_change(5)
+   348→    df["ret_10"] = c.pct_change(10)
+   349→    df["log_ret_1"] = np.log(c / c.shift(1))
+   350→
+   351→    tr = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
+   352→    df["atr_14"]   = tr.rolling(14).mean()
+   353→    df["atr_pct"]  = df["atr_14"] / c * 100
+   354→    df["vol_std_10"] = df["log_ret_1"].rolling(10).std()
+   355→
+   356→    delta = c.diff()
+   357→    gain = delta.where(delta > 0, 0).rolling(14).mean()
+   358→    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+   359→    rs = gain / loss.replace(0, 1e-10)
+   360→    df["rsi_14"] = 100 - (100 / (1 + rs))
+   361→
+   362→    for p in [9, 20, 50]:
+   363→        df[f"ema_{p}"] = c.ewm(span=p, adjust=False).mean()
+   364→        df[f"ema_{p}_slope"] = df[f"ema_{p}"].pct_change(3)
+   365→    df["ema_9_20_cross"] = (df["ema_9"] - df["ema_20"]) / c * 100
+   366→    df["ema_20_50_cross"] = (df["ema_20"] - df["ema_50"]) / c * 100
+   367→    df["price_vs_ema20"] = (c - df["ema_20"]) / c * 100
+   368→    df["price_vs_ema50"] = (c - df["ema_50"]) / c * 100
+   369→
+   370→    vol_ma = v.rolling(20).mean().replace(0, 1e-10)
+   371→    df["vol_ratio"] = v / vol_ma
+   372→    df["vol_z"] = (v - vol_ma) / v.rolling(20).std().replace(0, 1e-10)
+   373→
+   374→    df["last_3_body_sum"] = df["body_pct"].rolling(3).sum()
+   375→    df["last_3_range_sum"] = df["range_pct"].rolling(3).sum()
+   376→
+   377→    df["bullish_engulf_2"] = ((df["body_pct"].shift(1) < 0) & (df["body_pct"] > 0) &
+   378→                              (df["close"] > df["open"].shift(1)) &
+   379→                              (df["open"] < df["close"].shift(1))).astype(int)
+   380→    df["hammer_like"] = ((df["lower_wick"] > 2 * df["body_abs"]) & (df["body_abs"] > 0)).astype(int)
+   381→    df["shooting_star"] = ((df["upper_wick"] > 2 * df["body_abs"]) & (df["body_abs"] > 0)).astype(int)
+   382→
+   383→    df["high_20"] = h.rolling(20).max()
+   384→    df["low_20"]  = l.rolling(20).min()
+   385→    df["breakout_up"]   = (h > df["high_20"].shift(1)).astype(int)
+   386→    df["breakout_down"] = (l < df["low_20"].shift(1)).astype(int)
+   387→    df["dist_to_high_20"] = (c - df["high_20"]) / df["high_20"] * 100
+   388→    df["dist_to_low_20"]  = (c - df["low_20"])  / df["low_20"]  * 100
+   389→
+   390→    df["trend_50"] = np.sign(df["ema_9"] - df["ema_50"]).astype(int)
+   391→    atr_p = df["atr_pct"].fillna(0).values
+   392→    bins = [0.5, 1.5, 5.0]
+   393→    df["vol_regime"] = np.digitize(atr_p, bins).astype(int)
+   394→    df["trending"] = (df["atr_pct"] > df["atr_pct"].rolling(50, min_periods=5).mean()).astype(int)
+   395→
+   396→    # Hour features (from timestamp)
+   397→    ts_dt = ts_to_datetime(df["timestamp"])
+   398→    df["hour_sin"] = np.sin(2 * np.pi * ts_dt.dt.hour / 24)
+   399→    df["hour_cos"] = np.cos(2 * np.pi * ts_dt.dt.hour / 24)
+   400→    
+   401→    # === BTC/ETH cross-asset features (using merge_asof) ===
+   402→    btc = btc_5m.copy()
+   403→    btc = normalize_timestamps_ms(btc, "timestamp")
+   404→    btc = btc.rename(columns={
+   405→        "close": "btc_close", "volume": "btc_volume",
+   406→        "high": "btc_high", "low": "btc_low",
+   407→    })
+   408→    btc["btc_ret_1m"]  = btc["btc_close"].pct_change(1)
+   409→    btc["btc_ret_5m"]  = btc["btc_close"].pct_change(5)
+   410→    btc["btc_ret_15m"] = btc["btc_close"].pct_change(15)
+   411→    btc_vol_ma = btc["btc_volume"].rolling(20).mean().replace(0, 1e-10)
+   412→    btc["btc_vol_z"] = (btc["btc_volume"] - btc_vol_ma) / btc["btc_volume"].rolling(20).std().replace(0, 1e-10)
+   413→    btc["btc_ema_9"]  = btc["btc_close"].ewm(span=9,  adjust=False).mean()
+   414→    btc["btc_ema_50"] = btc["btc_close"].ewm(span=50, adjust=False).mean()
+   415→    btc["btc_trend_50"] = np.sign(btc["btc_ema_9"] - btc["btc_ema_50"]).astype(int)
+   416→    btc_atr = (btc["btc_high"] - btc["btc_low"]).rolling(14).mean()
+   417→    btc_atr_pct = btc_atr / btc["btc_close"] * 100
+   418→    btc["btc_volatility_regime"] = np.digitize(btc_atr_pct.fillna(0).values, [0.5, 1.5, 5.0]).astype(int)
+   419→    btc_cols = ["timestamp", "btc_ret_1m", "btc_ret_5m", "btc_ret_15m",
+   420→                "btc_vol_z", "btc_trend_50", "btc_volatility_regime"]
+   421→    btc = btc[btc_cols]
+   422→    
+   423→    # Use merge_asof instead of merge (prevents row duplication)
+   424→    n_before = len(df)
+   425→    df = safe_merge_asof(df, btc, on="timestamp")
+   426→    assert len(df) == n_before, f"Row count changed after BTC merge: {n_before} → {len(df)}"
+   427→    
+   428→    alt_ret_15m_pct = df["close"].pct_change(15) * 100
+   429→    btc_ret_15m_pct = df["btc_ret_15m"] * 100
+   430→    df["btc_alt_spread_15m"] = alt_ret_15m_pct - btc_ret_15m_pct
+   431→    
+   432→    # ETH correlation
+   433→    eth = eth_5m[["timestamp", "close"]].copy()
+   434→    eth = normalize_timestamps_ms(eth, "timestamp")
+   435→    eth = eth.rename(columns={"close": "eth_close"})
+   436→    
+   437→    n_before = len(df)
+   438→    df = safe_merge_asof(df, eth, on="timestamp")
+   439→    assert len(df) == n_before, f"Row count changed after ETH merge: {n_before} → {len(df)}"
+   440→    
+   441→    alt_ret = df["close"].pct_change()
+   442→    eth_ret = df["eth_close"].pct_change()
+   443→    df["eth_corr_30"] = alt_ret.rolling(30).corr(eth_ret)
+   444→    
+   445→    # Remaining v6 features
+   446→    df["vol_delta_3"] = df["volume"].pct_change(3).replace([np.inf, -np.inf], np.nan).fillna(0).clip(-5, 5)
+   447→    if "lower_wick" in df.columns and "upper_wick" in df.columns:
+   448→        df["wick_imbalance_3"] = (df["lower_wick"] - df["upper_wick"]).rolling(3).sum()
+   449→    else:
+   450→        df["wick_imbalance_3"] = 0.0
+   451→    body_sign = (df["close"] - df["open"] > 0).astype(float)
+   452→    df["body_consistency_5"] = body_sign.rolling(5).mean()
+   453→    avg_rng_3 = df["range_pct"].rolling(3).mean()
+   454→    avg_rng_20 = df["range_pct"].rolling(20).mean().replace(0, 1e-10)
+   455→    df["range_expansion_3"] = (avg_rng_3 / avg_rng_20).clip(0, 10)
+   456→    above_ema = (df["close"] > df["ema_20"]).astype(float)
+   457→    df["close_persistence_5"] = above_ema.rolling(5).mean()
+   458→    df["vol_acceleration"] = df["vol_ratio"] - df["vol_ratio"].shift(3)
+   459→    
+   460→    df["atr_percentile_50"] = df["atr_pct"].rolling(50, min_periods=5).rank(pct=True)
+   461→    df["trend_strength_50"] = ((df["ema_9"] - df["ema_50"]).abs() / df["atr_pct"].replace(0, 1e-10)).clip(0, 20)
+   462→    df["regime_vol_trend"] = df["vol_regime"] * df["trend_50"]
+   463→    
+   464→    ts_dt2 = ts_to_datetime(df["timestamp"])
+   465→    hour = ts_dt2.dt.hour
+   466→    df["hour_quantile"] = pd.cut(hour, bins=[-1, 8, 14, 22, 24], labels=[0, 1, 2, 3]).astype(int)
+   467→    
+   468→    df["alt_lead_5m"] = (df["close"].pct_change(5) - df["btc_ret_5m"]) * 100
+   469→    df["alt_lag_signal"] = ((df["btc_ret_1m"].abs() > 0.002) &
+   470→                             (df["ret_1"].abs() < 0.001)).astype(int)
+   471→    df["momentum_dispersion"] = df["ret_1"].rolling(10).std()
+   472→    
+   473→    # Clean up
+   474→    for col in FEATURES_5M_V5 + FEATURES_5M_V6:
+   475→        if col in df.columns:
+   476→            df[col] = df[col].replace([np.inf, -np.inf], np.nan).fillna(0)
+   477→    
+   478→    return df
+   479→
+   480→
+   481→# ============================================================================
+   482→# HIGHER TIMEFRAME FEATURES (15m, 1h)
+   483→# ============================================================================
+   484→
+   485→def compute_higher_tf_features(df_5m: pd.DataFrame, btc_5m: pd.DataFrame) -> pd.DataFrame:
+   486→    """Compute 15m and 1h features, merge back to 5m index.
+   487→    
+   488→    All merges use merge_asof to prevent row duplication.
+   489→    """
+   490→    df = df_5m.copy()
+   491→    df = normalize_timestamps_ms(df, "timestamp")
+   492→    btc_5m = normalize_timestamps_ms(btc_5m, "timestamp")
+   493→    
+   494→    # --- 15m features ---
+   495→    df_15m = aggregate_5m_to_n(df_5m, 15)
+   496→    df_15m["ema_9_15m"] = df_15m["close"].ewm(span=9, adjust=False).mean()
+   497→    df_15m["ema_20_15m"] = df_15m["close"].ewm(span=20, adjust=False).mean()
+   498→    df_15m["trend_15m"] = np.sign(df_15m["ema_9_15m"] - df_15m["ema_20_15m"]).astype(int)
+   499→    
+   500→    delta_15 = df_15m["close"].diff()
+   501→    gain_15 = delta_15.where(delta_15 > 0, 0).rolling(14).mean()
+   502→    loss_15 = (-delta_15.where(delta_15 < 0, 0)).rolling(14).mean()
+   503→    rs_15 = gain_15 / loss_15.replace(0, 1e-10)
+   504→    df_15m["rsi_15m"] = 100 - (100 / (1 + rs_15))
+   505→    
+   506→    atr_15 = (df_15m["high"] - df_15m["low"]).rolling(14).mean()
+   507→    atr_pct_15 = atr_15 / df_15m["close"] * 100
+   508→    df_15m["vol_regime_15m"] = np.digitize(atr_pct_15.fillna(0).values, [0.5, 1.5, 5.0]).astype(int)
+   509→    
+   510→    btc_15m = aggregate_5m_to_n(btc_5m, 15)
+   511→    btc_15m["btc_ema_9_15m"] = btc_15m["close"].ewm(span=9, adjust=False).mean()
+   512→    btc_15m["btc_ema_20_15m"] = btc_15m["close"].ewm(span=20, adjust=False).mean()
+   513→    btc_15m["btc_trend_15m"] = np.sign(btc_15m["btc_ema_9_15m"] - btc_15m["btc_ema_20_15m"]).astype(int)
+   514→    # Use merge_asof instead of direct array assignment (avoids length mismatch)
+   515→    df_15m = safe_merge_asof(df_15m, btc_15m[["timestamp", "btc_trend_15m"]], on="timestamp")
+   516→    
+   517→    # Merge 15m features into 5m (using merge_asof)
+   518→    htf_15m_cols = ["timestamp"] + FEATURES_15M
+   519→    df_15m_subset = df_15m[htf_15m_cols].copy()
+   520→    
+   521→    n_before = len(df)
+   522→    df = safe_merge_asof(df, df_15m_subset, on="timestamp")
+   523→    assert len(df) == n_before, f"Row count changed after 15m merge: {n_before} → {len(df)}"
+   524→    
+   525→    # --- 1h features ---
+   526→    df_1h = aggregate_5m_to_n(df_5m, 60)
+   527→    df_1h["ema_9_1h"] = df_1h["close"].ewm(span=9, adjust=False).mean()
+   528→    df_1h["ema_20_1h"] = df_1h["close"].ewm(span=20, adjust=False).mean()
+   529→    df_1h["trend_1h"] = np.sign(df_1h["ema_9_1h"] - df_1h["ema_20_1h"]).astype(int)
+   530→    
+   531→    delta_1h = df_1h["close"].diff()
+   532→    gain_1h = delta_1h.where(delta_1h > 0, 0).rolling(14).mean()
+   533→    loss_1h = (-delta_1h.where(delta_1h < 0, 0)).rolling(14).mean()
+   534→    rs_1h = gain_1h / loss_1h.replace(0, 1e-10)
+   535→    df_1h["rsi_1h"] = 100 - (100 / (1 + rs_1h))
+   536→    
+   537→    atr_1h = (df_1h["high"] - df_1h["low"]).rolling(14).mean()
+   538→    atr_pct_1h = atr_1h / df_1h["close"] * 100
+   539→    df_1h["vol_regime_1h"] = np.digitize(atr_pct_1h.fillna(0).values, [0.5, 1.5, 5.0]).astype(int)
+   540→    
+   541→    btc_1h = aggregate_5m_to_n(btc_5m, 60)
+   542→    btc_1h["btc_ema_9_1h"] = btc_1h["close"].ewm(span=9, adjust=False).mean()
+   543→    btc_1h["btc_ema_20_1h"] = btc_1h["close"].ewm(span=20, adjust=False).mean()
+   544→    btc_1h["btc_trend_1h"] = np.sign(btc_1h["btc_ema_9_1h"] - btc_1h["btc_ema_20_1h"]).astype(int)
+   545→    # Use merge_asof instead of direct array assignment (avoids length mismatch)
+   546→    df_1h = safe_merge_asof(df_1h, btc_1h[["timestamp", "btc_trend_1h"]], on="timestamp")
+   547→    
+   548→    # Merge 1h features into 5m
+   549→    htf_1h_cols = ["timestamp", "trend_1h", "rsi_1h", "vol_regime_1h", "btc_trend_1h"]
+   550→    df_1h_subset = df_1h[htf_1h_cols].copy()
+   551→    
+   552→    n_before = len(df)
+   553→    df = safe_merge_asof(df, df_1h_subset, on="timestamp")
+   554→    assert len(df) == n_before, f"Row count changed after 1h merge: {n_before} → {len(df)}"
+   555→    
+   556→    # MTF alignment
+   557→    df["mtf_alignment"] = (
+   558→        df["trend_50"].astype(float) +
+   559→        df["trend_15m"].astype(float) +
+   560→        df["trend_1h"].astype(float)
+   561→    ) / 3.0
+   562→    
+   563→    # Clean up
+   564→    for col in FEATURES_15M + FEATURES_1H:
+   565→        if col in df.columns:
+   566→            df[col] = df[col].replace([np.inf, -np.inf], np.nan).fillna(0).astype(np.float32)
+   567→    
+   568→    return df
+   569→
+   570→
+   571→# ============================================================================
+   572→# FORWARD RETURN LABELS
+   573→# ============================================================================
+   574→
+   575→def compute_labels(df_5m: pd.DataFrame, horizons: list[int]) -> pd.DataFrame:
+   576→    """Compute forward returns for multiple horizons."""
+   577→    df = df_5m.copy()
+   578→    c = df["close"].values
+   579→    n = len(df)
+   580→    
+   581→    for h in horizons:
+   582→        fwd = np.full(n, np.nan)
+   583→        for i in range(n - h):
+   584→            fwd[i] = (c[i + h] - c[i]) / c[i] * 100
+   585→        df[f"fwd_ret_h{h}"] = fwd
+   586→        df[f"label_h{h}"] = (fwd > 0).astype(int)
+   587→    
+   588→    return df
+   589→
+   590→
+   591→# ============================================================================
+   592→# MERGE 1m MICRO INTO 5m
+   593→# ============================================================================
+   594→
+   595→def merge_micro_into_5m(df_5m: pd.DataFrame, df_1m_micro: pd.DataFrame) -> pd.DataFrame:
+   596→    """Merge 1m microstructure features into 5m dataframe using merge_asof.
+   597→    
+   598→    For each 5m bar, we take the LAST 1m candle's micro features.
+   599→    """
+   600→    # Normalize timestamps
+   601→    df_5m = normalize_timestamps_ms(df_5m, "timestamp")
+   602→    df_1m_micro = normalize_timestamps_ms(df_1m_micro, "timestamp")
+   603→    
+   604→    # Keep only needed columns from 1m
+   605→    micro_cols = ["timestamp"] + FEATURES_MICRO_1M
+   606→    df_1m_subset = df_1m_micro[micro_cols].copy()
+   607→    
+   608→    # Remove duplicate timestamps (keep last = most recent 1m bar)
+   609→    df_1m_subset = df_1m_subset.drop_duplicates(subset=["timestamp"], keep="last")
+   610→    
+   611→    # Use merge_asof
+   612→    n_before = len(df_5m)
+   613→    merged = safe_merge_asof(df_5m, df_1m_subset, on="timestamp")
+   614→    assert len(merged) == n_before, f"Row count changed after micro merge: {n_before} → {len(merged)}"
+   615→    
+   616→    # Ensure all micro features are present
+   617→    for col in FEATURES_MICRO_1M:
+   618→        if col not in merged.columns:
+   619→            LOG.warning("Missing micro feature: %s", col)
+   620→            merged[col] = 0.0
+   621→        else:
+   622→            merged[col] = merged[col].replace([np.inf, -np.inf], np.nan).fillna(0).astype(np.float32)
+   623→    
+   624→    return merged
+   625→
+   626→
+   627→# ============================================================================
+   628→# MAIN
+   629→# ============================================================================
+   630→
+   631→def load_1m_data(symbol: str) -> pd.DataFrame:
+   632→    """Load 1m OHLCV from v10 cache."""
+   633→    path = CACHE_DIR / f"{symbol}_1m.parquet"
+   634→    if not path.exists():
+   635→        raise FileNotFoundError(f"No 1m data for {symbol} at {path}")
+   636→    df = pd.read_parquet(path)
+   637→    
+   638→    # Normalize timestamps to int64 ms
+   639→    df = normalize_timestamps_ms(df, "timestamp")
+   640→    
+   641→    LOG.info("Loaded %s_1m: %d rows (ts: %d to %d)",
+   642→             symbol, len(df), df["timestamp"].iloc[0], df["timestamp"].iloc[-1])
+   643→    return df
+   644→
+   645→
+   646→def build_symbol_dataset(
+   647→    symbol: str,
+   648→    horizons: list[int],
+   649→    btc_1m: pd.DataFrame,
+   650→    eth_5m: pd.DataFrame | None = None,
+   651→) -> pd.DataFrame:
+   652→    """Build complete dataset for one symbol."""
+   653→    LOG.info("Building dataset for %s", symbol)
+   654→    t0 = time.time()
+   655→    
+   656→    # Load 1m data
+   657→    sym_1m = load_1m_data(symbol)
+   658→    
+   659→    # 1. Compute microstructure features on 1m
+   660→    sym_1m_micro = compute_microstructure_features(sym_1m)
+   661→    
+   662→    # 2. Aggregate to 5m
+   663→    sym_5m = aggregate_1m_to_5m(sym_1m)
+   664→    btc_5m = aggregate_1m_to_5m(btc_1m)
+   665→    
+   666→    LOG.info("  %s: %d 5m bars, BTC: %d 5m bars", symbol, len(sym_5m), len(btc_5m))
+   667→    
+   668→    # Create a dummy ETH 5m if not available (use BTC as proxy)
+   669→    if eth_5m is None:
+   670→        LOG.warning("No ETH data — using BTC as ETH proxy for correlation features")
+   671→        eth_5m = btc_5m[["timestamp", "close"]].copy()
+   672→    
+   673→    # Ensure timestamp types match
+   674→    sym_5m = normalize_timestamps_ms(sym_5m, "timestamp")
+   675→    btc_5m = normalize_timestamps_ms(btc_5m, "timestamp")
+   676→    eth_5m = normalize_timestamps_ms(eth_5m, "timestamp")
+   677→    
+   678→    # 3. Compute 5m features (v7 58 features + BTC/ETH cross-asset)
+   679→    sym_5m_feat = compute_5m_features(sym_5m, btc_5m, eth_5m)
+   680→    LOG.info("  After compute_5m_features: %d rows", len(sym_5m_feat))
+   681→    
+   682→    # 4. Compute higher timeframe features (15m, 1h)
+   683→    sym_5m_feat = compute_higher_tf_features(sym_5m_feat, btc_5m)
+   684→    LOG.info("  After compute_higher_tf_features: %d rows", len(sym_5m_feat))
+   685→    
+   686→    # 5. Merge 1m microstructure into 5m
+   687→    sym_1m_micro = normalize_timestamps_ms(sym_1m_micro, "timestamp")
+   688→    sym_5m_full = merge_micro_into_5m(sym_5m_feat, sym_1m_micro)
+   689→    LOG.info("  After merge_micro_into_5m: %d rows", len(sym_5m_full))
+   690→    
+   691→    # 6. Compute forward return labels
+   692→    sym_5m_full = compute_labels(sym_5m_full, horizons)
+   693→    
+   694→    # 7. Add symbol column
+   695→    sym_5m_full["symbol"] = symbol
+   696→    
+   697→    # 8. Clean and validate
+   698→    for col in ALL_FEATURE_NAMES:
+   699→        if col not in sym_5m_full.columns:
+   700→            LOG.warning("Missing feature: %s — filling with 0", col)
+   701→            sym_5m_full[col] = 0.0
+   702→        else:
+   703→            sym_5m_full[col] = sym_5m_full[col].replace([np.inf, -np.inf], np.nan).fillna(0).astype(np.float32)
+   704→    
+   705→    elapsed = time.time() - t0
+   706→    LOG.info("  %s: %d rows × %d features in %.1fs", symbol, len(sym_5m_full), len(ALL_FEATURE_NAMES), elapsed)
+   707→    
+   708→    # Validate timestamps
+   709→    ts = sym_5m_full["timestamp"].values
+   710→    ts_min, ts_max = ts.min(), ts.max()
+   711→    span_days = (ts_max - ts_min) / (1000 * 86400)
+   712→    if span_days < 30:
+   713→        LOG.error("  %s: timestamp span only %.1f days — DATA MAY BE CORRUPT!", symbol, span_days)
+   714→    else:
+   715→        LOG.info("  %s: timestamp span %.1f days ✓", symbol, span_days)
+   716→    
+   717→    return sym_5m_full
+   718→
+   719→
+   720→def main():
+   721→    parser = argparse.ArgumentParser(description="Build v11 dataset for low-timeframe trading")
+   722→    parser.add_argument("--symbols", default=",".join(DEFAULT_SYMBOLS))
+   723→    parser.add_argument("--horizons", default=",".join(str(h) for h in DEFAULT_HORIZONS))
+   724→    parser.add_argument("--output", default=str(OUTPUT_DIR / "v11_dataset.parquet"))
+   725→    args = parser.parse_args()
+   726→    
+   727→    symbols = args.symbols.split(",")
+   728→    horizons = [int(h) for h in args.horizons.split(",")]
+   729→    
+   730→    print("=" * 80)
+   731→    print("v11 BUILD DATASET — Low Timeframe Trading")
+   732→    print(f"  Symbols: {symbols}")
+   733→    print(f"  Horizons: {horizons} (5m bars → {', '.join(f'{h*5/60:.0f}h' for h in horizons)})")
+   734→    print(f"  Features: {len(ALL_FEATURE_NAMES)} ({len(FEATURES_MICRO_1M)} micro + "
+   735→          f"{len(FEATURES_5M_V5) + len(FEATURES_5M_V6)} 5m + "
+   736→          f"{len(FEATURES_15M)} 15m + {len(FEATURES_1H)} 1h)")
+   737→    print("=" * 80)
+   738→    
+   739→    # Load BTC 1m (reference for all symbols)
+   740→    btc_1m = load_1m_data("BTC")
+   741→    
+   742→    # Build per-symbol datasets
+   743→    all_dfs = []
+   744→    for sym in symbols:
+   745→        LOG.info(">>> Building dataset for %s...", sym)
+   746→        try:
+   747→            df = build_symbol_dataset(sym, horizons, btc_1m)
+   748→            if len(df) == 0:
+   749→                LOG.error(">>> %s: build returned 0 rows!", sym)
+   750→            else:
+   751→                LOG.info(">>> %s: SUCCESS — %d rows", sym, len(df))
+   752→            all_dfs.append(df)
+   753→        except Exception as e:
+   754→            LOG.error(">>> %s: FAILED with %s: %s", sym, type(e).__name__, e)
+   755→            import traceback
+   756→            traceback.print_exc()
+   757→    
+   758→    if not all_dfs:
+   759→        LOG.error("No datasets built — exiting")
+   760→        sys.exit(1)
+   761→    
+   762→    # Combine
+   763→    combined = pd.concat(all_dfs, ignore_index=True)
+   764→    
+   765→    # Drop rows with NaN labels (forward returns near the end of data)
+   766→    label_cols = [f"fwd_ret_h{h}" for h in horizons]
+   767→    # Keep rows that have at least one valid label
+   768→    valid_mask = combined[label_cols].notna().any(axis=1)
+   769→    # Also require all features to be valid
+   770→    feat_mask = combined[ALL_FEATURE_NAMES].notna().all(axis=1)
+   771→    combined = combined[valid_mask & feat_mask].reset_index(drop=True)
+   772→    
+   773→    # Final timestamp validation
+   774→    ts = combined["timestamp"].values
+   775→    ts_min, ts_max = ts.min(), ts.max()
+   776→    span_days = (ts_max - ts_min) / (1000 * 86400)
+   777→    if span_days < 30:
+   778→        LOG.error("FINAL: timestamp span only %.1f days — DATASET MAY BE CORRUPT!", span_days)
+   779→    else:
+   780→        LOG.info("FINAL: timestamp span %.1f days ✓", span_days)
+   781→    
+   782→    # Deduplicate by (timestamp, symbol) just in case
+   783→    n_before = len(combined)
+   784→    combined = combined.drop_duplicates(subset=["timestamp", "symbol"], keep="last").reset_index(drop=True)
+   785→    if len(combined) < n_before:
+   786→        LOG.warning("Removed %d duplicate (timestamp, symbol) rows", n_before - len(combined))
+   787→    
+   788→    # Save
+   789→    output_path = Path(args.output)
+   790→    combined.to_parquet(output_path, index=False)
+   791→    
+   792→    print(f"\n{'='*80}")
+   793→    print(f"DATASET SAVED: {output_path}")
+   794→    print(f"  Total rows: {len(combined):,}")
+   795→    print(f"  Total features: {len(ALL_FEATURE_NAMES)}")
+   796→    print(f"  Symbols: {combined['symbol'].unique().tolist()}")
+   797→    print(f"  Timestamp span: {span_days:.1f} days")
+   798→    print(f"  Per-symbol row counts:")
+   799→    for sym in combined["symbol"].unique():
+   800→        n = len(combined[combined["symbol"] == sym])
+   801→        print(f"    {sym}: {n:,} rows")
+   802→    for h in horizons:
+   803→        col = f"fwd_ret_h{h}"
+   804→        valid = combined[col].notna().sum()
+   805→        print(f"  Label {col}: {valid:,} valid rows, "
+   806→              f"mean={combined[col].mean():+.4f}%, std={combined[col].std():.4f}%")
+   807→    print(f"{'='*80}")
+   808→
+   809→
+   810→if __name__ == "__main__":
+   811→    main()
+   812→

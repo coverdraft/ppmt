@@ -1,0 +1,731 @@
+23:16:06 INFO [csweep] COMPREHENSIVE SWEEP: 7 symbols × 6 horizons × 3 Q-configs × 4 windows
+23:16:06 INFO [csweep] Symbols: ['ETH/USDT', 'SOL/USDT', 'DOGE/USDT', 'AVAX/USDT', 'LINK/USDT', 'XRP/USDT', 'BTC/USDT']
+23:16:06 INFO [csweep] Horizons: [6, 12, 36, 72, 144, 288]
+23:16:06 INFO [csweep] Q configs: [(90, 10), (85, 15), (80, 20)]
+23:16:07 INFO [pt_feed] feed: exchange=bybit markets=3433 loaded
+23:16:07 INFO [csweep] ======================================================================
+23:16:07 INFO [csweep] FETCHING DATA: ETH/USDT (90 days)
+23:16:07 INFO [csweep] ======================================================================
+23:16:07 INFO [pt_layer2] fetch_30d_data: ETH/USDT bars_needed=25920 (~90 days)
+23:16:16 INFO [pt_layer2] fetch_30d_data: aligned rows=25920 (span: 2026-03-27T16:40:00 → 2026-06-25T16:35:00)
+23:16:16 INFO [csweep] --------------------------------------------------
+23:16:16 INFO [csweep]   HORIZON=6 (0h forward) for ETH/USDT
+23:16:16 INFO [csweep]   Clean rows=25884, label_up=49.7%
+23:16:16 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:16:20 INFO [csweep]   Horizon 6 done: 12 result rows so far
+23:16:20 INFO [csweep] --------------------------------------------------
+23:16:20 INFO [csweep]   HORIZON=12 (1h forward) for ETH/USDT
+23:16:20 INFO [csweep]   Clean rows=25878, label_up=49.8%
+23:16:20 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:16:24 INFO [csweep]   Horizon 12 done: 24 result rows so far
+23:16:24 INFO [csweep] --------------------------------------------------
+23:16:24 INFO [csweep]   HORIZON=36 (3h forward) for ETH/USDT
+23:16:24 INFO [csweep]   Clean rows=25854, label_up=49.0%
+23:16:24 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:16:28 INFO [csweep]   Horizon 36 done: 36 result rows so far
+23:16:28 INFO [csweep] --------------------------------------------------
+23:16:28 INFO [csweep]   HORIZON=72 (6h forward) for ETH/USDT
+23:16:28 INFO [csweep]   Clean rows=25818, label_up=49.1%
+23:16:28 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:16:32 INFO [csweep]   Horizon 72 done: 48 result rows so far
+23:16:32 INFO [csweep] --------------------------------------------------
+23:16:32 INFO [csweep]   HORIZON=144 (12h forward) for ETH/USDT
+23:16:32 INFO [csweep]   Clean rows=25746, label_up=48.7%
+23:16:32 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:16:34 INFO [csweep]   Horizon 144 done: 60 result rows so far
+23:16:34 INFO [csweep] --------------------------------------------------
+23:16:34 INFO [csweep]   HORIZON=288 (24h forward) for ETH/USDT
+23:16:34 INFO [csweep]   Clean rows=25602, label_up=47.6%
+23:16:34 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:16:37 INFO [csweep]   Horizon 288 done: 72 result rows so far
+23:16:37 INFO [csweep] ETH/USDT done in 29.5s — 72 result rows
+23:16:37 INFO [csweep] ======================================================================
+23:16:37 INFO [csweep] FETCHING DATA: SOL/USDT (90 days)
+23:16:37 INFO [csweep] ======================================================================
+23:16:37 INFO [pt_layer2] fetch_30d_data: SOL/USDT bars_needed=25920 (~90 days)
+23:16:46 INFO [pt_layer2] fetch_30d_data: aligned rows=25920 (span: 2026-03-27T16:40:00 → 2026-06-25T16:35:00)
+23:16:46 INFO [csweep] --------------------------------------------------
+23:16:46 INFO [csweep]   HORIZON=6 (0h forward) for SOL/USDT
+23:16:46 INFO [csweep]   Clean rows=25884, label_up=49.2%
+23:16:46 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:16:50 INFO [csweep]   Horizon 6 done: 12 result rows so far
+23:16:50 INFO [csweep] --------------------------------------------------
+23:16:50 INFO [csweep]   HORIZON=12 (1h forward) for SOL/USDT
+23:16:50 INFO [csweep]   Clean rows=25878, label_up=49.2%
+23:16:50 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:16:53 INFO [csweep]   Horizon 12 done: 24 result rows so far
+23:16:53 INFO [csweep] --------------------------------------------------
+23:16:53 INFO [csweep]   HORIZON=36 (3h forward) for SOL/USDT
+23:16:53 INFO [csweep]   Clean rows=25854, label_up=48.4%
+23:16:53 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:16:56 INFO [csweep]   Horizon 36 done: 36 result rows so far
+23:16:56 INFO [csweep] --------------------------------------------------
+23:16:56 INFO [csweep]   HORIZON=72 (6h forward) for SOL/USDT
+23:16:56 INFO [csweep]   Clean rows=25818, label_up=48.3%
+23:16:56 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:16:59 INFO [csweep]   Horizon 72 done: 48 result rows so far
+23:16:59 INFO [csweep] --------------------------------------------------
+23:16:59 INFO [csweep]   HORIZON=144 (12h forward) for SOL/USDT
+23:16:59 INFO [csweep]   Clean rows=25746, label_up=48.3%
+23:16:59 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:17:02 INFO [csweep]   Horizon 144 done: 60 result rows so far
+23:17:02 INFO [csweep] --------------------------------------------------
+23:17:02 INFO [csweep]   HORIZON=288 (24h forward) for SOL/USDT
+23:17:02 INFO [csweep]   Clean rows=25602, label_up=49.2%
+23:17:02 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:17:05 INFO [csweep]   Horizon 288 done: 72 result rows so far
+23:17:05 INFO [csweep] SOL/USDT done in 27.8s — 72 result rows
+23:17:05 INFO [csweep] ======================================================================
+23:17:05 INFO [csweep] FETCHING DATA: DOGE/USDT (90 days)
+23:17:05 INFO [csweep] ======================================================================
+23:17:05 INFO [pt_layer2] fetch_30d_data: DOGE/USDT bars_needed=25920 (~90 days)
+23:17:14 INFO [pt_layer2] fetch_30d_data: aligned rows=25920 (span: 2026-03-27T16:40:00 → 2026-06-25T16:35:00)
+23:17:14 INFO [csweep] --------------------------------------------------
+23:17:14 INFO [csweep]   HORIZON=6 (0h forward) for DOGE/USDT
+23:17:14 INFO [csweep]   Clean rows=25884, label_up=49.2%
+23:17:14 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:17:19 INFO [csweep]   Horizon 6 done: 12 result rows so far
+23:17:19 INFO [csweep] --------------------------------------------------
+23:17:19 INFO [csweep]   HORIZON=12 (1h forward) for DOGE/USDT
+23:17:19 INFO [csweep]   Clean rows=25878, label_up=49.2%
+23:17:19 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:17:22 INFO [csweep]   Horizon 12 done: 24 result rows so far
+23:17:22 INFO [csweep] --------------------------------------------------
+23:17:22 INFO [csweep]   HORIZON=36 (3h forward) for DOGE/USDT
+23:17:22 INFO [csweep]   Clean rows=25854, label_up=48.2%
+23:17:22 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:17:25 INFO [csweep]   Horizon 36 done: 36 result rows so far
+23:17:25 INFO [csweep] --------------------------------------------------
+23:17:25 INFO [csweep]   HORIZON=72 (6h forward) for DOGE/USDT
+23:17:25 INFO [csweep]   Clean rows=25818, label_up=49.0%
+23:17:25 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:17:28 INFO [csweep]   Horizon 72 done: 48 result rows so far
+23:17:28 INFO [csweep] --------------------------------------------------
+23:17:28 INFO [csweep]   HORIZON=144 (12h forward) for DOGE/USDT
+23:17:28 INFO [csweep]   Clean rows=25746, label_up=49.5%
+23:17:28 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:17:31 INFO [csweep]   Horizon 144 done: 60 result rows so far
+23:17:31 INFO [csweep] --------------------------------------------------
+23:17:31 INFO [csweep]   HORIZON=288 (24h forward) for DOGE/USDT
+23:17:31 INFO [csweep]   Clean rows=25602, label_up=50.1%
+23:17:31 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:17:34 INFO [csweep]   Horizon 288 done: 72 result rows so far
+23:17:34 INFO [csweep] DOGE/USDT done in 29.7s — 72 result rows
+23:17:34 INFO [csweep] ======================================================================
+23:17:34 INFO [csweep] FETCHING DATA: AVAX/USDT (90 days)
+23:17:34 INFO [csweep] ======================================================================
+23:17:34 INFO [pt_layer2] fetch_30d_data: AVAX/USDT bars_needed=25920 (~90 days)
+23:17:45 INFO [pt_layer2] fetch_30d_data: aligned rows=25920 (span: 2026-03-27T16:40:00 → 2026-06-25T16:35:00)
+23:17:45 INFO [csweep] --------------------------------------------------
+23:17:45 INFO [csweep]   HORIZON=6 (0h forward) for AVAX/USDT
+23:17:45 INFO [csweep]   Clean rows=25884, label_up=49.0%
+23:17:45 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:17:49 INFO [csweep]   Horizon 6 done: 12 result rows so far
+23:17:49 INFO [csweep] --------------------------------------------------
+23:17:49 INFO [csweep]   HORIZON=12 (1h forward) for AVAX/USDT
+23:17:49 INFO [csweep]   Clean rows=25878, label_up=48.9%
+23:17:49 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:17:53 INFO [csweep]   Horizon 12 done: 24 result rows so far
+23:17:53 INFO [csweep] --------------------------------------------------
+23:17:53 INFO [csweep]   HORIZON=36 (3h forward) for AVAX/USDT
+23:17:53 INFO [csweep]   Clean rows=25854, label_up=47.4%
+23:17:53 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:17:56 INFO [csweep]   Horizon 36 done: 36 result rows so far
+23:17:56 INFO [csweep] --------------------------------------------------
+23:17:56 INFO [csweep]   HORIZON=72 (6h forward) for AVAX/USDT
+23:17:56 INFO [csweep]   Clean rows=25818, label_up=47.4%
+23:17:56 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:17:59 INFO [csweep]   Horizon 72 done: 48 result rows so far
+23:17:59 INFO [csweep] --------------------------------------------------
+23:17:59 INFO [csweep]   HORIZON=144 (12h forward) for AVAX/USDT
+23:17:59 INFO [csweep]   Clean rows=25746, label_up=47.9%
+23:17:59 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:18:01 INFO [csweep]   Horizon 144 done: 60 result rows so far
+23:18:01 INFO [csweep] --------------------------------------------------
+23:18:01 INFO [csweep]   HORIZON=288 (24h forward) for AVAX/USDT
+23:18:01 INFO [csweep]   Clean rows=25602, label_up=48.7%
+23:18:01 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:18:04 INFO [csweep]   Horizon 288 done: 72 result rows so far
+23:18:04 INFO [csweep] AVAX/USDT done in 29.6s — 72 result rows
+23:18:04 INFO [csweep] ======================================================================
+23:18:04 INFO [csweep] FETCHING DATA: LINK/USDT (90 days)
+23:18:04 INFO [csweep] ======================================================================
+23:18:04 INFO [pt_layer2] fetch_30d_data: LINK/USDT bars_needed=25920 (~90 days)
+23:18:15 INFO [pt_layer2] fetch_30d_data: aligned rows=25920 (span: 2026-03-27T16:40:00 → 2026-06-25T16:35:00)
+23:18:15 INFO [csweep] --------------------------------------------------
+23:18:15 INFO [csweep]   HORIZON=6 (0h forward) for LINK/USDT
+23:18:15 INFO [csweep]   Clean rows=25884, label_up=48.6%
+23:18:15 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:18:19 INFO [csweep]   Horizon 6 done: 12 result rows so far
+23:18:19 INFO [csweep] --------------------------------------------------
+23:18:19 INFO [csweep]   HORIZON=12 (1h forward) for LINK/USDT
+23:18:19 INFO [csweep]   Clean rows=25878, label_up=48.8%
+23:18:19 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:18:22 INFO [csweep]   Horizon 12 done: 24 result rows so far
+23:18:22 INFO [csweep] --------------------------------------------------
+23:18:22 INFO [csweep]   HORIZON=36 (3h forward) for LINK/USDT
+23:18:22 INFO [csweep]   Clean rows=25854, label_up=48.7%
+23:18:22 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:18:25 INFO [csweep]   Horizon 36 done: 36 result rows so far
+23:18:25 INFO [csweep] --------------------------------------------------
+23:18:25 INFO [csweep]   HORIZON=72 (6h forward) for LINK/USDT
+23:18:25 INFO [csweep]   Clean rows=25818, label_up=48.7%
+23:18:25 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:18:28 INFO [csweep]   Horizon 72 done: 48 result rows so far
+23:18:28 INFO [csweep] --------------------------------------------------
+23:18:28 INFO [csweep]   HORIZON=144 (12h forward) for LINK/USDT
+23:18:28 INFO [csweep]   Clean rows=25746, label_up=49.4%
+23:18:28 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:18:31 INFO [csweep]   Horizon 144 done: 60 result rows so far
+23:18:31 INFO [csweep] --------------------------------------------------
+23:18:31 INFO [csweep]   HORIZON=288 (24h forward) for LINK/USDT
+23:18:31 INFO [csweep]   Clean rows=25602, label_up=49.6%
+23:18:31 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:18:33 INFO [csweep]   Horizon 288 done: 72 result rows so far
+23:18:33 INFO [csweep] LINK/USDT done in 29.4s — 72 result rows
+23:18:33 INFO [csweep] ======================================================================
+23:18:33 INFO [csweep] FETCHING DATA: XRP/USDT (90 days)
+23:18:33 INFO [csweep] ======================================================================
+23:18:33 INFO [pt_layer2] fetch_30d_data: XRP/USDT bars_needed=25920 (~90 days)
+23:18:42 INFO [pt_layer2] fetch_30d_data: aligned rows=25920 (span: 2026-03-27T16:40:00 → 2026-06-25T16:35:00)
+23:18:42 INFO [csweep] --------------------------------------------------
+23:18:42 INFO [csweep]   HORIZON=6 (0h forward) for XRP/USDT
+23:18:43 INFO [csweep]   Clean rows=25884, label_up=48.5%
+23:18:43 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:18:47 INFO [csweep]   Horizon 6 done: 12 result rows so far
+23:18:47 INFO [csweep] --------------------------------------------------
+23:18:47 INFO [csweep]   HORIZON=12 (1h forward) for XRP/USDT
+23:18:47 INFO [csweep]   Clean rows=25878, label_up=48.4%
+23:18:47 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:18:51 INFO [csweep]   Horizon 12 done: 24 result rows so far
+23:18:51 INFO [csweep] --------------------------------------------------
+23:18:51 INFO [csweep]   HORIZON=36 (3h forward) for XRP/USDT
+23:18:51 INFO [csweep]   Clean rows=25854, label_up=46.8%
+23:18:51 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:18:54 INFO [csweep]   Horizon 36 done: 36 result rows so far
+23:18:54 INFO [csweep] --------------------------------------------------
+23:18:54 INFO [csweep]   HORIZON=72 (6h forward) for XRP/USDT
+23:18:54 INFO [csweep]   Clean rows=25818, label_up=45.9%
+23:18:54 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:18:58 INFO [csweep]   Horizon 72 done: 48 result rows so far
+23:18:58 INFO [csweep] --------------------------------------------------
+23:18:58 INFO [csweep]   HORIZON=144 (12h forward) for XRP/USDT
+23:18:58 INFO [csweep]   Clean rows=25746, label_up=45.1%
+23:18:59 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:19:02 INFO [csweep]   Horizon 144 done: 60 result rows so far
+23:19:02 INFO [csweep] --------------------------------------------------
+23:19:02 INFO [csweep]   HORIZON=288 (24h forward) for XRP/USDT
+23:19:02 INFO [csweep]   Clean rows=25602, label_up=44.4%
+23:19:02 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:19:04 INFO [csweep]   Horizon 288 done: 72 result rows so far
+23:19:04 INFO [csweep] XRP/USDT done in 31.2s — 72 result rows
+23:19:04 INFO [csweep] ======================================================================
+23:19:04 INFO [csweep] FETCHING DATA: BTC/USDT (90 days)
+23:19:04 INFO [csweep] ======================================================================
+23:19:04 INFO [pt_layer2] fetch_30d_data: BTC/USDT bars_needed=25920 (~90 days)
+23:19:13 INFO [pt_layer2] fetch_30d_data: aligned rows=25920 (span: 2026-03-27T16:40:00 → 2026-06-25T16:35:00)
+23:19:13 INFO [csweep] --------------------------------------------------
+23:19:13 INFO [csweep]   HORIZON=6 (0h forward) for BTC/USDT
+23:19:13 INFO [csweep]   Clean rows=25884, label_up=50.2%
+23:19:13 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:19:17 INFO [csweep]   Horizon 6 done: 12 result rows so far
+23:19:17 INFO [csweep] --------------------------------------------------
+23:19:17 INFO [csweep]   HORIZON=12 (1h forward) for BTC/USDT
+23:19:17 INFO [csweep]   Clean rows=25878, label_up=49.9%
+23:19:17 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:19:21 INFO [csweep]   Horizon 12 done: 24 result rows so far
+23:19:21 INFO [csweep] --------------------------------------------------
+23:19:21 INFO [csweep]   HORIZON=36 (3h forward) for BTC/USDT
+23:19:21 INFO [csweep]   Clean rows=25854, label_up=49.2%
+23:19:21 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:19:24 INFO [csweep]   Horizon 36 done: 36 result rows so far
+23:19:24 INFO [csweep] --------------------------------------------------
+23:19:24 INFO [csweep]   HORIZON=72 (6h forward) for BTC/USDT
+23:19:24 INFO [csweep]   Clean rows=25818, label_up=50.1%
+23:19:24 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:19:27 INFO [csweep]   Horizon 72 done: 48 result rows so far
+23:19:27 INFO [csweep] --------------------------------------------------
+23:19:27 INFO [csweep]   HORIZON=144 (12h forward) for BTC/USDT
+23:19:27 INFO [csweep]   Clean rows=25746, label_up=50.5%
+23:19:27 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:19:29 INFO [csweep]   Horizon 144 done: 60 result rows so far
+23:19:29 INFO [csweep] --------------------------------------------------
+23:19:29 INFO [csweep]   HORIZON=288 (24h forward) for BTC/USDT
+23:19:29 INFO [csweep]   Clean rows=25602, label_up=51.6%
+23:19:29 INFO [csweep]   4 rolling windows available
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+/home/z/.venv/lib/python3.12/site-packages/lightgbm/engine.py:204: UserWarning: Found `n_estimators` in params. Will use it instead of argument
+  _log_warning(f"Found `{alias}` in params. Will use it instead of argument")
+23:19:32 INFO [csweep]   Horizon 288 done: 72 result rows so far
+23:19:32 INFO [csweep] BTC/USDT done in 27.4s — 72 result rows
+23:19:32 INFO [csweep] Per-window results saved to data/sweep_results/full_sweep.csv
+
+========================================================================================================================
+COMPREHENSIVE SWEEP RESULTS — AGGREGATED ACROSS WINDOWS
+========================================================================================================================
+
+--- BEST CONFIG PER SYMBOL (by PnL) ---
+  AVAX/USDT    | H=288 ( 24.0h) | Q85/15 | PnL=  +17.23% | Sharpe=+0.639 | Trades= 25 | WR= 76.2% | AUC=0.516 | Cons=4/4
+  BTC/USDT     | H=144 ( 12.0h) | Q85/15 | PnL=   +2.31% | Sharpe=-0.026 | Trades= 48 | WR= 45.8% | AUC=0.480 | Cons=1/4
+  DOGE/USDT    | H=288 ( 24.0h) | Q85/15 | PnL=  +34.02% | Sharpe=+0.588 | Trades= 26 | WR= 61.9% | AUC=0.542 | Cons=4/4
+  ETH/USDT     | H=288 ( 24.0h) | Q80/20 | PnL=  +22.78% | Sharpe=+0.281 | Trades= 26 | WR= 61.3% | AUC=0.578 | Cons=3/4
+  LINK/USDT    | H=288 ( 24.0h) | Q90/10 | PnL=  +13.03% | Sharpe=+0.163 | Trades= 24 | WR= 54.2% | AUC=0.515 | Cons=3/4
+  SOL/USDT     | H=288 ( 24.0h) | Q90/10 | PnL=  +34.79% | Sharpe=+0.360 | Trades= 24 | WR= 54.2% | AUC=0.496 | Cons=3/4
+  XRP/USDT     | H=288 ( 24.0h) | Q80/20 | PnL=  +21.74% | Sharpe=+0.323 | Trades= 26 | WR= 61.9% | AUC=0.442 | Cons=3/4
+
+--- BEST HORIZON PER SYMBOL (Q90/10, by PnL) ---
+  AVAX/USDT    | Best: H=144 ( 12.0h) | H=  6→PnL= -90.96% | H= 12→PnL= -50.40% | H= 36→PnL= -15.08% | H= 72→PnL= -19.32% | H=144→PnL=  +2.05% | H=288→PnL=  +0.38%
+  BTC/USDT     | Best: H=144 ( 12.0h) | H=  6→PnL= -74.82% | H= 12→PnL= -55.53% | H= 36→PnL= -24.58% | H= 72→PnL= -24.59% | H=144→PnL=  -5.68% | H=288→PnL= -12.63%
+  DOGE/USDT    | Best: H=288 ( 24.0h) | H=  6→PnL= -79.11% | H= 12→PnL= -33.61% | H= 36→PnL= -31.50% | H= 72→PnL= -25.79% | H=144→PnL=  -7.79% | H=288→PnL=  +7.65%
+  ETH/USDT     | Best: H=288 ( 24.0h) | H=  6→PnL= -64.52% | H= 12→PnL= -42.75% | H= 36→PnL= -26.92% | H= 72→PnL=  -0.51% | H=144→PnL= -16.34% | H=288→PnL= +13.40%
+  LINK/USDT    | Best: H=288 ( 24.0h) | H=  6→PnL= -75.10% | H= 12→PnL= -42.55% | H= 36→PnL= -25.27% | H= 72→PnL= -36.74% | H=144→PnL= -22.44% | H=288→PnL= +13.03%
+  SOL/USDT     | Best: H=288 ( 24.0h) | H=  6→PnL=-103.24% | H= 12→PnL= -50.83% | H= 36→PnL=  -7.57% | H= 72→PnL=  -3.81% | H=144→PnL=  -1.17% | H=288→PnL= +34.79%
+  XRP/USDT     | Best: H=144 ( 12.0h) | H=  6→PnL= -66.55% | H= 12→PnL= -29.61% | H= 36→PnL= -31.89% | H= 72→PnL= -18.51% | H=144→PnL=  -6.31% | H=288→PnL= -10.21%
+
+--- ALL CONFIGS SORTED BY PnL (top 30) ---
+   symbol  horizon  horizon_h  q_long  q_short  n_trades  win_rate  avg_ret_pct  pnl_pct    sharpe  test_auc consistency
+ SOL/USDT      288       24.0      90       10        24  0.541675     1.449700  34.7928  0.360475  0.496400         3/4
+DOGE/USDT      288       24.0      85       15        26  0.619075     1.334225  34.0228  0.587850  0.542150         4/4
+ ETH/USDT      288       24.0      80       20        26  0.613100     0.872600  22.7759  0.281200  0.578100         3/4
+ XRP/USDT      288       24.0      80       20        26  0.619025     0.852750  21.7385  0.323475  0.441775         3/4
+AVAX/USDT      288       24.0      85       15        25  0.761900     0.709050  17.2295  0.638575  0.516325         4/4
+AVAX/USDT      144       12.0      85       15        46  0.609875     0.330575  15.0856  0.190500  0.467500         3/4
+DOGE/USDT      288       24.0      80       20        26  0.535725     0.517400  14.2941  0.290275  0.542150         3/4
+ ETH/USDT      288       24.0      90       10        24  0.500000     0.558475  13.4034  0.180650  0.578100         1/4
+DOGE/USDT      144       12.0      85       15        48  0.604175     0.277975  13.3426  0.174050  0.515400         3/4
+ XRP/USDT      288       24.0      85       15        25  0.553575     0.473700  13.1832  0.258300  0.441775         2/4
+LINK/USDT      288       24.0      90       10        24  0.541675     0.542825  13.0284  0.163025  0.514725         3/4
+ SOL/USDT      288       24.0      85       15        24  0.541650     0.521050  12.5056  0.283900  0.496400         2/4
+LINK/USDT      288       24.0      85       15        24  0.500000     0.427800  10.2675  0.104825  0.514725         2/4
+ SOL/USDT      144       12.0      80       20        50  0.580150     0.186600   9.1816  0.092625  0.505950         4/4
+AVAX/USDT      288       24.0      80       20        25  0.601175     0.326950   7.6581  0.476825  0.516325         2/4
+DOGE/USDT      288       24.0      90       10        25  0.470250     0.273825   7.6456  0.175525  0.542150         3/4
+AVAX/USDT       36        3.0      85       15       155  0.481650     0.030250   5.8665  0.010675  0.516325         2/4
+DOGE/USDT      144       12.0      80       20        49  0.633000     0.105200   5.3461  0.145575  0.515400         2/4
+LINK/USDT       72        6.0      80       20        85  0.482225     0.058900   3.4948  0.035825  0.448000         2/4
+ BTC/USDT      144       12.0      85       15        48  0.458350     0.048075   2.3070 -0.026475  0.479875         1/4
+AVAX/USDT      144       12.0      90       10        43  0.523875     0.011925   2.0463 -0.014250  0.467500         2/4
+AVAX/USDT      144       12.0      80       20        48  0.479175     0.026700   1.2824  0.016450  0.467500         2/4
+AVAX/USDT      288       24.0      90       10        25  0.672600     0.000875   0.3755  0.206875  0.516325         3/4
+ XRP/USDT       72        6.0      85       15        83  0.435950    -0.015200  -0.2685 -0.012300  0.468525         2/4
+ ETH/USDT       72        6.0      90       10        76  0.444700    -0.012975  -0.5114 -0.062000  0.488475         2/4
+ SOL/USDT      144       12.0      90       10        45  0.513275    -0.026175  -1.1750 -0.026725  0.505950         1/4
+ SOL/USDT      288       24.0      80       20        25  0.607150    -0.010050  -1.2439  0.179700  0.496400         2/4
+ SOL/USDT       72        6.0      80       20        91  0.498050    -0.002700  -1.9313 -0.007400  0.487950         2/4
+LINK/USDT      288       24.0      80       20        24  0.416675    -0.086775  -2.0828 -0.147800  0.514725         2/4
+DOGE/USDT       36        3.0      85       15       158  0.513225    -0.014925  -2.3751 -0.011050  0.513875         2/4
+
+--- TOKENS WITH POSITIVE AGGREGATE PnL ---
+           best_pnl  best_sharpe  n_positive_configs  n_total_configs
+symbol                                                               
+SOL/USDT    34.7928     0.360475                   3                3
+DOGE/USDT   34.0228     0.587850                   5                5
+ETH/USDT    22.7759     0.281200                   2                2
+XRP/USDT    21.7385     0.323475                   2                2
+AVAX/USDT   17.2295     0.638575                   7                7
+LINK/USDT   13.0284     0.163025                   3                3
+BTC/USDT     2.3070    -0.026475                   1                1
+
+--- TOKENS WITH NO POSITIVE CONFIG (DEAD ENDS) ---
+  None — all tokens have at least one positive config!
+
+--- HORIZON COMPARISON (all tokens, Q90/10) ---
+           avg_pnl  med_pnl  avg_sharpe  avg_trades  pct_positive
+horizon                                                          
+6       -79.186029 -75.1011   -0.277329  546.142857      0.000000
+12      -43.611214 -42.7469   -0.222604  291.714286      0.000000
+36      -23.256814 -25.2719   -0.144286  138.000000      0.000000
+72      -18.468257 -19.3175   -0.153161   76.428571      0.000000
+144      -8.241729  -6.3065   -0.092293   44.571429     14.285714
+288       6.629629   7.6456    0.068039   24.285714     71.428571
+
+--- PER-WINDOW BREAKDOWN (top 5 configs by total PnL) ---
+
+  SOL/USDT H=288 Q90/10 (total PnL=+34.79%, Sharpe=+0.360):
+    Window 1: trades=6 WR=50.0% PnL=-0.37% Sharpe=-0.024 AUC=0.489
+    Window 2: trades=6 WR=66.7% PnL=+15.56% Sharpe=+0.827 AUC=0.415
+    Window 3: trades=6 WR=33.3% PnL=+1.55% Sharpe=+0.113 AUC=0.449
+    Window 4: trades=6 WR=66.7% PnL=+18.06% Sharpe=+0.527 AUC=0.632
+
+  DOGE/USDT H=288 Q85/15 (total PnL=+34.02%, Sharpe=+0.588):
+    Window 1: trades=7 WR=42.9% PnL=+6.51% Sharpe=+0.305 AUC=0.568
+    Window 2: trades=7 WR=71.4% PnL=+7.50% Sharpe=+0.721 AUC=0.582
+    Window 3: trades=6 WR=66.7% PnL=+8.12% Sharpe=+0.561 AUC=0.511
+    Window 4: trades=6 WR=66.7% PnL=+11.89% Sharpe=+0.765 AUC=0.508
+
+  ETH/USDT H=288 Q80/20 (total PnL=+22.78%, Sharpe=+0.281):
+    Window 1: trades=7 WR=71.4% PnL=+4.68% Sharpe=+0.233 AUC=0.617
+    Window 2: trades=7 WR=57.1% PnL=+8.15% Sharpe=+0.569 AUC=0.559
+    Window 3: trades=6 WR=50.0% PnL=-1.79% Sharpe=-0.097 AUC=0.510
+    Window 4: trades=6 WR=66.7% PnL=+11.73% Sharpe=+0.419 AUC=0.626
+
+  XRP/USDT H=288 Q80/20 (total PnL=+21.74%, Sharpe=+0.323):
+    Window 1: trades=7 WR=57.1% PnL=-3.89% Sharpe=-0.196 AUC=0.468
+    Window 2: trades=7 WR=57.1% PnL=+12.80% Sharpe=+0.732 AUC=0.365
+    Window 3: trades=6 WR=83.3% PnL=+3.12% Sharpe=+0.226 AUC=0.521
+    Window 4: trades=6 WR=50.0% PnL=+9.71% Sharpe=+0.533 AUC=0.413
+
+  AVAX/USDT H=288 Q85/15 (total PnL=+17.23%, Sharpe=+0.639):
+    Window 1: trades=6 WR=83.3% PnL=+7.65% Sharpe=+0.370 AUC=0.533
+    Window 2: trades=6 WR=100.0% PnL=+7.94% Sharpe=+1.998 AUC=0.550
+    Window 3: trades=7 WR=71.4% PnL=+1.49% Sharpe=+0.182 AUC=0.626
+    Window 4: trades=6 WR=50.0% PnL=+0.15% Sharpe=+0.004 AUC=0.357
+
+========================================================================================================================
+HONEST ASSESSMENT
+========================================================================================================================
+
+  WARNING: 2 configs positive in only 1 window — likely overfitting
+
+  ROBUST configs (PnL>0, >=2 windows positive, >=6 trades): 21
+    SOL/USDT     H=288 Q90/10 PnL=+34.79% Sharpe=+0.360 Cons=3/4
+    DOGE/USDT    H=288 Q85/15 PnL=+34.02% Sharpe=+0.588 Cons=4/4
+    ETH/USDT     H=288 Q80/20 PnL=+22.78% Sharpe=+0.281 Cons=3/4
+    XRP/USDT     H=288 Q80/20 PnL=+21.74% Sharpe=+0.323 Cons=3/4
+    AVAX/USDT    H=288 Q85/15 PnL=+17.23% Sharpe=+0.639 Cons=4/4
+    AVAX/USDT    H=144 Q85/15 PnL=+15.09% Sharpe=+0.191 Cons=3/4
+    DOGE/USDT    H=288 Q80/20 PnL=+14.29% Sharpe=+0.290 Cons=3/4
+    DOGE/USDT    H=144 Q85/15 PnL=+13.34% Sharpe=+0.174 Cons=3/4
+    XRP/USDT     H=288 Q85/15 PnL=+13.18% Sharpe=+0.258 Cons=2/4
+    LINK/USDT    H=288 Q90/10 PnL=+13.03% Sharpe=+0.163 Cons=3/4
+
+  AUC>0.52 AND PnL>0: 5 configs
+  AUC<0.48 AND PnL>0: 7 configs (PnL from noise, not signal)
+
+  RECOMMENDATION:
+    STRONGEST signal: SOL/USDT H=288 Q90/10 PnL=+34.79% Cons=3/4
+    → Launch paper trading with this config
+23:19:32 INFO [csweep] Aggregated results saved to data/sweep_results/full_sweep_agg.csv

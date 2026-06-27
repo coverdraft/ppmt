@@ -1,0 +1,2002 @@
+     1→"""
+     2→PPMT Terminal Server — FastAPI + WebSocket web dashboard with Money Management.
+     3→
+     4→Serves the real-time trading dashboard and provides both REST and WebSocket
+     5→endpoints for the front-end to consume state from :class:`TerminalState`.
+     6→
+     7→v0.27.0: Complete dashboard with candlestick chart, entry/exit markers,
+     8→real-time MEXC data, paper trading, and backtesting with real data.
+     9→"""
+    10→
+    11→from __future__ import annotations
+    12→
+    13→import asyncio
+    14→import json
+    15→import logging
+    16→import os
+    17→import time
+    18→from contextlib import asynccontextmanager
+    19→from pathlib import Path
+    20→from typing import Optional
+    21→
+    22→from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+    23→from fastapi.responses import HTMLResponse
+    24→from pydantic import BaseModel
+    25→
+    26→from ppmt.terminal.state import TerminalState, get_terminal_state
+    27→from ppmt.data.storage import PPMTStorage
+    28→from ppmt.data.collector import DataCollector
+    29→from ppmt.data.classifier import AssetClassifier
+    30→
+    31→logger = logging.getLogger(__name__)
+    32→
+    33→# ------------------------------------------------------------------ #
+    34→# Static files path
+    35→# ------------------------------------------------------------------ #
+    36→_STATIC_DIR = Path(__file__).parent / "static"
+    37→_DASHBOARD_HTML_PATH = _STATIC_DIR / "index.html"
+    38→
+    39→# ------------------------------------------------------------------ #
+    40→# Config directory for persistent state
+    41→# ------------------------------------------------------------------ #
+    42→CONFIG_DIR = os.path.expanduser("~/.ppmt")
+    43→
+    44→# ------------------------------------------------------------------ #
+    45→# FastAPI application
+    46→# ------------------------------------------------------------------ #
+    47→# v0.39.6: Use the modern lifespan pattern (instead of deprecated
+    48→# `@app.on_event("startup")`) to capture the running event loop.
+    49→# Worker threads (engine callbacks like `_on_position_hook`) need a
+    50→# reference to the main loop so they can schedule async broadcasts
+    51→# via `asyncio.run_coroutine_threadsafe`.
+    52→@asynccontextmanager
+    53→async def _lifespan(app: FastAPI):
+    54→    try:
+    55→        app.state.loop = asyncio.get_running_loop()
+    56→        logger.debug("Captured running event loop on startup")
+    57→    except Exception as _e:
+    58→        logger.debug("Could not capture event loop on startup: %s", _e)
+    59→    yield
+    60→
+    61→app = FastAPI(title="PPMT Terminal", version="0.40.34", lifespan=_lifespan)
+    62→
+    63→# Global terminal state (shared with engine)
+    64→terminal_state: TerminalState = get_terminal_state()
+    65→
+    66→# Connected WebSocket clients
+    67→_ws_clients: set[WebSocket] = set()
+    68→
+    69→# Parent Node Manager (lazy-loaded)
+    70→_parent_manager = None
+    71→
+    72→
+    73→def _get_parent_manager():
+    74→    """Get or create the ParentNodeManager."""
+    75→    global _parent_manager
+    76→    if _parent_manager is None:
+    77→        from ppmt.risk.money_manager import ParentNodeManager, ChildNodeConfig
+    78→        state_file = os.path.join(CONFIG_DIR, "parent_node_state.json")
+    79→        import yaml
+    80→
+    81→        # Default capital from terminal state
+    82→        capital = terminal_state.portfolio_value or 10_000.0
+    83→        _parent_manager = ParentNodeManager(total_capital=capital)
+    84→
+    85→        # Load saved state
+    86→        if os.path.exists(state_file):
+    87→            try:
+    88→                with open(state_file) as f:
+    89→                    saved = yaml.safe_load(f) or {}
+    90→                _parent_manager.total_capital = saved.get("total_capital", capital)
+    91→                for child_data in saved.get("children", []):
+    92→                    cfg = ChildNodeConfig(**child_data)
+    93→                    _parent_manager.register_child(cfg)
+    94→                if _parent_manager._children:
+    95→                    _parent_manager.distribute_capital()
+    96→            except Exception as e:
+    97→                logger.warning(f"Failed to load parent node state: {e}")
+    98→
+    99→    return _parent_manager
+   100→
+   101→
+   102→def _save_parent_manager():
+   103→    """Save ParentNodeManager state to disk."""
+   104→    import yaml
+   105→    pm = _get_parent_manager()
+   106→    state_file = os.path.join(CONFIG_DIR, "parent_node_state.json")
+   107→    try:
+   108→        os.makedirs(CONFIG_DIR, exist_ok=True)
+   109→        state = {
+   110→            "total_capital": pm.total_capital,
+   111→            "children": [
+   112→                {
+   113→                    "node_id": cfg.node_id,
+   114→                    "symbol": cfg.symbol,
+   115→                    "timeframe": cfg.timeframe,
+   116→                    "capital_allocation_pct": cfg.capital_allocation_pct,
+   117→                    "leverage": cfg.leverage,
+   118→                    "auto_mode": cfg.auto_mode,
+   119→                    "max_position_pct": cfg.max_position_pct,
+   120→                    "enabled": cfg.enabled,
+   121→                }
+   122→                for cfg in pm._children.values()
+   123→            ],
+   124→        }
+   125→        with open(state_file, "w") as f:
+   126→            yaml.dump(state, f, default_flow_style=False)
+   127→    except Exception as e:
+   128→        logger.warning(f"Failed to save parent node state: {e}")
+   129→
+   130→
+   131→# ------------------------------------------------------------------ #
+   132→# HTML serving
+   133→# ------------------------------------------------------------------ #
+   134→
+   135→
+   136→def _load_dashboard_html() -> str:
+   137→    """Load the dashboard HTML from the static directory."""
+   138→    if _DASHBOARD_HTML_PATH.exists():
+   139→        return _DASHBOARD_HTML_PATH.read_text(encoding="utf-8")
+   140→    return _FALLBACK_HTML
+   141→
+   142→
+   143→@app.get("/")
+   144→async def dashboard() -> HTMLResponse:
+   145→    """Serve the dashboard HTML."""
+   146→    return HTMLResponse(content=_load_dashboard_html())
+   147→
+   148→
+   149→# ------------------------------------------------------------------ #
+   150→# REST endpoints — State
+   151→# ------------------------------------------------------------------ #
+   152→
+   153→
+   154→@app.get("/api/status")
+   155→async def get_status() -> dict:
+   156→    """REST endpoint for current terminal status."""
+   157→    return terminal_state.to_dict()
+   158→
+   159→
+   160→@app.get("/api/snapshot")
+   161→async def get_snapshot() -> dict:
+   162→    """Full state snapshot including uptime."""
+   163→    return terminal_state.get_snapshot()
+   164→
+   165→
+   166→@app.get("/api/portfolio")
+   167→async def get_portfolio() -> dict:
+   168→    """Portfolio summary."""
+   169→    return {
+   170→        "value": terminal_state.portfolio_value,
+   171→        "cash": terminal_state.cash,
+   172→        "unrealized_pnl": terminal_state.unrealized_pnl,
+   173→        "realized_pnl": terminal_state.realized_pnl,
+   174→        "total_pnl_pct": terminal_state.total_pnl_pct,
+   175→        "exposure_pct": terminal_state.exposure_pct,
+   176→        "daily_return_pct": terminal_state.daily_return_pct,
+   177→        "positions": terminal_state.positions,
+   178→        "leverage": terminal_state.leverage,
+   179→        "auto_mode": terminal_state.auto_mode,
+   180→    }
+   181→
+   182→
+   183→@app.get("/api/signals")
+   184→async def get_signals() -> dict:
+   185→    """Recent signals.
+   186→
+   187→    v0.39.2: In multi-token mode the global terminal_state singleton is
+   188→    intentionally skipped (v0.39.1 cross-contamination fix), so its
+   189→    signals_history stays empty. Fall back to merging per-session
+   190→    signals_history from _multi_sessions so this endpoint keeps working
+   191→    for the dashboard's Signals panel + Recent Signals widget.
+   192→    """
+   193→    sigs = list(terminal_state.signals_history or [])
+   194→    if not sigs and _multi_sessions:
+   195→        # Multi-token mode — merge per-session signals, newest last.
+   196→        for sess in _multi_sessions.values():
+   197→            sigs.extend(sess.get("signals_history", []))
+   198→        # Cap at 50 (matches singleton's _MAX_SIGNALS).
+   199→        sigs = sigs[-50:]
+   200→    return {"signals": sigs}
+   201→
+   202→
+   203→@app.get("/api/performance")
+   204→async def get_performance() -> dict:
+   205→    """Performance metrics."""
+   206→    return {
+   207→        "total_trades": terminal_state.total_trades,
+   208→        "winning_trades": terminal_state.winning_trades,
+   209→        "win_rate": terminal_state.win_rate,
+   210→        "max_drawdown": terminal_state.max_drawdown,
+   211→        "equity_curve": terminal_state.equity_curve,
+   212→        "equity_timestamps": terminal_state.equity_timestamps,
+   213→    }
+   214→
+   215→
+   216→@app.get("/api/risk")
+   217→async def get_risk() -> dict:
+   218→    """Risk state."""
+   219→    return {
+   220→        "circuit_breakers": terminal_state.circuit_breakers,
+   221→        "is_trading_allowed": terminal_state.is_trading_allowed,
+   222→        "kill_switch_active": terminal_state.kill_switch_active,
+   223→        "exposure_pct": terminal_state.exposure_pct,
+   224→        "daily_return_pct": terminal_state.daily_return_pct,
+   225→        "max_drawdown_pct": terminal_state.max_drawdown_pct,
+   226→        "daily_loss_pct": terminal_state.daily_loss_pct,
+   227→    }
+   228→
+   229→
+   230→# ------------------------------------------------------------------ #
+   231→# REST endpoints — Money Management & Nodes (v0.25.0)
+   232→# ------------------------------------------------------------------ #
+   233→
+   234→
+   235→@app.get("/api/nodes")
+   236→async def get_nodes() -> dict:
+   237→    """Get all child nodes and parent state."""
+   238→    pm = _get_parent_manager()
+   239→    children = []
+   240→    for node_id, cfg in pm._children.items():
+   241→        state = pm._child_states.get(node_id)
+   242→        children.append({
+   243→            "node_id": cfg.node_id,
+   244→            "symbol": cfg.symbol,
+   245→            "timeframe": cfg.timeframe,
+   246→            "capital_allocation_pct": cfg.capital_allocation_pct,
+   247→            "leverage": cfg.leverage,
+   248→            "auto_mode": cfg.auto_mode,
+   249→            "max_position_pct": cfg.max_position_pct,
+   250→            "enabled": cfg.enabled,
+   251→            "allocated_capital": state.allocated_capital if state else 0,
+   252→            "available_capital": state.available_capital if state else 0,
+   253→            "realized_pnl": state.realized_pnl if state else 0,
+   254→            "unrealized_pnl": state.unrealized_pnl if state else 0,
+   255→            "open_positions": state.open_positions if state else 0,
+   256→            "total_trades": state.total_trades if state else 0,
+   257→            "winning_trades": state.winning_trades if state else 0,
+   258→        })
+   259→
+   260→    return {
+   261→        "total_capital": pm.total_capital,
+   262→        "reserve_capital": pm.reserve_capital,
+   263→        "total_portfolio_value": pm.total_portfolio_value,
+   264→        "total_exposure_pct": pm.total_exposure_pct,
+   265→        "total_realized_pnl": pm.total_realized_pnl,
+   266→        "total_unrealized_pnl": pm.total_unrealized_pnl,
+   267→        "kill_switch_active": pm._global_kill_switch,
+   268→        "children": children,
+   269→    }
+   270→
+   271→
+   272→class AddNodeRequest(BaseModel):
+   273→    symbol: str
+   274→    timeframe: str = "1h"
+   275→    capital_allocation_pct: float = 0.20
+   276→    leverage: int = 1
+   277→    auto_mode: bool = True
+   278→
+   279→
+   280→@app.post("/api/nodes/add")
+   281→async def add_node(req: AddNodeRequest) -> dict:
+   282→    """Add a child node."""
+   283→    from ppmt.risk.money_manager import ChildNodeConfig
+   284→    pm = _get_parent_manager()
+   285→    node_id = f"{req.symbol.split('/')[0].lower()}_{req.timeframe}"
+   286→
+   287→    if node_id in pm._children:
+   288→        return {"ok": False, "error": f"Node '{node_id}' already exists"}
+   289→
+   290→    cfg = ChildNodeConfig(
+   291→        node_id=node_id,
+   292→        symbol=req.symbol,
+   293→        timeframe=req.timeframe,
+   294→        capital_allocation_pct=req.capital_allocation_pct,
+   295→        leverage=req.leverage,
+   296→        auto_mode=req.auto_mode,
+   297→    )
+   298→
+   299→    try:
+   300→        pm.register_child(cfg)
+   301→        pm.distribute_capital()
+   302→        _save_parent_manager()
+   303→        return {"ok": True, "node_id": node_id, "capital": pm.get_child_capital(node_id)}
+   304→    except Exception as e:
+   305→        return {"ok": False, "error": str(e)}
+   306→
+   307→
+   308→class RemoveNodeRequest(BaseModel):
+   309→    node_id: str
+   310→
+   311→
+   312→@app.post("/api/nodes/remove")
+   313→async def remove_node(req: RemoveNodeRequest) -> dict:
+   314→    """Remove a child node."""
+   315→    pm = _get_parent_manager()
+   316→    try:
+   317→        pm.unregister_child(req.node_id)
+   318→        _save_parent_manager()
+   319→        return {"ok": True}
+   320→    except Exception as e:
+   321→        return {"ok": False, "error": str(e)}
+   322→
+   323→
+   324→class SetLeverageRequest(BaseModel):
+   325→    node_id: str
+   326→    leverage: int
+   327→
+   328→
+   329→@app.post("/api/nodes/leverage")
+   330→async def set_leverage(req: SetLeverageRequest) -> dict:
+   331→    """Set leverage for a child node."""
+   332→    pm = _get_parent_manager()
+   333→    try:
+   334→        pm.set_child_leverage(req.node_id, req.leverage)
+   335→        _save_parent_manager()
+   336→        return {"ok": True, "node_id": req.node_id, "leverage": req.leverage}
+   337→    except Exception as e:
+   338→        return {"ok": False, "error": str(e)}
+   339→
+   340→
+   341→class SetAutoModeRequest(BaseModel):
+   342→    node_id: str
+   343→    auto_mode: bool
+   344→
+   345→
+   346→@app.post("/api/nodes/auto-mode")
+   347→async def set_auto_mode(req: SetAutoModeRequest) -> dict:
+   348→    """Set auto/manual mode for a child node."""
+   349→    pm = _get_parent_manager()
+   350→    try:
+   351→        pm.set_child_auto_mode(req.node_id, req.auto_mode)
+   352→        _save_parent_manager()
+   353→        return {"ok": True, "node_id": req.node_id, "auto_mode": req.auto_mode}
+   354→    except Exception as e:
+   355→        return {"ok": False, "error": str(e)}
+   356→
+   357→
+   358→class SetCapitalRequest(BaseModel):
+   359→    total_capital: float
+   360→
+   361→
+   362→@app.post("/api/nodes/capital")
+   363→async def set_capital(req: SetCapitalRequest) -> dict:
+   364→    """Set total parent capital."""
+   365→    pm = _get_parent_manager()
+   366→    pm.total_capital = req.total_capital
+   367→    pm.distribute_capital()
+   368→    _save_parent_manager()
+   369→    return {"ok": True, "total_capital": pm.total_capital}
+   370→
+   371→
+   372→@app.post("/api/nodes/kill-switch/activate")
+   373→async def activate_kill_switch() -> dict:
+   374→    """Activate the global kill switch."""
+   375→    pm = _get_parent_manager()
+   376→    pm.activate_global_kill_switch()
+   377→    terminal_state.kill_switch_active = True
+   378→    terminal_state.is_trading_allowed = False
+   379→    _save_parent_manager()
+   380→    return {"ok": True, "kill_switch": True}
+   381→
+   382→
+   383→@app.post("/api/nodes/kill-switch/deactivate")
+   384→async def deactivate_kill_switch() -> dict:
+   385→    """Deactivate the global kill switch."""
+   386→    pm = _get_parent_manager()
+   387→    pm.deactivate_global_kill_switch()
+   388→    terminal_state.kill_switch_active = False
+   389→    terminal_state.is_trading_allowed = True
+   390→    _save_parent_manager()
+   391→    return {"ok": True, "kill_switch": False}
+   392→
+   393→
+   394→class RedistributeRequest(BaseModel):
+   395→    allocations: dict  # node_id -> pct (as fraction 0-1)
+   396→
+   397→
+   398→@app.post("/api/nodes/redistribute")
+   399→async def redistribute_capital(req: RedistributeRequest) -> dict:
+   400→    """Redistribute capital among child nodes."""
+   401→    pm = _get_parent_manager()
+   402→    try:
+   403→        pm.redistribute_capital(req.allocations)
+   404→        _save_parent_manager()
+   405→        return {"ok": True, "allocations": req.allocations}
+   406→    except Exception as e:
+   407→        return {"ok": False, "error": str(e)}
+   408→
+   409→
+   410→# ------------------------------------------------------------------ #
+   411→# REST endpoint — Run backtest via dashboard (v0.25.0)
+   412→# ------------------------------------------------------------------ #
+   413→
+   414→
+   415→class BacktestRequest(BaseModel):
+   416→    symbol: str = "BTC/USDT"
+   417→    timeframe: str = "1h"
+   418→    capital: float = 10_000.0
+   419→
+   420→
+   421→@app.post("/api/backtest")
+   422→async def run_backtest(req: BacktestRequest) -> dict:
+   423→    """Run a quick backtest and return results."""
+   424→    try:
+   425→        from ppmt.engine.realtime import RealtimeTrader, ReplayConfig
+   426→        config = ReplayConfig(
+   427→            symbol=req.symbol,
+   428→            timeframe=req.timeframe,
+   429→            initial_capital=req.capital,
+   430→            speed=0,
+   431→            verbose=False,
+   432→        )
+   433→        trader = RealtimeTrader(config=config)
+   434→        result = trader.run_replay()
+   435→
+   436→        trades = []
+   437→        for t in result.trades:
+   438→            # Parse timestamps for chart markers
+   439→            entry_ts = None
+   440→            exit_ts = None
+   441→            try:
+   442→                if t.entry_time:
+   443→                    import pandas as pd
+   444→                    dt = pd.Timestamp(t.entry_time)
+   445→                    entry_ts = int(dt.timestamp())
+   446→                if t.exit_time:
+   447→                    import pandas as pd
+   448→                    dt = pd.Timestamp(t.exit_time)
+   449→                    exit_ts = int(dt.timestamp())
+   450→            except Exception:
+   451→                pass
+   452→
+   453→            trades.append({
+   454→                "direction": t.direction,
+   455→                "entry_price": t.entry_price,
+   456→                "exit_price": t.exit_price,
+   457→                "entry_time": t.entry_time,
+   458→                "exit_time": t.exit_time,
+   459→                "entry_ts": entry_ts,
+   460→                "exit_ts": exit_ts,
+   461→                "pnl_pct": t.pnl_pct,
+   462→                "exit_reason": t.exit_reason,
+   463→                "regime": t.regime,
+   464→            })
+   465→
+   466→        return {
+   467→            "ok": True,
+   468→            "total_trades": result.total_trades,
+   469→            "win_rate": result.win_rate,
+   470→            "total_pnl_pct": result.total_pnl_pct,
+   471→            "max_drawdown": result.max_drawdown,
+   472→            "trades": trades,
+   473→            "equity_curve": result.equity_curve[-200:] if result.equity_curve else [],
+   474→        }
+   475→    except Exception as e:
+   476→        return {"ok": False, "error": str(e)}
+   477→
+   478→
+   479→# ------------------------------------------------------------------ #
+   480→# REST endpoints — Market Data & OHLCV for Chart (v0.27.0)
+   481→# ------------------------------------------------------------------ #
+   482→
+   483→
+   484→@app.get("/api/ohlcv")
+   485→async def get_ohlcv(
+   486→    symbol: str = "BTC/USDT",
+   487→    timeframe: str = "1m",
+   488→    limit: int = 200,
+   489→    exchange: str = "mexc",
+   490→) -> dict:
+   491→    """Fetch real OHLCV data from exchange via ccxt for the candlestick chart."""
+   492→    try:
+   493→        import ccxt
+   494→        ex = getattr(ccxt, exchange, None)
+   495→        if ex is None:
+   496→            return {"ok": False, "error": f"Exchange '{exchange}' not found"}
+   497→        # v0.40.28: spot-only for binance — avoids fapi.binance.com block.
+   498→        _opts = {}
+   499→        if exchange.lower() == 'binance':
+   500→            _opts = {'enableRateLimit': True,
+   501→                     'options': {'defaultType': 'spot', 'fetchMarkets': ['spot']}}
+   502→        exc = ex(_opts)
+   503→        try:
+   504→            ohlcv = exc.fetch_ohlcv(symbol, timeframe, limit=min(limit, 1000))
+   505→            candles = []
+   506→            for c in ohlcv:
+   507→                candles.append({
+   508→                    "t": c[0],       # timestamp
+   509→                    "o": c[1],       # open
+   510→                    "h": c[2],       # high
+   511→                    "l": c[3],       # low
+   512→                    "c": c[4],       # close
+   513→                    "v": c[5],       # volume
+   514→                })
+   515→            return {"ok": True, "symbol": symbol, "timeframe": timeframe, "candles": candles}
+   516→        finally:
+   517→            if hasattr(exc, 'close'):
+   518→                exc.close()
+   519→    except Exception as e:
+   520→        return {"ok": False, "error": str(e)}
+   521→
+   522→
+   523→@app.get("/api/market/price")
+   524→async def get_market_price(
+   525→    symbol: str = "BTC/USDT",
+   526→    exchange: str = "mexc",
+   527→) -> dict:
+   528→    """Get current market price from exchange."""
+   529→    try:
+   530→        import ccxt
+   531→        ex = getattr(ccxt, exchange, None)
+   532→        if ex is None:
+   533→            return {"ok": False, "error": f"Exchange '{exchange}' not found"}
+   534→        # v0.40.28: spot-only for binance — same fapi fix as /api/ohlcv.
+   535→        _opts = {}
+   536→        if exchange.lower() == 'binance':
+   537→            _opts = {'enableRateLimit': True,
+   538→                     'options': {'defaultType': 'spot', 'fetchMarkets': ['spot']}}
+   539→        exc = ex(_opts)
+   540→        try:
+   541→            ticker = exc.fetch_ticker(symbol)
+   542→            # v0.40.34: Explicit no-cache headers to prevent CDN/browser
+   543→            # proxies from serving stale prices (user saw 700-dollar jumps
+   544→            # in BTC price suggesting stale cached responses).
+   545→            from fastapi.responses import JSONResponse
+   546→            return JSONResponse(
+   547→                content={
+   548→                    "ok": True,
+   549→                    "symbol": symbol,
+   550→                    "price": ticker.get("last", 0),
+   551→                    "change_24h": ticker.get("percentage", 0),
+   552→                    "high_24h": ticker.get("high", 0),
+   553→                    "low_24h": ticker.get("low", 0),
+   554→                    "volume_24h": ticker.get("quoteVolume", 0),
+   555→                    "ts": int(time.time()),
+   556→                },
+   557→                headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+   558→                         "Pragma": "no-cache",
+   559→                         "Expires": "0"},
+   560→            )
+   561→        finally:
+   562→            if hasattr(exc, 'close'):
+   563→                exc.close()
+   564→    except Exception as e:
+   565→        return {"ok": False, "error": str(e)}
+   566→
+   567→
+   568→@app.get("/api/market/symbols")
+   569→async def get_market_symbols(exchange: str = "mexc", limit: int = 500) -> dict:
+   570→    """Get available trading symbols from exchange.
+   571→
+   572→    v0.32.5: Filters out leveraged/derivative tokens (1000X, 3L, 3S, 5L, 5S,
+   573→    UP, DOWN, BULL, BEAR) that aren't suitable for the PPMT pattern engine.
+   574→    Returns up to `limit` symbols (default 500, was 100). This makes the
+   575→    dropdown actually contain the major tokens the user expects (AAVE, ADA,
+   576→    AVAX, DOGE, etc.) instead of being filled with "1000BONK/USDT"-style
+   577→    leveraged tokens that sort first alphabetically.
+   578→    """
+   579→    try:
+   580→        import ccxt
+   581→        ex = getattr(ccxt, exchange, None)
+   582→        if ex is None:
+   583→            return {"ok": False, "error": f"Exchange '{exchange}' not found"}
+   584→        exc = ex()
+   585→        try:
+   586→            # v0.40.32: Use direct HTTP /api/v3/exchangeInfo with timeout.
+   587→            # If it times out (>10s), fall back to hardcoded top-50 list.
+   588→            # This avoids blocking the whole server when the endpoint is slow.
+   589→            import requests as _requests
+   590→            _base_urls = {
+   591→                "mexc": "https://api.mexc.com",
+   592→                "binance": "https://api.binance.com",
+   593→                "bybit": "https://api.bybit.com",
+   594→            }
+   595→            _base = _base_urls.get(exchange.lower(), "https://api.mexc.com")
+   596→            try:
+   597→                _r = _requests.get(f"{_base}/api/v3/exchangeInfo", timeout=10)
+   598→                _r.raise_for_status()
+   599→                _data = _r.json()
+   600→                usdt_pairs = []
+   601→                for s_obj in _data.get("symbols", []):
+   602→                    s = s_obj.get("symbol", "")
+   603→                    if not s.endswith("USDT"):
+   604→                        continue
+   605→                    if not s_obj.get("status", "TRADING") == "TRADING":
+   606→                        continue
+   607→                    # Reconstruct CCXT-style symbol: BTCUSDT -> BTC/USDT
+   608→                    base = s[:-4]
+   609→                    usdt_pairs.append(f"{base}/USDT")
+   610→                # Filter leveraged tokens
+   611→                usdt_pairs = [s for s in usdt_pairs
+   612→                              if not s[:-5].startswith(("1000", "10000", "1BULL", "3L", "3S", "5L", "5S"))
+   613→                              and not (s[:-5].endswith(("UP", "DOWN", "BULL", "BEAR")) and len(s[:-5]) > 4)]
+   614→                usdt_pairs.sort()
+   615→                return {"ok": True, "exchange": exchange, "symbols": usdt_pairs[:limit],
+   616→                        "total_available": len(usdt_pairs)}
+   617→            except Exception as e_direct:
+   618→                # Hardcoded fallback
+   619→                _fallback = [
+   620→                    "BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "XRP/USDT",
+   621→                    "ADA/USDT", "DOGE/USDT", "AVAX/USDT", "DOT/USDT", "LINK/USDT",
+   622→                    "MATIC/USDT", "UNI/USDT", "ATOM/USDT", "LTC/USDT", "BCH/USDT",
+   623→                    "NEAR/USDT", "APT/USDT", "FIL/USDT", "ARB/USDT", "OP/USDT",
+   624→                    "INJ/USDT", "SUI/USDT", "TIA/USDT", "SEI/USDT", "RUNE/USDT",
+   625→                    "AAVE/USDT", "MKR/USDT", "GRT/USDT", "SAND/USDT", "MANA/USDT",
+   626→                    "AXS/USDT", "FTM/USDT", "ALGO/USDT", "EGLD/USDT", "FLOW/USDT",
+   627→                    "THETA/USDT", "GALA/USDT", "IMX/USDT", "LDO/USDT", "STX/USDT",
+   628→                    "PEPE/USDT", "WIF/USDT", "BONK/USDT", "FLOKI/USDT", "SHIB/USDT",
+   629→                    "JUP/USDT", "PYTH/USDT", "RNDR/USDT", "FET/USDT", "GRT/USDT",
+   630→                ]
+   631→                return {"ok": True, "exchange": exchange, "symbols": _fallback[:limit],
+   632→                        "total_available": len(_fallback), "fallback": True,
+   633→                        "note": f"direct HTTP exchangeInfo failed ({e_direct}); using hardcoded top-50 list"}
+   634→        finally:
+   635→            if hasattr(exc, 'close'):
+   636→                exc.close()
+   637→    except Exception as e:
+   638→        return {"ok": False, "error": str(e)}
+   639→
+   640→
+   641→class IngestRequest(BaseModel):
+   642→    symbol: str = "BTC/USDT"
+   643→    timeframe: str = "1m"
+   644→    exchange: str = "mexc"
+   645→    days: int = 7
+   646→
+   647→
+   648→@app.post("/api/ingest")
+   649→async def ingest_data(req: IngestRequest) -> dict:
+   650→    """Download historical OHLCV data and store it in the PPMT database."""
+   651→    try:
+   652→        storage = PPMTStorage()
+   653→        collector = DataCollector(exchange=req.exchange, storage=storage)
+   654→        df = collector.fetch_and_save(req.symbol, req.timeframe, days=req.days)
+   655→        if df is None or df.empty:
+   656→            return {"ok": False, "error": "No data fetched"}
+   657→        count = len(df)
+   658→        if hasattr(collector, 'close'):
+   659→            collector.close()
+   660→        storage.close()
+   661→        return {"ok": True, "symbol": req.symbol, "timeframe": req.timeframe, "candles": count}
+   662→    except Exception as e:
+   663→        return {"ok": False, "error": str(e)}
+   664→
+   665→
+   666→# ------------------------------------------------------------------ #
+   667→# Background Trading Session Management (v0.29.0)
+   668→# ------------------------------------------------------------------ #
+   669→
+   670→# Active trading task
+   671→_trading_task: Optional[asyncio.Task] = None
+   672→_trading_stop_event = asyncio.Event()
+   673→
+   674→
+   675→class StartTradingRequest(BaseModel):
+   676→    symbol: str = "BTC/USDT"
+   677→    timeframe: str = "5m"
+   678→    exchange: str = "mexc"
+   679→    capital: float = 10_000.0
+   680→    leverage: int = 1
+   681→    auto_mode: bool = True
+   682→    max_positions: int = 5
+   683→    max_exposure: float = 0.80
+   684→    kill_switch_pct: float = 0.95
+   685→    daily_loss_pct: float = 0.05
+   686→    # v0.32.3: default 90 days (was 30) — same rationale as AutoSetupRequest
+   687→    days_ingest: int = 90
+   688→    """How many days of data to ingest before starting."""
+   689→
+   690→
+   691→@app.post("/api/start-trading")
+   692→async def start_trading(req: StartTradingRequest) -> dict:
+   693→    """Start a paper trading session in the background.
+   694→
+   695→    v0.31.0: Pre-trade gate — checks validation before allowing trading.
+   696→    If no recent validation exists, runs auto-setup first.
+   697→
+   698→    This endpoint performs the full workflow:
+   699→    1. Checks pre-trade validation (backtest + MC)
+   700→    2. Ingests historical data (if not already present)
+   701→    3. Auto-builds Trie (if not already present)
+   702→    4. Starts the RealtimeTrader in live/paper mode as a background asyncio task
+   703→
+   704→    The dashboard WebSocket will receive real-time updates automatically.
+   705→    """
+   706→    global _trading_task
+   707→
+   708→    if _trading_task is not None and not _trading_task.done():
+   709→        return {"ok": False, "error": "Trading session already running. Stop it first."}
+   710→
+   711→    # v0.31.0: Pre-trade validation gate
+   712→    try:
+   713→        storage = PPMTStorage()
+   714→        latest_val = storage.get_latest_validation(req.symbol, req.timeframe)
+   715→        storage.close()
+   716→
+   717→        if latest_val is None or latest_val.get("verdict") != "PASS":
+   718→            # Auto-validate if no recent validation
+   719→            val_result = await validate_token(ValidateRequest(
+   720→                symbol=req.symbol,
+   721→                timeframe=req.timeframe,
+   722→                exchange=req.exchange,
+   723→                capital=req.capital,
+   724→            ))
+   725→            v = val_result.get("verdict")
+   726→            if v != "PASS":
+   727→                if v == "INSUFFICIENT_DATA":
+   728→                    return {
+   729→                        "ok": False,
+   730→                        "error": f"Cannot trade {req.symbol} {req.timeframe}: backtest produced 0 trades. "
+   731→                                 f"Ingest more historical data or try a different timeframe.",
+   732→                        "validation": val_result,
+   733→                        "checks": val_result.get("checks", {}),
+   734→                    }
+   735→                else:
+   736→                    return {
+   737→                        "ok": False,
+   738→                        "error": f"Pre-trade validation FAILED for {req.symbol} {req.timeframe}. "
+   739→                                 f"Token did not pass safety checks (WR/PF/RoR).",
+   740→                        "validation": val_result,
+   741→                        "checks": val_result.get("checks", {}),
+   742→                    }
+   743→    except Exception as e:
+   744→        logger.warning(f"Pre-trade gate check failed: {e} — proceeding anyway")
+   745→
+   746→    try:
+   747→        # v0.34.3: Reset terminal state so the new session doesn't show stale
+   748→        # pattern_buffer / signals / equity_curve from a previous session.
+   749→        # Without this, the dashboard shows 30 'n' (SAX neutral) symbols from
+   750→        # the previous run forever, even after Stop+Start.
+   751→        terminal_state.reset()
+   752→        terminal_state.update_sync(
+   753→            symbol=req.symbol,
+   754→            timeframe=req.timeframe,
+   755→            exchange=req.exchange,
+   756→            is_running=True,
+   757→            websocket_status="connecting",
+   758→            mode="paper",
+   759→            started_at=time.time(),
+   760→            capital=req.capital,
+   761→            leverage=req.leverage,
+   762→            auto_mode=req.auto_mode,
+   763→        )
+   764→
+   765→        # Step 1: Auto-ingest data if needed
+   766→        storage = PPMTStorage()
+   767→        df = storage.load_ohlcv(req.symbol, req.timeframe)
+   768→        candles_count = len(df) if df is not None and not df.empty else 0
+   769→
+   770→        if candles_count < 500:
+   771→            logger.info(f"Auto-ingesting {req.days_ingest} days of {req.symbol} {req.timeframe} data...")
+   772→            try:
+   773→                collector = DataCollector(exchange=req.exchange, storage=storage)
+   774→                df = collector.fetch_and_save(req.symbol, req.timeframe, days=req.days_ingest)
+   775→                candles_count = len(df) if df is not None and not df.empty else 0
+   776→                logger.info(f"Ingested {candles_count} candles")
+   777→                # v0.34.3: collector.close() no longer closes the shared storage.
+   778→                if hasattr(collector, 'close'):
+   779→                    collector.close()
+   780→            except Exception as e:
+   781→                logger.warning(f"Auto-ingest failed: {e} — continuing with existing data")
+   782→
+   783→        # v0.34.3: Defensive — re-open storage if it was closed by a child.
+   784→        if storage.conn is None:
+   785→            try:
+   786→                storage._reconnect()
+   787→            except Exception:
+   788→                storage = PPMTStorage()
+   789→
+   790→        # Step 2: Auto-build Trie if needed
+   791→        # v0.40.4 FIX-1D: pass asset_class so N1/N2 load from shared cross-asset pools.
+   792→        _info = AssetClassifier().classify(req.symbol)
+   793→        all_tries = storage.load_all_tries(req.symbol, asset_class=_info.asset_class)
+   794→        if all_tries.get("n3") is None:
+   795→            logger.info(f"Auto-building Trie for {req.symbol} {req.timeframe}...")
+   796→            try:
+   797→                from ppmt.engine.ppmt import PPMT as PPMTBuilder
+   798→                df = storage.load_ohlcv(req.symbol, req.timeframe)
+   799→                if df is not None and not df.empty:
+   800→                    builder = PPMTBuilder(
+   801→                        symbol=req.symbol,
+   802→                        asset_class=_info.asset_class,
+   803→                        sax_strategy="ohlcv",
+   804→                    )
+   805→                    # v0.40.4 FIX-1D: attach storage so build() contributes each
+   806→                    # observation to the universal N1 pool and the class-shared
+   807→                    # N2 pool. Without this, N1/N2 stay empty in production and
+   808→                    # 40% of the weighted confidence is wasted (see audit CAPA 1).
+   809→                    builder.attach_storage(storage)
+   810→                    # Build all 4 levels in one call (persists N1→universal,
+   811→                    # N2→class pool, N3→per-symbol, N4→per-symbol+regime)
+   812→                    count = builder.build(df, pattern_length=5)
+   813→                    logger.info(f"Built {count} patterns; N1 universal + N2 class pools updated")
+   814→                    # v0.41.0 FIX-1B: verify shared pools were actually saved
+   815→                    pool_status = builder.ensure_shared_pools(storage)
+   816→                    if not pool_status["n1_universal"]["exists"]:
+   817→                        logger.warning(f"N1 universal pool MISSING after build of {req.symbol}")
+   818→                    if not pool_status["n2_class"]["exists"]:
+   819→                        logger.warning(f"N2 class pool MISSING after build of {req.symbol}")
+   820→                    # Reload via load_all_tries so N1/N2 are the cross-asset
+   821→                    # pools (builder.trie_n1/trie_n2 are empty in storage mode).
+   822→                    all_tries = storage.load_all_tries(req.symbol, asset_class=_info.asset_class)
+   823→                else:
+   824→                    storage.close()
+   825→                    return {"ok": False, "error": f"No data available for {req.symbol} {req.timeframe}. Ingest failed."}
+   826→            except Exception as e:
+   827→                logger.warning(f"Auto-build failed: {e}")
+   828→                storage.close()
+   829→                return {"ok": False, "error": f"Auto-build failed: {str(e)}"}
+   830→
+   831→        storage.close()
+   832→
+   833→        # Step 3: Start trading as background task
+   834→        _trading_stop_event.clear()
+   835→
+   836→        async def _run_trading():
+   837→            """Background trading task."""
+   838→            from ppmt.engine.realtime import RealtimeTrader, LiveConfig
+   839→
+   840→            config = LiveConfig(
+   841→                symbol=req.symbol,
+   842→                timeframe=req.timeframe,
+   843→                initial_capital=req.capital,
+   844→                exchange=req.exchange,
+   845→                dry_run=True,  # Always paper trading from dashboard
+   846→                testnet=False,  # v0.29.0: Use mainnet data feed (testnet=404 on Binance WS)
+   847→                leverage=req.leverage,
+   848→                auto_mode=req.auto_mode,
+   849→                max_open_positions=req.max_positions,
+   850→                max_portfolio_exposure_pct=req.max_exposure,
+   851→                kill_switch_pct=req.kill_switch_pct,
+   852→                daily_loss_limit_pct=req.daily_loss_pct,
+   853→                use_kelly_sizing=True,
+   854→                kelly_fraction=0.25,
+   855→                use_token_profile=True,
+   856→                auto_calibrate=True,
+   857→                regime_aware=True,
+   858→                use_multi_level=True,
+   859→                living_trie=True,
+   860→            )
+   861→
+   862→            trader = RealtimeTrader(config=config)
+   863→            try:
+   864→                result = await trader.run_live()
+   865→                logger.info(f"Trading session ended: {result.total_trades} trades, P&L: {result.total_pnl_pct:.2f}%")
+   866→            except Exception as e:
+   867→                logger.error(f"Trading session error: {e}")
+   868→            finally:
+   869→                terminal_state.update_sync(is_running=False, websocket_status="stopped")
+   870→
+   871→        _trading_task = asyncio.create_task(_run_trading())
+   872→
+   873→        return {
+   874→            "ok": True,
+   875→            "message": f"Paper trading started for {req.symbol} {req.timeframe} on {req.exchange}",
+   876→            "symbol": req.symbol,
+   877→            "timeframe": req.timeframe,
+   878→            "candles_available": candles_count,
+   879→            "trie_patterns": all_tries.get("n3").pattern_count if all_tries.get("n3") else 0,
+   880→        }
+   881→
+   882→    except Exception as e:
+   883→        return {"ok": False, "error": str(e)}
+   884→
+   885→
+   886→@app.post("/api/stop-trading")
+   887→async def stop_trading() -> dict:
+   888→    """Stop the active trading session."""
+   889→    global _trading_task
+   890→
+   891→    if _trading_task is None or _trading_task.done():
+   892→        return {"ok": False, "error": "No active trading session"}
+   893→
+   894→    _trading_stop_event.set()
+   895→    _trading_task.cancel()
+   896→    try:
+   897→        await asyncio.wait_for(_trading_task, timeout=5.0)
+   898→    except (asyncio.TimeoutError, asyncio.CancelledError):
+   899→        pass
+   900→
+   901→    _trading_task = None
+   902→    terminal_state.update_sync(is_running=False, websocket_status="stopped")
+   903→    return {"ok": True, "message": "Trading session stopped"}
+   904→
+   905→
+   906→@app.get("/api/trading-status")
+   907→async def get_trading_status() -> dict:
+   908→    """Check if a trading session is active."""
+   909→    is_active = _trading_task is not None and not _trading_task.done()
+   910→    return {
+   911→        "is_running": is_active,
+   912→        "symbol": terminal_state.symbol,
+   913→        "timeframe": terminal_state.timeframe,
+   914→        "exchange": terminal_state.exchange,
+   915→        "candles_processed": terminal_state.candles_processed,
+   916→        "total_trades": terminal_state.total_trades,
+   917→        "pnl_pct": terminal_state.total_pnl_pct,
+   918→    }
+   919→
+   920→
+   921→# ------------------------------------------------------------------ #
+   922→# REST endpoint — Multi-Token Trading (v0.36.0)
+   923→# ------------------------------------------------------------------ #
+   924→# v0.36.0: True multi-token server-side trading. Each token gets its own
+   925→# background asyncio task running a RealtimeTrader instance. The frontend
+   926→# Trading tab polls /api/multi-status to display live per-token state.
+   927→#
+   928→# Replaces the v0.35.0 hack where _activeTradeTokens was just an in-memory
+   929→# JS list and "Start" only ran autoSetup() on the first token.
+   930→
+   931→# Map: node_id -> {task, config, started_at, last_price, pnl_pct, signals,
+   932→#                  trades, status, error}
+   933→_multi_sessions: dict = {}
+   934→
+   935→
+   936→class MultiStartRequest(BaseModel):
+   937→    """v0.36.0: Start multiple paper-trading sessions in parallel."""
+   938→    tokens: list[dict] = []
+   939→    """List of {symbol, timeframe, exchange} dicts. Empty list = use parent
+   940→    manager's registered child nodes."""
+   941→    capital: float = 10_000.0
+   942→    """Total capital to split across all tokens."""
+   943→    leverage: int = 1
+   944→    auto_mode: bool = True
+   945→    days_ingest: int = 90
+   946→
+   947→
+   948→@app.post("/api/multi-start")
+   949→async def multi_start(req: MultiStartRequest) -> dict:
+   950→    """v0.36.0: Start N concurrent paper-trading sessions (one per token).
+   951→
+   952→    Each token gets its own asyncio task that:
+   953→      1. Auto-validates (skip if already PASS in DB)
+   954→      2. Auto-ingests data (if < 500 candles)
+   955→      3. Auto-builds Trie (if missing)
+   956→      4. Starts RealtimeTrader.run_live() in dry_run mode
+   957→
+   958→    Returns immediately with the list of sessions launched.
+   959→    """
+   960→    tokens = list(req.tokens)
+   961→    if not tokens:
+   962→        return {"ok": False, "error": "No tokens provided"}
+   963→
+   964→    launched = []
+   965→    from ppmt.engine.realtime import RealtimeTrader, LiveConfig
+   966→    for t in tokens:
+   967→        sym = t.get("symbol", "").strip().upper()
+   968→        tf = t.get("timeframe", "1h")
+   969→        exch = t.get("exchange", "binance").lower()
+   970→        if not sym:
+   971→            continue
+   972→        if "/" not in sym:
+   973→            # Accept "BTCUSDT" or "BTC" → normalize to "BTC/USDT"
+   974→            if sym.endswith("USDT"):
+   975→                sym = sym[:-4] + "/USDT"
+   976→            else:
+   977→                sym = sym + "/USDT"
+   978→
+   979→        node_id = f"{sym.split('/')[0].lower()}_{tf}"
+   980→
+   981→        # Skip if already running
+   982→        existing = _multi_sessions.get(node_id)
+   983→        if existing and not existing.get("task").done():
+   984→            launched.append({"node_id": node_id, "symbol": sym, "status": "ALREADY_RUNNING"})
+   985→            continue
+   986→
+   987→        # Per-token capital (even split)
+   988→        per_capital = req.capital / max(len(tokens), 1)
+   989→
+   990→        config = LiveConfig(
+   991→            symbol=sym,
+   992→            timeframe=tf,
+   993→            initial_capital=per_capital,
+   994→            exchange=exch,
+   995→            dry_run=True,
+   996→            testnet=False,
+   997→            leverage=req.leverage,
+   998→            auto_mode=req.auto_mode,
+   999→            use_token_profile=True,
+  1000→            auto_calibrate=True,
+  1001→            regime_aware=True,
+  1002→            use_multi_level=True,
+  1003→            living_trie=True,
+  1004→        )
+  1005→
+  1006→        session_state = {
+  1007→            "node_id": node_id,
+  1008→            "symbol": sym,
+  1009→            "timeframe": tf,
+  1010→            "exchange": exch,
+  1011→            "started_at": time.time(),
+  1012→            "status": "STARTING",
+  1013→            "last_price": 0.0,
+  1014→            "pnl_pct": 0.0,
+  1015→            "signals": 0,
+  1016→            "trades": 0,
+  1017→            "candles_processed": 0,
+  1018→            "error": "",
+  1019→            # v0.36.2: extra live state for richer UI
+  1020→            "regime": "",
+  1021→            "pattern_buffer": [],
+  1022→            "entropy": 0.0,
+  1023→            "websocket_status": "disconnected",
+  1024→            "is_running": False,
+  1025→            "portfolio_value": 0.0,
+  1026→            "win_rate": 0.0,
+  1027→            "exposure_pct": 0.0,
+  1028→            "validation_verdict": "",
+  1029→            # v0.38.9: track initial capital for realized_pnl_pct calculation
+  1030→            "initial_capital": per_capital,
+  1031→            "last_update_ts": 0.0,
+  1032→            # v0.39.0: track the currently-open position (None when flat) so
+  1033→            # /api/multi-status can expose it to the dashboard chart for an
+  1034→            # entry-price price-line overlay. Updated by cfg.on_position below.
+  1035→            "open_position": None,
+  1036→            # v0.39.2: per-session signals ring buffer (cap 50). Populated by
+  1037→            # cfg.on_signal below. Previously signals were NEVER shown in
+  1038→            # multi-token mode because (a) the v0.39.1 cross-contamination
+  1039→            # fix skipped the global _terminal_state singleton in multi-token
+  1040→            # mode, and (b) _state_cb ignored the `signal=` kwarg that the
+  1041→            # engine forwards via _update_terminal_state(signal={...}). As a
+  1042→            # result the dashboard's Signals panel always showed "No signals"
+  1043→            # even when the bot was actively generating them, which the user
+  1044→            # perceived as "bot not operating". This buffer + the
+  1045→            # /api/multi-status + WS-broadcast enrichment (see /ws below)
+  1046→            # restore visibility without re-introducing cross-contamination.
+  1047→            "signals_history": [],
+  1048→        }
+  1049→
+  1050→        # v0.39.0: Wire on_position callback. The RealtimeTrader fires this
+  1051→        # when a position opens or closes (live mode only). We use it to
+  1052→        # update _multi_sessions[node_id]["open_position"] in real time so
+  1053→        # /api/multi-status can return the entry price to the chart, which
+  1054→        # renders a horizontal price line at the entry for the active token.
+  1055→        # v0.39.6: On close, we also broadcast an out-of-band WS event
+  1056→        # `{"type": "trade_event", "event": "trade_closed", "payload": {...}}`
+  1057→        # so the frontend can immediately refresh the "Recently Closed" list
+  1058→        # + Hero KPIs without waiting for the next 3s poll.
+  1059→        def _on_position_hook(payload, _nid=node_id):
+  1060→            try:
+  1061→                sess_ref = _multi_sessions.get(_nid)
+  1062→                if sess_ref is None:
+  1063→                    return
+  1064→                if payload.get("action") == "open":
+  1065→                    sess_ref["open_position"] = {
+  1066→                        "symbol": payload.get("symbol", ""),
+  1067→                        "direction": payload.get("direction", ""),
+  1068→                        "entry_price": payload.get("entry_price", 0.0),
+  1069→                        "entry_time": payload.get("entry_time", ""),
+  1070→                        "sl_price": payload.get("sl_price"),
+  1071→                        "tp_price": payload.get("tp_price"),
+  1072→                        "size": payload.get("size", 0.0),
+  1073→                        "confidence": payload.get("confidence", 0.0),
+  1074→                        "trade_id": payload.get("trade_id", 0),
+  1075→                        "opened_at": time.time(),
+  1076→                    }
+  1077→                else:  # action == "close"
+  1078→                    sess_ref["open_position"] = None
+  1079→                    # v0.39.6: Fire-and-forget broadcast so the dashboard
+  1080→                    # updates Recently Closed + Hero KPIs instantly. The
+  1081→                    # engine calls this hook from a worker thread (asyncio
+  1082→                    # loop is in the main thread), so we use
+  1083→                    # run_coroutine_threadsafe to schedule the broadcast.
+  1084→                    try:
+  1085→                        evt = {
+  1086→                            "type": "trade_event",
+  1087→                            "event": "trade_closed",
+  1088→                            "payload": {
+  1089→                                "node_id": _nid,
+  1090→                                "symbol": payload.get("symbol", ""),
+  1091→                                "timeframe": sess_ref.get("timeframe", ""),
+  1092→                                "direction": payload.get("direction", ""),
+  1093→                                "entry_price": payload.get("entry_price", 0.0),
+  1094→                                "exit_price": payload.get("exit_price", 0.0),
+  1095→                                "entry_time": payload.get("entry_time", ""),
+  1096→                                "exit_time": payload.get("exit_time", ""),
+  1097→                                "pnl_pct": payload.get("pnl_pct", 0.0),
+  1098→                                "exit_reason": payload.get("exit_reason", ""),
+  1099→                                "trade_id": payload.get("trade_id", 0),
+  1100→                                "ts": time.time(),
+  1101→                            },
+  1102→                        }
+  1103→                        _loop = getattr(app.state, "loop", None)
+  1104→                        if _loop is None:
+  1105→                            # Fallback: try to grab the running loop. This
+  1106→                            # works during normal uvicorn operation.
+  1107→                            _loop = asyncio.get_event_loop()
+  1108→                        if _loop and _loop.is_running():
+  1109→                            asyncio.run_coroutine_threadsafe(
+  1110→                                _broadcast_event(evt), _loop
+  1111→                            )
+  1112→                        else:
+  1113→                            # No loop available — best-effort log only.
+  1114→                            logger.debug(
+  1115→                                "[_on_position_hook] no running loop; "
+  1116→                                "trade_closed event dropped"
+  1117→                            )
+  1118→                    except Exception as _e:
+  1119→                        logger.debug(
+  1120→                            "[_on_position_hook] broadcast failed (non-critical): %s", _e
+  1121→                        )
+  1122→            except Exception:
+  1123→                pass
+  1124→        config.on_position = _on_position_hook
+  1125→
+  1126→        # v0.39.2: Wire on_signal callback. The RealtimeTrader fires this
+  1127→        # when a signal passes all skip filters and an entry decision is
+  1128→        # made (regardless of whether the risk manager allows the position
+  1129→        # to actually open). We use it to:
+  1130→        #   1. Persist the signal to SQLite via storage.save_signal() —
+  1131→        #      previously the signals table was ALWAYS empty because no
+  1132→        #      caller invoked save_signal(), so /api/clear-signals had
+  1133→        #      nothing to delete and the dashboard's "Signals" panel was
+  1134→        #      permanently empty in multi-token mode.
+  1135→        #   2. Append to _multi_sessions[node_id]["signals_history"] so
+  1136→        #      /api/multi-status can return the per-session signal list
+  1137→        #      (last 50) and the /ws broadcast can enrich its snapshot
+  1138→        #      with merged per-session signals when the global singleton
+  1139→        #      is empty (which it always is in multi-token mode per the
+  1140→        #      v0.39.1 cross-contamination fix).
+  1141→        def _on_signal_hook(signal, prediction, _nid=node_id, _sym=sym, _tf=tf):
+  1142→            try:
+  1143→                # 1. Persist to SQLite (best-effort — never block the engine).
+  1144→                sig_dict = {
+  1145→                    "symbol": _sym,
+  1146→                    "signal_type": getattr(getattr(signal, "signal_type", None), "value", "UNKNOWN"),
+  1147→                    "confidence": float(getattr(signal, "confidence", 0) or 0),
+  1148→                    "quality_score": float(getattr(signal, "quality_score", 0) or 0),
+  1149→                    "sizing_multiplier": float(getattr(signal, "sizing_multiplier", 0) or 0),
+  1150→                    "entry_price": float(getattr(signal, "entry_price", 0) or 0),
+  1151→                    "sl_price": float(getattr(signal, "sl_price", 0) or 0),
+  1152→                    "tp_price": float(getattr(signal, "tp_price", 0) or 0),
+  1153→                    "expected_move_pct": float(getattr(signal, "expected_move_pct", 0) or 0),
+  1154→                    "win_rate": float(getattr(signal, "win_rate", 0) or 0),
+  1155→                    "remaining_candles": int(getattr(signal, "remaining_candles", 0) or 0),
+  1156→                    "matched_pattern": list(getattr(signal, "matched_pattern", []) or []),
+  1157→                    "predicted_path": [],  # skip serialization — non-critical
+  1158→                    "timestamp": time.time(),
+  1159→                }
+  1160→                try:
+  1161→                    _sig_storage = PPMTStorage()
+  1162→                    _sig_storage.save_signal(sig_dict)
+  1163→                    _sig_storage.close()
+  1164→                except Exception as _e:
+  1165→                    logger.debug(f"[{_nid}] save_signal failed (non-critical): {_e}")
+  1166→
+  1167→                # 2. Append to per-session ring buffer (cap 50 — matches
+  1168→                # the singleton's _MAX_SIGNALS in state.py).
+  1169→                sess_ref = _multi_sessions.get(_nid)
+  1170→                if sess_ref is None:
+  1171→                    return
+  1172→                sig_view = {
+  1173→                    "type": sig_dict["signal_type"],
+  1174→                    "direction": getattr(signal, "direction", None) or sig_dict["signal_type"],
+  1175→                    "confidence": sig_dict["confidence"],
+  1176→                    "price": sig_dict["entry_price"],
+  1177→                    "entry_price": sig_dict["entry_price"],
+  1178→                    "sl": sig_dict["sl_price"],
+  1179→                    "tp": sig_dict["tp_price"],
+  1180→                    "pattern": sig_dict["matched_pattern"],
+  1181→                    "trie_level": getattr(signal, "trie_level", "n3"),
+  1182→                    "timestamp": sig_dict["timestamp"],
+  1183→                    "symbol": _sym,
+  1184→                    "timeframe": _tf,
+  1185→                }
+  1186→                sess_ref["signals_history"].append(sig_view)
+  1187→                if len(sess_ref["signals_history"]) > 50:
+  1188→                    sess_ref["signals_history"] = sess_ref["signals_history"][-50:]
+  1189→                # Bump aggregate count too (defensive — engine also reports
+  1190→                # this via _state_cb, but we ensure it stays monotonic).
+  1191→                sess_ref["signals"] = max(sess_ref.get("signals", 0) + 1, len(sess_ref["signals_history"]))
+  1192→                sess_ref["last_update_ts"] = time.time()
+  1193→            except Exception as _e:
+  1194→                logger.debug(f"[{_nid}] on_signal hook failed (non-critical): {_e}")
+  1195→        config.on_signal = _on_signal_hook
+  1196→
+  1197→        async def _run_one_token(_sym=sym, _tf=tf, _exch=exch, _cfg=config, _nid=node_id):
+  1198→            sess = _multi_sessions[_nid]
+  1199→            try:
+  1200→                # Auto-validate first (non-blocking gate)
+  1201→                # v0.38.6: Paper trading (dry_run=True) NO debe bloquear el arranque del
+  1202→                # trader si la validación es FAIL o INSUFFICIENT_DATA. La idea es que el
+  1203→                # usuario pueda VER el sistema operando (con señales+trades) aunque los
+  1204→                # KPIs aún no alcancen el umbral de "producción". El usuario decide luego
+  1205→                # cuándo pasar a real money basándose en sus propios datos.
+  1206→                # Solo el modo real-money (dry_run=False) mantiene el gate estricto.
+  1207→                storage = PPMTStorage()
+  1208→                latest_val = storage.get_latest_validation(_sym, _tf)
+  1209→                storage.close()
+  1210→
+  1211→                _is_paper = getattr(_cfg, "dry_run", True)
+  1212→                # v0.40.0: Don't re-validate INSUFFICIENT_DATA tokens — it's
+  1213→                # deterministic for the same data/trie/filters, so re-running
+  1214→                # wastes 10-30s per token AND creates a duplicate DB row.
+  1215→                # Only re-validate when there's no row OR the verdict was FAIL
+  1216→                # (FAIL may turn into PASS if user added more OHLCV history).
+  1217→                _existing_verdict = latest_val.get("verdict") if latest_val else None
+  1218→                _needs_validation = (
+  1219→                    latest_val is None
+  1220→                    or _existing_verdict not in ("PASS", "INSUFFICIENT_DATA")
+  1221→                )
+  1222→                if _needs_validation:
+  1223→                    sess["status"] = "VALIDATING"
+  1224→                    val_result = await validate_token(ValidateRequest(
+  1225→                        symbol=_sym, timeframe=_tf, exchange=_exch, capital=_cfg.initial_capital,
+  1226→                    ))
+  1227→                    verdict = val_result.get("verdict", "UNKNOWN")
+  1228→                    sess["validation_verdict"] = verdict
+  1229→                    if verdict != "PASS":
+  1230→                        _reason = (f"Validation: {verdict} — "
+  1231→                                   f"{val_result.get('reason', val_result.get('error', ''))}")[:200]
+  1232→                        if _is_paper:
+  1233→                            # v0.38.6: Paper trading — seguir adelante aunque la
+  1234→                            # validación no pase. Solo marcamos una advertencia.
+  1235→                            logger.warning(
+  1236→                                f"[{_nid}] Paper trading: validation NOT PASS ({verdict}) "
+  1237→                                f"but proceeding anyway (dry_run=True). Trader will start."
+  1238→                            )
+  1239→                            sess["error"] = f"WARNING: {_reason} (paper trading proceeding)"
+  1240→                        else:
+  1241→                            # Real-money mode: keep strict gate
+  1242→                            sess["status"] = "VALIDATION_FAILED"
+  1243→                            sess["error"] = _reason
+  1244→                            return
+  1245→                else:
+  1246→                    # Reuse existing verdict (PASS or INSUFFICIENT_DATA)
+  1247→                    sess["validation_verdict"] = _existing_verdict
+  1248→                    if _existing_verdict == "INSUFFICIENT_DATA" and not _is_paper:
+  1249→                        sess["status"] = "VALIDATION_FAILED"
+  1250→                        sess["error"] = "Validation: INSUFFICIENT_DATA (real-money gate)"
+  1251→                        return
+  1252→
+  1253→                # v0.36.2: Per-session state callback — bridges trader updates to
+  1254→                # this session's dict so /api/multi-status returns real values
+  1255→                # instead of all zeros. Also drives granular status transitions.
+  1256→                def _state_cb(_nid=_nid, **kwargs):
+  1257→                    s = _multi_sessions.get(_nid)
+  1258→                    if s is None:
+  1259→                        return
+  1260→                    if "current_price" in kwargs:
+  1261→                        s["last_price"] = float(kwargs["current_price"] or 0)
+  1262→                    if "total_pnl_pct" in kwargs:
+  1263→                        s["pnl_pct"] = float(kwargs["total_pnl_pct"] or 0)
+  1264→                    elif "portfolio_value" in kwargs and _cfg.initial_capital > 0:
+  1265→                        # Fallback: derive pct from portfolio value vs initial capital
+  1266→                        pv = float(kwargs["portfolio_value"] or 0)
+  1267→                        s["pnl_pct"] = ((pv - _cfg.initial_capital) / _cfg.initial_capital) * 100.0
+  1268→                    if "candles_processed" in kwargs:
+  1269→                        s["candles_processed"] = int(kwargs["candles_processed"] or 0)
+  1270→                    if "total_trades" in kwargs:
+  1271→                        s["trades"] = int(kwargs["total_trades"] or 0)
+  1272→                    # v0.38.2: Prefer real signals_generated (actual trading signals)
+  1273→                    # over sax_symbols_produced (raw SAX symbol count, which is much larger).
+  1274→                    if "signals_generated" in kwargs:
+  1275→                        s["signals"] = int(kwargs["signals_generated"] or 0)
+  1276→                    elif "sax_symbols_produced" in kwargs:
+  1277→                        # Legacy fallback — only used by older engine versions
+  1278→                        s["signals"] = int(kwargs["sax_symbols_produced"] or 0)
+  1279→                    if "regime" in kwargs and kwargs["regime"]:
+  1280→                        s["regime"] = kwargs["regime"]
+  1281→                    if "pattern_buffer" in kwargs:
+  1282→                        s["pattern_buffer"] = list(kwargs["pattern_buffer"] or [])[-30:]
+  1283→                    if "entropy" in kwargs:
+  1284→                        s["entropy"] = float(kwargs["entropy"] or 0)
+  1285→                    if "websocket_status" in kwargs and kwargs["websocket_status"]:
+  1286→                        s["websocket_status"] = kwargs["websocket_status"]
+  1287→                    if "is_running" in kwargs:
+  1288→                        s["is_running"] = bool(kwargs["is_running"])
+  1289→                    if "portfolio_value" in kwargs:
+  1290→                        s["portfolio_value"] = float(kwargs["portfolio_value"] or 0)
+  1291→                    if "win_rate" in kwargs:
+  1292→                        s["win_rate"] = float(kwargs["win_rate"] or 0)
+  1293→                    if "exposure_pct" in kwargs:
+  1294→                        s["exposure_pct"] = float(kwargs["exposure_pct"] or 0)
+  1295→                    # v0.40.34: Capture open_position so the dashboard header
+  1296→                    # can show LONG/SHORT + entry + P&L even in multi-token mode
+  1297→                    # (where the global _terminal_state singleton is bypassed).
+  1298→                    if "open_position" in kwargs:
+  1299→                        s["open_position"] = kwargs["open_position"]
+  1300→                    # v0.39.3: Capture engine errors (e.g., "No Trie") so
+  1301→                    # the dashboard can show WHY a session died instead of
+  1302→                    # just flipping to STOPPED with no reason.
+  1303→                    if "error" in kwargs and kwargs["error"]:
+  1304→                        s["error"] = str(kwargs["error"])[:300]
+  1305→                        s["status"] = "ERROR"
+  1306→                    # v0.39.2: Capture `signal=` kwarg forwarded by the engine
+  1307→                    # via _update_terminal_state(signal={...}) (realtime.py:1217
+  1308→                    # in run_replay, used by backtest path). Without this the
+  1309→                    # signal would be silently dropped in multi-token mode
+  1310→                    # because the singleton is skipped (v0.39.1 fix). Dedup
+  1311→                    # against the most recent entry by timestamp+symbol to
+  1312→                    # avoid double-counting when both on_signal AND
+  1313→                    # _update_terminal_state fire for the same signal.
+  1314→                    if "signal" in kwargs and kwargs["signal"]:
+  1315→                        _sig = kwargs["signal"]
+  1316→                        if isinstance(_sig, dict):
+  1317→                            _sig_ts = float(_sig.get("timestamp") or time.time())
+  1318→                            _sig_sym = _sig.get("symbol") or s.get("symbol", "")
+  1319→                            _last = s["signals_history"][-1] if s["signals_history"] else None
+  1320→                            if not (_last and abs(float(_last.get("timestamp") or 0) - _sig_ts) < 0.5
+  1321→                                    and _last.get("symbol") == _sig_sym):
+  1322→                                s["signals_history"].append(_sig)
+  1323→                                if len(s["signals_history"]) > 50:
+  1324→                                    s["signals_history"] = s["signals_history"][-50:]
+  1325→                                s["signals"] = max(s.get("signals", 0) + 1, len(s["signals_history"]))
+  1326→                    s["last_update_ts"] = time.time()
+  1327→                    # Status transitions driven by what we just learned
+  1328→                    # v0.40.28: also promote CONNECTING/WARMING_UP to RUNNING
+  1329→                    # when is_running=True arrives (previously only STARTING
+  1330→                    # and STARTING_TRADER would promote, leaving sessions
+  1331→                    # stuck in CONNECTING forever once they hit that state).
+  1332→                    if kwargs.get("is_running") and s["status"] in (
+  1333→                        "STARTING_TRADER", "STARTING", "CONNECTING", "WARMING_UP",
+  1334→                    ):
+  1335→                        s["status"] = "RUNNING"
+  1336→                    elif (kwargs.get("websocket_status") == "connecting"
+  1337→                          and s["status"] in ("STARTING_TRADER", "STARTING")):
+  1338→                        s["status"] = "CONNECTING"
+  1339→                    elif (kwargs.get("websocket_status") == "warming_up"
+  1340→                          and s["status"] in ("STARTING_TRADER", "STARTING", "CONNECTING")):
+  1341→                        s["status"] = "WARMING_UP"
+  1342→
+  1343→                sess["status"] = "STARTING_TRADER"
+  1344→                trader = RealtimeTrader(config=_cfg, state_callback=_state_cb)
+  1345→                # run_live() runs until cancelled
+  1346→                await trader.run_live()
+  1347→                sess["status"] = "STOPPED"
+  1348→                sess["is_running"] = False
+  1349→            except asyncio.CancelledError:
+  1350→                sess["status"] = "STOPPED"
+  1351→                sess["is_running"] = False
+  1352→                raise
+  1353→            except Exception as e:
+  1354→                logger.error(f"Multi-session {_nid} error: {e}", exc_info=True)
+  1355→                sess["status"] = "ERROR"
+  1356→                sess["error"] = str(e)[:200]
+  1357→                sess["is_running"] = False
+  1358→
+  1359→        task = asyncio.create_task(_run_one_token())
+  1360→        _multi_sessions[node_id] = {**session_state, "task": task, "config": config}
+  1361→        launched.append({"node_id": node_id, "symbol": sym, "status": "LAUNCHED"})
+  1362→
+  1363→        # v0.39.1 FIX (Bug #6 Money Manager $--):
+  1364→        # Previously /api/multi-start did NOT call pm.register_child(), so the
+  1365→        # ParentNodeManager never knew about the 22 parallel sessions →
+  1366→        # /api/nodes returned children: [] → mmTotalCapital/mmReserve/mmExposure
+  1367→        # stayed at "$--" forever, even with 22 sessions RUNNING.
+  1368→        # Now we register the child node here (idempotent if already present
+  1369→        # from a previous sweep), redistribute capital, and persist state.
+  1370→        try:
+  1371→            pm = _get_parent_manager()
+  1372→            if node_id not in pm._children:
+  1373→                from ppmt.risk.money_manager import ChildNodeConfig
+  1374→                # Split capital evenly across all tokens (matches per_capital
+  1375→                # logic above). Cap at 25% per token to avoid over-allocation
+  1376→                # when the user launches very few tokens.
+  1377→                alloc_pct = min(0.25, 1.0 / max(len(tokens), 1))
+  1378→                child_cfg = ChildNodeConfig(
+  1379→                    node_id=node_id,
+  1380→                    symbol=sym,
+  1381→                    timeframe=tf,
+  1382→                    capital_allocation_pct=alloc_pct,
+  1383→                    leverage=req.leverage,
+  1384→                    auto_mode=req.auto_mode,
+  1385→                )
+  1386→                pm.register_child(child_cfg)
+  1387→            # Always redistribute + save so the dashboard sees fresh totals
+  1388→            pm.distribute_capital()
+  1389→            _save_parent_manager()
+  1390→        except Exception as e:
+  1391→            logger.warning(f"multi-start: register_child({node_id}) failed: {e}")
+  1392→
+  1393→    # v0.39.1: After launching all tokens, do a final distribute_capital()
+  1394→    # so allocations sum to 100% (each token gets 1/N instead of all getting
+  1395→    # the same 25% cap which would leave reserve capital unused).
+  1396→    try:
+  1397→        pm = _get_parent_manager()
+  1398→        pm.distribute_capital()
+  1399→        _save_parent_manager()
+  1400→    except Exception:
+  1401→        pass
+  1402→
+  1403→    return {
+  1404→        "ok": True,
+  1405→        "launched": launched,
+  1406→        "total_active": sum(1 for s in _multi_sessions.values() if not s["task"].done()),
+  1407→    }
+  1408→
+  1409→
+  1410→@app.get("/api/multi-status")
+  1411→async def multi_status() -> dict:
+  1412→    """v0.36.0: Live status of all multi-token trading sessions.
+  1413→
+  1414→    v0.36.2: Now also returns regime, pattern_buffer, entropy, websocket_status,
+  1415→    portfolio_value, win_rate, exposure_pct, and last_update_ts per session.
+  1416→    v0.38.9: Now also returns `realized_pnl` and `realized_pnl_pct` per session
+  1417→    (sum of pnl from closed live trades in SQLite). This lets the Trading tab
+  1418→    show realized P&L separately from unrealized, addressing the user's concern
+  1419→    that "P&L always shows 0.00% even when trades have closed".
+  1420→    """
+  1421→    # v0.38.9: Bulk-fetch realized P&L per symbol+timeframe to avoid N+1 queries.
+  1422→    # Each session looks up its realized pnl from this dict.
+  1423→    realized_map: dict[tuple[str, str], float] = {}
+  1424→    try:
+  1425→        storage = PPMTStorage()
+  1426→        cursor = storage._ensure_conn().cursor()
+  1427→        cursor.execute(
+  1428→            """SELECT symbol, timeframe, COALESCE(SUM(pnl), 0) as total_pnl
+  1429→               FROM trades WHERE source = 'live'
+  1430→               GROUP BY symbol, timeframe"""
+  1431→        )
+  1432→        for row in cursor.fetchall():
+  1433→            realized_map[(row[0], row[1])] = float(row[2] or 0)
+  1434→        storage.close()
+  1435→    except Exception as e:
+  1436→        logger.warning(f"multi_status: realized_pnl bulk fetch failed: {e}")
+  1437→
+  1438→    sessions = []
+  1439→    now = time.time()
+  1440→    for node_id, sess in _multi_sessions.items():
+  1441→        is_active = not sess["task"].done()
+  1442→        # v0.36.2: Stale detection — if a session claims to be RUNNING but
+  1443→        # hasn't updated state in 60s, mark as STALE so the UI can surface it.
+  1444→        last_update = sess.get("last_update_ts", 0)
+  1445→        status = sess["status"]
+  1446→        if is_active and status == "RUNNING" and last_update > 0 and (now - last_update) > 60:
+  1447→            status = "STALE"
+  1448→        # v0.38.9: Realized P&L from SQLite (sum of pnl for this symbol+tf, live source)
+  1449→        sym = sess["symbol"]
+  1450→        tf = sess["timeframe"]
+  1451→        realized_pnl = realized_map.get((sym, tf), 0.0)
+  1452→        initial_cap = float(sess.get("initial_capital", 0) or 0)
+  1453→        realized_pnl_pct = (realized_pnl / initial_cap * 100.0) if initial_cap > 0 else 0.0
+  1454→        sessions.append({
+  1455→            "node_id": node_id,
+  1456→            "symbol": sym,
+  1457→            "timeframe": tf,
+  1458→            "exchange": sess["exchange"],
+  1459→            "started_at": sess["started_at"],
+  1460→            "status": status if is_active else (
+  1461→                "STOPPED" if sess["status"] in ("STARTING_TRADER", "RUNNING", "CONNECTING", "WARMING_UP") else sess["status"]
+  1462→            ),
+  1463→            "last_price": sess.get("last_price", 0.0),
+  1464→            "pnl_pct": sess.get("pnl_pct", 0.0),
+  1465→            "signals": sess.get("signals", 0),
+  1466→            "trades": sess.get("trades", 0),
+  1467→            "candles_processed": sess.get("candles_processed", 0),
+  1468→            "error": sess.get("error", ""),
+  1469→            "is_active": is_active,
+  1470→            "uptime_seconds": (now - sess["started_at"]) if is_active else 0,
+  1471→            # v0.36.2: new fields
+  1472→            "regime": sess.get("regime", ""),
+  1473→            "pattern_buffer": sess.get("pattern_buffer", [])[-30:],
+  1474→            "entropy": sess.get("entropy", 0.0),
+  1475→            "websocket_status": sess.get("websocket_status", "disconnected"),
+  1476→            "portfolio_value": sess.get("portfolio_value", 0.0),
+  1477→            "win_rate": sess.get("win_rate", 0.0),
+  1478→            "exposure_pct": sess.get("exposure_pct", 0.0),
+  1479→            "validation_verdict": sess.get("validation_verdict", ""),
+  1480→            "last_update_ts": last_update,
+  1481→            "seconds_since_update": (now - last_update) if last_update > 0 else 0,
+  1482→            # v0.40.34: open_position for header display (multi-token mode bypasses
+  1483→            # the singleton, so header reads from here instead).
+  1484→            "open_position": sess.get("open_position"),
+  1485→            # v0.38.9: new realized P&L fields
+  1486→            "realized_pnl": realized_pnl,
+  1487→            "realized_pnl_pct": realized_pnl_pct,
+  1488→            "initial_capital": initial_cap,
+  1489→            # v0.39.0: currently-open position (None when flat) so the chart
+  1490→            # can render a price-line at the entry for the selected token.
+  1491→            "open_position": sess.get("open_position"),
+  1492→            # v0.39.2: per-session signals ring buffer (last 50). Populated by
+  1493→            # cfg.on_signal in /api/multi-start. Lets the dashboard render the
+  1494→            # Signals panel + chart markers in multi-token mode (where the
+  1495→            # global singleton is intentionally skipped — see v0.39.1 fix).
+  1496→            "signals_history": list(sess.get("signals_history", []))[-50:],
+  1497→        })
+  1498→    return {
+  1499→        "ok": True,
+  1500→        "sessions": sessions,
+  1501→        "total": len(sessions),
+  1502→        "active": sum(1 for s in sessions if s["is_active"]),
+  1503→    }
+  1504→
+  1505→
+  1506→@app.post("/api/multi-stop")
+  1507→async def multi_stop(node_id: str = "") -> dict:
+  1508→    """v0.36.0: Stop one (by node_id) or all multi-token trading sessions."""
+  1509→    stopped = []
+  1510→    if node_id:
+  1511→        sess = _multi_sessions.get(node_id)
+  1512→        if sess and not sess["task"].done():
+  1513→            sess["task"].cancel()
+  1514→            try:
+  1515→                await asyncio.wait_for(sess["task"], timeout=5.0)
+  1516→            except (asyncio.TimeoutError, asyncio.CancelledError):
+  1517→                pass
+  1518→            sess["status"] = "STOPPED"
+  1519→            stopped.append(node_id)
+  1520→    else:
+  1521→        # Stop all
+  1522→        for nid, sess in list(_multi_sessions.items()):
+  1523→            if not sess["task"].done():
+  1524→                sess["task"].cancel()
+  1525→                try:
+  1526→                    await asyncio.wait_for(sess["task"], timeout=5.0)
+  1527→                except (asyncio.TimeoutError, asyncio.CancelledError):
+  1528→                    pass
+  1529→                sess["status"] = "STOPPED"
+  1530→                stopped.append(nid)
+  1531→    return {"ok": True, "stopped": stopped}
+  1532→
+  1533→
+  1534→@app.delete("/api/multi-remove")
+  1535→async def multi_remove(node_id: str) -> dict:
+  1536→    """v0.36.0: Remove a multi-token session from the registry (stops first)."""
+  1537→    sess = _multi_sessions.get(node_id)
+  1538→    if sess is None:
+  1539→        return {"ok": False, "error": f"Session '{node_id}' not found"}
+  1540→    if not sess["task"].done():
+  1541→        sess["task"].cancel()
+  1542→        try:
+  1543→            await asyncio.wait_for(sess["task"], timeout=5.0)
+  1544→        except (asyncio.TimeoutError, asyncio.CancelledError):
+  1545→            pass
+  1546→    del _multi_sessions[node_id]
+  1547→    return {"ok": True, "removed": node_id}
+  1548→
+  1549→
+  1550→# ------------------------------------------------------------------ #
+  1551→# REST endpoint — Trade History (v0.31.0)
+  1552→# ------------------------------------------------------------------ #
+  1553→
+  1554→
+  1555→@app.get("/api/trades")
+  1556→async def get_trades(
+  1557→    symbol: Optional[str] = None,
+  1558→    timeframe: Optional[str] = None,
+  1559→    limit: int = 50,
+  1560→    source: Optional[str] = "live",
+  1561→) -> dict:
+  1562→    """Get closed trade history from persistent storage.
+  1563→
+  1564→    v0.38.9: Added `source` query param (default 'live'). The dashboard's
+  1565→    Trade History panel now shows only live/paper trades by default, hiding
+  1566→    the noisy backtest trades from validation runs. Pass source=null or
+  1567→    source=all to see everything, source=backtest for backtest only.
+  1568→    """
+  1569→    try:
+  1570→        storage = PPMTStorage()
+  1571→        # Normalize 'all' to None (no filter)
+  1572→        src = None if source in (None, "all", "") else source
+  1573→        trades = storage.get_trades(
+  1574→            symbol=symbol, timeframe=timeframe, limit=limit, source=src,
+  1575→        )
+  1576→        summary = storage.get_trade_summary(symbol=symbol, source=src)
+  1577→        storage.close()
+  1578→        return {"ok": True, "trades": trades, "summary": summary, "source": src or "all"}
+  1579→    except Exception as e:
+  1580→        return {"ok": False, "error": str(e)}
+  1581→
+  1582→
+  1583→@app.get("/api/trade-summary")
+  1584→async def get_trade_summary(
+  1585→    symbol: Optional[str] = None,
+  1586→    source: Optional[str] = "live",
+  1587→) -> dict:
+  1588→    """Get aggregate trade statistics.
+  1589→
+  1590→    v0.38.9: Added `source` filter (default 'live').
+  1591→    """
+  1592→    try:
+  1593→        storage = PPMTStorage()
+  1594→        src = None if source in (None, "all", "") else source
+  1595→        summary = storage.get_trade_summary(symbol=symbol, source=src)
+  1596→        storage.close()
+  1597→        return {"ok": True, "summary": summary, "source": src or "all"}
+  1598→    except Exception as e:
+  1599→        return {"ok": False, "error": str(e)}
+  1600→
+  1601→
+  1602→class ClearHistoryRequest(BaseModel):
+  1603→    """v0.37.0: Request body for clearing stale trade/signal history.
+  1604→    v0.38.9: Added optional `source` filter to clear only backtest or live."""
+  1605→    symbol: Optional[str] = None  # None = clear ALL symbols
+  1606→    older_than_days: int = 0      # 0 = clear all matching
+  1607→    clear_trades: bool = True
+  1608→    clear_signals: bool = True
+  1609→    source: Optional[str] = None  # None = all sources, 'backtest' or 'live' to filter
+  1610→
+  1611→
+  1612→@app.post("/api/clear-history")
+  1613→async def clear_history(req: ClearHistoryRequest) -> dict:
+  1614→    """v0.37.0: Clear stale trade/signal history from SQLite.
+  1615→
+  1616→    Use case: The dashboard's Trade History panel was showing 434 fake
+  1617→    BTC trades at $38,452 / $41,940 / $50,919 from a previous backtest,
+  1618→    even while the user was trading XLM/OP/ICP/INJ at $0.23 / $0.11.
+  1619→    This endpoint lets the user clear that stale data.
+  1620→
+  1621→    v0.38.9: Added `source` filter — pass 'backtest' to clear only backtest
+  1622→    data (preserving live trades), 'live' for the reverse, or None (default)
+  1623→    to clear everything.
+  1624→
+  1625→    Args (in body):
+  1626→        symbol: If provided, only clear this symbol. If None, clear ALL.
+  1627→        older_than_days: If >0, only clear rows older than N days.
+  1628→        clear_trades: Whether to clear the trades table (default True).
+  1629→        clear_signals: Whether to clear the signals table (default True).
+  1630→        source: If provided, only clear trades with this source.
+  1631→
+  1632→    Returns:
+  1633→        {ok: True, trades_deleted: N, signals_deleted: N}
+  1634→    """
+  1635→    try:
+  1636→        storage = PPMTStorage()
+  1637→        trades_deleted = 0
+  1638→        signals_deleted = 0
+  1639→        if req.clear_trades:
+  1640→            trades_deleted = storage.clear_trades(
+  1641→                symbol=req.symbol, older_than_days=req.older_than_days,
+  1642→                source=req.source,
+  1643→            )
+  1644→        if req.clear_signals:
+  1645→            signals_deleted = storage.clear_signals(
+  1646→                symbol=req.symbol, older_than_days=req.older_than_days,
+  1647→            )
+  1648→        storage.close()
+  1649→        src_label = f" (source={req.source})" if req.source else ""
+  1650→        return {
+  1651→            "ok": True,
+  1652→            "trades_deleted": trades_deleted,
+  1653→            "signals_deleted": signals_deleted,
+  1654→            "message": (
+  1655→                f"Cleared {trades_deleted} trades and {signals_deleted} signals"
+  1656→                + (f" for {req.symbol}" if req.symbol else " (all symbols)")
+  1657→                + src_label
+  1658→                + (f" older than {req.older_than_days} days" if req.older_than_days > 0 else "")
+  1659→            ),
+  1660→        }
+  1661→    except Exception as e:
+  1662→        return {"ok": False, "error": str(e)}
+  1663→
+  1664→
+  1665→# ------------------------------------------------------------------ #
+  1666→# REST endpoint — Validate Token (v0.31.0)
+  1667→# ------------------------------------------------------------------ #
+  1668→
+  1669→
+  1670→class ValidateRequest(BaseModel):
+  1671→    symbol: str = "BTC/USDT"
+  1672→    timeframe: str = "1h"
+  1673→    exchange: str = "mexc"
+  1674→    capital: float = 10_000.0
+  1675→
+  1676→
+  1677→def _days_for_tf(timeframe: str, default: int = 180) -> int:
+  1678→    """v0.33.0: Crypto 24/7 needs more data than forex. Calibrated so each TF
+  1679→    produces >=500 candles (the warning threshold) AND captures enough market
+  1680→    regimes (weekends, macro events, halving cycles) for robust backtests.
+  1681→
+  1682→    TF   | Days | Candles (approx)  | Justification
+  1683→    -----|------|--------------------|----------------------------------------
+  1684→    1m   |  7   | 10,080             | 1 semana captura fines de semana
+  1685→    5m   | 30   |  8,640             | 1 mes para capturar ciclos
+  1686→    10m  | 45   |  6,480             | 6 semanas
+  1687→    15m  | 90   |  8,640             | 3 meses para tendencias medias
+  1688→    30m  | 120  |  5,760             | 4 meses
+  1689→    1h   | 180  |  4,320             | 6 meses, captura macro + halving
+  1690→    4h   | 365  |  2,190             | 1 año, fiable para swing
+  1691→    1d   | 730  |    730             | 2 años, ciclos crypto
+  1692→    """
+  1693→    return {
+  1694→        "1m": 7, "3m": 14, "5m": 30, "10m": 45, "15m": 90, "30m": 120,
+  1695→        "1h": 180, "2h": 240, "4h": 365, "6h": 540, "12h": 730,
+  1696→        "1d": 730, "1w": 1825,
+  1697→    }.get(timeframe, default)
+  1698→
+  1699→
+  1700→def _min_candles_for_tf(timeframe: str) -> int:
+  1701→    """v0.33.0: Minimum candle count for a 'reliable' backtest on this TF.
+  1702→
+  1703→    Below this threshold, the dashboard shows a warning:
+  1704→    '⚠️ Muestra insuficiente. Resultados poco fiables.'
+  1705→    """
+  1706→    return 500
+  1707→
+  1708→
+  1709→def _candle_count_warning(candles: int, timeframe: str) -> Optional[str]:
+  1710→    """Return a warning string if candle count is below the reliability threshold."""
+  1711→    threshold = _min_candles_for_tf(timeframe)
+  1712→    if candles < threshold:
+  1713→        return (
+  1714→            f"⚠️ Muestra insuficiente ({candles} < {threshold} velas). "
+  1715→            f"Resultados poco fiables para TF={timeframe}."
+  1716→        )
+  1717→    return None
+  1718→
+  1719→
+  1720→@app.post("/api/validate")
+  1721→async def validate_token(req: ValidateRequest) -> dict:
+  1722→    """Run backtest + Monte Carlo to validate a token before trading.
+  1723→
+  1724→    Returns a verdict (PASS/FAIL) with detailed metrics.
+  1725→    The pre-trade gate checks:
+  1726→    - Win Rate > 40%
+  1727→    - Profit Factor > 0.8
+  1728→    - Monte Carlo Risk of Ruin < 20%
+  1729→    - Monte Carlo Verdict != HIGH RISK
+  1730→    - Min 5 trades in backtest
+  1731→    """
+  1732→    # v0.32.6: Per-token status tagging. The frontend now filters
+  1733→    # auto_setup_status / validation_result by symbol+timeframe so switching
+  1734→    # tokens no longer re-renders stale state from a previous token's run.
+  1735→    _status_token = {"symbol": req.symbol, "timeframe": req.timeframe,
+  1736→                     "exchange": req.exchange}
+  1737→
+  1738→    try:
+  1739→        terminal_state.update_sync(
+  1740→            auto_setup_status={**_status_token,
+  1741→                               "step": "validating", "status": "running",
+  1742→                               "message": f"Validating {req.symbol} {req.timeframe}...",
+  1743→                               "percent": 10}
+  1744→        )
+  1745→
+  1746→        # Step 1: Ensure data exists
+  1747→        storage = PPMTStorage()
+  1748→        df = storage.load_ohlcv(req.symbol, req.timeframe)
+  1749→        candles = len(df) if df is not None and not df.empty else 0
+  1750→
+  1751→        if candles < 500:
+  1752→            terminal_state.update_sync(
+  1753→                auto_setup_status={**_status_token,
+  1754→                                   "step": "ingesting", "status": "running",
+  1755→                                   "message": f"Ingesting data for {req.symbol}...",
+  1756→                                   "percent": 20}
+  1757→            )
+  1758→            try:
+  1759→                collector = DataCollector(exchange=req.exchange, storage=storage)
+  1760→                # v0.32.6: TF-aware day defaults. 1h needs >=180d to give the
+  1761→                # trie enough patterns to reach the 5-trade MC threshold.
+  1762→                # Shorter TFs need less because each day produces more candles.
+  1763→                days = _days_for_tf(req.timeframe, default=180)
+  1764→                df = collector.fetch_and_save(req.symbol, req.timeframe, days=days)
+  1765→                # v0.34.3: collector.close() no longer closes the shared storage
+  1766→                # (collector now tracks _owns_storage). Safe to call.
+  1767→                if hasattr(collector, 'close'):
+  1768→                    collector.close()
+  1769→            except Exception as e:
+  1770→                logger.warning(f"Auto-ingest for validation failed: {e}")
+  1771→
+  1772→        # v0.34.3: Defensive — if storage was somehow closed, re-open it.
+  1773→        # This guards against any future regression in the collector lifecycle.
+  1774→        if storage.conn is None:
+  1775→            try:
+  1776→                storage._reconnect()
+  1777→            except Exception:
+  1778→                storage = PPMTStorage()  # fallback: create a fresh instance
+  1779→
+  1780→        # Step 2: Ensure trie exists
+  1781→        # v0.40.4 FIX-1D: pass asset_class so N1/N2 load from shared cross-asset pools.
+  1782→        _info = AssetClassifier().classify(req.symbol)
+  1783→        all_tries = storage.load_all_tries(req.symbol, asset_class=_info.asset_class)
+  1784→        if all_tries.get("n3") is None:
+  1785→            terminal_state.update_sync(
+  1786→                auto_setup_status={**_status_token,
+  1787→                                   "step": "building", "status": "running",
+  1788→                                   "message": f"Building Trie for {req.symbol}...",
+  1789→                                   "percent": 40}
+  1790→            )
+  1791→            try:
+  1792→                from ppmt.engine.ppmt import PPMT as PPMTBuilder
+  1793→                df = storage.load_ohlcv(req.symbol, req.timeframe)
+  1794→                if df is not None and not df.empty:
+  1795→                    builder = PPMTBuilder(symbol=req.symbol, asset_class=_info.asset_class,
+  1796→                                          sax_strategy="ohlcv")
+  1797→                    # FIX-1D: contribute to universal N1 + class N2 pools
+  1798→                    builder.attach_storage(storage)
+  1799→                    count = builder.build(df, pattern_length=5)
+  1800→                    # v0.41.0 FIX-1B: verify shared pools were actually saved
+  1801→                    pool_status = builder.ensure_shared_pools(storage)
+  1802→                    if not pool_status["n1_universal"]["exists"]:
+  1803→                        logger.warning(f"N1 universal pool MISSING after auto-setup build of {req.symbol}")
+  1804→                    if not pool_status["n2_class"]["exists"]:
+  1805→                        logger.warning(f"N2 class pool MISSING after auto-setup build of {req.symbol}")
+  1806→                    # No need to save_trie per level — build() already did it
+  1807→                    # to the universal/class/per-symbol/per-symbol+regime keys.
+  1808→            except Exception as e:
+  1809→                storage.close()
+  1810→                return {"ok": False, "error": f"Build failed: {str(e)}"}
+  1811→
+  1812→        storage.close()
+  1813→
+  1814→        # Step 3: Run backtest
+  1815→        terminal_state.update_sync(
+  1816→            auto_setup_status={**_status_token,
+  1817→                               "step": "backtesting", "status": "running",
+  1818→                               "message": f"Running backtest for {req.symbol}...",
+  1819→                               "percent": 60}
+  1820→        )
+  1821→        from ppmt.engine.realtime import RealtimeTrader, ReplayConfig
+  1822→
+  1823→        # v0.39.3: Wire on_signal so backtest signals persist to SQLite
+  1824→        # (source='backtest'). Previously validate_token created ReplayConfig
+  1825→        # WITHOUT on_signal, so the signals table was always empty even after
+  1826→        # successful backtests that generated 30+ signals. The dashboard's
+  1827→        # Signals panel therefore showed "No signals" forever, which the user
+  1828→        # perceived as "bot not operating".
+  1829→        _bt_storage = PPMTStorage()
+  1830→        def _bt_on_signal(signal, prediction, _sym=req.symbol, _tf=req.timeframe):
+  1831→            try:
+  1832→                sig_dict = {
+  1833→                    "symbol": _sym,
+  1834→                    "signal_type": getattr(getattr(signal, "signal_type", None), "value", "UNKNOWN"),
+  1835→                    "confidence": float(getattr(signal, "confidence", 0) or 0),
+  1836→                    "quality_score": float(getattr(signal, "quality_score", 0) or 0),
+  1837→                    "sizing_multiplier": float(getattr(signal, "sizing_multiplier", 0) or 0),
+  1838→                    "entry_price": float(getattr(signal, "entry_price", 0) or 0),
+  1839→                    "sl_price": float(getattr(signal, "sl_price", 0) or 0),
+  1840→                    "tp_price": float(getattr(signal, "tp_price", 0) or 0),
+  1841→                    "expected_move_pct": float(getattr(signal, "expected_move_pct", 0) or 0),
+  1842→                    "win_rate": float(getattr(signal, "win_rate", 0) or 0),
+  1843→                    "remaining_candles": int(getattr(signal, "remaining_candles", 0) or 0),
+  1844→                    "matched_pattern": list(getattr(signal, "matched_pattern", []) or []),
+  1845→                    "predicted_path": [],
+  1846→                    "timestamp": time.time(),
+  1847→                }
+  1848→                _bt_storage.save_signal(sig_dict)
+  1849→            except Exception:
+  1850→                pass
+  1851→
+  1852→        config = ReplayConfig(
+  1853→            symbol=req.symbol,
+  1854→            timeframe=req.timeframe,
+  1855→            initial_capital=req.capital,
+  1856→            speed=0,
+  1857→            verbose=False,
+  1858→            # v0.32.3: validation_mode relaxes v0.25.0 strict signal filters so
+  1859→            # the backtest can produce enough trades to reach the 5-trade MC
+  1860→            # threshold. Without this, Bayesian shrinkage + regime filters reject
+  1861→            # almost all signals in short (30-day) backtests → 0-2 trades → FAIL.
+  1862→            validation_mode=True,
+  1863→            # v0.39.3: Wire on_signal so backtest signals persist to SQLite
+  1864→            on_signal=_bt_on_signal,
+  1865→        )
+  1866→        trader = RealtimeTrader(config=config)
+  1867→        result = trader.run_replay()
+  1868→        try:
+  1869→            _bt_storage.close()
+  1870→        except Exception:
+  1871→            pass
+  1872→
+  1873→        logger.info(
+  1874→            f"Backtest {req.symbol} {req.timeframe}: "
+  1875→            f"trades={result.total_trades}, WR={result.win_rate:.1%}, "
+  1876→            f"PnL={result.total_pnl_pct:+.2f}%, DD={result.max_drawdown:.2%}"
+  1877→        )
+  1878→
+  1879→        # Compute profit factor (v0.40.0: shared helper, was `else 0` which
+  1880→        # failed profitable-only tokens — mathematically PF = ∞ when no losses)
+  1881→        gross_profit = sum(t.pnl_pct for t in result.trades if t.pnl_pct > 0)
+  1882→        gross_loss = abs(sum(t.pnl_pct for t in result.trades if t.pnl_pct < 0))
+  1883→        from ppmt.data.storage import compute_profit_factor
+  1884→        profit_factor = compute_profit_factor(gross_profit, gross_loss)
+  1885→
+  1886→        # Step 4: Run Monte Carlo
+  1887→        mc_result = {}
+  1888→        mc_verdict = ""
+  1889→        terminal_state.update_sync(
+  1890→            auto_setup_status={**_status_token,
+  1891→                               "step": "montecarlo", "status": "running",
+  1892→                               "message": f"Running Monte Carlo for {req.symbol}...",
+  1893→                               "percent": 80}
+  1894→        )
+  1895→        try:
+  1896→            from ppmt.risk.monte_carlo import MonteCarloSimulator, MonteCarloConfig
+  1897→            mc_config = MonteCarloConfig(initial_capital=req.capital)
+  1898→            mc_sim = MonteCarloSimulator()  # No args in constructor (v0.32.0 fix)
+  1899→            trades_pnl = [t.pnl_pct / 100.0 for t in result.trades]  # Convert to fraction
+  1900→            if len(trades_pnl) >= 5:
+  1901→                mc_out = mc_sim.simulate(trades_pnl, config=mc_config)  # config passed here
+  1902→                # Compute simple verdict from risk_of_ruin
+  1903→                if mc_out.risk_of_ruin < 0.05:
+  1904→                    mc_verdict = "LOW RISK"
+  1905→                elif mc_out.risk_of_ruin < 0.15:
+  1906→                    mc_verdict = "MODERATE RISK"
+  1907→                else:
+  1908→                    mc_verdict = "HIGH RISK"
+  1909→                mc_result = {
+  1910→                    "risk_of_ruin": mc_out.risk_of_ruin,
+  1911→                    "probability_of_profit": mc_out.probability_of_profit,
+  1912→                    "p95_max_drawdown": mc_out.p95_max_drawdown,
+  1913→                    "mean_final_equity": mc_out.mean_final_equity,
+  1914→                    "median_final_equity": mc_out.median_final_equity,
+  1915→                    "verdict": mc_verdict,
+  1916→                    "risk_score": mc_out.risk_of_ruin * 100,
+  1917→                }
+  1918→        except Exception as e:
+  1919→            logger.warning(f"Monte Carlo failed: {e}", exc_info=True)
+  1920→
+  1921→        # Step 5: Compute verdict
+  1922→        # v0.32.3: If backtest produced < 5 trades, mark as INSUFFICIENT_DATA
+  1923→        # (previously only 0 trades → INSUFFICIENT_DATA; 1-4 trades went to FAIL
+  1924→        # because MC was skipped → risk_of_ruin defaulted to 1.0 → check failed).
+  1925→        # v0.40.0: Lowered 5 → 3 trades. With 5000-candle ingestion the trie
+  1926→        # produces richer patterns, but short backtests on low-TF still yield
+  1927→        # 3-4 trades. 3 is enough for MC simulation with wider confidence
+  1928→        # intervals. Validator.py (oos) keeps the 5-trade gate for OOS.
+  1929→        if result.total_trades < 3:
+  1930→            verdict = "INSUFFICIENT_DATA"
+  1931→            reason_msg = (
+  1932→                f"Backtest produced only {result.total_trades} trades (need >= 3). "
+  1933→                f"Causes: (a) insufficient historical data, (b) overly strict signal "
+  1934→                f"filters for this regime/market, (c) TokenProfile calibration issue. "
+  1935→                f"Try: longer history (90+ days), different timeframe, or check trie patterns."
+  1936→            )
+  1937→            # v0.32.3: checks dict uses BOTH naming conventions for dashboard compat:
+  1938→            #   - `win_rate_pass` (server original) — used by Python code/tests
+  1939→            #   - `win_rate`      (dashboard expects) — used by index.html JS
+  1940→            checks = {
+  1941→                "win_rate_pass": False,
+  1942→                "profit_factor_pass": False,
+  1943→                "risk_of_ruin_pass": False,
+  1944→                "mc_verdict_pass": False,
+  1945→                "min_trades_pass": False,
+  1946→                # Dashboard-friendly aliases (simple names without `_pass` suffix)
+  1947→                "win_rate": False,
+  1948→                "profit_factor": False,
+  1949→                "risk_of_ruin": False,
+  1950→                "mc_verdict": False,
+  1951→                "min_trades": False,
+  1952→                "reason": reason_msg,
+  1953→            }
+  1954→            # v0.32.3: Diagnostic logging — print which check failed and why
+  1955→            logger.warning(
+  1956→                f"Validation {req.symbol} {req.timeframe}: INSUFFICIENT_DATA "
+  1957→                f"(trades={result.total_trades} < 3, signals={result.signals_generated}, "
+  1958→                f"candles_processed={result.candles_processed})"
+  1959→            )
+  1960→        else:
+  1961→            wr_pass = result.win_rate > 0.40
+  1962→            pf_pass = profit_factor > 0.8
+  1963→            ror_pass = mc_result.get("risk_of_ruin", 1.0) < 0.20
+  1964→            mc_pass = mc_verdict not in ("HIGH RISK",)
+  1965→            mt_pass = result.total_trades >= 3
+  1966→
+  1967→            checks = {
+  1968→                # Server-style keys (with _pass suffix)
+  1969→                "win_rate_pass": wr_pass,
+  1970→                "profit_factor_pass": pf_pass,
+  1971→                "risk_of_ruin_pass": ror_pass,
+  1972→                "mc_verdict_pass": mc_pass,
+  1973→                "min_trades_pass": mt_pass,
+  1974→                # v0.32.3: Dashboard-friendly aliases (simple names).
+  1975→                # Dashboard's checkNames = ['win_rate','profit_factor','risk_of_ruin','mc_verdict','min_trades']
+  1976→                "win_rate": wr_pass,
+  1977→                "profit_factor": pf_pass,
+  1978→                "risk_of_ruin": ror_pass,
+  1979→                "mc_verdict": mc_pass,
+  1980→                "min_trades": mt_pass,
+  1981→            }
+  1982→            all_pass = wr_pass and pf_pass and ror_pass and mc_pass and mt_pass
+  1983→            verdict = "PASS" if all_pass else "FAIL"
+  1984→
+  1985→            # v0.32.3: Detailed per-check diagnostic logging
+  1986→            if not all_pass:
+  1987→                failed = [k for k, v in checks.items() if k.endswith("_pass") and not v]
+  1988→                logger.warning(
+  1989→                    f"Validation {req.symbol} {req.timeframe}: FAIL. "
+  1990→                    f"Failed checks: {failed}. "
+  1991→                    f"Metrics: WR={result.win_rate:.1%} ({'PASS' if wr_pass else 'FAIL'}), "
+  1992→                    f"PF={profit_factor:.2f} ({'PASS' if pf_pass else 'FAIL'}), "
+  1993→                    f"RoR={mc_result.get('risk_of_ruin', 1.0):.2%} ({'PASS' if ror_pass else 'FAIL'}), "
+  1994→                    f"MC={mc_verdict or 'N/A'} ({'PASS' if mc_pass else 'FAIL'}), "
+  1995→                    f"Trades={result.total_trades} ({'PASS' if mt_pass else 'FAIL'})"
+  1996→                )
+  1997→            else:
+  1998→                logger.info(
+  1999→                    f"Validation {req.symbol} {req.timeframe}: PASS. "
+  2000→                    f"WR={result.win_rate:.1%}, PF={profit_factor:.2f}, "
+
+[showing lines 1-2000 of 3621; use offset=2001 with limit to continue reading]

@@ -1,0 +1,2002 @@
+     1→"""
+     2→PPMT V2 Terminal — FastAPI WebSocket Bridge.
+     3→
+     4→This server provides the real-time bridge between the PPMT Python engine
+     5→and the React terminal frontend. It exposes a single WebSocket endpoint
+     6→per token that streams candle, brain, and position updates.
+     7→
+     8→v0.50.0: ENTREGABLE 11 — Proxy/VPN URL support + Mock Live Test mode.
+     9→
+    10→Usage:
+    11→    uvicorn ppmt.terminal.v2_server:app --host 0.0.0.0 --port 8000 --reload
+    12→"""
+    13→
+    14→from __future__ import annotations
+    15→
+    16→import asyncio
+    17→import json
+    18→import logging
+    19→import os
+    20→import queue
+    21→import threading
+    22→import time
+    23→from datetime import datetime, timezone
+    24→from typing import Optional
+    25→
+    26→import pandas as pd
+    27→from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+    28→from fastapi.middleware.cors import CORSMiddleware
+    29→from fastapi.responses import FileResponse
+    30→from fastapi.staticfiles import StaticFiles
+    31→from pydantic import BaseModel
+    32→
+    33→from ppmt.data.storage import PPMTStorage
+    34→from ppmt.engine.ppmt import PPMT, PPMTResult
+    35→from ppmt.terminal.paper_executor import PaperExecutor
+    36→from ppmt.execution.models import PositionState, PositionStatus
+    37→from ppmt.execution.interfaces import IExecutor
+    38→from ppmt.execution.mexc_futures import MexcFuturesExecutor
+    39→from ppmt.execution.crypto import decrypt_auth_payload
+    40→
+    41→logger = logging.getLogger("ppmt.v2")
+    42→logging.basicConfig(
+    43→    level=logging.INFO,
+    44→    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    45→    datefmt="%H:%M:%S",
+    46→)
+    47→
+    48→# ─── v0.57.0 (TAREA 19): Global Anti-Overlap tracker ──────────
+    49→# Tracks which symbols currently have an ACTIVE position across
+    50→# ALL WebSocket sessions (5m + 15m combined). If SOL/USDT has
+    51→# a position open in 5m, a 15m signal for SOL/USDT is REJECTED.
+    52→_ACTIVE_SYMBOLS: dict[str, str] = {}  # {"SOL/USDT": "5m", "DOGE/USDT": "15m", ...}
+    53→
+    54→# ─── v0.57.0 (TAREA 19): Net EV Gate statistics ──────────────
+    55→_NET_EV_STATS: dict[str, int] = {
+    56→    "total_raw_signals": 0,
+    57→    "passed_net_ev": 0,
+    58→    "rejected_spread": 0,   # Net_Move <= 0 (spread devoured the move)
+    59→    "rejected_ev_score": 0,  # Net_EV < 0.80
+    60→    "rejected_overlap": 0,   # Same symbol already has position in another TF
+    61→}
+    62→
+    63→# ─── v0.58.0 (TAREA 21): Session-wide open positions tracker ──
+    64→_OPEN_POSITIONS: dict[str, dict] = {}  # {"SOL/USDT": {direction, entry, pnl_pct, ev_score, ...}}
+    65→
+    66→# ─── v0.58.0 (TAREA 21): Last Net EV score per symbol ─────────
+    67→_LAST_NET_EV: dict[str, dict] = {}  # {"SOL/USDT": {ev_score, passed, net_rr, conf, ...}}
+    68→
+    69→# ─── v0.58.0 (TAREA 21): Log emitter helper ──────────────────
+    70→# v2.1: Only emit logs with these tags to the Learning Feed.
+    71→# Prevents noise from spurious tags flooding the frontend.
+    72→_FEED_ALLOWED_TAGS = frozenset({
+    73→    "LEARN", "PATTERN BROKEN", "EV GATE", "SIGNAL", "WALK-FORWARD",
+    74→    "DIVERGE", "ERROR",
+    75→})
+    76→
+    77→async def _emit_log(websocket, tag: str, message: str, level: str = "info"):
+    78→    """Emit a structured log message through the WebSocket for the terminal feed.
+    79→    
+    80→    v2.1 FIX: Only emit if tag is in the allowlist. This prevents the Learning
+    81→    Feed from filling with irrelevant entries (e.g. raw candle data).
+    82→    """
+    83→    if tag.upper() not in _FEED_ALLOWED_TAGS:
+    84→        return
+    85→    try:
+    86→        await websocket.send_json({
+    87→            "type": "log",
+    88→            "data": {
+    89→                "timestamp": datetime.now(timezone.utc).strftime("%H:%M:%S"),
+    90→                "tag": tag,
+    91→                "message": message,
+    92→                "level": level,
+    93→            },
+    94→        })
+    95→    except Exception:
+    96→        pass  # Don't break the poll loop if WS send fails
+    97→
+    98→
+    99→# ─── Helpers ──────────────────────────────────────────────────
+   100→
+   101→def _sax_symbol_to_str(sym) -> str:
+   102→    """Convert a SAX symbol (str or tuple) to a pure string.
+   103→    
+   104→    Single: 'a' → 'a'
+   105→    Dual:   ('a', 'x') → 'a'  (price symbol only, for path IDs)
+   106→    """
+   107→    if isinstance(sym, tuple):
+   108→        return str(sym[0])  # price symbol
+   109→    return str(sym)
+   110→
+   111→
+   112→def _sax_symbol_to_json(sym) -> list[str] | str:
+   113→    """Convert a SAX symbol to JSON-safe format.
+   114→    
+   115→    Single: 'a' → 'a'
+   116→    Dual:   ('a', 'x') → ['a', 'x']  (pure JSON string array)
+   117→    """
+   118→    if isinstance(sym, tuple):
+   119→        return [str(s) for s in sym]
+   120→    return str(sym)
+   121→
+   122→
+   123→def _build_active_path_ids(backward_path: list) -> list[str]:
+   124→    """Build cumulative path IDs from a backward path.
+   125→    
+   126→    backward_path: ['a', 'b', 'c'] or [('a','x'), ('b','y'), ('c','z')]
+   127→    Result: ["root", "a", "a-b", "a-b-c"]
+   128→    """
+   129→    ids = ["root"]
+   130→    cumulative = []
+   131→    for sym in backward_path:
+   132→        key = _sax_symbol_to_str(sym)
+   133→        cumulative.append(key)
+   134→        ids.append("-".join(cumulative))
+   135→    return ids
+   136→
+   137→
+   138→# ─── App ──────────────────────────────────────────────────────
+   139→app = FastAPI(title="PPMT V2 Terminal", version="2.0.0")
+   140→
+   141→app.add_middleware(
+   142→    CORSMiddleware,
+   143→    allow_origins=["*"],
+   144→    allow_methods=["*"],
+   145→    allow_headers=["*"],
+   146→)
+   147→
+   148→# ─── Global state ─────────────────────────────────────────────
+   149→_storage: Optional[PPMTStorage] = None
+   150→
+   151→# v0.50.0: ENTREGABLE 11 — Mock Live Test mode.
+   152→# When PPMT_MOCK_LIVE=1, the live-trading endpoint uses PaperExecutor
+   153→# instead of MexcFuturesExecutor, and injects fake signals to test the
+   154→# frontend chart + position card lifecycle without real money.
+   155→MOCK_LIVE = os.environ.get("PPMT_MOCK_LIVE", "0") == "1"
+   156→if MOCK_LIVE:
+   157→    logger.warning("⚠️  PPMT_MOCK_LIVE=1 — Live trading uses PaperExecutor (NO REAL MONEY)")
+   158→
+   159→# ─── v0.58.0: TAREA 20 — Risk Config & Live Session Tracker ──────
+   160→# In-memory risk configuration adjustable via /api/risk/config.
+   161→# Live session registry: each active WS connection registers its
+   162→# position state so /api/portfolio/live can report across sessions.
+   163→
+   164→_RISK_CONFIG: dict = {
+   165→    "risk_per_trade": 0.01,      # 1% por defecto
+   166→    "max_positions": 3,
+   167→    "total_capital": 1000.0,     # USDT
+   168→    "current_drawdown": 0.0,     # % drawdown actual
+   169→}
+   170→
+   171→# _LIVE_SESSIONS tracks active positions across all WS connections.
+   172→# Key: "SOL/USDT:5m" → value: dict with position summary.
+   173→# Populated by WebSocket handlers when positions open/close.
+   174→_LIVE_SESSIONS: dict[str, dict] = {}
+   175→
+   176→# v0.60.0 (TERMINAL-v2.1): Trade history — in-memory list of closed trades.
+   177→_TRADE_HISTORY: list[dict] = []
+   178→
+   179→
+   180→def get_storage() -> PPMTStorage:
+   181→    global _storage
+   182→    if _storage is None:
+   183→        _storage = PPMTStorage()
+   184→    return _storage
+   185→
+   186→
+   187→# ─── REST: Health check ───────────────────────────────────────
+   188→@app.get("/api/health")
+   189→async def health():
+   190→    return {"status": "ok", "version": "2.0.0"}
+   191→
+   192→
+   193→# ─── REST: Available symbols ─────────────────────────────────
+   194→@app.get("/api/symbols")
+   195→async def list_symbols():
+   196→    storage = get_storage()
+   197→    assets = storage.get_assets()
+   198→    return {"symbols": [a["symbol"] for a in assets]}
+   199→
+   200→
+   201→# ─── v0.57.0 (TAREA 19): Net EV Gate Statistics ──────────────
+   202→@app.get("/api/net-ev-stats")
+   203→async def net_ev_stats():
+   204→    """Return cumulative Net EV Gate filtering statistics."""
+   205→    return {
+   206→        "stats": dict(_NET_EV_STATS),
+   207→        "active_symbols": dict(_ACTIVE_SYMBOLS),
+   208→    }
+   209→
+   210→
+   211→# ─── REST: Risk Control Endpoints (TAREA 20) ─────────────────────
+   212→
+   213→class RiskConfigPayload(BaseModel):
+   214→    """Payload for POST /api/risk/config — partial update of risk parameters."""
+   215→    risk_per_trade: Optional[float] = None
+   216→    max_positions: Optional[int] = None
+   217→    total_capital: Optional[float] = None
+   218→    current_drawdown: Optional[float] = None
+   219→
+   220→
+   221→@app.get("/api/risk/status")
+   222→async def risk_status():
+   223→    """Return the current risk configuration."""
+   224→    return dict(_RISK_CONFIG)
+   225→
+   226→
+   227→@app.post("/api/risk/config")
+   228→async def risk_config(payload: RiskConfigPayload):
+   229→    """Update risk configuration parameters in memory.
+   230→
+   231→    Accepts a partial JSON body with any of:
+   232→      risk_per_trade (0.001–0.10), max_positions (1–20),
+   233→      total_capital (>0), current_drawdown (0.0–1.0)
+   234→    """
+   235→    updated = {}
+   236→
+   237→    if payload.risk_per_trade is not None:
+   238→        val = payload.risk_per_trade
+   239→        if not (0.001 <= val <= 0.10):
+   240→            return {"error": "risk_per_trade must be between 0.001 and 0.10"}
+   241→        _RISK_CONFIG["risk_per_trade"] = val
+   242→        updated["risk_per_trade"] = val
+   243→
+   244→    if payload.max_positions is not None:
+   245→        val = payload.max_positions
+   246→        if not (1 <= val <= 20):
+   247→            return {"error": "max_positions must be between 1 and 20"}
+   248→        _RISK_CONFIG["max_positions"] = val
+   249→        updated["max_positions"] = val
+   250→
+   251→    if payload.total_capital is not None:
+   252→        val = payload.total_capital
+   253→        if val <= 0:
+   254→            return {"error": "total_capital must be > 0"}
+   255→        _RISK_CONFIG["total_capital"] = val
+   256→        updated["total_capital"] = val
+   257→
+   258→    if payload.current_drawdown is not None:
+   259→        val = payload.current_drawdown
+   260→        if not (0.0 <= val <= 1.0):
+   261→            return {"error": "current_drawdown must be between 0.0 and 1.0"}
+   262→        _RISK_CONFIG["current_drawdown"] = val
+   263→        updated["current_drawdown"] = val
+   264→
+   265→    logger.info(f"[RISK] Config updated: {updated}")
+   266→    return {"status": "ok", "updated": updated, "config": dict(_RISK_CONFIG)}
+   267→
+   268→
+   269→@app.get("/api/portfolio/live")
+   270→async def portfolio_live():
+   271→    """Return currently open positions with aggregate stats.
+   272→
+   273→    Aggregates from both _LIVE_SESSIONS (TAREA 20) and _OPEN_POSITIONS (TAREA 21).
+   274→    """
+   275→    positions = []
+   276→    total_exposure = 0.0
+   277→    session_ev = 0.0
+   278→
+   279→    # From _LIVE_SESSIONS (populated by live-trading WS)
+   280→    for session_key, data in _LIVE_SESSIONS.items():
+   281→        if data.get("status") not in ("ACTIVE", "BREAK_EVEN_SECURED", "TP_EXTENDED"):
+   282→            continue
+   283→        pos_info = {
+   284→            "symbol": data.get("symbol", session_key),
+   285→            "direction": data.get("direction", "LONG"),
+   286→            "entry": data.get("entry_price", 0.0),
+   287→            "pnl": data.get("pnl_pct", "0.0%"),
+   288→            "ev_score": data.get("ev_score", 0.0),
+   289→            "status": data.get("status", "UNKNOWN"),
+   290→            "timeframe": data.get("timeframe", ""),
+   291→        }
+   292→        positions.append(pos_info)
+   293→        total_exposure += data.get("size_usdt", 0.0)
+   294→        session_ev += data.get("ev_r", 0.0)
+   295→
+   296→    # From _OPEN_POSITIONS (populated by paper-live WS)
+   297→    for sym, pos_data in _OPEN_POSITIONS.items():
+   298→        positions.append({"symbol": sym, **pos_data})
+   299→        total_exposure += pos_data.get("size_usdt", 0.0)
+   300→        session_ev += pos_data.get("ev_score", 0.0)
+   301→
+   302→    return {
+   303→        "positions": positions,
+   304→        "total_exposure": round(total_exposure, 2),
+   305→        "active_count": len(positions),
+   306→        "session_ev": round(session_ev, 3),
+   307→    }
+   308→
+   309→
+   310→# ─── REST: Trade History ──────────────────────────────────────
+   311→# v0.60.0 (TERMINAL-v2.1): In-memory trade history endpoint.
+   312→@app.get("/api/trades/history")
+   313→async def get_trade_history():
+   314→    """Return all closed trades from the current server session."""
+   315→    return {"trades": _TRADE_HISTORY, "count": len(_TRADE_HISTORY)}
+   316→
+   317→
+   318→# ─── REST: Backtest ──────────────────────────────────────────────
+   319→# v2.1: Run a quick OOS backtest on historical data using the real
+   320→# PPMT engine with Config F. Results stream via WebSocket IN REAL-TIME.
+   321→#
+   322→# v2.1-fix: Rewritten to use EXACTLY the same logic as
+   323→# full_replay_v21.py — builds tries from IS data, uses the same
+   324→# replay loop, and streams results via WS.
+   325→
+   326→class BacktestPayload(BaseModel):
+   327→    symbol: str = "SOL/USDT"
+   328→    timeframe: str = "5m"
+   329→    days: int = 7
+   330→
+   331→
+   332→# Track active backtest WebSocket connections so the endpoint can
+   333→# stream results to the calling client.
+   334→_BACKTEST_WS: dict[str, WebSocket] = {}  # key: "SOL/USDT:5m"
+   335→
+   336→# Track running backtests to prevent duplicates
+   337→_BACKTEST_RUNNING: set[str] = set()  # keys like "SOL/USDT:5m"
+   338→
+   339→
+   340→@app.post("/api/backtest")
+   341→async def run_backtest(payload: BacktestPayload):
+   342→    """Start a backtest for the given symbol/timeframe/days.
+   343→
+   344→    Runs in a background thread. Results are streamed to the client
+   345→    in real-time via the same WebSocket connection the client has open.
+   346→    """
+   347→    symbol = payload.symbol
+   348→    timeframe = payload.timeframe
+   349→    days = payload.days
+   350→
+   351→    logger.info(f"[BACKTEST] POST received: {symbol} {timeframe} {days}d")
+   352→
+   353→    if timeframe not in ("5m", "15m"):
+   354→        return {"status": "error", "message": f"Timeframe {timeframe} not supported for backtest. Use 5m or 15m."}
+   355→
+   356→    if days < 1 or days > 30:
+   357→        return {"status": "error", "message": f"Days must be 1-30, got {days}"}
+   358→
+   359→    # Prevent duplicate backtests for the same symbol:tf
+   360→    bt_key = f"{symbol}:{timeframe}"
+   361→    if bt_key in _BACKTEST_RUNNING:
+   362→        return {"status": "error", "message": f"Backtest already running for {symbol} {timeframe}"}
+   363→
+   364→    # Check if WS client is registered
+   365→    ws = _BACKTEST_WS.get(bt_key)
+   366→    if not ws:
+   367→        logger.warning(f"[BACKTEST] No WS client registered for {bt_key}")
+   368→        return {"status": "error", "message": f"No WebSocket connection for {symbol} {timeframe}. Connect to the terminal first."}
+   369→
+   370→    logger.info(f"[BACKTEST] Starting: {symbol} {timeframe} {days}d (WS client found)")
+   371→
+   372→    asyncio.create_task(_run_backtest_async(symbol, timeframe, days))
+   373→
+   374→    return {"status": "started", "symbol": symbol, "timeframe": timeframe, "days": days}
+   375→
+   376→
+   377→async def _run_backtest_async(symbol: str, timeframe: str, days: int):
+   378→    """Run the backtest in a thread and stream results via WebSocket in real-time."""
+   379→    bt_key = f"{symbol}:{timeframe}"
+   380→    _BACKTEST_RUNNING.add(bt_key)
+   381→    msg_queue: queue.Queue = queue.Queue()
+   382→
+   383→    bt_thread = threading.Thread(
+   384→        target=_backtest_sync,
+   385→        args=(symbol, timeframe, days, msg_queue),
+   386→        daemon=True,
+   387→    )
+   388→    bt_thread.start()
+   389→    logger.info(f"[BACKTEST] Thread started for {bt_key}")
+   390→
+   391→    try:
+   392→        # Drain the queue and send messages in real-time via WS
+   393→        got_complete = False
+   394→        while True:
+   395→            # Thread finished AND queue empty → done
+   396→            if not bt_thread.is_alive() and msg_queue.empty():
+   397→                break
+   398→
+   399→            try:
+   400→                msg = msg_queue.get(timeout=0.3)
+   401→            except queue.Empty:
+   402→                await asyncio.sleep(0.05)  # Yield to event loop
+   403→                continue
+   404→
+   405→            # Send the message via WS
+   406→            ws = _BACKTEST_WS.get(bt_key)
+   407→            if ws:
+   408→                try:
+   409→                    await ws.send_json(msg)
+   410→                except Exception as e:
+   411→                    logger.error(f"[BACKTEST] WS send failed: {e}")
+   412→                    _BACKTEST_WS.pop(bt_key, None)
+   413→                    break
+   414→            else:
+   415→                logger.warning(f"[BACKTEST] WS client gone for {bt_key}, stopping stream")
+   416→                break
+   417→
+   418→            # If this was the completion message, we're done
+   419→            if msg.get("type") == "backtest_complete":
+   420→                got_complete = True
+   421→                break
+   422→
+   423→        # If thread died without sending backtest_complete, send error
+   424→        if not got_complete:
+   425→            logger.error(f"[BACKTEST] Thread ended without sending complete for {bt_key}")
+   426→            ws = _BACKTEST_WS.get(bt_key)
+   427→            if ws:
+   428→                try:
+   429→                    await ws.send_json({"type": "backtest_complete", "data": {
+   430→                        "error": "Backtest thread crashed (no completion message)",
+   431→                        "trades": 0, "wins": 0, "losses": 0,
+   432→                        "wr": 0, "pnl_pct": 0, "profit_factor": 0, "max_drawdown": 0,
+   433→                    }})
+   434→                except Exception:
+   435→                    _BACKTEST_WS.pop(bt_key, None)
+   436→
+   437→    except Exception as e:
+   438→        logger.error(f"[BACKTEST] Async streamer failed: {e}", exc_info=True)
+   439→        ws = _BACKTEST_WS.get(bt_key)
+   440→        if ws:
+   441→            try:
+   442→                await ws.send_json({"type": "backtest_complete", "data": {
+   443→                    "error": str(e), "trades": 0, "wins": 0, "losses": 0,
+   444→                    "wr": 0, "pnl_pct": 0, "profit_factor": 0, "max_drawdown": 0,
+   445→                }})
+   446→            except Exception:
+   447→                _BACKTEST_WS.pop(bt_key, None)
+   448→    finally:
+   449→        _BACKTEST_RUNNING.discard(bt_key)
+   450→        logger.info(f"[BACKTEST] Finished: {bt_key}")
+   451→
+   452→
+   453→def _backtest_sync(symbol: str, timeframe: str, days: int, msg_queue: queue.Queue) -> None:
+   454→    """Synchronous backtest logic — runs in a thread.
+   455→
+   456→    This function replicates EXACTLY the same logic as full_replay_v21.py:
+   457→    - Loads IS + OOS data (DB first, Binance REST fallback)
+   458→    - Builds tries from IS data with Config F alpha=3
+   459→    - Runs OOS replay with Config F parameters
+   460→    - Streams results via msg_queue
+   461→
+   462→    CRITICAL: ALL SQLite connections must be created INSIDE this function
+   463→    because SQLite objects can only be used in the thread that created them.
+   464→    """
+   465→    import copy
+   466→    import requests as _requests
+   467→    from ppmt.data.classifier import AssetClassifier
+   468→    from ppmt.data.storage import PPMTStorage as _PPMTStorage, UNIVERSAL_POOL_KEY, class_pool_key
+   469→    from ppmt.core.trie import PPMTTrie, RegimePartitionedTrie
+   470→    from ppmt.core.regime import RegimeDetector
+   471→    from ppmt.core.profiles import SPREAD_ESTIMATES
+   472→    from ppmt.core.thresholds import TIMEFRAME_HARD_MOVE_FLOOR
+   473→    from ppmt.engine.weights import AdaptiveWeights
+   474→    from ppmt.core.sax import LEVEL_DUAL_ALPHA_CONFIG, LEVEL_DUAL_ALPHA_TF_OVERRIDES
+   475→
+   476→    def _send(msg_type: str, data: dict):
+   477→        msg_queue.put({"type": msg_type, "data": data})
+   478→
+   479→    # Config F parameters (EXACTLY matching full_replay_v21.py Config F)
+   480→    EV_THRESHOLD = 0.40
+   481→    SL_MULT = 2.0
+   482→    ALPHA_N3_N4 = 3  # Config F uses alpha=3
+   483→    CONFIG_F_WEIGHTS = {"n1": 0.10, "n2": 0.00, "n3": 0.90, "n4": 0.00, "n5": 0.00}
+   484→    HARD_MOVE_FLOOR = 0.10  # Config F: 0.10% for 5m
+   485→    CAPITAL_USDT = 1000.0
+   486→    RISK_PCT = 0.01
+   487→    IS_DAYS = 60  # In-sample period for trie building
+   488→    REGIME_WINDOW_SIZE = 10
+   489→
+   490→    try:
+   491→        logger.info(f"[BACKTEST] _backtest_sync started: {symbol} {timeframe} {days}d")
+   492→
+   493→        # 1. Classify asset
+   494→        classifier = AssetClassifier()
+   495→        info = classifier.classify(symbol)
+   496→        asset_class = info.asset_class
+   497→        weight_profile = info.weight_profile
+   498→        logger.info(f"[BACKTEST] Classified: {symbol} → {asset_class}/{weight_profile}")
+   499→
+   500→        # 2. Load data — try DB first, fall back to Binance download
+   501→        storage = _PPMTStorage()  # NEW instance in this thread (SQLite safe)
+   502→        total_days = IS_DAYS + days
+   503→        df = None
+   504→
+   505→        # Try loading from DB
+   506→        try:
+   507→            db_df = storage.load_ohlcv(symbol, timeframe)
+   508→            if db_df is not None and len(db_df) > 1000:
+   509→                logger.info(f"[BACKTEST] DB has {len(db_df)} candles for {symbol} {timeframe}")
+   510→                df = db_df
+   511→        except Exception as e:
+   512→            logger.warning(f"[BACKTEST] DB load failed: {e}")
+   513→
+   514→        # Fall back to Binance REST API (direct, like full_replay_v21.py)
+   515→        if df is None:
+   516→            logger.info(f"[BACKTEST] Fetching {total_days}d of {timeframe} data from Binance REST API...")
+   517→            api_symbol = symbol.replace("/", "")
+   518→            tf_ms = {"1m": 60000, "5m": 300000, "15m": 900000, "1h": 3600000}
+   519→            candle_ms = tf_ms.get(timeframe, 300000)
+   520→            target_candles = total_days * (86400000 // candle_ms)
+   521→
+   522→            all_data = []
+   523→            end_ms = int(time.time() * 1000)
+   524→            current_end = end_ms
+   525→            total_fetched = 0
+   526→
+   527→            while total_fetched < target_candles:
+   528→                batch_size = 1000
+   529→                start_ms = current_end - (batch_size * candle_ms)
+   530→                url = "https://api.binance.com/api/v3/klines"
+   531→                params = {
+   532→                    "symbol": api_symbol,
+   533→                    "interval": timeframe,
+   534→                    "limit": batch_size,
+   535→                    "startTime": start_ms,
+   536→                    "endTime": current_end,
+   537→                }
+   538→                try:
+   539→                    resp = _requests.get(url, params=params, timeout=15)
+   540→                    if resp.status_code != 200:
+   541→                        logger.warning(f"[BACKTEST] Binance HTTP {resp.status_code}")
+   542→                        break
+   543→                    data = resp.json()
+   544→                    if not data:
+   545→                        break
+   546→                    parsed = [
+   547→                        [int(c[0]), float(c[1]), float(c[2]), float(c[3]), float(c[4]), float(c[5])]
+   548→                        for c in data
+   549→                    ]
+   550→                    all_data.extend(parsed)
+   551→                    total_fetched += len(parsed)
+   552→                    current_end = int(data[0][0]) - 1
+   553→                    if len(parsed) < batch_size:
+   554→                        break
+   555→                except Exception as e:
+   556→                    logger.warning(f"[BACKTEST] Binance download error: {e}")
+   557→                    break
+   558→
+   559→            if len(all_data) < 500:
+   560→                raise ValueError(f"Not enough data for {symbol} {timeframe}: {len(all_data)} candles (need 500+)")
+   561→            logger.info(f"[BACKTEST] Downloaded {len(all_data)} candles from Binance")
+   562→
+   563→            df = pd.DataFrame(all_data, columns=["timestamp", "open", "high", "low", "close", "volume"])
+   564→            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+   565→            df = df.set_index("timestamp")
+   566→            df = df[~df.index.duplicated(keep="first")]
+   567→            df.sort_index(inplace=True)
+   568→
+   569→        logger.info(f"[BACKTEST] Data: {len(df)} candles, {df.index[0]} → {df.index[-1]}")
+   570→
+   571→        # 3. IS/OOS split (EXACTLY like full_replay_v21.py)
+   572→        total_candles = len(df)
+   573→        is_cutoff = int(total_candles * IS_DAYS / (IS_DAYS + days))
+   574→        is_df = df.iloc[:is_cutoff]
+   575→        oos_df = df.iloc[is_cutoff:]
+   576→        logger.info(f"[BACKTEST] IS/OOS split: {len(is_df)} IS + {len(oos_df)} OOS candles")
+   577→
+   578→        # 4. Load or build tries with Config F alpha
+   579→        tf_key = f"{timeframe}_a{ALPHA_N3_N4}"  # e.g. "5m_a3"
+   580→        tries = storage.load_all_tries(symbol, asset_class, timeframe=tf_key)
+   581→
+   582→        trie_counts = {}
+   583→        for lvl in ("n1", "n2", "n3", "n4"):
+   584→            t = tries.get(lvl)
+   585→            trie_counts[lvl] = t.pattern_count if t else 0
+   586→        logger.info(f"[BACKTEST] Tries from '{tf_key}': N1={trie_counts['n1']} N2={trie_counts['n2']} N3={trie_counts['n3']} N4={trie_counts['n4']}")
+   587→
+   588→        # If no tries under the alpha key, build them from IS data
+   589→        if not tries.get("n1") and not tries.get("n2") and not tries.get("n3"):
+   590→            logger.info(f"[BACKTEST] No tries under '{tf_key}', building from {len(is_df)} IS candles...")
+   591→
+   592→            saved_n3_b = LEVEL_DUAL_ALPHA_CONFIG["n3"].copy()
+   593→            saved_n4_b = LEVEL_DUAL_ALPHA_CONFIG["n4"].copy()
+   594→            saved_tf_b = copy.deepcopy(LEVEL_DUAL_ALPHA_TF_OVERRIDES)
+   595→
+   596→            LEVEL_DUAL_ALPHA_CONFIG["n3"] = {"price": ALPHA_N3_N4, "volume": 0}
+   597→            LEVEL_DUAL_ALPHA_CONFIG["n4"] = {"price": ALPHA_N3_N4, "volume": 0}
+   598→            for tf_k in LEVEL_DUAL_ALPHA_TF_OVERRIDES:
+   599→                for lvl in ["n3", "n4"]:
+   600→                    LEVEL_DUAL_ALPHA_TF_OVERRIDES[tf_k].pop(lvl, None)
+   601→
+   602→            try:
+   603→                build_engine = PPMT(
+   604→                    symbol=symbol,
+   605→                    asset_class=asset_class,
+   606→                    weight_profile=weight_profile,
+   607→                    dual_sax=True,
+   608→                    min_confidence=0.08,
+   609→                    timeframe=timeframe,
+   610→                )
+   611→                build_count = build_engine.build(is_df)
+   612→                logger.info(f"[BACKTEST] Built {build_count} patterns from {len(is_df)} IS candles (α={ALPHA_N3_N4})")
+   613→
+   614→                # Save tries to storage for future use
+   615→                if build_engine.trie_n1 and build_engine.trie_n1.pattern_count > 0:
+   616→                    storage.save_trie(UNIVERSAL_POOL_KEY, "n1", build_engine.trie_n1, timeframe=tf_key)
+   617→                if build_engine.trie_n2 and build_engine.trie_n2.pattern_count > 0:
+   618→                    storage.save_trie(class_pool_key(asset_class), "n2", build_engine.trie_n2, timeframe=tf_key)
+   619→                if build_engine.trie_n3 and build_engine.trie_n3.pattern_count > 0:
+   620→                    storage.save_trie(symbol, "n3", build_engine.trie_n3, timeframe=tf_key)
+   621→                if build_engine.trie_n4 and build_engine.trie_n4.pattern_count > 0:
+   622→                    storage.save_trie(symbol, "n4", build_engine.trie_n4, timeframe=tf_key)
+   623→            finally:
+   624→                LEVEL_DUAL_ALPHA_CONFIG["n3"] = saved_n3_b
+   625→                LEVEL_DUAL_ALPHA_CONFIG["n4"] = saved_n4_b
+   626→                LEVEL_DUAL_ALPHA_TF_OVERRIDES.clear()
+   627→                LEVEL_DUAL_ALPHA_TF_OVERRIDES.update(saved_tf_b)
+   628→
+   629→            # Reload tries
+   630→            tries = storage.load_all_tries(symbol, asset_class, timeframe=tf_key)
+   631→            trie_counts = {}
+   632→            for lvl in ("n1", "n2", "n3", "n4"):
+   633→                t = tries.get(lvl)
+   634→                trie_counts[lvl] = t.pattern_count if t else 0
+   635→            logger.info(f"[BACKTEST] Rebuilt tries: N1={trie_counts['n1']} N2={trie_counts['n2']} N3={trie_counts['n3']} N4={trie_counts['n4']}")
+   636→
+   637→        # Final check — still no tries?
+   638→        if not tries.get("n1") and not tries.get("n2") and not tries.get("n3"):
+   639→            raise ValueError(f"No tries for {symbol} {timeframe}! Backtest cannot run.")
+   640→
+   641→        # 5. Override alpha + hard_move_floor for Config F
+   642→        saved_n3 = LEVEL_DUAL_ALPHA_CONFIG["n3"].copy()
+   643→        saved_n4 = LEVEL_DUAL_ALPHA_CONFIG["n4"].copy()
+   644→        saved_tf_overrides = copy.deepcopy(LEVEL_DUAL_ALPHA_TF_OVERRIDES)
+   645→        saved_hmf = TIMEFRAME_HARD_MOVE_FLOOR.get(timeframe, 0.15)
+   646→
+   647→        LEVEL_DUAL_ALPHA_CONFIG["n3"] = {"price": ALPHA_N3_N4, "volume": 0}
+   648→        LEVEL_DUAL_ALPHA_CONFIG["n4"] = {"price": ALPHA_N3_N4, "volume": 0}
+   649→        for tf_k in LEVEL_DUAL_ALPHA_TF_OVERRIDES:
+   650→            for lvl in ["n3", "n4"]:
+   651→                LEVEL_DUAL_ALPHA_TF_OVERRIDES[tf_k].pop(lvl, None)
+   652→        TIMEFRAME_HARD_MOVE_FLOOR[timeframe] = HARD_MOVE_FLOOR
+   653→
+   654→        try:
+   655→            # 6. Create PPMT engine for replay
+   656→            engine = PPMT(
+   657→                symbol=symbol,
+   658→                asset_class=asset_class,
+   659→                weight_profile=weight_profile,
+   660→                dual_sax=True,
+   661→                min_confidence=0.08,
+   662→                timeframe=timeframe,
+   663→            )
+   664→            logger.info(f"[BACKTEST] PPMT engine created: symbol={symbol} asset_class={asset_class}")
+   665→
+   666→            # 7. Apply Config F weights: N1=10%, N2=0%, N3=90%, N4=0%
+   667→            engine.weights = AdaptiveWeights(
+   668→                n1_universal=CONFIG_F_WEIGHTS["n1"],
+   669→                n2_asset_class=CONFIG_F_WEIGHTS["n2"],
+   670→                n3_per_asset=CONFIG_F_WEIGHTS["n3"],
+   671→                n4_per_asset_regime=CONFIG_F_WEIGHTS["n4"],
+   672→                n5_btc_context=CONFIG_F_WEIGHTS["n5"],
+   673→            )
+   674→            logger.info(f"[BACKTEST] Config F applied: EV>={EV_THRESHOLD} SL={SL_MULT}xDD N3=90% floor={HARD_MOVE_FLOOR}%")
+   675→
+   676→            engine.set_tries(
+   677→                trie_n1=tries["n1"] if tries["n1"] else PPMTTrie(name="empty_n1"),
+   678→                trie_n2=tries["n2"] if tries["n2"] else PPMTTrie(name="empty_n2"),
+   679→                trie_n3=tries["n3"] if tries["n3"] else PPMTTrie(name="empty_n3"),
+   680→                trie_n4=tries["n4"] if tries["n4"] else engine.trie_n4,
+   681→            )
+   682→            logger.info(f"[BACKTEST] Tries set on engine")
+   683→        finally:
+   684→            # Restore global state IMMEDIATELY after engine creation
+   685→            LEVEL_DUAL_ALPHA_CONFIG["n3"] = saved_n3
+   686→            LEVEL_DUAL_ALPHA_CONFIG["n4"] = saved_n4
+   687→            LEVEL_DUAL_ALPHA_TF_OVERRIDES.clear()
+   688→            LEVEL_DUAL_ALPHA_TF_OVERRIDES.update(saved_tf_overrides)
+   689→            TIMEFRAME_HARD_MOVE_FLOOR[timeframe] = saved_hmf
+   690→
+   691→        # 8. OOS replay — EXACTLY matching full_replay_v21.py run_replay()
+   692→        # No separate warmup phase: the engine processes OOS candles directly.
+   693→        # The first ~10-20 candles will not produce signals (SAX buffer filling),
+   694→        # which is expected and matches the script behavior.
+   695→        executor = PaperExecutor(capital_usdt=CAPITAL_USDT)
+   696→        executor._position = None
+   697→        regime_detector = RegimeDetector()
+   698→        regime_window: list[dict] = []
+   699→        _last_engine_ts = 0
+   700→
+   701→        trades = []
+   702→        wins = 0
+   703→        losses = 0
+   704→        total_pnl = 0.0
+   705→        gross_profit = 0.0
+   706→        gross_loss = 0.0
+   707→        max_drawdown = 0.0
+   708→        peak_pnl = 0.0
+   709→        long_count = 0
+   710→        short_count = 0
+   711→        total_signals_raw = 0
+   712→        signals_rejected_spread = 0
+   713→        signals_rejected_ev = 0
+   714→        regime_counts = {"trending_up": 0, "trending_down": 0, "ranging": 0, "volatile": 0}
+   715→
+   716→        spread_pct = SPREAD_ESTIMATES.get(asset_class, 0.050)
+   717→        logger.info(f"[BACKTEST] Starting OOS replay: {len(oos_df)} candles, spread={spread_pct}%")
+   718→
+   719→        for idx in range(len(oos_df)):
+   720→            row = oos_df.iloc[[idx]]
+   721→            current_price = float(row["close"].iloc[0])
+   722→            candle_high = float(row["high"].iloc[0])
+   723→            candle_low = float(row["low"].iloc[0])
+   724→            ts = oos_df.index[idx]
+   725→            ts_sec = int(ts.timestamp()) if isinstance(ts, pd.Timestamp) else int(ts)
+   726→
+   727→            # ── Check SL/TP (script style: NO continue after close) ──
+   728→            if executor.is_in_position:
+   729→                pos = executor.position
+   730→                closed = None
+   731→                if pos.direction == "LONG":
+   732→                    if candle_low <= pos.catastrophic_sl:
+   733→                        closed = executor.force_close(pos.catastrophic_sl, "CLOSED_CATASTROPHIC")
+   734→                    elif candle_low <= pos.current_sl:
+   735→                        closed = executor.force_close(pos.current_sl, "CLOSED_BY_SL")
+   736→                    elif candle_high >= pos.current_tp:
+   737→                        closed = executor.force_close(pos.current_tp, "CLOSED_BY_TP")
+   738→                else:
+   739→                    if candle_high >= pos.catastrophic_sl:
+   740→                        closed = executor.force_close(pos.catastrophic_sl, "CLOSED_CATASTROPHIC")
+   741→                    elif candle_high >= pos.current_sl:
+   742→                        closed = executor.force_close(pos.current_sl, "CLOSED_BY_SL")
+   743→                    elif candle_low <= pos.current_tp:
+   744→                        closed = executor.force_close(pos.current_tp, "CLOSED_BY_TP")
+   745→
+   746→                if closed:
+   747→                    pnl = closed.pnl_pct or 0.0
+   748→                    if pnl > 0:
+   749→                        wins += 1
+   750→                        gross_profit += pnl
+   751→                    else:
+   752→                        losses += 1
+   753→                        gross_loss += abs(pnl)
+   754→                    total_pnl += pnl
+   755→                    peak_pnl = max(peak_pnl, total_pnl)
+   756→                    dd = peak_pnl - total_pnl
+   757→                    max_drawdown = max(max_drawdown, dd)
+   758→
+   759→                    _send("backtest_trade", {
+   760→                        "direction": pos.direction, "entry": round(pos.entry_price, 6),
+   761→                        "exit": round(closed.close_price, 6), "pnl_pct": round(pnl, 2),
+   762→                        "close_reason": closed.close_reason or "UNKNOWN",
+   763→                        "timestamp": int(ts.timestamp()),
+   764→                    })
+   765→                    executor._position = None
+   766→                    # Script does NOT continue here — falls through to feed candle
+   767→
+   768→            # ── Feed candle to engine (script style: uses iloc[[idx]] row) ──
+   769→            result: Optional[PPMTResult] = None
+   770→            if ts_sec > _last_engine_ts:
+   771→                _last_engine_ts = ts_sec
+   772→
+   773→                # Regime detection (on every candle, script style)
+   774→                regime_window.append({
+   775→                    "open": float(row["open"].iloc[0]),
+   776→                    "high": candle_high,
+   777→                    "low": candle_low,
+   778→                    "close": current_price,
+   779→                    "volume": float(row["volume"].iloc[0]),
+   780→                })
+   781→                if len(regime_window) > REGIME_WINDOW_SIZE:
+   782→                    regime_window = regime_window[-REGIME_WINDOW_SIZE:]
+   783→                if len(regime_window) >= 2:
+   784→                    try:
+   785→                        rw_df = pd.DataFrame(regime_window)
+   786→                        detected = regime_detector.detect_simple(rw_df, timeframe=timeframe)
+   787→                        regime_counts[detected] += 1
+   788→                        engine.set_regime(detected)
+   789→                    except Exception:
+   790→                        regime_counts["ranging"] += 1
+   791→                        engine.set_regime("ranging")
+   792→
+   793→                result = engine.process_new_candle(
+   794→                    candle_df=row,
+   795→                    current_price=current_price,
+   796→                    is_in_position=executor.is_in_position,
+   797→                    entry_price=executor.position.entry_price if executor.position else None,
+   798→                )
+   799→
+   800→            if result is None:
+   801→                continue
+   802→
+   803→            sig = result.signal if result and result.signal else None
+   804→            if sig is None or not sig.is_entry:
+   805→                continue
+   806→            if executor.is_in_position:
+   807→                continue
+   808→
+   809→            total_signals_raw += 1
+   810→
+   811→            # ── Net EV Gate (Config F) — same as full_replay_v21.py ──
+   812→            best_node = None
+   813→            for _mr in [result.n3_match, result.n1_match, result.n2_match, result.n4_match]:
+   814→                if _mr and _mr.node and _mr.node.metadata and _mr.node.metadata.historical_count > 0:
+   815→                    best_node = _mr.node
+   816→                    break
+   817→
+   818→            favorable_pct = abs(best_node.metadata.max_favorable_pct) if best_node else 0.0
+   819→            drawdown_pct = abs(best_node.metadata.max_drawdown_pct) if best_node else 0.5
+   820→
+   821→            if favorable_pct < 0.001:
+   822→                favorable_pct = abs(sig.expected_move_pct) if sig.expected_move_pct else 0.1
+   823→            if drawdown_pct < 0.001:
+   824→                drawdown_pct = 0.5
+   825→
+   826→            net_favorable = favorable_pct - spread_pct
+   827→            if net_favorable <= 0:
+   828→                signals_rejected_spread += 1
+   829→                continue
+   830→
+   831→            net_rr = min(net_favorable / drawdown_pct, 3.0)
+   832→            net_ev = sig.confidence * net_rr
+   833→
+   834→            if net_ev < EV_THRESHOLD:
+   835→                signals_rejected_ev += 1
+   836→                continue
+   837→
+   838→            # ── Signal passed EV gate → open position ──
+   839→            direction = sig.direction or "LONG"
+   840→            expected_move_pct = sig.expected_move_pct or 1.0
+   841→            size_usdt = CAPITAL_USDT * RISK_PCT / (abs(expected_move_pct) * 0.012)
+   842→            size_usdt = min(size_usdt, CAPITAL_USDT)
+   843→
+   844→            try:
+   845→                pos = executor.open_position_sync(
+   846→                    symbol=symbol,
+   847→                    direction=direction,
+   848→                    entry_price=current_price,
+   849→                    expected_move_pct=expected_move_pct,
+   850→                    predicted_path_symbols=sig.predicted_path_symbols if sig.predicted_path else None,
+   851→                    size_usdt=size_usdt,
+   852→                )
+   853→            except RuntimeError:
+   854→                continue
+   855→
+   856→            # Config F: SL = max(default 1.2xEM, drawdown_pct x SL_MULT)
+   857→            sl_dist_pct = abs(pos.entry_price - pos.current_sl) / pos.entry_price * 100.0
+   858→            dd_sl_pct = drawdown_pct * SL_MULT
+   859→            if dd_sl_pct > sl_dist_pct:
+   860→                extra = dd_sl_pct - sl_dist_pct
+   861→                if pos.direction == "LONG":
+   862→                    pos.current_sl -= pos.entry_price * (extra / 100.0)
+   863→                    pos.catastrophic_sl -= pos.entry_price * (extra / 100.0)
+   864→                else:
+   865→                    pos.current_sl += pos.entry_price * (extra / 100.0)
+   866→                    pos.catastrophic_sl += pos.entry_price * (extra / 100.0)
+   867→
+   868→            if direction == "LONG":
+   869→                long_count += 1
+   870→            else:
+   871→                short_count += 1
+   872→
+   873→            _send("backtest_signal", {
+   874→                "symbol": symbol, "direction": direction,
+   875→                "entry": round(current_price, 6), "confidence": round(sig.confidence, 3),
+   876→                "ev_score": round(net_ev, 2), "ev_passed": True,
+   877→                "timestamp": int(ts.timestamp()),
+   878→            })
+   879→
+   880→            # ── Check entry candle for immediate SL/TP (script style) ──
+   881→            if executor.is_in_position:
+   882→                entry_closed = None
+   883→                if pos.direction == "LONG":
+   884→                    if candle_low <= pos.catastrophic_sl:
+   885→                        entry_closed = executor.force_close(pos.catastrophic_sl, "CLOSED_CATASTROPHIC")
+   886→                    elif candle_low <= pos.current_sl:
+   887→                        entry_closed = executor.force_close(pos.current_sl, "CLOSED_BY_SL")
+   888→                    elif candle_high >= pos.current_tp:
+   889→                        entry_closed = executor.force_close(pos.current_tp, "CLOSED_BY_TP")
+   890→                else:
+   891→                    if candle_high >= pos.catastrophic_sl:
+   892→                        entry_closed = executor.force_close(pos.catastrophic_sl, "CLOSED_CATASTROPHIC")
+   893→                    elif candle_high >= pos.current_sl:
+   894→                        entry_closed = executor.force_close(pos.current_sl, "CLOSED_BY_SL")
+   895→                    elif candle_low <= pos.current_tp:
+   896→                        entry_closed = executor.force_close(pos.current_tp, "CLOSED_BY_TP")
+   897→
+   898→                if entry_closed:
+   899→                    pnl = entry_closed.pnl_pct or 0.0
+   900→                    if pnl > 0:
+   901→                        wins += 1
+   902→                        gross_profit += pnl
+   903→                    else:
+   904→                        losses += 1
+   905→                        gross_loss += abs(pnl)
+   906→                    total_pnl += pnl
+   907→                    peak_pnl = max(peak_pnl, total_pnl)
+   908→                    dd = peak_pnl - total_pnl
+   909→                    max_drawdown = max(max_drawdown, dd)
+   910→
+   911→                    _send("backtest_trade", {
+   912→                        "direction": pos.direction, "entry": round(pos.entry_price, 6),
+   913→                        "exit": round(entry_closed.close_price, 6), "pnl_pct": round(pnl, 2),
+   914→                        "close_reason": entry_closed.close_reason or "ENTRY_CANDLE",
+   915→                        "timestamp": int(ts.timestamp()),
+   916→                    })
+   917→                    executor._position = None
+   918→                    continue  # Script continues after entry candle close
+   919→
+   920→            # Walk-Forward check (script style)
+   921→            if result and executor.is_in_position:
+   922→                current_sax = []
+   923→                buf = getattr(engine, '_streaming_buffer', None)
+   924→                if buf and buf._pattern_buffer:
+   925→                    last_sym = buf._pattern_buffer[-1]
+   926→                    if isinstance(last_sym, (tuple, list)):
+   927→                        current_sax = [str(s) for s in last_sym]
+   928→                    else:
+   929→                        current_sax = [str(last_sym)]
+   930→                if current_sax:
+   931→                    executor.check_walk_forward(current_sax, current_price)
+   932→
+   933→        # ── Force-close remaining position at end ──
+   934→        if executor.is_in_position and executor._position:
+   935→            last_price = float(oos_df["close"].iloc[-1])
+   936→            closed = executor.force_close(last_price, "REPLAY_END")
+   937→            pnl = closed.pnl_pct or 0.0
+   938→            if pnl > 0:
+   939→                wins += 1
+   940→                gross_profit += pnl
+   941→            else:
+   942→                losses += 1
+   943→                gross_loss += abs(pnl)
+   944→            total_pnl += pnl
+   945→
+   946→            _send("backtest_trade", {
+   947→                "direction": closed.direction, "entry": round(closed.entry_price, 6),
+   948→                "exit": round(last_price, 6), "pnl_pct": round(pnl, 2),
+   949→                "close_reason": "REPLAY_END",
+   950→                "timestamp": int(oos_df.index[-1].timestamp()) if isinstance(oos_df.index[-1], pd.Timestamp) else 0,
+   951→            })
+   952→            executor._position = None
+   953→
+   954→        # ── Summary ──
+   955→        total_trades = wins + losses
+   956→        wr = round((wins / total_trades * 100), 1) if total_trades > 0 else 0
+   957→        pf = round(gross_profit / gross_loss, 2) if gross_loss > 0 else (999.99 if gross_profit > 0 else 0.0)
+   958→
+   959→        logger.info(
+   960→            f"[BACKTEST] Replay complete: {symbol} {timeframe} {days}d | "
+   961→            f"OOS={len(oos_df)} raw_signals={total_signals_raw} "
+   962→            f"rej_spread={signals_rejected_spread} rej_ev={signals_rejected_ev} | "
+   963→            f"trades={total_trades} WR={wr}% PnL={round(total_pnl,2)}% PF={pf} | "
+   964→            f"regimes={regime_counts}"
+   965→        )
+   966→
+   967→        summary = {
+   968→            "trades": total_trades, "longs": long_count, "shorts": short_count,
+   969→            "wins": wins, "losses": losses, "wr": wr,
+   970→            "pnl_pct": round(total_pnl, 2), "profit_factor": pf,
+   971→            "max_drawdown": round(max_drawdown, 2),
+   972→            "signals_total": total_signals_raw,
+   973→            "signals_rejected_spread": signals_rejected_spread,
+   974→            "signals_rejected_ev": signals_rejected_ev,
+   975→        }
+   976→
+   977→        _send("backtest_complete", summary)
+   978→
+   979→    except Exception as e:
+   980→        import traceback
+   981→        tb = traceback.format_exc()
+   982→        logger.error(f"[BACKTEST] _backtest_sync FAILED: {e}\n{tb}")
+   983→        _send("backtest_complete", {
+   984→            "error": str(e), "trades": 0, "wins": 0, "losses": 0,
+   985→            "wr": 0, "pnl_pct": 0, "profit_factor": 0, "max_drawdown": 0,
+   986→        })
+   987→
+   988→
+   989→# ─── WebSocket: Paper Live ────────────────────────────────────
+   990→@app.websocket("/ws/paper-live/{symbol}/{timeframe}")
+   991→async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str):
+   992→    """
+   993→    Real-time paper trading WebSocket.
+   994→
+   995→    Flow:
+   996→    1. Accept connection
+   997→    2. Load tries from SQLite, warmup engine with historical data
+   998→    3. Poll loop: fetch candle from exchange → feed PPMT → emit messages
+   999→    """
+  1000→
+  1001→    await websocket.accept()
+  1002→    
+  1003→    # Normalize symbol: URL path uses "DOGE-USDT" (no slashes in URL segments)
+  1004→    # Convert to internal format "DOGE/USDT" and API format "DOGEUSDT"
+  1005→    internal_symbol = symbol.replace("-", "/")  # "DOGE-USDT" → "DOGE/USDT"
+  1006→    api_symbol = internal_symbol.replace("/", "")  # "DOGE/USDT" → "DOGEUSDT"
+  1007→    symbol = internal_symbol
+  1008→    
+  1009→    logger.info(f"[WS] Connected: {symbol}/{timeframe}")
+  1010→
+  1011→    # v2.1: Register this WS for backtest streaming
+  1012→    _ws_session_id = f"{symbol}:{timeframe}"
+  1013→    _BACKTEST_WS[_ws_session_id] = websocket
+  1014→    storage = get_storage()
+  1015→
+  1016→    # ─── 1. Initialize PPMT Engine ────────────────────────────
+  1017→    try:
+  1018→        # FIX #1: AssetClassifier.classify() returns AssetInfo object, NOT dict
+  1019→        asset_class = "meme"  # Default fallback
+  1020→        weight_profile = "meme"
+  1021→        try:
+  1022→            from ppmt.data.classifier import AssetClassifier
+  1023→            classifier = AssetClassifier()
+  1024→            info = classifier.classify(symbol)
+  1025→            asset_class = info.asset_class       # NOT info.get("asset_class")
+  1026→            weight_profile = info.weight_profile  # Also extract weight_profile
+  1027→            logger.info(f"[WS] Classified: {symbol} → asset_class={asset_class}, weight_profile={weight_profile}")
+  1028→        except Exception as e:
+  1029→            logger.warning(f"[WS] AssetClassifier unavailable ({e}), defaulting to 'meme'")
+  1030→
+  1031→        engine = PPMT(
+  1032→            symbol=symbol,
+  1033→            asset_class=asset_class,
+  1034→            weight_profile=weight_profile,   # Pass correct weight_profile
+  1035→            dual_sax=True,
+  1036→            min_confidence=0.08,
+  1037→            timeframe=timeframe,             # Pass timeframe for correct SAX params
+  1038→        )
+  1039→
+  1040→        # Load pre-built tries from SQLite — MANDATORY for PPMT
+  1041→        # v0.57.0 (TAREA 19): Pass timeframe to load_all_tries so it loads
+  1042→        # the correct per-timeframe tries (5m, 15m, etc.)
+  1043→        tries = storage.load_all_tries(symbol, asset_class, timeframe=timeframe)
+  1044→        
+  1045→        # Log what we loaded with pattern counts
+  1046→        n1 = tries.get("n1")
+  1047→        n2 = tries.get("n2")
+  1048→        n3 = tries.get("n3")
+  1049→        n4 = tries.get("n4")
+  1050→        
+  1051→        n1_count = n1.pattern_count if n1 else 0
+  1052→        n2_count = n2.pattern_count if n2 else 0
+  1053→        n3_count = n3.pattern_count if n3 else 0
+  1054→        n4_count = n4.pattern_count if hasattr(n4, 'pattern_count') and n4 else 0
+  1055→        
+  1056→        logger.info(
+  1057→            f"[WS] Loaded N1: {n1_count} patterns, "
+  1058→            f"N2: {n2_count} patterns, "
+  1059→            f"N3: {n3_count} patterns, "
+  1060→            f"N4: {n4_count} patterns"
+  1061→        )
+  1062→        
+  1063→        if n1 or n2 or n3:
+  1064→            # N4 may be None — keep the default RegimePartitionedTrie instead
+  1065→            from ppmt.core.trie import PPMTTrie, RegimePartitionedTrie
+  1066→            # v0.49.0 (FASE 3 BUG 3): DO NOT fall back to engine.trie_n1/n2 —
+  1067→            # those are empty in storage mode and would mask a missing shared pool.
+  1068→            # Use empty tries + WARNING instead (same as realtime.py FIX-1B).
+  1069→            _n1 = n1 if n1 is not None else None
+  1070→            _n2 = n2 if n2 is not None else None
+  1071→            if _n1 is None:
+  1072→                _n1 = PPMTTrie(name="universal_empty")
+  1073→                logger.warning(f"[WS] N1 universal pool not found for {symbol}. Using empty trie — confidence will be 0.")
+  1074→            if _n2 is None:
+  1075→                _n2 = PPMTTrie(name=f"class_empty:{asset_class}")
+  1076→                logger.warning(f"[WS] N2 class pool not found for {asset_class}. Using empty trie — confidence will be 0.")
+  1077→            engine.set_tries(
+  1078→                trie_n1=_n1,
+  1079→                trie_n2=_n2,
+  1080→                trie_n3=n3 or PPMTTrie(name="n3_empty"),
+  1081→                trie_n4=n4 if n4 is not None else engine.trie_n4,
+  1082→            )
+  1083→            logger.info(f"[WS] Tries injected into engine — Transfer Learning ACTIVE")
+  1084→        else:
+  1085→            logger.warning(f"[WS] No tries found for {symbol}/{asset_class}, engine runs without tries")
+  1086→
+  1087→    except Exception as e:
+  1088→        import traceback
+  1089→        logger.error(f"[WS] Engine init failed: {e}")
+  1090→        traceback.print_exc()
+  1091→        await websocket.send_json({"type": "error", "data": {"message": f"Engine init failed: {e}"}})
+  1092→        await websocket.close()
+  1093→        return
+  1094→
+  1095→    # ─── 2. Initialize PaperExecutor (via IExecutor interface) ──
+  1096→    # v0.49.0 (FASE 3 BUG 2): Ensure clean state on new WS session.
+  1097→    # Previously, if a session restarted, stale position data from
+  1098→    # a prior session could leak through. Now we explicitly reset.
+  1099→    executor: IExecutor = PaperExecutor(capital_usdt=100.0)
+  1100→    executor._position = None  # Force FLAT state
+  1101→
+  1102→    # ─── 3. Initialize Exchange Poller ────────────────────────
+  1103→    from ppmt.engine.realtime import _DirectPollExchange
+  1104→    exchange = _DirectPollExchange("binance")
+  1105→
+  1106→    # ─── 4. Warmup: Load historical candles into engine ───────
+  1107→    warmup_count = 0
+  1108→    try:
+  1109→        ohlcv_raw = await exchange.fetch_ohlcv(api_symbol, timeframe, limit=500)
+  1110→        if ohlcv_raw:
+  1111→            # Convert to DataFrame
+  1112→            df = pd.DataFrame(ohlcv_raw, columns=["timestamp", "open", "high", "low", "close", "volume"])
+  1113→            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+  1114→            df.set_index("timestamp", inplace=True)
+  1115→
+  1116→            # Feed all but the last candle for warmup
+  1117→            for i in range(len(df) - 1):
+  1118→                row = df.iloc[[i]]
+  1119→                result = engine.process_new_candle(
+  1120→                    candle_df=row,
+  1121→                    current_price=float(row["close"].iloc[0]),
+  1122→                )
+  1123→                if result is not None:
+  1124→                    warmup_count += 1
+  1125→
+  1126→            # Send the last 50 candles to the frontend for chart display
+  1127→            for i in range(max(0, len(df) - 50), len(df)):
+  1128→                r = df.iloc[i]
+  1129→                await websocket.send_json({
+  1130→                    "type": "candle",
+  1131→                    "data": {
+  1132→                        "time": int(df.index[i].timestamp()) if isinstance(df.index[i], pd.Timestamp) else int(df.index[i]),
+  1133→                        "open": float(r["open"]),
+  1134→                        "high": float(r["high"]),
+  1135→                        "low": float(r["low"]),
+  1136→                        "close": float(r["close"]),
+  1137→                    },
+  1138→                })
+  1139→
+  1140→            logger.info(f"[WS] Warmup complete: {len(df)} candles, {warmup_count} SAX outputs")
+  1141→            # Log SAX buffer state after warmup to verify engine is alive
+  1142→            _w_buf = getattr(engine, '_streaming_buffer', None)
+  1143→            _w_n1 = getattr(engine, '_streaming_buffer_n1', None)
+  1144→            _w_len = len(_w_buf._pattern_buffer) if _w_buf else 0
+  1145→            _w_n1_len = len(_w_n1._pattern_buffer) if _w_n1 else 0
+  1146→            logger.info(
+  1147→                f"[WS] Post-warmup SAX: buf_n3={_w_len} symbols, buf_n1={_w_n1_len} symbols"
+  1148→            )
+  1149→    except Exception as e:
+  1150→        logger.warning(f"[WS] Warmup fetch failed: {e}. Continuing without historical data.")
+  1151→
+  1152→    # ─── 5. Polling interval ─────────────────────────────────
+  1153→    tf_seconds = {"1m": 5, "5m": 10, "15m": 15, "1h": 30}
+  1154→    poll_interval = tf_seconds.get(timeframe, 5)
+  1155→
+  1156→    # ─── v2.1 FIX: Regime detection for N4 ─────────────────────
+  1157→    # BUG: Without set_regime(), N4's RegimePartitionedTrie defaults
+  1158→    # to _current_regime="trending_up" → 100% LONG bias.
+  1159→    # Fix: maintain a rolling window of recent candles and call
+  1160→    # detect_simple() before each process_new_candle().
+  1161→    from ppmt.core.regime import RegimeDetector
+  1162→    _regime_detector = RegimeDetector()
+  1163→    _regime_window: list[dict] = []  # rolling OHLCV window for regime
+  1164→    _REGIME_WINDOW_SIZE = 10  # same as trie build uses
+  1165→    _last_regime = "ranging"  # default until we have data
+  1166→
+  1167→    last_candle_ts = 0
+  1168→
+  1169→    # ─── 6. Main poll loop ────────────────────────────────────
+  1170→    # v2.1 FIX: Separate UI price updates from engine candle processing.
+  1171→    # - UI gets the LATEST price on EVERY poll (forming candle updates)
+  1172→    # - Engine only gets CLOSED candles (new timestamp = new candle)
+  1173→    # This ensures the displayed price matches Binance in real-time.
+  1174→    _last_engine_ts = 0  # Last candle timestamp fed to engine
+  1175→    _last_ui_update = 0.0  # Timestamp of last UI update (monotonic)
+  1176→    _ticker_price = 0.0  # v2.1: Real-time price from /api/v3/ticker/price
+  1177→    # v2.1 FIX: Sticky N3/N4 confidence — preserve last known good values
+  1178→    # between full matches (result=YES). Without this, the quick match
+  1179→    # (result=no) overwrites N3/N4 with 0.0 every 10s, causing the UI
+  1180→    # to show 0.00 between candles.
+  1181→    _sticky_n3_conf = 0.0
+  1182→    _sticky_n4_conf = 0.0
+  1183→    _sticky_direction = "FLAT"
+  1184→    _sticky_direction_score = 0.0
+  1185→    try:
+  1186→        while True:
+  1187→            try:
+  1188→                # Fetch latest candles (last 2: closed + forming)
+  1189→                ohlcv_raw = await exchange.fetch_ohlcv(api_symbol, timeframe, limit=2)
+  1190→
+  1191→                if not ohlcv_raw:
+  1192→                    await asyncio.sleep(poll_interval)
+  1193→                    continue
+  1194→
+  1195→                # ─── Fetch REAL-TIME price from Binance ticker ───
+  1196→                # klines close price can lag (forming candle, cache).
+  1197→                # /api/v3/ticker/price returns the LAST TRADE price —
+  1198→                # the most accurate real-time price for display.
+  1199→                try:
+  1200→                    ticker = await exchange.fetch_ticker(api_symbol)
+  1201→                    _ticker_price = float(ticker.get("last", 0))
+  1202→                except Exception as _te:
+  1203→                    logger.debug(f"[WS] Ticker fetch failed (using kline close): {_te}")
+  1204→                    _ticker_price = 0.0
+  1205→
+  1206→                latest = ohlcv_raw[-1]
+  1207→                ts_ms, o, h, l, c, v = latest
+  1208→                ts_sec = int(ts_ms / 1000)
+  1209→                kline_close = float(c)
+  1210→                # Use ticker price for display/engine if available, fallback to kline close
+  1211→                current_price = _ticker_price if _ticker_price > 0 else kline_close
+  1212→
+  1213→                # ─── Diagnostic logging ─────────────────────────
+  1214→                # Log the exact timestamps so we can verify data freshness
+  1215→                logger.info(
+  1216→                    f"[WS] Binance fetch: kline_ts={ts_sec} kline_C={kline_close:.6f} "
+  1217→                    f"ticker_C={_ticker_price:.6f} delta={abs(_ticker_price - kline_close):.6f} "
+  1218→                    f"({symbol})"
+  1219→                )
+  1220→
+  1221→                # Emit candle to frontend on EVERY poll.
+  1222→                # candleSeries.update() handles overwriting the forming candle.
+  1223→                # ticker_price is the real-time price for display; chart uses OHLC.
+  1224→                candle_msg = {
+  1225→                    "type": "candle",
+  1226→                    "data": {
+  1227→                        "time": ts_sec,
+  1228→                        "open": float(o),
+  1229→                        "high": float(h),
+  1230→                        "low": float(l),
+  1231→                        "close": float(c),
+  1232→                        "ticker_price": round(_ticker_price, 8) if _ticker_price > 0 else None,
+  1233→                    },
+  1234→                }
+  1235→                await websocket.send_json(candle_msg)
+  1236→                _last_ui_update = time.monotonic()
+  1237→
+  1238→                # ─── Feed CLOSED candles to PPMT engine ──────────
+  1239→                # Only process when a NEW candle closes (timestamp changes).
+  1240→                # The forming candle would corrupt the SAX buffer.
+  1241→                result = None  # Reset on every tick
+  1242→                if ts_sec > _last_engine_ts:
+  1243→                    _last_engine_ts = ts_sec
+  1244→                    logger.info(
+  1245→                        f"[WS] Candle: ts={ts_sec} C={current_price:.6f} ({symbol})"
+  1246→                    )
+  1247→
+  1248→                    # ── v2.1 FIX: Update regime for N4 ────────────
+  1249→                    # Maintain rolling window of recent candles and
+  1250→                    # detect regime before feeding the candle to engine.
+  1251→                    _regime_window.append({"open": o, "high": h, "low": l, "close": c, "volume": v})
+  1252→                    if len(_regime_window) > _REGIME_WINDOW_SIZE:
+  1253→                        _regime_window = _regime_window[-_REGIME_WINDOW_SIZE:]
+  1254→                    if len(_regime_window) >= 2:
+  1255→                        try:
+  1256→                            _rw_df = pd.DataFrame(_regime_window)
+  1257→                            _detected_regime = _regime_detector.detect_simple(_rw_df, timeframe=timeframe)
+  1258→                            if _detected_regime != _last_regime:
+  1259→                                logger.info(f"[WS] Regime changed: {_last_regime} → {_detected_regime} ({symbol})")
+  1260→                                _last_regime = _detected_regime
+  1261→                            engine.set_regime(_detected_regime)
+  1262→                        except Exception as _re:
+  1263→                            # Don't block trading if regime detection fails
+  1264→                            logger.debug(f"[WS] Regime detection failed: {_re}")
+  1265→
+  1266→                    candle_df = pd.DataFrame(
+  1267→                        {"open": [o], "high": [h], "low": [l], "close": [c], "volume": [v]},
+  1268→                        index=pd.DatetimeIndex([datetime.fromtimestamp(ts_sec, tz=timezone.utc)]),
+  1269→                    )
+  1270→
+  1271→                    result: Optional[PPMTResult] = engine.process_new_candle(
+  1272→                        candle_df=candle_df,
+  1273→                        current_price=current_price,
+  1274→                        is_in_position=executor.is_in_position,
+  1275→                        entry_price=executor.position.entry_price if executor.position else None,
+  1276→                    )
+  1277→
+  1278→                # ─── SAX output log (ENTREGABLE 13 FIX) ───────
+  1279→                # Log current SAX buffer state on EVERY candle so we can
+  1280→                # verify the engine keeps thinking after warmup.
+  1281→                _sax_buf = getattr(engine, '_streaming_buffer', None)
+  1282→                _sax_n1_buf = getattr(engine, '_streaming_buffer_n1', None)
+  1283→                _buf_len = len(_sax_buf._pattern_buffer) if _sax_buf else 0
+  1284→                _buf_n1_len = len(_sax_n1_buf._pattern_buffer) if _sax_n1_buf else 0
+  1285→                _sax_sym = str(_sax_buf._pattern_buffer[-1]) if _sax_buf and _sax_buf._pattern_buffer else "—"
+  1286→                logger.info(
+  1287→                    f"[WS] SAX output: [{_sax_sym}] buf_n3={_buf_len} buf_n1={_buf_n1_len}"
+  1288→                    f" result={'YES' if result else 'no'} C={current_price:.6f}"
+  1289→                )
+  1290→
+  1291→                # ─── Emit brain_update ────────────────────────
+  1292→                # FIX #2: SAX serialization — decompose tuples into pure JSON string arrays
+  1293→                # FIX #3: Build active_path_ids from matched Trie nodes
+  1294→                #
+  1295→                # IMPORTANT: process_new_candle() only returns a PPMTResult when
+  1296→                # a SAX window completes (every W=45 candles for 1m). We must
+  1297→                # extract the current SAX state from the engine's streaming buffers
+  1298→                # on EVERY candle so the frontend gets continuous updates.
+  1299→                current_sax = []
+  1300→                active_path_ids = ["root"]
+  1301→                n1_conf = 0.0
+  1302→                n2_conf = 0.0
+  1303→                n3_conf = _sticky_n3_conf  # v2.1 FIX: Start with sticky values
+  1304→                n4_conf = _sticky_n4_conf  # v2.1 FIX: Start with sticky values
+  1305→                weighted_conf = 0.0
+  1306→                signal_type = "NO_SIGNAL"
+  1307→                direction = _sticky_direction  # v2.1 FIX: Start with sticky direction
+  1308→                direction_score = _sticky_direction_score  # v2.1 FIX
+  1309→                _last_best_level = None  # Track last known active path level
+  1310→
+  1311→                if result is not None:
+  1312→                    # A SAX window completed — extract full match data
+  1313→                    # Current SAX symbol(s) — extract last symbol, decompose tuples
+  1314→                    if result.sax_symbols:
+  1315→                        last_sym = result.sax_symbols[-1]
+  1316→                        if isinstance(last_sym, tuple):
+  1317→                            current_sax = [str(s) for s in last_sym]
+  1318→                        elif isinstance(last_sym, list):
+  1319→                            current_sax = [str(s) for s in last_sym]
+  1320→                        else:
+  1321→                            current_sax = [str(last_sym)]
+  1322→
+  1323→                    # Active path from match results — build cumulative path IDs
+  1324→                    best_match = None
+  1325→                    best_level = None
+  1326→                    for level, match in [
+  1327→                        ("n3", result.n3_match),
+  1328→                        ("n2", result.n2_match),
+  1329→                        ("n4", result.n4_match),
+  1330→                        ("n1", result.n1_match),
+  1331→                    ]:
+  1332→                        if match and match.node:
+  1333→                            conf = match.node.metadata.confidence if match.node.metadata else 0.0
+  1334→                            if best_match is None or conf > (best_match.node.metadata.confidence if best_match.node and best_match.node.metadata else 0.0):
+  1335→                                best_match = match
+  1336→                                best_level = level
+  1337→                    
+  1338→                    if best_match and best_match.node:
+  1339→                        backward_path = best_match.node.get_backward_path()
+  1340→                        active_path_ids = _build_active_path_ids(backward_path)
+  1341→                        _last_best_level = best_level
+  1342→                        logger.info(
+  1343→                            f"[WS] Active path ({best_level}): {active_path_ids} "
+  1344→                            f"conf={f'{best_match.node.metadata.confidence:.3f}' if best_match.node.metadata else '0.000'}"
+  1345→                        )
+  1346→
+  1347→                    n1_conf = result.n1_confidence
+  1348→                    n2_conf = result.n2_confidence
+  1349→                    weighted_conf = result.weighted_confidence
+  1350→                    signal_type = result.signal.signal_type.value if result.signal else "NO_SIGNAL"
+  1351→                    # v2.1 FIX: Only update n3/n4 from full match if > 0.
+  1352→                    # A full match (result is not None) can still have n3_confidence=0
+  1353→                    # if N3 didn't match. Overwriting sticky with 0 destroys the
+  1354→                    # last-known-good value that the UI should display.
+  1355→                    if result.n3_confidence > 0:
+  1356→                        n3_conf = result.n3_confidence
+  1357→                        _sticky_n3_conf = n3_conf
+  1358→                    # else: keep n3_conf = _sticky_n3_conf (set at line ~626)
+  1359→                    if result.n4_confidence > 0:
+  1360→                        n4_conf = result.n4_confidence
+  1361→                        _sticky_n4_conf = n4_conf
+  1362→                    # else: keep n4_conf = _sticky_n4_conf
+  1363→                    # v2.1 FIX: Only update direction sticky when non-FLAT
+  1364→                    if hasattr(result, 'direction') and result.direction and result.direction != "FLAT":
+  1365→                        direction = result.direction
+  1366→                        _sticky_direction = direction
+  1367→                    if hasattr(result, 'direction_score') and result.direction_score != 0:
+  1368→                        direction_score = result.direction_score
+  1369→                        _sticky_direction_score = direction_score
+  1370→                else:
+  1371→                    # No SAX window completed this candle — still extract
+  1372→                    # current buffer state so the frontend shows partial progress
+  1373→                    buf = getattr(engine, '_streaming_buffer', None)
+  1374→                    buf_n1 = getattr(engine, '_streaming_buffer_n1', None)
+  1375→                    buf_n2 = getattr(engine, '_streaming_buffer_n2', None)
+  1376→                    
+  1377→                    if buf and buf._pattern_buffer:
+  1378→                        last_sym = buf._pattern_buffer[-1]
+  1379→                        if isinstance(last_sym, tuple):
+  1380→                            current_sax = [str(s) for s in last_sym]
+  1381→                        else:
+  1382→                            current_sax = [str(last_sym)]
+  1383→                    
+  1384→                    # Re-run a quick match on current buffer state to get active_path
+  1385→                    if buf and buf.has_pattern():
+  1386→                        try:
+  1387→                            current_pattern_n3 = buf.get_pattern()
+  1388→                            current_pattern_n1 = buf_n1.get_pattern() if buf_n1 else None
+  1389→                            current_pattern_n2 = buf_n2.get_pattern() if buf_n2 else None
+  1390→                            
+  1391→                            quick_result = engine.match(
+  1392→                                current_symbols=current_pattern_n3,
+  1393→                                current_price=current_price,
+  1394→                                is_in_position=executor.is_in_position,
+  1395→                                entry_price=executor.position.entry_price if executor.position else None,
+  1396→                                current_symbols_n1=current_pattern_n1 or None,
+  1397→                                current_symbols_n2=current_pattern_n2 or None,
+  1398→                                current_symbols_n3=current_pattern_n3,
+  1399→                            )
+  1400→                            # v2.1 FIX: Also extract N4 buffer symbols
+  1401→                            buf_n4 = getattr(engine, '_streaming_buffer_n4', None)
+  1402→                            current_pattern_n4 = buf_n4.get_pattern() if buf_n4 and buf_n4.has_pattern() else None
+  1403→
+  1404→                            if quick_result:
+  1405→                                n1_conf = quick_result.n1_confidence
+  1406→                                n2_conf = quick_result.n2_confidence
+  1407→                                # v2.1 FIX: Only update N3/N4 if quick match found them,
+  1408→                                # otherwise keep sticky values from last full match.
+  1409→                                if quick_result.n3_confidence > 0:
+  1410→                                    n3_conf = quick_result.n3_confidence
+  1411→                                    _sticky_n3_conf = n3_conf
+  1412→                                if quick_result.n4_confidence > 0:
+  1413→                                    n4_conf = quick_result.n4_confidence
+  1414→                                    _sticky_n4_conf = n4_conf
+  1415→                                weighted_conf = quick_result.weighted_confidence
+  1416→                                if quick_result.direction and quick_result.direction != "FLAT":
+  1417→                                    direction = quick_result.direction
+  1418→                                    _sticky_direction = direction
+  1419→                                if quick_result.direction_score != 0:
+  1420→                                    direction_score = quick_result.direction_score
+  1421→                                    _sticky_direction_score = direction_score
+  1422→                                
+  1423→                                # Find best match for active path
+  1424→                                best_match = None
+  1425→                                best_level = None
+  1426→                                for level, match in [
+  1427→                                    ("n3", quick_result.n3_match),
+  1428→                                    ("n2", quick_result.n2_match),
+  1429→                                    ("n4", quick_result.n4_match),
+  1430→                                    ("n1", quick_result.n1_match),
+  1431→                                ]:
+  1432→                                    if match and match.node:
+  1433→                                        conf = match.node.metadata.confidence if match.node.metadata else 0.0
+  1434→                                        if best_match is None or conf > (best_match.node.metadata.confidence if best_match.node and best_match.node.metadata else 0.0):
+  1435→                                            best_match = match
+  1436→                                            best_level = level
+  1437→                                
+  1438→                                if best_match and best_match.node:
+  1439→                                    backward_path = best_match.node.get_backward_path()
+  1440→                                    active_path_ids = _build_active_path_ids(backward_path)
+  1441→                                    _last_best_level = best_level
+  1442→                                    logger.info(
+  1443→                                        f"[WS] Quick match ({best_level}): path={active_path_ids} "
+  1444→                                        f"n1={n1_conf:.3f} n2={n2_conf:.3f} n3={n3_conf:.3f} n4={n4_conf:.3f} wconf={weighted_conf:.3f}"
+  1445→                                    )
+  1446→                        except Exception as e:
+  1447→                            logger.debug(f"[WS] Quick match failed: {e}")
+  1448→                    else:
+  1449→                        logger.debug(f"[WS] No pattern in buffer yet (buf={buf is not None}, symbols={len(buf._pattern_buffer) if buf else 0})")
+  1450→
+  1451→                # ─── Extract full current SAX pattern buffer ───────
+  1452→                current_pattern = []
+  1453→                _pat_buf = getattr(engine, '_streaming_buffer', None)
+  1454→                if _pat_buf and _pat_buf._pattern_buffer:
+  1455→                    for _sym in _pat_buf._pattern_buffer:
+  1456→                        if isinstance(_sym, tuple):
+  1457→                            current_pattern.append([str(s) for s in _sym])
+  1458→                        else:
+  1459→                            current_pattern.append(str(_sym))
+  1460→
+  1461→                # ─── Get last known EV score for this symbol ────────
+  1462→                _ev_info = _LAST_NET_EV.get(symbol, {})
+  1463→
+  1464→                # v2.1 FIX: Build brain_update using STICKY values for n3/n4.
+  1465→                # If sticky is 0.0 (never initialized), send None so the frontend
+  1466→                # keeps its last display instead of resetting to 0.00.
+  1467→                _brain_n3 = round(_sticky_n3_conf, 4) if _sticky_n3_conf > 0 else None
+  1468→                _brain_n4 = round(_sticky_n4_conf, 4) if _sticky_n4_conf > 0 else None
+  1469→                _brain_dir = _sticky_direction if _sticky_direction != "FLAT" else direction
+  1470→                _brain_dir_score = round(_sticky_direction_score, 4) if _sticky_direction_score != 0 else round(direction_score, 4)
+  1471→
+  1472→                brain_msg = {
+  1473→                    "type": "brain_update",
+  1474→                    "data": {
+  1475→                        "current_sax_symbol": current_sax,
+  1476→                        "active_path_ids": active_path_ids,
+  1477→                        "n1_confidence": round(n1_conf if n1_conf and n1_conf == n1_conf else 0.0, 4),  # NaN guard
+  1478→                        "n2_confidence": round(n2_conf if n2_conf and n2_conf == n2_conf else 0.0, 4),
+  1479→                        "n3_confidence": _brain_n3,  # v2.1 FIX: null when no sticky value
+  1480→                        "n4_confidence": _brain_n4,  # v2.1 FIX: null when no sticky value
+  1481→                        "weighted_confidence": round(weighted_conf if weighted_conf and weighted_conf == weighted_conf else 0.0, 4),
+  1482→                        "signal_type": signal_type,
+  1483→                        "current_pattern": current_pattern,
+  1484→                        "direction": _brain_dir,
+  1485→                        "direction_score": _brain_dir_score,
+  1486→                        "ev_score": round(_ev_info.get("ev_score", 0.0) or 0.0, 3),
+  1487→                        "ev_passed": _ev_info.get("passed", False),
+  1488→                        "net_rr": round(_ev_info.get("net_rr", 0.0) or 0.0, 2),
+  1489→                        "ticker_price": round(_ticker_price, 8) if _ticker_price > 0 else None,  # v2.1 FIX: Price in brain_update too
+  1490→                    },
+  1491→                }
+  1492→                # v2.1 TEMP LOG: Verify brain_update values before sending
+  1493→                logger.info(
+  1494→                    f"[BRAIN-JSON] {symbol} n1={n1_conf:.3f} n2={n2_conf:.3f} "
+  1495→                    f"n3={_brain_n3} n4={_brain_n4} dir={_brain_dir} "
+  1496→                    f"sticky_n3={_sticky_n3_conf:.3f} sticky_n4={_sticky_n4_conf:.3f} "
+  1497→                    f"result={'YES' if result else 'no'}"
+  1498→                )
+  1499→                await websocket.send_json(brain_msg)
+  1500→
+  1501→                # ─── Signal → Net EV Gate → Routed execution ─────
+  1502→                # v0.57.0 (TAREA 19): Net EV Gate with friction-aware filtering.
+  1503→                # Before opening any position, we discount the expected_move
+  1504→                # by the real spread+slippage for this asset class. If the
+  1505→                # net move doesn't cover costs, the signal is REJECTED.
+  1506→                if result and result.signal and result.signal.is_entry and not (isinstance(executor, PaperExecutor) and executor.is_in_position):
+  1507→                    sig = result.signal
+  1508→                    _NET_EV_STATS["total_raw_signals"] += 1
+  1509→
+  1510→                    # ─── Anti-overlap check ──────────────────────
+  1511→                    # If this symbol already has a position open in
+  1512→                    # another TF, REJECT to avoid correlated exposure.
+  1513→                    if symbol in _ACTIVE_SYMBOLS:
+  1514→                        existing_tf = _ACTIVE_SYMBOLS[symbol]
+  1515→                        _NET_EV_STATS["rejected_overlap"] += 1
+  1516→                        _LAST_NET_EV[symbol] = {"ev_score": 0.0, "passed": False, "net_rr": 0.0, "conf": sig.confidence, "reason": "overlap"}
+  1517→                        logger.info(
+  1518→                            f"[NET EV GATE] OVERLAP REJECTED: {symbol} already has "
+  1519→                            f"position in {existing_tf}, ignoring {timeframe} signal"
+  1520→                        )
+  1521→                        await _emit_log(websocket, "EV GATE", f"OVERLAP REJECTED: {symbol} already in {existing_tf}", "warn")
+  1522→                    else:
+  1523→                        # ─── Net EV Gate calculation ─────────────
+  1524→                        # The signal's expected_move_pct is the AVERAGE move (small).
+  1525→                        # For R:R, we use the historical BEST outcome (max_favorable)
+  1526→                        # and worst drawdown from the matched pattern node.
+  1527→                        # Net favorable = max_favorable - spread (friction-aware).
+  1528→
+  1529→                        # 1. Get favorable/drawdown from matched node metadata
+  1530→                        # Walk through match results to find best node with metadata
+  1531→                        _best_node = None
+  1532→                        for _lvl, _mr in [("n3", result.n3_match), ("n1", result.n1_match),
+  1533→                                          ("n2", result.n2_match), ("n4", result.n4_match)]:
+  1534→                            if _mr and _mr.node and _mr.node.metadata.historical_count > 0:
+  1535→                                _best_node = _mr.node
+  1536→                                break
+  1537→
+  1538→                        favorable_pct = abs(_best_node.metadata.max_favorable_pct) if _best_node else 0.0
+  1539→                        drawdown_pct = abs(_best_node.metadata.max_drawdown_pct) if _best_node else 0.5
+  1540→                        if favorable_pct < 0.001:
+  1541→                            favorable_pct = abs(sig.expected_move_pct) if sig.expected_move_pct else 0.1
+  1542→                        if drawdown_pct < 0.001:
+  1543→                            drawdown_pct = 0.5
+  1544→
+  1545→                        # 2. Get spread for this asset class
+  1546→                        from ppmt.core.profiles import SPREAD_ESTIMATES
+  1547→                        spread_pct = SPREAD_ESTIMATES.get(asset_class, 0.050)  # default 0.05%
+  1548→
+  1549→                        # 3. Net Favorable = max_favorable - spread
+  1550→                        net_favorable = favorable_pct - spread_pct
+  1551→
+  1552→                        # 4. If Net_Favorable <= 0: REJECT (signal doesn't cover costs)
+  1553→                        if net_favorable <= 0:
+  1554→                            _NET_EV_STATS["rejected_spread"] += 1
+  1555→                            _LAST_NET_EV[symbol] = {"ev_score": 0.0, "passed": False, "net_rr": 0.0, "conf": sig.confidence, "reason": "spread"}
+  1556→                            logger.info(
+  1557→                                f"[NET EV GATE] SPREAD REJECTED: {symbol} {timeframe} "
+  1558→                                f"favorable={favorable_pct:.3f}% "
+  1559→                                f"spread={spread_pct:.3f}% "
+  1560→                                f"net_favorable={net_favorable:.3f}% (≤0)"
+  1561→                            )
+  1562→                            await _emit_log(websocket, "EV GATE", f"SPREAD REJECTED: {symbol} favorable={favorable_pct:.3f}% spread={spread_pct:.3f}%", "warn")
+  1563→                        else:
+  1564→                            # 5. Net R:R = net_favorable / drawdown
+  1565→                            net_rr = net_favorable / drawdown_pct
+  1566→                            net_rr_capped = min(net_rr, 3.0)
+  1567→
+  1568→                            # 6. Net EV = confidence × min(Net_R:R, 3.0)
+  1569→                            net_ev = sig.confidence * net_rr_capped
+  1570→
+  1571→                            # 7. Gate: Net EV must be >= 0.40 (v2.1 Config F)
+  1572→                            # v2.1: Lowered from 0.80 to 0.40 — validated 30-day OOS
+  1573→                            # Config F: N3=90%, N4=0%, SL=2.0×drawdown, hard_move_floor=0.10%
+  1574→                            _EV_THRESHOLD = 0.40
+  1575→                            if net_ev < _EV_THRESHOLD:
+  1576→                                _NET_EV_STATS["rejected_ev_score"] += 1
+  1577→                                _LAST_NET_EV[symbol] = {"ev_score": net_ev, "passed": False, "net_rr": net_rr_capped, "conf": sig.confidence, "reason": "ev_score"}
+  1578→                                logger.info(
+  1579→                                    f"[NET EV GATE] EV REJECTED: {symbol} {timeframe} "
+  1580→                                    f"conf={sig.confidence:.3f} net_R:R={net_rr_capped:.2f} "
+  1581→                                    f"Net_EV={net_ev:.3f} (min {_EV_THRESHOLD})"
+  1582→                                )
+  1583→                                await _emit_log(websocket, "EV GATE", f"EV REJECTED: conf={sig.confidence:.3f} R:R={net_rr_capped:.2f} EV={net_ev:.3f}", "warn")
+  1584→                            else:
+  1585→                                # ─── PASSED: Open position ─────────
+  1586→                                _NET_EV_STATS["passed_net_ev"] += 1
+  1587→                                _ACTIVE_SYMBOLS[symbol] = timeframe  # Register in anti-overlap
+  1588→                                _LAST_NET_EV[symbol] = {"ev_score": net_ev, "passed": True, "net_rr": net_rr_capped, "conf": sig.confidence}
+  1589→                                logger.info(
+  1590→                                    f"[NET EV GATE] PASSED: {symbol} {timeframe} "
+  1591→                                    f"conf={sig.confidence:.3f} net_R:R={net_rr_capped:.2f} "
+  1592→                                    f"Net_EV={net_ev:.3f} spread={spread_pct:.3f}% "
+  1593→                                    f"favorable={favorable_pct:.3f}% drawdown={drawdown_pct:.3f}%"
+  1594→                                )
+  1595→                                await _emit_log(websocket, "EV GATE", f"PASSED: conf={sig.confidence:.3f} R:R={net_rr_capped:.2f} EV={net_ev:.3f}", "info")
+  1596→                                try:
+  1597→                                    pos = await executor.open_position(
+  1598→                                        symbol=symbol,
+  1599→                                        direction=sig.direction or "LONG",
+  1600→                                        size_usdt=100.0,
+  1601→                                        metadata={
+  1602→                                            "entry_price": current_price,
+  1603→                                            "expected_move_pct": sig.expected_move_pct or 1.0,
+  1604→                                            "predicted_path_symbols": sig.predicted_path_symbols if sig.predicted_path else None,
+  1605→                                            "net_ev_score": net_ev,
+  1606→                                            "net_rr": net_rr_capped,
+  1607→                                            "spread_pct": spread_pct,
+  1608→                                        },
+  1609→                                    )
+  1610→                                    # v2.1 Config F: SL = max(default 1.2×EM, drawdown_pct × 2.0)
+  1611→                                    _SL_MULT = 2.0
+  1612→                                    current_sl_distance_pct = abs(pos.entry_price - pos.current_sl) / pos.entry_price * 100.0
+  1613→                                    drawdown_sl_pct = drawdown_pct * _SL_MULT
+  1614→                                    if drawdown_sl_pct > current_sl_distance_pct:
+  1615→                                        extra_distance = drawdown_sl_pct - current_sl_distance_pct
+  1616→                                        if pos.direction == "LONG":
+  1617→                                            pos.current_sl -= pos.entry_price * (extra_distance / 100.0)
+  1618→                                            pos.catastrophic_sl -= pos.entry_price * (extra_distance / 100.0)
+  1619→                                        else:
+  1620→                                            pos.current_sl += pos.entry_price * (extra_distance / 100.0)
+  1621→                                            pos.catastrophic_sl += pos.entry_price * (extra_distance / 100.0)
+  1622→                                    # Track in session-wide positions
+  1623→                                    _OPEN_POSITIONS[symbol] = {
+  1624→                                        "direction": pos.direction,
+  1625→                                        "entry_price": pos.entry_price,
+  1626→                                        "size_usdt": pos.size_usdt,
+  1627→                                        "pnl_pct": 0.0,
+  1628→                                        "ev_score": net_ev,
+  1629→                                        "status": pos.status,
+  1630→                                        "timeframe": timeframe,
+  1631→                                    }
+  1632→                                    logger.info(
+  1633→                                        f"[WS] SIGNAL {sig.signal_type.value} @ {current_price:.6f} "
+  1634→                                        f"conf={sig.confidence:.3f} Net_EV={net_ev:.3f} "
+  1635→                                        f"SL={pos.current_sl:.6f} TP={pos.current_tp:.6f}"
+  1636→                                    )
+  1637→
+  1638→                                    # v0.58.0: TAREA 20 — Register position in live session tracker
+  1639→                                    _session_key = f"{symbol}:{timeframe}"
+  1640→                                    _LIVE_SESSIONS[_session_key] = {
+  1641→                                        "symbol": symbol,
+  1642→                                        "direction": sig.direction or "LONG",
+  1643→                                        "entry_price": current_price,
+  1644→                                        "size_usdt": 100.0,
+  1645→                                        "pnl_pct": "0.0%",
+  1646→                                        "ev_score": round(net_ev, 4),
+  1647→                                        "ev_r": round(net_ev, 4),
+  1648→                                        "status": "ACTIVE",
+  1649→                                        "timeframe": timeframe,
+  1650→                                    }
+  1651→                                    logger.info(f"[WS] Session tracker: registered {_session_key}")
+  1652→
+  1653→                                    # v0.58.0: TAREA 21 — Track in _OPEN_POSITIONS + emit log
+  1654→                                    _OPEN_POSITIONS[symbol] = {
+  1655→                                        "direction": pos.direction,
+  1656→                                        "entry_price": pos.entry_price,
+  1657→                                        "size_usdt": pos.size_usdt,
+  1658→                                        "pnl_pct": 0.0,
+  1659→                                        "ev_score": net_ev,
+  1660→                                        "status": pos.status,
+  1661→                                        "timeframe": timeframe,
+  1662→                                    }
+  1663→                                    await _emit_log(websocket, "SIGNAL", f"{sig.signal_type.value} {pos.direction} @ {current_price:.6f} EV={net_ev:.3f}", "info")
+  1664→                                    await websocket.send_json({
+  1665→                                        "type": "position_update",
+  1666→                                        "data": pos.to_dict(),
+  1667→                                    })
+  1668→                                except Exception as e:
+  1669→                                    # Position failed — remove from active symbols
+  1670→                                    _ACTIVE_SYMBOLS.pop(symbol, None)
+  1671→                                    _OPEN_POSITIONS.pop(symbol, None)
+  1672→                                    logger.error(f"[WS] Failed to open position: {e}")
+  1673→
+  1674→                # ─── Walk-Forward check ───────────────────────
+  1675→                if result and executor.is_in_position and current_sax:
+  1676→                    updated = executor.check_walk_forward(current_sax, current_price)
+  1677→                    if updated:
+  1678→                        # Check if this was a MATCH (sequence_index advanced)
+  1679→                        _old_idx = updated.sequence_index
+  1680→                        logger.info(
+  1681→                            f"[WS] Walk-Forward: seq_idx={updated.sequence_index} "
+  1682→                            f"status={updated.status} SL={updated.current_sl:.6f} TP={updated.current_tp:.6f}"
+  1683→                        )
+  1684→                        await _emit_log(websocket, "WALK-FORWARD", f"MATCH #{updated.sequence_index} → {updated.status} SL={updated.current_sl:.6f}", "info")
+  1685→                        await websocket.send_json({
+  1686→                            "type": "position_update",
+  1687→                            "data": updated.to_dict(),
+  1688→                        })
+  1689→
+  1690→                # ─── Pattern Divergence check ───────────────────
+  1691→                # v0.60.0 (TERMINAL-v2.1): Extract pattern_break_score from
+  1692→                # the best match result and pass to executor.
+  1693→                if executor.is_in_position and result is not None:
+  1694→                    _break_score = 1.0  # Default: assume continuation
+  1695→                    for _mr in [result.n3_match, result.n1_match, result.n2_match, result.n4_match]:
+  1696→                        if _mr is not None:
+  1697→                            _break_score = getattr(_mr, 'pattern_break_score', 1.0)
+  1698→                            break  # Use first available match
+  1699→
+  1700→                    divergence_closed = executor.check_divergence(_break_score, current_price)
+  1701→                    if divergence_closed:
+  1702→                        closed = executor._position  # Already closed by check_divergence
+  1703→                        if closed:
+  1704→                            _ACTIVE_SYMBOLS.pop(symbol, None)
+  1705→                            _OPEN_POSITIONS.pop(symbol, None)
+  1706→                            # v0.60.0 (TERMINAL-v2.1): Append to trade history
+  1707→                            _TRADE_HISTORY.append({
+  1708→                                "timestamp": int(time.time() * 1000),
+  1709→                                "symbol": symbol,
+  1710→                                "timeframe": timeframe,
+  1711→                                "direction": closed.direction,
+  1712→                                "entry_price": closed.entry_price,
+  1713→                                "exit_price": closed.close_price,
+  1714→                                "pnl_pct": round(closed.pnl_pct or 0, 4),
+  1715→                                "close_reason": closed.close_reason or "DIVERGENCE",
+  1716→                            })
+  1717→                            logger.info(
+  1718→                                f"[WS] DIVERGENCE EXIT: score={_break_score:.2f} @ {current_price:.6f} "
+  1719→                                f"PnL={closed.pnl_pct:+.2f}%"
+  1720→                            )
+  1721→                            await websocket.send_json({
+  1722→                                "type": "position_update",
+  1723→                                "data": closed.to_dict(),
+  1724→                            })
+  1725→                            # Skip check_price() this candle — already closed
+  1726→                            continue
+  1727→
+  1728→                # ─── Check SL/TP hit ──────────────────────────
+  1729→                if executor.is_in_position:
+  1730→                    closed = executor.check_price(current_price)
+  1731→                    if closed:
+  1732→                        # v0.57.0 (TAREA 19): Remove from anti-overlap when position closes
+  1733→                        _ACTIVE_SYMBOLS.pop(symbol, None)
+  1734→                        _OPEN_POSITIONS.pop(symbol, None)
+  1735→                        logger.info(
+  1736→                            f"[WS] CLOSED: {closed.status} @ {closed.close_price:.6f} "
+  1737→                            f"PnL={closed.pnl_pct:+.2f}% (${closed.pnl_usdt:+.2f})"
+  1738→                        )
+  1739→
+  1740→                        # v0.58.0: TAREA 20 — Update session tracker on close
+  1741→                        _session_key = f"{symbol}:{timeframe}"
+  1742→                        if _session_key in _LIVE_SESSIONS:
+  1743→                            _LIVE_SESSIONS[_session_key]["status"] = closed.status
+  1744→                            _LIVE_SESSIONS[_session_key]["pnl_pct"] = f"{closed.pnl_pct:+.2f}%"
+  1745→                            logger.info(f"[WS] Session tracker: closed {_session_key} → {closed.status}")
+  1746→
+  1747→                        # v0.60.0 (TERMINAL-v2.1): Append to trade history
+  1748→                        _TRADE_HISTORY.append({
+  1749→                            "timestamp": int(time.time() * 1000),
+  1750→                            "symbol": symbol,
+  1751→                            "timeframe": timeframe,
+  1752→                            "direction": closed.direction,
+  1753→                            "entry_price": closed.entry_price,
+  1754→                            "exit_price": closed.close_price,
+  1755→                            "pnl_pct": round(closed.pnl_pct or 0, 4),
+  1756→                            "close_reason": closed.close_reason or closed.status,
+  1757→                        })
+  1758→
+  1759→                        # v0.58.0: TAREA 21 — Determine log tag + emit learning feed
+  1760→                        _close_tag = "LEARN"
+  1761→                        if "DIVERGENCE" in (closed.close_reason or ""):
+  1762→                            _close_tag = "PATTERN BROKEN"
+  1763→                        elif "SL" in (closed.close_reason or "") or "CATASTROPHIC" in (closed.close_reason or ""):
+  1764→                            _close_tag = "LEARN"
+  1765→                        elif "TP" in (closed.close_reason or ""):
+  1766→                            _close_tag = "LEARN"
+  1767→                        _won = closed.pnl_pct is not None and closed.pnl_pct > 0
+  1768→                        await _emit_log(
+  1769→                            websocket, _close_tag,
+  1770→                            f"{'Won' if _won else 'Lost'}: {closed.status} @ {closed.close_price:.6f} PnL={closed.pnl_pct:+.2f}% pattern=closed",
+  1771→                            "info" if _won else "warn"
+  1772→                        )
+  1773→                        await websocket.send_json({
+  1774→                            "type": "position_update",
+  1775→                            "data": closed.to_dict(),
+  1776→                        })
+  1777→
+  1778→            except WebSocketDisconnect:
+  1779→                logger.info(f"[WS] Client disconnected: {symbol}/{timeframe}")
+  1780→                break
+  1781→            except Exception as e:
+  1782→                logger.error(f"[WS] Poll loop error: {e}", exc_info=True)
+  1783→                try:
+  1784→                    await websocket.send_json({"type": "error", "data": {"message": str(e)}})
+  1785→                except Exception:
+  1786→                    break
+  1787→
+  1788→            await asyncio.sleep(poll_interval)
+  1789→
+  1790→    except WebSocketDisconnect:
+  1791→        pass
+  1792→    finally:
+  1793→        # v0.57.0 (TAREA 19): Clean up anti-overlap on disconnect
+  1794→        if symbol in _ACTIVE_SYMBOLS and _ACTIVE_SYMBOLS.get(symbol) == timeframe:
+  1795→            _ACTIVE_SYMBOLS.pop(symbol, None)
+  1796→        try:
+  1797→            await exchange.close()
+  1798→        except Exception:
+  1799→            pass
+  1800→        # v0.58.0: TAREA 20 — Clean up session tracker on disconnect
+  1801→        _session_key = f"{symbol}:{timeframe}"
+  1802→        _LIVE_SESSIONS.pop(_session_key, None)
+  1803→        # v2.1: Clean up backtest WS registration
+  1804→        _BACKTEST_WS.pop(_session_key, None)
+  1805→        logger.info(f"[WS] Session closed: {symbol}/{timeframe}")
+  1806→
+  1807→
+  1808→# ─── WebSocket: Live Trading (MEXC Futures) ───────────────────
+  1809→# v0.45.0: ENTREGABLE 6 — Encrypted credentials + Walk-Forward Loop
+  1810→
+  1811→# Helper: normalize a SAX symbol (str, list, or tuple) to a flat string
+  1812→# for safe comparison across trie levels (N1/N2 produce str, N3/N4 produce tuple).
+  1813→def _norm_sax(sym) -> str:
+  1814→    """Normalize a SAX symbol to a flat string for comparison.
+  1815→    
+  1816→    'a'       → 'a'
+  1817→    ['d','x'] → 'd'   (price dimension only)
+  1818→    ('a','y') → 'a'
+  1819→    """
+  1820→    if isinstance(sym, (tuple, list)):
+  1821→        return str(sym[0])  # price symbol only
+  1822→    return str(sym)
+  1823→
+  1824→
+  1825→# Helper: check if any IExecutor has an active position
+  1826→def _executor_in_position(executor: IExecutor) -> bool:
+  1827→    """Check if executor has an active (open) position — works for all IExecutor impls."""
+  1828→    if isinstance(executor, PaperExecutor):
+  1829→        return executor.is_in_position
+  1830→    # MexcFuturesExecutor and future impls store current position
+  1831→    pos = getattr(executor, '_position', None) or getattr(executor, 'position', None)
+  1832→    return pos is not None and pos.status in ("ACTIVE", "BREAK_EVEN_SECURED", "TP_EXTENDED")
+  1833→
+  1834→
+  1835→def _executor_position(executor: IExecutor) -> Optional[PositionState]:
+  1836→    """Get current position from any IExecutor — works for all impls."""
+  1837→    if isinstance(executor, PaperExecutor):
+  1838→        return executor.position
+  1839→    return getattr(executor, '_position', None) or getattr(executor, 'position', None)
+  1840→
+  1841→
+  1842→@app.websocket("/ws/live-trading/{symbol}/{timeframe}")
+  1843→async def live_trading_websocket(websocket: WebSocket, symbol: str, timeframe: str):
+  1844→    """
+  1845→    Real-money trading WebSocket via MEXC Futures.
+  1846→
+  1847→    v0.45.0: ENTREGABLE 6
+  1848→    - Credentials are Fernet-encrypted in transit.
+  1849→    - Full Walk-Forward Loop monitors open positions on every candle.
+  1850→    - Divergence → close. Match → advance SL/TP along expected sequence.
+  1851→
+  1852→    Auth flow:
+  1853→      1. Frontend encrypts api_key + api_secret with Fernet using a key
+  1854→         derived from the user's session password (PBKDF2-SHA256).
+  1855→      2. Frontend sends: {"type":"auth", "api_key":"<enc>", "api_secret":"<enc>",
+  1856→         "session_password_hash":"<sha256_hex>"}
+  1857→      3. Backend decrypts, instantiates MexcFuturesExecutor, zeroes plaintext.
+  1858→    """
+  1859→
+  1860→    await websocket.accept()
+  1861→
+  1862→    # ─── 1. Instantiate executor ────────────────────────────────
+  1863→    # v0.50.0: ENTREGABLE 11 — If PPMT_MOCK_LIVE=1, use PaperExecutor
+  1864→    # instead of MexcFuturesExecutor to test the frontend without real money.
+  1865→    # Injected signals: entry at 10s, MATCH at 20s, DIVERGE at 30s.
+  1866→    allocated_usdt: float = 100.0
+  1867→    custom_base_url: str = ""
+  1868→
+  1869→    if MOCK_LIVE:
+  1870→        # ── MOCK MODE: Skip auth entirely, use PaperExecutor ──
+  1871→        logger.info("[WS-LIVE-MOCK] Using PaperExecutor (Mock Live Test mode)")
+  1872→        executor: IExecutor = PaperExecutor(capital_usdt=allocated_usdt)
+  1873→        executor._position = None  # v0.49.0 (FASE 3 BUG 2): Force clean state
+  1874→
+  1875→        # Still send auth_ok so the frontend proceeds to config
+  1876→        await websocket.send_json({"type": "auth_ok"})
+  1877→
+  1878→        # Read config message (allocated_usdt + optional custom_base_url)
+  1879→        try:
+  1880→            config_raw = await asyncio.wait_for(websocket.receive_json(), timeout=10.0)
+  1881→            if config_raw.get("type") == "config":
+  1882→                allocated_usdt = float(config_raw.get("allocated_usdt", 100.0))
+  1883→                if allocated_usdt <= 0:
+  1884→                    allocated_usdt = 100.0
+  1885→                custom_base_url = str(config_raw.get("custom_base_url", "")).strip()
+  1886→                logger.info(f"[WS-LIVE-MOCK] Config: allocated_usdt={allocated_usdt}, custom_base_url={'<set>' if custom_base_url else '<default>'}")
+  1887→        except asyncio.TimeoutError:
+  1888→            logger.warning("[WS-LIVE-MOCK] No config message received")
+  1889→
+  1890→        # Update PaperExecutor capital with the user's allocated amount
+  1891→        if isinstance(executor, PaperExecutor):
+  1892→            executor.capital_usdt = allocated_usdt
+  1893→
+  1894→    else:
+  1895→        # ── PRODUCTION MODE: Real MEXC Futures ──
+  1896→        # Wait for encrypted credentials
+  1897→        try:
+  1898→            auth_raw = await asyncio.wait_for(websocket.receive_json(), timeout=15.0)
+  1899→        except asyncio.TimeoutError:
+  1900→            await websocket.send_json({"type": "error", "data": {"message": "Auth timeout — send encrypted auth within 15s"}})
+  1901→            await websocket.close()
+  1902→            return
+  1903→
+  1904→        if auth_raw.get("type") != "auth":
+  1905→            await websocket.send_json({"type": "error", "data": {"message": "First message must be {type:auth, ...}"}})
+  1906→            await websocket.close()
+  1907→            return
+  1908→
+  1909→        # Decrypt credentials
+  1910→        api_key, api_secret = decrypt_auth_payload(auth_raw)
+  1911→
+  1912→        if api_key is None or api_secret is None:
+  1913→            await websocket.send_json({"type": "error", "data": {"message": "Decryption failed — wrong session password or tampered payload"}})
+  1914→            await websocket.close()
+  1915→            return
+  1916→
+  1917→        # Defer executor creation until AFTER config (need custom_base_url)
+  1918→        _api_key = api_key
+  1919→        _api_secret = api_secret
+  1920→        del api_key
+  1921→        del api_secret
+  1922→
+  1923→        # Read config message (allocated_usdt + custom_base_url)
+  1924→        try:
+  1925→            config_raw = await asyncio.wait_for(websocket.receive_json(), timeout=10.0)
+  1926→            if config_raw.get("type") == "config":
+  1927→                allocated_usdt = float(config_raw.get("allocated_usdt", 100.0))
+  1928→                if allocated_usdt <= 0:
+  1929→                    allocated_usdt = 100.0
+  1930→                custom_base_url = str(config_raw.get("custom_base_url", "")).strip()
+  1931→                logger.info(f"[WS-LIVE] Config received: allocated_usdt={allocated_usdt}, custom_base_url={'<set>' if custom_base_url else '<default>'}")
+  1932→        except asyncio.TimeoutError:
+  1933→            logger.warning("[WS-LIVE] No config message received, defaulting to 100 USDT")
+  1934→
+  1935→        # Create MexcFuturesExecutor with optional custom_base_url
+  1936→        executor = MexcFuturesExecutor(
+  1937→            api_key=_api_key,
+  1938→            secret=_api_secret,
+  1939→            base_url=custom_base_url,
+  1940→        )
+  1941→        del _api_key
+  1942→        del _api_secret
+  1943→
+  1944→        logger.info(f"[WS-LIVE] Auth OK — MexcFuturesExecutor created (base_url={'custom' if custom_base_url else 'default'}, credentials zeroed)")
+  1945→        await websocket.send_json({"type": "auth_ok"})
+  1946→
+  1947→    # ─── 2. Same engine init as paper-live ─────────────────────
+  1948→    internal_symbol = symbol.replace("-", "/")
+  1949→    api_symbol = internal_symbol.replace("/", "")
+  1950→    symbol = internal_symbol
+  1951→
+  1952→    logger.info(f"[WS-LIVE] Connected: {symbol}/{timeframe}")
+  1953→    storage = get_storage()
+  1954→
+  1955→    try:
+  1956→        asset_class = "meme"
+  1957→        weight_profile = "meme"
+  1958→        try:
+  1959→            from ppmt.data.classifier import AssetClassifier
+  1960→            classifier = AssetClassifier()
+  1961→            info = classifier.classify(symbol)
+  1962→            asset_class = info.asset_class
+  1963→            weight_profile = info.weight_profile
+  1964→        except Exception as e:
+  1965→            logger.warning(f"[WS-LIVE] AssetClassifier unavailable ({e}), defaulting to 'meme'")
+  1966→
+  1967→        engine = PPMT(
+  1968→            symbol=symbol, asset_class=asset_class,
+  1969→            weight_profile=weight_profile, dual_sax=True,
+  1970→            min_confidence=0.08, timeframe=timeframe,
+  1971→        )
+  1972→
+  1973→        tries = storage.load_all_tries(symbol, asset_class, timeframe=timeframe)
+  1974→        n1, n2, n3, n4 = tries.get("n1"), tries.get("n2"), tries.get("n3"), tries.get("n4")
+  1975→        n1c = n1.pattern_count if n1 else 0
+  1976→        n2c = n2.pattern_count if n2 else 0
+  1977→        n3c = n3.pattern_count if n3 else 0
+  1978→        n4c = n4.pattern_count if hasattr(n4, 'pattern_count') and n4 else 0
+  1979→        logger.info(f"[WS-LIVE] Loaded N1: {n1c} N2: {n2c} N3: {n3c} N4: {n4c}")
+  1980→
+  1981→        if n1 or n2 or n3:
+  1982→            from ppmt.core.trie import PPMTTrie, RegimePartitionedTrie
+  1983→            # v0.49.0 (FASE 3 BUG 3): Same fix as paper_live_websocket.
+  1984→            _n1 = n1 if n1 is not None else None
+  1985→            _n2 = n2 if n2 is not None else None
+  1986→            if _n1 is None:
+  1987→                _n1 = PPMTTrie(name="universal_empty")
+  1988→                logger.warning(f"[WS-LIVE] N1 universal pool not found for {symbol}. Using empty trie.")
+  1989→            if _n2 is None:
+  1990→                _n2 = PPMTTrie(name=f"class_empty:{asset_class}")
+  1991→                logger.warning(f"[WS-LIVE] N2 class pool not found for {asset_class}. Using empty trie.")
+  1992→            engine.set_tries(
+  1993→                trie_n1=_n1,
+  1994→                trie_n2=_n2,
+  1995→                trie_n3=n3 or PPMTTrie(name="n3_empty"),
+  1996→                trie_n4=n4 if n4 is not None else engine.trie_n4,
+  1997→            )
+  1998→    except Exception as e:
+  1999→        logger.error(f"[WS-LIVE] Engine init failed: {e}")
+  2000→        await websocket.send_json({"type": "error", "data": {"message": f"Engine init failed: {e}"}})
+
+[showing lines 1-2000 of 2606; use offset=2001 with limit to continue reading]

@@ -1,0 +1,755 @@
+     1→"""
+     2→PPMT v7 — Features Extras (F4)
+     3→================================
+     4→
+     5→Adds 6 new features on top of v6's 59 base features:
+     6→  1. funding_rate         — Raw funding rate (8h interval, last known)
+     7→  2. funding_rate_z       — Z-score vs 30-day rolling mean
+     8→  3. oi_change_1h         — Open Interest % change vs 1h ago (12x 5m bars)
+     9→  4. oi_change_4h         — Open Interest % change vs 4h ago (48x 5m bars)
+    10→  5. sector_one_hot       — 4 binary features (blue_chip/large_cap/old_meme/new_meme)
+    11→                            + 1 categorical int (0-3) for LightGBM native handling
+    12→  6. day_of_week_sin/cos  — Cyclical day encoding (sin + cos to capture weekly seasonality)
+    13→
+    14→Total NEW features: 4 (funding/OI) + 5 (sector: 4 binary + 1 int) + 2 (dow sin/cos) = 11
+    15→But we count "logical" additions:
+    16→  - funding_rate, funding_rate_z, oi_change_1h, oi_change_4h = 4 numeric
+    17→  - sector_one_hot (expanded to 4 binaries + 1 categorical) = 5 features
+    18→  - day_of_week_sin, day_of_week_cos = 2 features
+    19→  TOTAL: 11 features (vs 6 conceptual)
+    20→
+    21→Why these matter (per MASTER_PLAN §3):
+    22→  - funding_rate_z: SHORT gate (only SHORT if funding_z > 1.5 — longs overleveraged)
+    23→  - oi_change_1h/4h: rising OI + rising price = trend confirmation;
+    24→                     rising OI + falling price = bearish positioning
+    25→  - sector_one_hot: LightGBM sees sector and learns per-sector adjustments
+    26→                    (PEPE/WIF/BONK share microstructure within new_meme)
+    27→  - day_of_week_sin/cos: captures weekend vs weekday effect in crypto
+    28→                         (Sunday/Monday typically lower volume)
+    29→
+    30→Data sources:
+    31→  - Funding rate: Binance Futures public API (no auth required)
+    32→    GET https://fapi.binance.com/fapi/v1/fundingRate?symbol=BTCUSDT&limit=1000
+    33→  - Open Interest: Binance Futures public API
+    34→    GET https://fapi.binance.com/futures/data/openInterestHist?symbol=BTCUSDT&period=5m&limit=1000
+    35→  - Both are 8h/5m intervals respectively, we cache locally to avoid API limits
+    36→
+    37→Anti-leakage:
+    38→  - Funding rate is forward-looking in nature: the 8h funding rate SETTLES
+    39→    at fixed times (00:00, 08:00, 16:00 UTC). We use the LAST SETTLED rate
+    40→    (i.e., fundingRate for fundingTime <= current_ts), never the upcoming.
+    41→  - OI is real-time market data, no leakage concern (just need to align
+    42→    timestamps with candle close).
+    43→"""
+    44→
+    45→from __future__ import annotations
+    46→
+    47→import json
+    48→import math
+    49→import os
+    50→import sqlite3
+    51→import time
+    52→import urllib.error
+    53→import urllib.parse
+    54→import urllib.request
+    55→from dataclasses import dataclass, field
+    56→from typing import Any, Dict, List, Optional, Tuple
+    57→
+    58→# Same dir
+    59→import sys
+    60→sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    61→
+    62→from v7_ohlcv_encoder import SECTOR_TOKENS, SECTOR_BINS, symbol_to_sector
+    63→
+    64→
+    65→# ---------------------------------------------------------------------------
+    66→# Constants
+    67→# ---------------------------------------------------------------------------
+    68→
+    69→BINANCE_FAPI_BASE = "https://fapi.binance.com"
+    70→
+    71→# Binance Futures uses "1000X" prefix for low-priced tokens (< $0.01)
+    72→# to avoid precision issues. Map our internal symbol → Binance API symbol.
+    73→BINANCE_SYMBOL_MAP: Dict[str, str] = {
+    74→    "SHIBUSDT": "1000SHIBUSDT",
+    75→    "PEPEUSDT": "1000PEPEUSDT",
+    76→    "BONKUSDT": "1000BONKUSDT",
+    77→    # All other tokens (BTCUSDT, ETHUSDT, SOLUSDT, ADAUSDT, AVAXUSDT,
+    78→    # LINKUSDT, XRPUSDT, DOGEUSDT, WIFUSDT) use the same name on both sides.
+    79→}
+    80→
+    81→
+    82→def to_binance_symbol(symbol: str) -> str:
+    83→    """
+    84→    Convert our internal symbol (e.g., 'SHIBUSDT') to the Binance API
+    85→    symbol (e.g., '1000SHIBUSDT').
+    86→
+    87→    For symbols without a mapping, returns the input unchanged.
+    88→    """
+    89→    s = symbol.upper().strip()
+    90→    return BINANCE_SYMBOL_MAP.get(s, s)
+    91→
+    92→
+    93→# Sectors in fixed order (for one-hot encoding)
+    94→SECTOR_INDEX: Dict[str, int] = {
+    95→    "blue_chip": 0,
+    96→    "large_cap": 1,
+    97→    "old_meme": 2,
+    98→    "new_meme": 3,
+    99→}
+   100→
+   101→# Funding rate settles every 8h at 00:00, 08:00, 16:00 UTC
+   102→FUNDING_INTERVAL_SECONDS = 8 * 3600  # 28800
+   103→
+   104→# OI history period (must match our candle TF)
+   105→OI_PERIOD = "5m"
+   106→
+   107→# Cache config
+   108→CACHE_DIR_DEFAULT = "data/v7_cache"
+   109→FUNDING_CACHE_DB = "funding_cache.db"      # SQLite: per-symbol funding rates
+   110→OI_CACHE_DB = "oi_cache.db"                # SQLite: per-symbol OI snapshots
+   111→
+   112→# Rolling window for funding_rate_z (30 days = 90 funding intervals at 8h)
+   113→FUNDING_Z_WINDOW = 90
+   114→
+   115→
+   116→# ---------------------------------------------------------------------------
+   117→# Sector one-hot encoding
+   118→# ---------------------------------------------------------------------------
+   119→
+   120→def encode_sector_one_hot(symbol: str) -> Dict[str, float]:
+   121→    """
+   122→    Encode the sector of a symbol as 4 binary features + 1 categorical.
+   123→
+   124→    Returns dict with keys:
+   125→        sector_blue_chip, sector_large_cap, sector_old_meme, sector_new_meme
+   126→        sector_idx  (0-3, for LightGBM categorical handling)
+   127→
+   128→    Args:
+   129→        symbol: e.g., 'BTCUSDT', 'BTC', 'btc-usd'
+   130→
+   131→    Raises:
+   132→        ValueError: if symbol not in any sector.
+   133→    """
+   134→    sector = symbol_to_sector(symbol)
+   135→    idx = SECTOR_INDEX[sector]
+   136→    return {
+   137→        "sector_blue_chip": 1.0 if sector == "blue_chip" else 0.0,
+   138→        "sector_large_cap": 1.0 if sector == "large_cap" else 0.0,
+   139→        "sector_old_meme":  1.0 if sector == "old_meme" else 0.0,
+   140→        "sector_new_meme":  1.0 if sector == "new_meme" else 0.0,
+   141→        "sector_idx": float(idx),
+   142→    }
+   143→
+   144→
+   145→# ---------------------------------------------------------------------------
+   146→# Day-of-week cyclical encoding
+   147→# ---------------------------------------------------------------------------
+   148→
+   149→def encode_day_of_week(timestamp: float) -> Dict[str, float]:
+   150→    """
+   151→    Encode day of week as sin/cos cyclical features.
+   152→
+   153→    Args:
+   154→        timestamp: epoch seconds (UTC)
+   155→
+   156→    Returns:
+   157→        dict with:
+   158→            day_of_week_sin: sin(2*pi*dow/7)  in [-1, 1]
+   159→            day_of_week_cos: cos(2*pi*dow/7)  in [-1, 1]
+   160→            day_of_week:     integer 0-6 (0=Monday, 6=Sunday)
+   161→    """
+   162→    # Python's time.localtime().tm_wday: 0=Monday, 6=Sunday
+   163→    # Use gmtime for UTC consistency
+   164→    dow = time.gmtime(timestamp).tm_wday  # 0-6
+   165→    angle = 2.0 * math.pi * dow / 7.0
+   166→    return {
+   167→        "day_of_week_sin": math.sin(angle),
+   168→        "day_of_week_cos": math.cos(angle),
+   169→        "day_of_week": float(dow),
+   170→    }
+   171→
+   172→
+   173→# ---------------------------------------------------------------------------
+   174→# Binance API fetcher (with local SQLite cache)
+   175→# ---------------------------------------------------------------------------
+   176→
+   177→@dataclass
+   178→class BinanceFundingFetcher:
+   179→    """
+   180→    Fetches and caches Binance Futures funding rates per symbol.
+   181→
+   182→    Cache schema (SQLite):
+   183→        CREATE TABLE funding_rates (
+   184→            symbol TEXT,
+   185→            funding_time INTEGER,    -- epoch ms (when rate settles)
+   186→            funding_rate REAL,       -- e.g., 0.00002154 (0.002154%)
+   187→            mark_price REAL,         -- e.g., 62696.80 (USDT)
+   188→            fetched_at INTEGER,     -- epoch s (when we cached it)
+   189→            PRIMARY KEY (symbol, funding_time)
+   190→        )
+   191→    """
+   192→
+   193→    cache_dir: str = CACHE_DIR_DEFAULT
+   194→    cache_db: str = FUNDING_CACHE_DB
+   195→    timeout_seconds: int = 15
+   196→    user_agent: str = "ppmt-v7/1.0"
+   197→
+   198→    # Binance returns at most 1000 records per request
+   199→    BINANCE_MAX_LIMIT = 1000
+   200→
+   201→    def __post_init__(self) -> None:
+   202→        os.makedirs(self.cache_dir, exist_ok=True)
+   203→        # Eagerly create the cache DB so it exists immediately after construction
+   204→        self._connect().close()
+   205→
+   206→    @property
+   207→    def cache_path(self) -> str:
+   208→        return os.path.join(self.cache_dir, self.cache_db)
+   209→
+   210→    def _connect(self) -> sqlite3.Connection:
+   211→        conn = sqlite3.connect(self.cache_path)
+   212→        conn.execute("""
+   213→            CREATE TABLE IF NOT EXISTS funding_rates (
+   214→                symbol TEXT NOT NULL,
+   215→                funding_time INTEGER NOT NULL,
+   216→                funding_rate REAL NOT NULL,
+   217→                mark_price REAL,
+   218→                fetched_at INTEGER NOT NULL,
+   219→                PRIMARY KEY (symbol, funding_time)
+   220→            )
+   221→        """)
+   222→        conn.execute("CREATE INDEX IF NOT EXISTS idx_symbol_time ON funding_rates(symbol, funding_time)")
+   223→        conn.commit()
+   224→        return conn
+   225→
+   226→    def _fetch_binance(
+   227→        self,
+   228→        symbol: str,
+   229→        start_time_ms: Optional[int] = None,
+   230→        end_time_ms: Optional[int] = None,
+   231→        limit: int = 1000,
+   232→    ) -> List[Dict[str, Any]]:
+   233→        """
+   234→        Fetch funding rates from Binance API.
+   235→
+   236→        Args:
+   237→            symbol: 'BTCUSDT' (must include USDT suffix)
+   238→            start_time_ms: optional epoch ms (inclusive)
+   239→            end_time_ms: optional epoch ms (exclusive)
+   240→            limit: max records (1-1000)
+   241→        """
+   242→        params = {"symbol": symbol, "limit": min(limit, self.BINANCE_MAX_LIMIT)}
+   243→        if start_time_ms is not None:
+   244→            params["startTime"] = start_time_ms
+   245→        if end_time_ms is not None:
+   246→            params["endTime"] = end_time_ms
+   247→        url = f"{BINANCE_FAPI_BASE}/fapi/v1/fundingRate?{urllib.parse.urlencode(params)}"
+   248→
+   249→        req = urllib.request.Request(url, headers={"User-Agent": self.user_agent})
+   250→        with urllib.request.urlopen(req, timeout=self.timeout_seconds) as r:
+   251→            data = json.loads(r.read())
+   252→        return data
+   253→
+   254→    def fetch_and_cache(
+   255→        self,
+   256→        symbol: str,
+   257→        start_time_ms: Optional[int] = None,
+   258→        end_time_ms: Optional[int] = None,
+   259→        max_pages: int = 50,
+   260→    ) -> int:
+   261→        """
+   262→        Fetch funding rates from Binance and store in local cache.
+   263→
+   264→        Handles pagination: if more than `limit` records are available,
+   265→        fetches in batches using startTime/endTime.
+   266→
+   267→        Args:
+   268→            symbol: 'BTCUSDT' (internal name; will be mapped to Binance API
+   269→                    symbol via to_binance_symbol, e.g., 'SHIBUSDT' → '1000SHIBUSDT')
+   270→            start_time_ms: optional epoch ms
+   271→            end_time_ms: optional epoch ms
+   272→            max_pages: safety cap on number of API calls
+   273→
+   274→        Returns:
+   275→            Number of new records cached.
+   276→        """
+   277→        binance_symbol = to_binance_symbol(symbol)
+   278→        conn = self._connect()
+   279→        try:
+   280→            n_inserted = 0
+   281→            cursor_ms = start_time_ms
+   282→            for _ in range(max_pages):
+   283→                batch = self._fetch_binance(binance_symbol, start_time_ms=cursor_ms, end_time_ms=end_time_ms)
+   284→                if not batch:
+   285→                    break
+   286→                # Insert into cache (under the INTERNAL symbol, not Binance's)
+   287→                rows = []
+   288→                for r in batch:
+   289→                    rows.append((
+   290→                        symbol,
+   291→                        int(r["fundingTime"]),
+   292→                        float(r["fundingRate"]),
+   293→                        float(r.get("markPrice", 0.0) or 0.0),
+   294→                        int(time.time()),
+   295→                    ))
+   296→                conn.executemany("""
+   297→                    INSERT OR REPLACE INTO funding_rates
+   298→                    (symbol, funding_time, funding_rate, mark_price, fetched_at)
+   299→                    VALUES (?, ?, ?, ?, ?)
+   300→                """, rows)
+   301→                conn.commit()
+   302→                n_inserted += len(rows)
+   303→
+   304→                # Advance cursor: last fundingTime + 1ms
+   305→                last_time = int(batch[-1]["fundingTime"])
+   306→                cursor_ms = last_time + 1
+   307→                if end_time_ms is not None and cursor_ms >= end_time_ms:
+   308→                    break
+   309→                if len(batch) < self.BINANCE_MAX_LIMIT:
+   310→                    break  # no more pages
+   311→            return n_inserted
+   312→        finally:
+   313→            conn.close()
+   314→
+   315→    def get_last_settled_rate(
+   316→        self,
+   317→        symbol: str,
+   318→        current_ts_seconds: float,
+   319→    ) -> Tuple[float, float]:
+   320→        """
+   321→        Get the most recent SETTLED funding rate at or before current_ts.
+   322→
+   323→        Anti-leakage: returns the rate that was already settled before
+   324→        current_ts (funding_time <= current_ts). The NEXT upcoming rate
+   325→        is NOT used (it would be lookahead).
+   326→
+   327→        Args:
+   328→            symbol: 'BTCUSDT'
+   329→            current_ts_seconds: epoch seconds of the candle close
+   330→
+   331→        Returns:
+   332→            (funding_rate, funding_time_seconds)
+   333→            Returns (0.0, 0.0) if no settled rate in cache.
+   334→        """
+   335→        current_ms = int(current_ts_seconds * 1000)
+   336→        conn = self._connect()
+   337→        try:
+   338→            cur = conn.execute("""
+   339→                SELECT funding_rate, funding_time
+   340→                FROM funding_rates
+   341→                WHERE symbol = ? AND funding_time <= ?
+   342→                ORDER BY funding_time DESC
+   343→                LIMIT 1
+   344→            """, (symbol, current_ms))
+   345→            row = cur.fetchone()
+   346→            if row is None:
+   347→                return (0.0, 0.0)
+   348→            return (float(row[0]), int(row[1]) / 1000.0)
+   349→        finally:
+   350→            conn.close()
+   351→
+   352→    def get_history(
+   353→        self,
+   354→        symbol: str,
+   355→        end_ts_seconds: float,
+   356→        lookback_seconds: int = 30 * 24 * 3600,  # 30 days
+   357→    ) -> List[Tuple[float, float]]:
+   358→        """
+   359→        Get historical funding rates for z-score computation.
+   360→
+   361→        Args:
+   362→            symbol: 'BTCUSDT'
+   363→            end_ts_seconds: epoch seconds (exclusive upper bound)
+   364→            lookback_seconds: how far back to fetch (default 30 days)
+   365→
+   366→        Returns:
+   367→            List of (funding_rate, funding_time_seconds), oldest first.
+   368→        """
+   369→        start_ms = int((end_ts_seconds - lookback_seconds) * 1000)
+   370→        end_ms = int(end_ts_seconds * 1000)
+   371→        conn = self._connect()
+   372→        try:
+   373→            cur = conn.execute("""
+   374→                SELECT funding_rate, funding_time
+   375→                FROM funding_rates
+   376→                WHERE symbol = ? AND funding_time >= ? AND funding_time <= ?
+   377→                ORDER BY funding_time ASC
+   378→            """, (symbol, start_ms, end_ms))
+   379→            return [(float(r[0]), int(r[1]) / 1000.0) for r in cur.fetchall()]
+   380→        finally:
+   381→            conn.close()
+   382→
+   383→    def compute_funding_z(
+   384→        self,
+   385→        symbol: str,
+   386→        current_ts_seconds: float,
+   387→        window: int = FUNDING_Z_WINDOW,
+   388→    ) -> float:
+   389→        """
+   390→        Compute the z-score of the current funding rate vs the last
+   391→        `window` settled rates (default 90 = 30 days at 8h intervals).
+   392→
+   393→        z = (current_rate - mean) / std
+   394→
+   395→        Args:
+   396→            symbol: 'BTCUSDT'
+   397→            current_ts_seconds: epoch seconds
+   398→            window: number of historical settled rates to use
+   399→
+   400→        Returns:
+   401→            z-score (float). Returns 0.0 if insufficient history.
+   402→        """
+   403→        history = self.get_history(
+   404→            symbol,
+   405→            end_ts_seconds=current_ts_seconds,
+   406→            lookback_seconds=window * FUNDING_INTERVAL_SECONDS + 86400,  # +1 day buffer
+   407→        )
+   408→        if len(history) < max(10, window // 3):
+   409→            return 0.0  # not enough data
+   410→        # Use the last `window` rates
+   411→        rates = [r[0] for r in history[-window:]]
+   412→        n = len(rates)
+   413→        mean = sum(rates) / n
+   414→        var = sum((r - mean) ** 2 for r in rates) / max(1, n - 1)
+   415→        std = math.sqrt(var)
+   416→        if std < 1e-9:
+   417→            return 0.0
+   418→        current_rate, _ = self.get_last_settled_rate(symbol, current_ts_seconds)
+   419→        return (current_rate - mean) / std
+   420→
+   421→
+   422→# ---------------------------------------------------------------------------
+   423→# Binance Open Interest fetcher
+   424→# ---------------------------------------------------------------------------
+   425→
+   426→@dataclass
+   427→class BinanceOIFetcher:
+   428→    """
+   429→    Fetches and caches Binance Futures Open Interest history per symbol.
+   430→
+   431→    Cache schema (SQLite):
+   432→        CREATE TABLE oi_history (
+   433→            symbol TEXT,
+   434→            timestamp INTEGER,        -- epoch ms (start of 5m period)
+   435→            open_interest REAL,       -- sumOpenInterest (in base asset units)
+   436→            open_interest_value REAL, -- sumOpenInterestValue (in USDT)
+   437→            fetched_at INTEGER,
+   438→            PRIMARY KEY (symbol, timestamp)
+   439→        )
+   440→    """
+   441→
+   442→    cache_dir: str = CACHE_DIR_DEFAULT
+   443→    cache_db: str = OI_CACHE_DB
+   444→    timeout_seconds: int = 15
+   445→    user_agent: str = "ppmt-v7/1.0"
+   446→    period: str = OI_PERIOD
+   447→
+   448→    BINANCE_MAX_LIMIT = 500  # openInterestHist endpoint limit
+   449→
+   450→    def __post_init__(self) -> "os.makedirs":
+   451→        os.makedirs(self.cache_dir, exist_ok=True)
+   452→        # Eagerly create the cache DB so it exists immediately after construction
+   453→        self._connect().close()
+   454→
+   455→    @property
+   456→    def cache_path(self) -> str:
+   457→        return os.path.join(self.cache_dir, self.cache_db)
+   458→
+   459→    def _connect(self) -> sqlite3.Connection:
+   460→        conn = sqlite3.connect(self.cache_path)
+   461→        conn.execute("""
+   462→            CREATE TABLE IF NOT EXISTS oi_history (
+   463→                symbol TEXT NOT NULL,
+   464→                timestamp INTEGER NOT NULL,
+   465→                open_interest REAL NOT NULL,
+   466→                open_interest_value REAL,
+   467→                fetched_at INTEGER NOT NULL,
+   468→                PRIMARY KEY (symbol, timestamp)
+   469→            )
+   470→        """)
+   471→        conn.execute("CREATE INDEX IF NOT EXISTS idx_oi_symbol_ts ON oi_history(symbol, timestamp)")
+   472→        conn.commit()
+   473→        return conn
+   474→
+   475→    def _fetch_binance(
+   476→        self,
+   477→        symbol: str,
+   478→        start_time_ms: Optional[int] = None,
+   479→        end_time_ms: Optional[int] = None,
+   480→        limit: int = 500,
+   481→    ) -> List[Dict[str, Any]]:
+   482→        params = {
+   483→            "symbol": symbol,
+   484→            "period": self.period,
+   485→            "limit": min(limit, self.BINANCE_MAX_LIMIT),
+   486→        }
+   487→        if start_time_ms is not None:
+   488→            params["startTime"] = start_time_ms
+   489→        if end_time_ms is not None:
+   490→            params["endTime"] = end_time_ms
+   491→        url = f"{BINANCE_FAPI_BASE}/futures/data/openInterestHist?{urllib.parse.urlencode(params)}"
+   492→
+   493→        req = urllib.request.Request(url, headers={"User-Agent": self.user_agent})
+   494→        with urllib.request.urlopen(req, timeout=self.timeout_seconds) as r:
+   495→            data = json.loads(r.read())
+   496→        return data
+   497→
+   498→    def fetch_and_cache(
+   499→        self,
+   500→        symbol: str,
+   501→        start_time_ms: Optional[int] = None,
+   502→        end_time_ms: Optional[int] = None,
+   503→        max_pages: int = 100,
+   504→    ) -> int:
+   505→        """
+   506→        Fetch OI history from Binance and store in local cache.
+   507→
+   508→        Args:
+   509→            symbol: 'BTCUSDT' (internal name; mapped to Binance API symbol
+   510→                    via to_binance_symbol, e.g., 'SHIBUSDT' → '1000SHIBUSDT')
+   511→
+   512→        Returns: number of new records cached.
+   513→        """
+   514→        binance_symbol = to_binance_symbol(symbol)
+   515→        conn = self._connect()
+   516→        try:
+   517→            n_inserted = 0
+   518→            cursor_ms = start_time_ms
+   519→            for _ in range(max_pages):
+   520→                batch = self._fetch_binance(binance_symbol, start_time_ms=cursor_ms, end_time_ms=end_time_ms)
+   521→                if not batch:
+   522→                    break
+   523→                rows = []
+   524→                for r in batch:
+   525→                    rows.append((
+   526→                        symbol,  # store under INTERNAL symbol
+   527→                        int(r["timestamp"]),
+   528→                        float(r["sumOpenInterest"]),
+   529→                        float(r["sumOpenInterestValue"]),
+   530→                        int(time.time()),
+   531→                    ))
+   532→                conn.executemany("""
+   533→                    INSERT OR REPLACE INTO oi_history
+   534→                    (symbol, timestamp, open_interest, open_interest_value, fetched_at)
+   535→                    VALUES (?, ?, ?, ?, ?)
+   536→                """, rows)
+   537→                conn.commit()
+   538→                n_inserted += len(rows)
+   539→
+   540→                # Advance cursor
+   541→                last_ts = int(batch[-1]["timestamp"])
+   542→                cursor_ms = last_ts + 1
+   543→                if end_time_ms is not None and cursor_ms >= end_time_ms:
+   544→                    break
+   545→                if len(batch) < self.BINANCE_MAX_LIMIT:
+   546→                    break
+   547→            return n_inserted
+   548→        finally:
+   549→            conn.close()
+   550→
+   551→    def get_oi_at(self, symbol: str, ts_seconds: float) -> Optional[float]:
+   552→        """
+   553→        Get the OI snapshot whose timestamp is the LARGEST value <= ts_seconds.
+   554→
+   555→        Anti-leakage: only uses OI data that was already observable at ts_seconds.
+   556→        Returns None if no data.
+   557→        """
+   558→        ts_ms = int(ts_seconds * 1000)
+   559→        conn = self._connect()
+   560→        try:
+   561→            cur = conn.execute("""
+   562→                SELECT open_interest
+   563→                FROM oi_history
+   564→                WHERE symbol = ? AND timestamp <= ?
+   565→                ORDER BY timestamp DESC
+   566→                LIMIT 1
+   567→            """, (symbol, ts_ms))
+   568→            row = cur.fetchone()
+   569→            return float(row[0]) if row else None
+   570→        finally:
+   571→            conn.close()
+   572→
+   573→    def compute_oi_change(
+   574→        self,
+   575→        symbol: str,
+   576→        current_ts_seconds: float,
+   577→        lookback_seconds: int,
+   578→    ) -> float:
+   579→        """
+   580→        Compute % change in OI vs `lookback_seconds` ago.
+   581→
+   582→        change = (oi_now - oi_then) / oi_then * 100
+   583→
+   584→        Args:
+   585→            symbol: 'BTCUSDT'
+   586→            current_ts_seconds: epoch seconds of the candle close
+   587→            lookback_seconds: how far back to compare (e.g., 3600 for 1h)
+   588→
+   589→        Returns:
+   590→            % change (float). Returns 0.0 if either point missing.
+   591→        """
+   592→        oi_now = self.get_oi_at(symbol, current_ts_seconds)
+   593→        if oi_now is None or oi_now <= 0:
+   594→            return 0.0
+   595→        oi_then = self.get_oi_at(symbol, current_ts_seconds - lookback_seconds)
+   596→        if oi_then is None or oi_then <= 0:
+   597→            return 0.0
+   598→        return (oi_now - oi_then) / oi_then * 100.0
+   599→
+   600→
+   601→# ---------------------------------------------------------------------------
+   602→# Combined feature extractor
+   603→# ---------------------------------------------------------------------------
+   604→
+   605→@dataclass
+   606→class FeaturesExtrasExtractor:
+   607→    """
+   608→    Combines all F4 features into a single dict.
+   609→
+   610→    Usage:
+   611→        extractor = FeaturesExtrasExtractor()
+   612→        # Pre-fetch funding + OI history (one-time, per symbol)
+   613→        extractor.prefetch_symbol("BTCUSDT", start_ts, end_ts)
+   614→        # Compute features at inference time
+   615→        features = extractor.extract(symbol="BTCUSDT", ts=candle_close_ts)
+   616→    """
+   617→
+   618→    cache_dir: str = CACHE_DIR_DEFAULT
+   619→    funding_fetcher: BinanceFundingFetcher = field(default_factory=BinanceFundingFetcher)
+   620→    oi_fetcher: BinanceOIFetcher = field(default_factory=BinanceOIFetcher)
+   621→
+   622→    # Feature names produced by extract()
+   623→    FEATURE_NAMES: List[str] = field(default_factory=lambda: [
+   624→        "funding_rate",
+   625→        "funding_rate_z",
+   626→        "oi_change_1h",
+   627→        "oi_change_4h",
+   628→        "sector_blue_chip", "sector_large_cap", "sector_old_meme", "sector_new_meme",
+   629→        "sector_idx",
+   630→        "day_of_week_sin", "day_of_week_cos", "day_of_week",
+   631→    ])
+   632→
+   633→    def __post_init__(self) -> None:
+   634→        # Ensure fetchers share cache_dir
+   635→        self.funding_fetcher.cache_dir = self.cache_dir
+   636→        self.oi_fetcher.cache_dir = self.cache_dir
+   637→
+   638→    # ------------- prefetch -------------
+   639→
+   640→    def prefetch_symbol(
+   641→        self,
+   642→        symbol: str,
+   643→        start_ts_seconds: float,
+   644→        end_ts_seconds: float,
+   645→        fetch_funding: bool = True,
+   646→        fetch_oi: bool = True,
+   647→    ) -> Dict[str, int]:
+   648→        """
+   649→        Fetch and cache funding + OI history for a symbol between
+   650→        [start_ts, end_ts]. Idempotent: re-running won't duplicate data
+   651→        (SQLite INSERT OR REPLACE).
+   652→
+   653→        Returns: dict with counts {funding_new, oi_new}.
+   654→        """
+   655→        result = {"funding_new": 0, "oi_new": 0}
+   656→        start_ms = int(start_ts_seconds * 1000)
+   657→        end_ms = int(end_ts_seconds * 1000)
+   658→
+   659→        if fetch_funding:
+   660→            try:
+   661→                result["funding_new"] = self.funding_fetcher.fetch_and_cache(
+   662→                    symbol, start_time_ms=start_ms, end_time_ms=end_ms,
+   663→                )
+   664→            except (urllib.error.URLError, urllib.error.HTTPError) as e:
+   665→                print(f"  ! funding fetch failed for {symbol}: {e}")
+   666→        if fetch_oi:
+   667→            try:
+   668→                result["oi_new"] = self.oi_fetcher.fetch_and_cache(
+   669→                    symbol, start_time_ms=start_ms, end_time_ms=end_ms,
+   670→                )
+   671→            except (urllib.error.URLError, urllib.error.HTTPError) as e:
+   672→                print(f"  ! OI fetch failed for {symbol}: {e}")
+   673→        return result
+   674→
+   675→    # ------------- extract -------------
+   676→
+   677→    def extract(self, symbol: str, ts_seconds: float) -> Dict[str, float]:
+   678→        """
+   679→        Extract all F4 features for a (symbol, timestamp) pair.
+   680→
+   681→        Args:
+   682→            symbol: 'BTCUSDT' (must include USDT suffix for API)
+   683→            ts_seconds: epoch seconds of the candle close
+   684→
+   685→        Returns:
+   686→            Dict with all F4 feature names (12 features).
+   687→            Missing data → 0.0 (safe defaults).
+   688→        """
+   689→        features: Dict[str, float] = {}
+   690→
+   691→        # Funding rate + z-score
+   692→        funding_rate, _ = self.funding_fetcher.get_last_settled_rate(symbol, ts_seconds)
+   693→        features["funding_rate"] = funding_rate
+   694→        features["funding_rate_z"] = self.funding_fetcher.compute_funding_z(symbol, ts_seconds)
+   695→
+   696→        # OI changes
+   697→        features["oi_change_1h"] = self.oi_fetcher.compute_oi_change(
+   698→            symbol, ts_seconds, lookback_seconds=3600,
+   699→        )
+   700→        features["oi_change_4h"] = self.oi_fetcher.compute_oi_change(
+   701→            symbol, ts_seconds, lookback_seconds=4 * 3600,
+   702→        )
+   703→
+   704→        # Sector one-hot
+   705→        features.update(encode_sector_one_hot(symbol))
+   706→
+   707→        # Day of week
+   708→        features.update(encode_day_of_week(ts_seconds))
+   709→
+   710→        return features
+   711→
+   712→    def extract_batch(
+   713→        self,
+   714→        symbol: str,
+   715→        timestamps: List[float],
+   716→    ) -> List[Dict[str, float]]:
+   717→        """
+   718→        Extract features for a list of timestamps (same symbol).
+   719→        Useful for backtest: avoids redundant DB connections per row.
+   720→        """
+   721→        # Single connection batch would be faster, but the simple loop
+   722→        # is good enough for now — each query is indexed.
+   723→        return [self.extract(symbol, ts) for ts in timestamps]
+   724→
+   725→
+   726→# ---------------------------------------------------------------------------
+   727→# Module-level helpers
+   728→# ---------------------------------------------------------------------------
+   729→
+   730→def get_feature_names() -> List[str]:
+   731→    """Return the list of F4 feature names (12 total)."""
+   732→    return [
+   733→        "funding_rate",
+   734→        "funding_rate_z",
+   735→        "oi_change_1h",
+   736→        "oi_change_4h",
+   737→        "sector_blue_chip", "sector_large_cap", "sector_old_meme", "sector_new_meme",
+   738→        "sector_idx",
+   739→        "day_of_week_sin", "day_of_week_cos", "day_of_week",
+   740→    ]
+   741→
+   742→
+   743→def is_funding_data_available(symbol: str, ts_seconds: float, cache_dir: str = CACHE_DIR_DEFAULT) -> bool:
+   744→    """Quick check: is there at least one funding rate <= ts_seconds in cache?"""
+   745→    ff = BinanceFundingFetcher(cache_dir=cache_dir)
+   746→    rate, _ = ff.get_last_settled_rate(symbol, ts_seconds)
+   747→    return rate != 0.0
+   748→
+   749→
+   750→def is_oi_data_available(symbol: str, ts_seconds: float, cache_dir: str = CACHE_DIR_DEFAULT) -> bool:
+   751→    """Quick check: is there OI data <= ts_seconds in cache?"""
+   752→    of = BinanceOIFetcher(cache_dir=cache_dir)
+   753→    oi = of.get_oi_at(symbol, ts_seconds)
+   754→    return oi is not None
+   755→
