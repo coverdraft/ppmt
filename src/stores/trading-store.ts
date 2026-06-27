@@ -160,7 +160,7 @@ export interface LearningStagePoint {
 export interface TradingState {
   // Connection
   isConnected: boolean
-  engineMode: 'demo' | 'live' | 'disconnected'
+  engineMode: 'demo' | 'paper' | 'live' | 'disconnected'
   isRunning: boolean
 
   // Market

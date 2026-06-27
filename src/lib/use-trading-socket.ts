@@ -1,32 +1,34 @@
 /**
- * useTradingSocket — Hook to connect to PPMT Trading Bridge via Socket.io.
+ * useTradingSocket — Hook for PPMT Trading Terminal.
  *
- * Handles connection, state updates, and command emission.
- * Falls back to a built-in client-side DemoEngine when the bridge
- * is unreachable, so the terminal always has data flowing.
- * Now supports multi-token, portfolio, and money manager data.
+ * NEW: Uses PaperTradingEngine with LIVE Binance prices instead of DemoEngine.
+ * The terminal now operates in true paper-trading mode:
+ *  - Real-time prices from Binance public WebSocket (no API key)
+ *  - Manual BUY / SELL / CLOSE on any of 25 supported tokens
+ *  - Realistic fees (0.1% taker) and slippage (0.05%)
+ *  - Starting capital: 10,000 USDT — can grow or shrink for real
  *
- * Behaviour:
- *  - If NEXT_PUBLIC_BRIDGE_URL is NOT set, we never attempt a socket
- *    connection (avoids /socket.io 404 spam against the Next.js dev
- *    server). Demo mode starts immediately.
- *  - If NEXT_PUBLIC_BRIDGE_URL IS set, we try socket.io. On the first
- *    connect_error we log it once; subsequent reconnection errors are
- *    silenced to keep the console clean. After BRIDGE_FALLBACK_DELAY
- *    we still start demo mode in parallel so the UI always has data.
+ * If NEXT_PUBLIC_BRIDGE_URL is set, the hook ALSO tries to connect to the
+ * Python backend via Socket.io for live PPMT signals. If that connection
+ * fails, the paper engine keeps running independently on live prices.
  */
 'use client'
 
 import { useEffect, useRef, useCallback, useState } from 'react'
 import { useTradingStore } from '@/stores/trading-store'
-import { DemoEngine } from '@/lib/demo-engine'
+import { LivePriceFeed } from '@/lib/live-price-feed'
+import {
+  PaperTradingEngine,
+  SUPPORTED_TOKENS,
+  INITIAL_CAPITAL,
+} from '@/lib/paper-trading-engine'
 
-const BRIDGE_FALLBACK_DELAY = 3000 // ms before falling back to demo
+const BRIDGE_FALLBACK_DELAY = 3000
 
 export function useTradingSocket() {
   const socketRef = useRef<any>(null)
-  const demoRef = useRef<DemoEngine | null>(null)
-  const usingDemoRef = useRef(false)
+  const priceFeedRef = useRef<LivePriceFeed | null>(null)
+  const paperRef = useRef<PaperTradingEngine | null>(null)
   const mountedRef = useRef(false)
   const firstErrorLoggedRef = useRef(false)
   const setState = useTradingStore((s) => s.setState)
@@ -43,10 +45,10 @@ export function useTradingSocket() {
     if (!ready) return
 
     let socket: any = null
-    let demoEngine: DemoEngine | null = null
+    let paperEngine: PaperTradingEngine | null = null
+    let priceFeed: LivePriceFeed | null = null
     let demoTimeout: ReturnType<typeof setTimeout> | null = null
 
-    // Apply trading-state data to the store (only if still mounted)
     const applyState = (data: any) => {
       if (!mountedRef.current) return
       setState({
@@ -87,49 +89,52 @@ export function useTradingSocket() {
         candlesProcessed: data.candles_processed,
         websocketStatus: data.websocket_status,
         isConnected: true,
-        // Multi-token
         tokenStates: data.token_states || {},
-        activeTokens: data.active_tokens || ['SOL/USDT'],
-        selectedToken: data.selected_token || 'SOL/USDT',
-        // Money manager
+        activeTokens: data.active_tokens || ['BTC/USDT'],
+        selectedToken: data.selected_token || 'BTC/USDT',
         moneyManager: data.money_manager || undefined,
         kellyPercent: data.kelly_percent || 0,
         suggestedPositionSize: data.suggested_position_size || 0,
         riskRewardRatio: data.risk_reward_ratio || 0,
       })
-    }
-
-    // Start client-side demo engine as fallback
-    const startDemoFallback = () => {
-      if (usingDemoRef.current) return
-      usingDemoRef.current = true
-      console.log('[Demo] Starting client-side demo engine (bridge unreachable)')
-      demoEngine = new DemoEngine()
-      demoRef.current = demoEngine
+      // Set connection status: paper engine always reports connected once
+      // we have a price feed, even if the Python bridge is not running.
       if (mountedRef.current) {
-        setConnected(true, 'demo')
+        setConnected(true, data.mode || 'paper')
       }
-      demoEngine.startTicking((state) => {
-        applyState(state)
-      })
     }
 
-    // Try Socket.io connection to the bridge
+    // ─── Start Paper Trading Engine with Live Prices ──────────
+    const startPaperEngine = () => {
+      if (paperEngine) return
+      console.log('[Paper] Starting paper trading engine with live Binance prices')
+      console.log(`[Paper] Initial capital: ${INITIAL_CAPITAL} USDT`)
+      console.log(`[Paper] Supported tokens: ${SUPPORTED_TOKENS.length}`)
+
+      // LivePriceFeed subscribes to all supported tokens by default
+      priceFeed = new LivePriceFeed([...SUPPORTED_TOKENS])
+      priceFeedRef.current = priceFeed
+
+      paperEngine = new PaperTradingEngine(priceFeed)
+      paperRef.current = paperEngine
+
+      paperEngine.startTicking((state) => {
+        applyState(state)
+      }, 1500)
+    }
+
+    startPaperEngine()
+
+    // ─── Optional: connect to Python bridge for PPMT signals ──
     const trySocketConnection = () => {
       const bridgeUrl = process.env.NEXT_PUBLIC_BRIDGE_URL
-
-      // If no bridge URL is configured, skip socket attempt entirely
-      // and go straight to demo mode. This prevents /socket.io 404 spam
-      // against the Next.js dev server origin.
       if (!bridgeUrl) {
-        console.log('[Socket] No NEXT_PUBLIC_BRIDGE_URL set — using demo mode directly')
-        startDemoFallback()
+        console.log('[Socket] No NEXT_PUBLIC_BRIDGE_URL set — paper mode only')
         return
       }
 
       import('socket.io-client').then(({ io }) => {
         if (!mountedRef.current) return
-
         socket = io(bridgeUrl, {
           path: '/socket.io',
           transports: ['polling', 'websocket'],
@@ -139,82 +144,47 @@ export function useTradingSocket() {
           reconnectionDelay: 2000,
           timeout: 5000,
         })
-
         socketRef.current = socket
 
         socket.on('connect', () => {
-          console.log('[Socket] Connected to Trading Bridge at', bridgeUrl)
+          console.log('[Socket] Connected to Python Bridge at', bridgeUrl)
           firstErrorLoggedRef.current = false
-          // Stop demo if it was running
-          if (demoEngine) {
-            demoEngine.stopTicking()
-            demoEngine = null
-            demoRef.current = null
-            usingDemoRef.current = false
-          }
-          if (demoTimeout) {
-            clearTimeout(demoTimeout)
-            demoTimeout = null
-          }
         })
 
         socket.on('disconnect', () => {
-          console.log('[Socket] Disconnected from Trading Bridge')
-          if (!usingDemoRef.current && mountedRef.current) {
-            setConnected(false, 'disconnected')
-          }
+          console.log('[Socket] Disconnected from Python Bridge (paper engine keeps running)')
         })
 
         socket.on('engine-status', (data: { connected: boolean; mode: string }) => {
-          if (mountedRef.current) {
-            setConnected(data.connected, data.mode)
-          }
+          // Don't override paper's connected status — bridge is supplementary
+          console.log('[Socket] Engine status from bridge:', data)
         })
 
         socket.on('trading-state', (data: any) => {
-          applyState(data)
-        })
-
-        socket.on('kill-switch-activated', () => {
-          if (mountedRef.current) {
-            setState({ killSwitchActive: true, isRunning: false })
+          // Bridge can supplement with PPMT signals — merge with paper state
+          if (data.latest_signal && mountedRef.current) {
+            setState({ latestSignal: data.latest_signal })
           }
-        })
-
-        socket.on('command-result', (data: { success: boolean; message: string }) => {
-          console.log('[CMD]', data.message)
         })
 
         socket.on('connect_error', (err: any) => {
-          // Log the FIRST connect_error once, then silence subsequent
-          // reconnection retries to keep the console clean.
           if (!firstErrorLoggedRef.current) {
             console.warn(
               `[Socket] Bridge at ${bridgeUrl} unreachable: ${err.message}. ` +
-              `Falling back to demo mode. (further retries silenced)`
+              `Paper engine continues on live prices. (further retries silenced)`
             )
             firstErrorLoggedRef.current = true
-          }
-          // Don't override demo state once demo is running
-          if (!usingDemoRef.current && mountedRef.current) {
-            setConnected(false, 'disconnected')
           }
         })
       }).catch((err) => {
         console.error('[Socket] Failed to load socket.io-client:', err)
-        startDemoFallback()
       })
     }
 
-    // Schedule demo fallback in case bridge is unreachable
-    // (only relevant when bridge URL IS set — otherwise trySocketConnection
-    // already starts demo synchronously)
     const bridgeUrl = process.env.NEXT_PUBLIC_BRIDGE_URL
     if (bridgeUrl) {
       demoTimeout = setTimeout(() => {
-        if (!socket || !socket.connected) {
-          startDemoFallback()
-        }
+        // no-op — paper engine is already running; bridge is supplementary
       }, BRIDGE_FALLBACK_DELAY)
     }
 
@@ -222,31 +192,29 @@ export function useTradingSocket() {
 
     return () => {
       if (demoTimeout) clearTimeout(demoTimeout)
-      if (demoEngine) {
-        demoEngine.stopTicking()
-        demoEngine = null
-        demoRef.current = null
+      if (paperEngine) {
+        paperEngine.stopTicking()
+        paperEngine = null
+        paperRef.current = null
+      }
+      if (priceFeed) {
+        priceFeed.disconnect()
+        priceFeed = null
+        priceFeedRef.current = null
       }
       if (socket) {
         socket.disconnect()
         socket = null
         socketRef.current = null
       }
-      usingDemoRef.current = false
       firstErrorLoggedRef.current = false
     }
   }, [ready, setState, setConnected])
 
   const emit = useCallback((event: string, data?: any) => {
-    // Try socket first
-    if (socketRef.current?.connected) {
-      socketRef.current.emit(event, data)
-      return
-    }
-    // Fall back to demo engine
-    const demo = demoRef.current
-    if (!demo) {
-      console.warn('[Demo] No demo engine available for event:', event)
+    const paper = paperRef.current
+    if (!paper) {
+      console.warn('[Paper] No paper engine available for event:', event)
       return
     }
 
@@ -285,10 +253,9 @@ export function useTradingSocket() {
         tradeHistory: state.trade_history || [],
         candlesProcessed: state.candles_processed,
         isConnected: true,
-        // Multi-token
         tokenStates: state.token_states || {},
-        activeTokens: state.active_tokens || ['SOL/USDT'],
-        selectedToken: state.selected_token || 'SOL/USDT',
+        activeTokens: state.active_tokens || ['BTC/USDT'],
+        selectedToken: state.selected_token || 'BTC/USDT',
         moneyManager: state.money_manager || undefined,
         kellyPercent: state.kelly_percent || 0,
         suggestedPositionSize: state.suggested_position_size || 0,
@@ -298,64 +265,89 @@ export function useTradingSocket() {
 
     switch (event) {
       case 'start-trading':
-        if (data?.symbol) demo.setSymbol(data.symbol)
-        if (data?.timeframe) demo.setTimeframe(data.timeframe)
-        // Re-enable new entries (ticker keeps running, was never stopped)
-        demo.setTradingEnabled(true)
-        // If ticker was stopped (e.g. component remount), start it
-        if (!demo.isRunning()) {
-          demo.startTicking(storeUpdate)
-        }
+        paper.setTradingEnabled(true)
         useTradingStore.getState().setState({ isRunning: true, killSwitchActive: false })
-        console.log('[Demo] Trading started — new entries enabled, ticker running')
+        console.log('[Paper] Trading enabled — new entries allowed')
         break
       case 'stop-trading':
-        // IMPORTANT: do NOT stop the ticker. Only disable new entries.
-        // Prices, signals, equity curve, and open-position management
-        // keep flowing — terminal stays in real-time per user requirement.
-        demo.setTradingEnabled(false)
+        paper.setTradingEnabled(false)
         useTradingStore.getState().setState({ isRunning: false })
-        console.log('[Demo] Trading stopped — no new entries, ticker still running')
+        console.log('[Paper] Trading paused — no new entries (positions remain open)')
         break
       case 'kill-switch':
-        // Closes all open positions and disables new entries.
-        // The ticker keeps running so the user can see post-kill state
-        // and resume later with Start Trading.
-        demo.killSwitch()
+        paper.killSwitch()
         useTradingStore.getState().setState({ killSwitchActive: true, isRunning: false })
-        console.log('[Demo] Kill switch activated — positions closed, ticker still running')
+        console.log('[Paper] Kill switch — all positions closed, new entries disabled')
         break
       case 'toggle-auto':
-        console.log('[Demo] Auto mode toggled:', data?.enabled)
+        paper.setAutoMode(!!data?.enabled)
+        useTradingStore.getState().setState({ autoMode: !!data?.enabled })
         break
       case 'switch-symbol':
-        if (data?.symbol) demo.setSymbol(data.symbol)
-        useTradingStore.getState().setState({ selectedToken: data?.symbol || 'SOL/USDT' })
-        console.log('[Demo] Switched symbol:', data?.symbol)
+        if (data?.symbol) {
+          paper.setSymbol(data.symbol)
+          useTradingStore.getState().setState({ selectedToken: data.symbol, symbol: data.symbol })
+          console.log('[Paper] Selected symbol:', data.symbol)
+        }
         break
       case 'switch-timeframe':
-        if (data?.timeframe) demo.setTimeframe(data.timeframe)
-        console.log('[Demo] Switched timeframe:', data?.timeframe)
+        paper.setTimeframe(data?.timeframe || 'live')
         break
-      case 'toggle-token':
-        if (data?.symbol) {
-          const store = useTradingStore.getState()
-          const isActive = store.activeTokens.includes(data.symbol)
-          const newActive = isActive
-            ? store.activeTokens.filter(s => s !== data.symbol)
-            : [...store.activeTokens, data.symbol]
-          demo.setActiveTokens(newActive)
-          useTradingStore.getState().setState({ activeTokens: newActive })
-          console.log('[Demo] Toggled token:', data.symbol, isActive ? 'off' : 'on')
-        }
+      case 'toggle-token': {
+        const store = useTradingStore.getState()
+        const isActive = store.activeTokens.includes(data.symbol)
+        const newActive = isActive
+          ? store.activeTokens.filter(s => s !== data.symbol)
+          : [...store.activeTokens, data.symbol]
+        paper.setActiveTokens(newActive)
+        useTradingStore.getState().setState({ activeTokens: newActive })
+        console.log('[Paper] Token toggled:', data.symbol, isActive ? 'off' : 'on')
         break
+      }
       case 'update-money-manager':
         if (data) {
-          demo.setMoneyManager(data)
+          paper.setMoneyManager(data)
           useTradingStore.getState().updateMoneyManager(data)
-          console.log('[Demo] Money manager updated')
+          console.log('[Paper] Money manager updated')
         }
         break
+      // ─── NEW: Manual trading events ────────────────────
+      case 'manual-buy': {
+        const sym = data?.symbol || useTradingStore.getState().selectedToken
+        const amt = Number(data?.amount) || 100
+        const result = paper.marketBuy(sym, amt)
+        if (result.success) {
+          console.log(`[Paper] BUY ${sym} ${result.qty?.toFixed(6)} @ ${result.fillPrice}`)
+        } else {
+          console.warn(`[Paper] BUY failed: ${result.error}`)
+        }
+        // Force immediate snapshot so UI reflects the new position
+        storeUpdate((paper as any).snapshot?.() || {})
+        break
+      }
+      case 'manual-sell': {
+        const sym = data?.symbol || useTradingStore.getState().selectedToken
+        const amt = Number(data?.amount) || 100
+        const result = paper.marketSell(sym, amt)
+        if (result.success) {
+          console.log(`[Paper] SELL ${sym} ${result.qty?.toFixed(6)} @ ${result.fillPrice} (pnl ${result.pnl?.toFixed(2)})`)
+        } else {
+          console.warn(`[Paper] SELL failed: ${result.error}`)
+        }
+        break
+      }
+      case 'close-position': {
+        const sym = data?.symbol || useTradingStore.getState().selectedToken
+        const result = paper.closePosition(sym)
+        if (result.success) {
+          console.log(`[Paper] CLOSED ${sym} @ ${result.fillPrice} (pnl ${result.pnl?.toFixed(2)})`)
+        } else {
+          console.warn(`[Paper] CLOSE failed: ${result.error}`)
+        }
+        break
+      }
+      default:
+        console.warn('[Paper] Unknown event:', event)
     }
   }, [])
 

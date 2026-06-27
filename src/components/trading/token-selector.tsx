@@ -9,6 +9,7 @@ import { Badge } from '@/components/ui/badge'
 import { Switch } from '@/components/ui/switch'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useTradingSocket } from '@/lib/use-trading-socket'
+import { SUPPORTED_TOKENS, TOKEN_NAMES } from '@/lib/paper-trading-engine'
 import { Coins, Star } from 'lucide-react'
 
 const TOKEN_ICONS: Record<string, string> = {
@@ -20,15 +21,16 @@ const TOKEN_ICONS: Record<string, string> = {
   'ADA/USDT': '₳',
   'LINK/USDT': '⬡',
   'DOT/USDT': '●',
-  'MATIC/USDT': '◇',
-  'UNI/USDT': '🦄',
+  'ATOM/USDT': '⚛',
+  'LTC/USDT': 'Ł',
+  'XRP/USDT': '✕',
+  'BNB/USDT': 'ⓑ',
+  'ARB/USDT': '◆',
+  'OP/USDT': '◯',
+  'SUI/USDT': '✦',
 }
 
-const ALL_TOKENS = [
-  'SOL/USDT', 'BTC/USDT', 'ETH/USDT',
-  'DOGE/USDT', 'AVAX/USDT', 'ADA/USDT',
-  'LINK/USDT', 'DOT/USDT', 'MATIC/USDT', 'UNI/USDT',
-]
+const ALL_TOKENS = [...SUPPORTED_TOKENS]
 
 export function TokenSelector() {
   const { tokenStates, activeTokens, selectedToken } = useTradingStore()

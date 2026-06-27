@@ -39,3 +39,39 @@ Stage Summary:
 - The system architecture remains sound — the two-sided expansion with trade_direction
   feature was already designed to handle this exact scenario
 - Next step: user should git pull and run the v8 validation
+
+---
+Task ID: 6
+Agent: main
+Task: Verify terminal runs in real-time always — fix Stop/Kill freezing the ticker
+
+Work Log:
+- User asked: "está en tiempo real? porque necesitamos que haga operaciones con el backtesting en tiempo real.. siempre.. chequea eso"
+- Reviewed DemoEngine (src/lib/demo-engine.ts) + useTradingSocket hook
+- Confirmed: ticker runs every 2s, generates signals, opens positions, manages SL/TP, updates equity
+- Found bug: emit('stop-trading') and emit('kill-switch') both called demo.stopTicking()
+  which cleared the setInterval — freezing the entire terminal (no price updates,
+  no signals, no equity updates). Violated the "always in real-time" requirement.
+- Fix: introduced separate `tradingEnabled` flag in DemoEngine
+  - this.running      = ticker active (only stops on unmount)
+  - this.tradingEnabled = new positions can be opened (controlled by user)
+- DemoEngine changes:
+  - Added private tradingEnabled: boolean = true
+  - Added setTradingEnabled(enabled) method
+  - Gated both position-opening blocks (primary + tokenSims) on tradingEnabled
+  - killSwitch() now sets tradingEnabled=false instead of running=false (ticker keeps running)
+  - State output: is_running now reflects tradingEnabled (UI shows correct on/off while data flows)
+- Hook changes:
+  - start-trading: setTradingEnabled(true), only restart ticker if !isRunning()
+  - stop-trading: setTradingEnabled(false) — NO stopTicking()
+  - kill-switch: killSwitch() only — NO stopTicking()
+- Synced edits via /home/z/my-project/scripts/terminal/ workspace copy
+- Brace balance verified (79/79 demo-engine, 61/61 hook)
+- Committed as 768c253 on branch terminal-web
+- Pushed 3 commits to GitHub (723e7f2, 253ecec, 768c253) — user needs to git pull
+
+Stage Summary:
+- Terminal now ALWAYS runs in real-time after mount
+- Stop Trading just pauses new entries; prices, signals, equity, open positions keep flowing
+- Kill Switch closes all positions but ticker keeps running; user can resume with Start Trading
+- is_running flag in store correctly reflects "new entries enabled" while data continues updating

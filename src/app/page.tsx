@@ -6,6 +6,7 @@ import { StatusHeader } from '@/components/trading/header'
 import { PortfolioPanel } from '@/components/trading/portfolio-panel'
 import { BrainPanel } from '@/components/trading/brain-panel'
 import { PositionPanel } from '@/components/trading/position-panel'
+import { ManualTradePanel } from '@/components/trading/manual-trade-panel'
 import { PerformancePanel } from '@/components/trading/performance-panel'
 import { TradeLog } from '@/components/trading/trade-log'
 import { RiskPanel } from '@/components/trading/risk-panel'
@@ -245,9 +246,10 @@ export default function TerminalPage() {
                   <RiskPanel />
                 </div>
 
-                {/* Center Column: Position + Performance */}
+                {/* Center Column: Position + Manual Trade + Performance */}
                 <div className="lg:col-span-5 space-y-3">
                   <PositionPanel />
+                  <ManualTradePanel />
                   <PerformancePanel />
                 </div>
 
@@ -367,7 +369,7 @@ export default function TerminalPage() {
             </span>
           </div>
           <span className="text-[9px] text-gray-600 font-mono">|</span>
-          <span className="text-[9px] text-gray-500 font-mono">
+          <span className={`text-[9px] font-mono ${engineMode === 'paper' ? 'text-blue-400' : 'text-gray-500'}`}>
             Engine: {engineMode.toUpperCase()}
           </span>
           <span className="text-[9px] text-gray-600 font-mono">|</span>
@@ -377,7 +379,7 @@ export default function TerminalPage() {
         </div>
         <div className="flex items-center gap-3">
           <span className="text-[9px] text-gray-600 font-mono">
-            PPMT v0.60 • Multi-Token • Progressive Pattern Matching Trie
+            PPMT v0.70 • PAPER TRADING • Live Binance Prices • 25 Tokens
           </span>
           <span className="text-[9px] text-gray-600 font-mono">|</span>
           <span className="text-[9px] text-gray-500 font-mono">
