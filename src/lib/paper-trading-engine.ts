@@ -234,8 +234,8 @@ const TOKEN_COLORS: Record<string, string> = {
 
 const DEFAULT_MONEY_MANAGER: MoneyManagerSettings = {
   riskPerTradePct: 2,
-  maxConcurrentPositions: 5,
-  maxCorrelatedPositions: 2,
+  maxConcurrentPositions: 8,
+  maxCorrelatedPositions: 3,
   maxDrawdownPct: 25,
   dailyLossLimitPct: 8,
   positionSizingMethod: 'risk_parity',
@@ -271,7 +271,9 @@ export class PaperTradingEngine {
   private autoMode: boolean = false
   private interval: ReturnType<typeof setInterval> | null = null
   private priceFeed: LivePriceFeed
-  private activeTokens: string[] = [...SUPPORTED_TOKENS.slice(0, 12)]
+  // All 50 supported tokens are active by default — gives the auto-scanner
+  // a wide universe to find real momentum. User can toggle off via UI.
+  private activeTokens: string[] = [...SUPPORTED_TOKENS]
   private selectedToken: string = 'BTC/USDT'
   private moneyManager: MoneyManagerSettings = { ...DEFAULT_MONEY_MANAGER }
   private lastAutoSignalTime: number = 0
@@ -590,13 +592,13 @@ export class PaperTradingEngine {
   private maybeAutoTrade() {
     if (!this.autoMode || !this.tradingEnabled) return
     const now = Date.now()
-    if (now - this.lastAutoSignalTime < 15000) return
+    if (now - this.lastAutoSignalTime < 10000) return
     this.lastAutoSignalTime = now
 
     // Find strongest mover among active tokens with live prices
     const candidates = this.activeTokens
       .map(sym => this.priceFeed.getData(sym))
-      .filter((t): t is TickerData => t !== null && t.quoteVolume > 10_000_000)
+      .filter((t): t is TickerData => t !== null && t.quoteVolume > 5_000_000)
       .sort((a, b) => Math.abs(b.changePct) - Math.abs(a.changePct))
 
     if (candidates.length === 0) {
@@ -604,8 +606,8 @@ export class PaperTradingEngine {
       return
     }
     const top = candidates[0]
-    if (Math.abs(top.changePct) < 1.5) {
-      console.log(`[Paper/Auto] Top mover ${top.symbol} only ${top.changePct.toFixed(2)}% — below 1.5% threshold`)
+    if (Math.abs(top.changePct) < 0.8) {
+      console.log(`[Paper/Auto] Top mover ${top.symbol} only ${top.changePct.toFixed(2)}% — below 0.8% threshold`)
       return
     }
 
@@ -744,7 +746,14 @@ export class PaperTradingEngine {
       if (last === undefined) continue // skip first tick (no reference)
 
       const pct = ((t.price - last) / last) * 100
-      const sym_char = pct > 0.05 ? 'U' : pct < -0.05 ? 'D' : 'F'
+      // 5-symbol SAX alphabet — captures more variance than U/D/F.
+      // Lower threshold (0.02% vs old 0.05%) means BTC/ETH ticks
+      // are no longer dominated by 'F' (flat).
+      const sym_char =
+        pct >=  0.15 ? 'V' :
+        pct >=  0.02 ? 'U' :
+        pct <= -0.15 ? 'B' :
+        pct <= -0.02 ? 'D' : 'F'
 
       // Append to per-token pattern buffer
       let buf = this.patternBufferPerToken.get(sym) || []

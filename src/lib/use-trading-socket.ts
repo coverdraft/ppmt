@@ -92,7 +92,10 @@ export function useTradingSocket() {
         tokenStates: data.token_states || {},
         activeTokens: data.active_tokens || ['BTC/USDT'],
         selectedToken: data.selected_token || 'BTC/USDT',
-        moneyManager: data.money_manager || undefined,
+        // Only override if engine provided a real money_manager object.
+        // Falling back to undefined would wipe the store and break the
+        // MoneyManager Select (the 'loop back' bug).
+        ...(data.money_manager ? { moneyManager: data.money_manager } : {}),
         kellyPercent: data.kelly_percent || 0,
         suggestedPositionSize: data.suggested_position_size || 0,
         riskRewardRatio: data.risk_reward_ratio || 0,
@@ -256,7 +259,7 @@ export function useTradingSocket() {
         tokenStates: state.token_states || {},
         activeTokens: state.active_tokens || ['BTC/USDT'],
         selectedToken: state.selected_token || 'BTC/USDT',
-        moneyManager: state.money_manager || undefined,
+        ...(state.money_manager ? { moneyManager: state.money_manager } : {}),
         kellyPercent: state.kelly_percent || 0,
         suggestedPositionSize: state.suggested_position_size || 0,
         riskRewardRatio: state.risk_reward_ratio || 0,

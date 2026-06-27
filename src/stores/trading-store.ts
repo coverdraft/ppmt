@@ -288,8 +288,8 @@ const TOKEN_NAMES: Record<string, string> = {
 
 const defaultMoneyManager: MoneyManagerSettings = {
   riskPerTradePct: 2,
-  maxConcurrentPositions: 3,
-  maxCorrelatedPositions: 1,
+  maxConcurrentPositions: 8,
+  maxCorrelatedPositions: 3,
   maxDrawdownPct: 15,
   dailyLossLimitPct: 5,
   positionSizingMethod: 'risk_parity',
