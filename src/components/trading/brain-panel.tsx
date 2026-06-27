@@ -9,12 +9,17 @@ import { Badge } from '@/components/ui/badge'
 import { Brain, Waves, GitBranch, Activity } from 'lucide-react'
 
 const SAX_COLORS: Record<string, string> = {
+  // SAX alphabet (legacy a-f)
   a: 'bg-red-500/30 text-red-300 border-red-500/40',
   b: 'bg-orange-500/30 text-orange-300 border-orange-500/40',
   c: 'bg-yellow-500/30 text-yellow-300 border-yellow-500/40',
   d: 'bg-green-500/30 text-green-300 border-green-500/40',
   e: 'bg-emerald-500/30 text-emerald-300 border-emerald-500/40',
   f: 'bg-teal-500/30 text-teal-300 border-teal-500/40',
+  // Paper engine U/D/F encoding (Up / Down / Flat)
+  U: 'bg-emerald-500/30 text-emerald-300 border-emerald-500/40',
+  D: 'bg-red-500/30 text-red-300 border-red-500/40',
+  F: 'bg-gray-500/30 text-gray-300 border-gray-500/40',
 }
 
 const REGIME_LABELS: Record<string, { label: string; color: string }> = {
