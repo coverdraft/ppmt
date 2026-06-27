@@ -16,10 +16,12 @@ const SAX_COLORS: Record<string, string> = {
   d: 'bg-green-500/30 text-green-300 border-green-500/40',
   e: 'bg-emerald-500/30 text-emerald-300 border-emerald-500/40',
   f: 'bg-teal-500/30 text-teal-300 border-teal-500/40',
-  // Paper engine U/D/F encoding (Up / Down / Flat)
-  U: 'bg-emerald-500/30 text-emerald-300 border-emerald-500/40',
+  // Paper engine 5-symbol encoding (Big-down / Down / Flat / Up / Big-up)
+  B: 'bg-red-600/40 text-red-200 border-red-600/50',
   D: 'bg-red-500/30 text-red-300 border-red-500/40',
   F: 'bg-gray-500/30 text-gray-300 border-gray-500/40',
+  U: 'bg-emerald-500/30 text-emerald-300 border-emerald-500/40',
+  V: 'bg-emerald-600/40 text-emerald-200 border-emerald-600/50',
 }
 
 const REGIME_LABELS: Record<string, { label: string; color: string }> = {
@@ -86,7 +88,12 @@ export function BrainPanel() {
         {/* Entropy */}
         <div>
           <div className="flex justify-between mb-1">
-            <span className="text-[10px] text-gray-500 font-mono">ENTROPY</span>
+            <div className="flex items-center gap-1">
+              <span className="text-[10px] text-gray-500 font-mono">ENTROPY</span>
+              <span className="text-[9px] text-gray-600 font-mono" title="Shannon-like entropy of 24h returns across active tokens. 0 = all tokens moving in lockstep (low uncertainty). 1 = maximally dispersed (high uncertainty, market is choppy). Computed as stdev(changes)/5, clamped to [0,1].">
+                (ℹ)
+              </span>
+            </div>
             <span className="text-[10px] text-gray-400 font-mono">{entropy.toFixed(3)}</span>
           </div>
           <div className="h-1.5 bg-[#1a2334] rounded-full overflow-hidden">
@@ -94,6 +101,11 @@ export function BrainPanel() {
               className={`h-full ${entropyColor} rounded-full transition-all duration-500`}
               style={{ width: `${entropyPct}%` }}
             />
+          </div>
+          <div className="flex justify-between text-[8px] text-gray-600 font-mono mt-0.5">
+            <span>calm</span>
+            <span>{entropy < 0.3 ? 'low uncertainty' : entropy < 0.6 ? 'normal' : 'choppy'}</span>
+            <span>chaos</span>
           </div>
         </div>
 
@@ -124,6 +136,12 @@ export function BrainPanel() {
             </div>
           </div>
         )}
+
+        {/* SAX legend */}
+        <div className="flex items-center justify-between text-[8px] text-gray-600 font-mono">
+          <span>B↓ D↓ F· U↑ V↑</span>
+          <span>last {patternBuffer.length} ticks</span>
+        </div>
 
         {/* Living Trie Stats */}
         {livingTrieStats && (

@@ -19,7 +19,7 @@ import {
 } from 'lucide-react'
 import { motion } from 'framer-motion'
 import { useTradingSocket } from '@/lib/use-trading-socket'
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 
 function RiskGauge({ value, max, color }: { value: number; max: number; color: string }) {
   const pct = Math.min((value / max) * 100, 100)
@@ -69,6 +69,17 @@ export function MoneyManager() {
   const [expandedSection, setExpandedSection] = useState<string>('risk')
 
   const mm = moneyManager
+
+  // Optimistic local state for the position-sizing Select — prevents the
+  // 'loop back' flicker where Radix Select briefly shows the old value
+  // between user click and the next 1.5s engine snapshot.
+  const [sizingMethodLocal, setSizingMethodLocal] = useState<string>(
+    mm.positionSizingMethod
+  )
+  // Sync from store when the store value changes (e.g. on engine reset)
+  useEffect(() => {
+    setSizingMethodLocal(mm.positionSizingMethod)
+  }, [mm.positionSizingMethod])
 
   const updateMM = (updates: Partial<MoneyManagerSettings>) => {
     emit('update-money-manager', updates)
@@ -195,8 +206,11 @@ export function MoneyManager() {
               <span className="text-[9px] text-gray-500 font-mono">METHOD</span>
             </div>
             <Select
-              value={mm.positionSizingMethod}
-              onValueChange={(val) => updateMM({ positionSizingMethod: val as MoneyManagerSettings['positionSizingMethod'] })}
+              value={sizingMethodLocal}
+              onValueChange={(val) => {
+                setSizingMethodLocal(val as MoneyManagerSettings['positionSizingMethod'])
+                updateMM({ positionSizingMethod: val as MoneyManagerSettings['positionSizingMethod'] })
+              }}
             >
               <SelectTrigger className="h-7 bg-[#121a26] border-[#1e2a3d] text-[10px] font-mono">
                 <SelectValue />
