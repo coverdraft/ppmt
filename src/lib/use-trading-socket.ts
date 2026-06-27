@@ -1,10 +1,12 @@
 /**
  * useTradingSocket — Hook for PPMT Trading Terminal.
  *
- * NEW: Uses PaperTradingEngine with LIVE Binance prices instead of DemoEngine.
+ * NEW: Uses PaperTradingEngine with LIVE prices from Coinbase WS +
+ * CoinGecko/Kraken REST (Spain-friendly — no Binance.com geo-block).
  * The terminal now operates in true paper-trading mode:
- *  - Real-time prices from Binance public WebSocket (no API key)
- *  - Manual BUY / SELL / CLOSE on any of 25 supported tokens
+ *  - Real-time prices from Coinbase WebSocket (no API key)
+ *  - 24h change % and volume from CoinGecko REST (one call for all tokens)
+ *  - Manual BUY / SELL / CLOSE on any of 82 supported tokens
  *  - Realistic fees (0.1% taker) and slippage (0.05%)
  *  - Starting capital: 10,000 USDT — can grow or shrink for real
  *
@@ -25,10 +27,20 @@ import {
 
 const BRIDGE_FALLBACK_DELAY = 3000
 
+// ─── Global singleton: prevents StrictMode double-mount from creating
+// multiple PaperTradingEngine instances that would each open their own
+// WebSocket and stomp on each other's state. React 18 StrictMode in dev
+// mounts every component twice; without this guard we'd see 2-8 engines
+// running simultaneously, all pushing conflicting state updates.
+let GLOBAL_ENGINE: PaperTradingEngine | null = null
+let GLOBAL_FEED: LivePriceFeed | null = null
+let GLOBAL_LISTENER: ((state: any) => void) | null = null
+let GLOBAL_REFCOUNT = 0
+
 export function useTradingSocket() {
   const socketRef = useRef<any>(null)
-  const priceFeedRef = useRef<LivePriceFeed | null>(null)
   const paperRef = useRef<PaperTradingEngine | null>(null)
+  const priceFeedRef = useRef<LivePriceFeed | null>(null)
   const mountedRef = useRef(false)
   const firstErrorLoggedRef = useRef(false)
   const setState = useTradingStore((s) => s.setState)
@@ -45,8 +57,6 @@ export function useTradingSocket() {
     if (!ready) return
 
     let socket: any = null
-    let paperEngine: PaperTradingEngine | null = null
-    let priceFeed: LivePriceFeed | null = null
     let demoTimeout: ReturnType<typeof setTimeout> | null = null
 
     const applyState = (data: any) => {
@@ -100,33 +110,34 @@ export function useTradingSocket() {
         suggestedPositionSize: data.suggested_position_size || 0,
         riskRewardRatio: data.risk_reward_ratio || 0,
       })
-      // Set connection status: paper engine always reports connected once
-      // we have a price feed, even if the Python bridge is not running.
       if (mountedRef.current) {
         setConnected(true, data.mode || 'paper')
       }
     }
 
-    // ─── Start Paper Trading Engine with Live Prices ──────────
-    const startPaperEngine = () => {
-      if (paperEngine) return
-      console.log('[Paper] Starting paper trading engine with live Binance prices')
+    // ─── Start Paper Trading Engine (singleton) ───────────────
+    // Use a global singleton so StrictMode double-mount in dev doesn't
+    // spawn multiple engines. We refcount so cleanup only tears down
+    // when the last consumer unmounts.
+    GLOBAL_REFCOUNT++
+    if (!GLOBAL_ENGINE) {
+      console.log('[Paper] Starting paper trading engine with live Coinbase + CoinGecko prices')
       console.log(`[Paper] Initial capital: ${INITIAL_CAPITAL} USDT`)
       console.log(`[Paper] Supported tokens: ${SUPPORTED_TOKENS.length}`)
 
-      // LivePriceFeed subscribes to all supported tokens by default
-      priceFeed = new LivePriceFeed([...SUPPORTED_TOKENS])
-      priceFeedRef.current = priceFeed
-
-      paperEngine = new PaperTradingEngine(priceFeed)
-      paperRef.current = paperEngine
-
-      paperEngine.startTicking((state) => {
-        applyState(state)
-      }, 1500)
+      GLOBAL_FEED = new LivePriceFeed([...SUPPORTED_TOKENS])
+      GLOBAL_ENGINE = new PaperTradingEngine(GLOBAL_FEED)
+      GLOBAL_LISTENER = (state: any) => applyState(state)
+      GLOBAL_ENGINE.startTicking(GLOBAL_LISTENER, 1500)
+    } else {
+      console.log('[Paper] Reusing existing paper engine (StrictMode remount)')
+      // Replace listener so the new component gets fresh state pushes
+      GLOBAL_ENGINE.stopTicking()
+      GLOBAL_LISTENER = (state: any) => applyState(state)
+      GLOBAL_ENGINE.startTicking(GLOBAL_LISTENER, 1500)
     }
-
-    startPaperEngine()
+    paperRef.current = GLOBAL_ENGINE
+    priceFeedRef.current = GLOBAL_FEED
 
     // ─── Optional: connect to Python bridge for PPMT signals ──
     const trySocketConnection = () => {
@@ -159,12 +170,10 @@ export function useTradingSocket() {
         })
 
         socket.on('engine-status', (data: { connected: boolean; mode: string }) => {
-          // Don't override paper's connected status — bridge is supplementary
           console.log('[Socket] Engine status from bridge:', data)
         })
 
         socket.on('trading-state', (data: any) => {
-          // Bridge can supplement with PPMT signals — merge with paper state
           if (data.latest_signal && mountedRef.current) {
             setState({ latestSignal: data.latest_signal })
           }
@@ -195,27 +204,40 @@ export function useTradingSocket() {
 
     return () => {
       if (demoTimeout) clearTimeout(demoTimeout)
-      if (paperEngine) {
-        paperEngine.stopTicking()
-        paperEngine = null
-        paperRef.current = null
-      }
-      if (priceFeed) {
-        priceFeed.disconnect()
-        priceFeed = null
-        priceFeedRef.current = null
-      }
       if (socket) {
         socket.disconnect()
         socket = null
         socketRef.current = null
       }
+      // Decrement refcount; only teardown global engine when last consumer unmounts
+      GLOBAL_REFCOUNT = Math.max(0, GLOBAL_REFCOUNT - 1)
+      if (GLOBAL_REFCOUNT === 0) {
+        console.log('[Paper] Last consumer unmounted — tearing down engine + price feed')
+        if (GLOBAL_ENGINE) {
+          GLOBAL_ENGINE.stopTicking()
+          GLOBAL_ENGINE = null
+        }
+        if (GLOBAL_FEED) {
+          GLOBAL_FEED.disconnect()
+          GLOBAL_FEED = null
+        }
+        GLOBAL_LISTENER = null
+      } else {
+        // Just stop this consumer's ticking subscription
+        if (GLOBAL_ENGINE) {
+          GLOBAL_ENGINE.stopTicking()
+        }
+      }
+      paperRef.current = null
+      priceFeedRef.current = null
       firstErrorLoggedRef.current = false
     }
   }, [ready, setState, setConnected])
 
   const emit = useCallback((event: string, data?: any) => {
-    const paper = paperRef.current
+    // Prefer the singleton engine — paperRef may be stale across StrictMode
+    // remounts but the singleton lives for the lifetime of the page.
+    const paper = GLOBAL_ENGINE || paperRef.current
     if (!paper) {
       console.warn('[Paper] No paper engine available for event:', event)
       return
