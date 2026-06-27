@@ -300,23 +300,30 @@ export function useTradingSocket() {
       case 'start-trading':
         if (data?.symbol) demo.setSymbol(data.symbol)
         if (data?.timeframe) demo.setTimeframe(data.timeframe)
-        // If demo isn't ticking, start it
+        // Re-enable new entries (ticker keeps running, was never stopped)
+        demo.setTradingEnabled(true)
+        // If ticker was stopped (e.g. component remount), start it
         if (!demo.isRunning()) {
           demo.startTicking(storeUpdate)
         }
-        useTradingStore.getState().setState({ isRunning: true })
-        console.log('[Demo] Trading started')
+        useTradingStore.getState().setState({ isRunning: true, killSwitchActive: false })
+        console.log('[Demo] Trading started — new entries enabled, ticker running')
         break
       case 'stop-trading':
-        demo.stopTicking()
+        // IMPORTANT: do NOT stop the ticker. Only disable new entries.
+        // Prices, signals, equity curve, and open-position management
+        // keep flowing — terminal stays in real-time per user requirement.
+        demo.setTradingEnabled(false)
         useTradingStore.getState().setState({ isRunning: false })
-        console.log('[Demo] Trading stopped')
+        console.log('[Demo] Trading stopped — no new entries, ticker still running')
         break
       case 'kill-switch':
+        // Closes all open positions and disables new entries.
+        // The ticker keeps running so the user can see post-kill state
+        // and resume later with Start Trading.
         demo.killSwitch()
-        demo.stopTicking()
         useTradingStore.getState().setState({ killSwitchActive: true, isRunning: false })
-        console.log('[Demo] Kill switch activated')
+        console.log('[Demo] Kill switch activated — positions closed, ticker still running')
         break
       case 'toggle-auto':
         console.log('[Demo] Auto mode toggled:', data?.enabled)
