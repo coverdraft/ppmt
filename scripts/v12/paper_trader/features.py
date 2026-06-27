@@ -280,37 +280,32 @@ def _safe_merge_asof(left: pd.DataFrame, right: pd.DataFrame,
     return merged
 
 
-def _datetime_to_ms(series: pd.Series) -> np.ndarray:
-    """Convert datetime Series to int64 ms. Robust for tz-aware datetime.
-
-    In pandas 2.x, .values.astype(np.int64) on tz-aware datetime Series
-    returns incorrect values (already in ms instead of ns), causing
-    results 1M× too small after dividing by 10**6.
-    Fix: strip timezone first (timestamps remain at same UTC moment),
-    then convert the tz-naive datetime64[ns] array to nanoseconds.
-    """
-    if len(series) == 0:
-        return np.array([], dtype=np.int64)
-    # Strip timezone for reliable int64 conversion
-    if pd.api.types.is_datetime64_any_dtype(series) and series.dt.tz is not None:
-        naive = series.dt.tz_localize(None)
-    else:
-        naive = series
-    ns = naive.values.astype(np.int64)  # nanoseconds since epoch
-    return (ns // 10**6).astype(np.int64)  # milliseconds
+def _round_ms_to_interval(ts_ms: int, interval_ms: int) -> int:
+    """Round a millisecond timestamp down to the nearest interval boundary."""
+    return (ts_ms // interval_ms) * interval_ms
 
 
 def _aggregate_5m_to_n(df_5m: pd.DataFrame, n: int) -> pd.DataFrame:
-    """Aggregate 5m candles into n-minute candles."""
+    """Aggregate 5m candles into n-minute candles.
+
+    Key design: NEVER convert datetime→ms (unreliable across pandas versions).
+    Instead, compute n-minute timestamps by rounding the preserved ms values.
+    """
     df = df_5m.copy()
+    # Keep original ms timestamps — they are always correct
+    df["timestamp_ms"] = df["timestamp"]
     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
     df = df.set_index("timestamp")
     agg = df.resample(f"{n}min").agg({
+        "timestamp_ms": "first",
         "open": "first", "high": "max", "low": "min",
         "close": "last", "volume": "sum",
     }).dropna()
-    agg = agg.reset_index()
-    agg["timestamp"] = _datetime_to_ms(agg["timestamp"])
+    # Compute n-minute aligned timestamps from preserved ms — no datetime→ms conversion
+    agg["timestamp"] = agg["timestamp_ms"].apply(
+        lambda x: _round_ms_to_interval(int(x), n * 60 * 1000)
+    ).astype(np.int64)
+    agg = agg.drop(columns=["timestamp_ms"]).reset_index(drop=True)
     return agg
 
 

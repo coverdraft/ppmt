@@ -23,21 +23,9 @@ import pandas as pd
 LOG = logging.getLogger("v12_feed")
 
 
-def _datetime_to_ms(series: pd.Series) -> np.ndarray:
-    """Convert datetime Series to int64 milliseconds. Robust for tz-aware datetime.
-
-    In pandas 2.x, .values.astype(np.int64) on tz-aware datetime Series
-    returns incorrect values (ms instead of ns), causing results 1M× too
-    small after dividing by 10**6. Fix: strip timezone first.
-    """
-    if len(series) == 0:
-        return np.array([], dtype=np.int64)
-    if pd.api.types.is_datetime64_any_dtype(series) and series.dt.tz is not None:
-        naive = series.dt.tz_localize(None)
-    else:
-        naive = series
-    ns = naive.values.astype(np.int64)  # nanoseconds since epoch
-    return (ns // 10**6).astype(np.int64)  # milliseconds
+def _round_ms_to_interval(ts_ms: int, interval_ms: int) -> int:
+    """Round a millisecond timestamp down to the nearest interval boundary."""
+    return (ts_ms // interval_ms) * interval_ms
 
 
 class Feed:
@@ -78,12 +66,21 @@ class Feed:
         return raw
 
     def aggregate_1m_to_5m(self, candles_1m: list[list]) -> pd.DataFrame:
-        """Aggregate 1m candles into 5m OHLCV DataFrame."""
+        """Aggregate 1m candles into 5m OHLCV DataFrame.
+
+        Key design: NEVER convert datetime→ms (unreliable across pandas versions).
+        Instead, compute 5m timestamps by rounding the original ms values.
+        Use resample only for OHLCV aggregation, discard its datetime index.
+        """
         df = pd.DataFrame(candles_1m, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        # Keep original ms timestamps — they are always correct from the API
+        df["timestamp_ms"] = df["timestamp"]
+        # Create datetime index for resample (only used for grouping)
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
         df = df.set_index("timestamp")
 
         agg = df.resample("5min").agg({
+            "timestamp_ms": "first",   # carry original ms timestamp
             "open": "first",
             "high": "max",
             "low": "min",
@@ -91,10 +88,12 @@ class Feed:
             "volume": "sum",
         }).dropna()
 
-        agg = agg.reset_index()
-        # Robust datetime→ms conversion — must strip timezone before int64
-        # because .values.astype(np.int64) is unreliable on tz-aware datetime
-        agg["timestamp"] = _datetime_to_ms(agg["timestamp"])
+        # Compute 5m-aligned timestamps from the preserved ms values
+        # This avoids ANY datetime→ms conversion (which is unreliable)
+        agg["timestamp"] = agg["timestamp_ms"].apply(
+            lambda x: _round_ms_to_interval(int(x), 5 * 60 * 1000)
+        ).astype(np.int64)
+        agg = agg.drop(columns=["timestamp_ms"]).reset_index(drop=True)
         return agg
 
     def fetch_5m_window(self, symbol: str, n_5m_bars: int = 400) -> pd.DataFrame:
