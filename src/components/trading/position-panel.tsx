@@ -1,15 +1,27 @@
 /**
  * PositionPanel — Active positions and position management.
+ * Now with manual CLOSE button on each position (paper trading).
  */
 'use client'
 
+import { useState } from 'react'
 import { useTradingStore } from '@/stores/trading-store'
+import { useTradingSocket } from '@/lib/use-trading-socket'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
-import { Target, ArrowUp, ArrowDown, ShieldAlert } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { Target, ArrowUp, ArrowDown, ShieldAlert, X } from 'lucide-react'
 
 export function PositionPanel() {
   const { positions, symbol, currentPrice } = useTradingStore()
+  const { emit } = useTradingSocket()
+  const [closingSymbol, setClosingSymbol] = useState<string | null>(null)
+
+  const handleClose = (sym: string) => {
+    setClosingSymbol(sym)
+    emit('close-position', { symbol: sym })
+    setTimeout(() => setClosingSymbol(null), 800)
+  }
 
   const hasPosition = positions && positions.length > 0
 
@@ -122,6 +134,18 @@ export function PositionPanel() {
                   <ShieldAlert className="w-3 h-3" />
                   Cat SL: {pos.catastrophic_sl?.toFixed(4)}
                 </div>
+
+                {/* Close button (paper trading) */}
+                <Button
+                  size="sm"
+                  variant="destructive"
+                  className="w-full h-7 text-[10px] font-mono"
+                  disabled={closingSymbol === pos.symbol}
+                  onClick={() => handleClose(pos.symbol)}
+                >
+                  <X className="w-3 h-3 mr-1" />
+                  {closingSymbol === pos.symbol ? 'CLOSING...' : `CLOSE ${pos.symbol}`}
+                </Button>
               </div>
             )
           })
