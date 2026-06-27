@@ -10,6 +10,7 @@
 'use client'
 
 import { useTradingStore } from '@/stores/trading-store'
+import { INITIAL_CAPITAL } from '@/lib/paper-trading-engine'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import {
@@ -44,7 +45,7 @@ export function OperationsChart() {
   const equityData = equityCurve.map((val, i) => ({
     time: equityTimestamps[i],
     value: val,
-    baseline: 1000,
+    baseline: INITIAL_CAPITAL,
   }))
 
   // Build trade PnL bars
@@ -96,14 +97,18 @@ export function OperationsChart() {
                 <Area type="monotone" dataKey="price" fill="url(#priceGrad)" stroke="none" />
                 <Line type="monotone" dataKey="price" stroke="#3b82f6" strokeWidth={1.5} dot={false} />
 
-                {/* Position TP/SL lines if active */}
+                {/* Position TP/SL lines if active (skip if null — manual entries) */}
                 {positions && positions.length > 0 && positions.map((pos, idx) => {
                   const tpColor = '#10b981'
                   const slColor = '#ef4444'
-                  return [
-                    <ReferenceLine key={`tp-${idx}`} y={pos.current_tp} stroke={tpColor} strokeDasharray="4 4" strokeOpacity={0.6} />,
-                    <ReferenceLine key={`sl-${idx}`} y={pos.current_sl} stroke={slColor} strokeDasharray="4 4" strokeOpacity={0.6} />,
-                  ]
+                  const lines: any[] = []
+                  if (pos.current_tp !== null && pos.current_tp !== undefined) {
+                    lines.push(<ReferenceLine key={`tp-${idx}`} y={pos.current_tp} stroke={tpColor} strokeDasharray="4 4" strokeOpacity={0.6} />)
+                  }
+                  if (pos.current_sl !== null && pos.current_sl !== undefined) {
+                    lines.push(<ReferenceLine key={`sl-${idx}`} y={pos.current_sl} stroke={slColor} strokeDasharray="4 4" strokeOpacity={0.6} />)
+                  }
+                  return lines
                 })}
               </ComposedChart>
             </ResponsiveContainer>
@@ -173,8 +178,8 @@ export function OperationsChart() {
                     return [val, name]
                   }}
                 />
-                {/* Baseline at 1000 */}
-                <ReferenceLine y={1000} stroke="#1e2a3d" strokeWidth={1} />
+                {/* Baseline at INITIAL_CAPITAL */}
+                <ReferenceLine y={INITIAL_CAPITAL} stroke="#1e2a3d" strokeWidth={1} />
                 <Area type="monotone" dataKey="value" fill={isPositive ? 'url(#eqGradPos)' : 'url(#eqGradNeg)'} stroke="none" />
                 <Line type="monotone" dataKey="value" stroke={isPositive ? '#10b981' : '#ef4444'} strokeWidth={2} dot={false} />
               </ComposedChart>
@@ -250,38 +255,51 @@ export function OperationsChart() {
             {positions.map((pos, idx) => {
               const isLong = pos.direction === 'LONG'
               const isPositive = pos.pnl_pct >= 0
-              const tpDist = isLong
-                ? ((pos.current_tp - currentPrice) / currentPrice) * 100
-                : ((currentPrice - pos.current_tp) / currentPrice) * 100
-              const slDist = isLong
-                ? ((currentPrice - pos.current_sl) / currentPrice) * 100
-                : ((pos.current_sl - currentPrice) / currentPrice) * 100
+              // Null-safe: manual entries have no SL/TP
+              const tpDist = pos.current_tp !== null && currentPrice > 0
+                ? (isLong
+                    ? ((pos.current_tp - currentPrice) / currentPrice) * 100
+                    : ((currentPrice - pos.current_tp) / currentPrice) * 100)
+                : null
+              const slDist = pos.current_sl !== null && currentPrice > 0
+                ? (isLong
+                    ? ((currentPrice - pos.current_sl) / currentPrice) * 100
+                    : ((pos.current_sl - currentPrice) / currentPrice) * 100)
+                : null
 
-              // Progress bar: how far between SL and TP
-              const totalRange = Math.abs(tpDist) + Math.abs(slDist)
-              const progressPct = totalRange > 0 ? (Math.abs(slDist) / totalRange) * 100 : 50
+              // Progress bar: how far between SL and TP (only if both exist)
+              const totalRange = (tpDist !== null && slDist !== null) ? Math.abs(tpDist) + Math.abs(slDist) : 0
+              const progressPct = totalRange > 0 ? (Math.abs(slDist!) / totalRange) * 100 : 50
 
               return (
                 <div key={idx} className="space-y-2">
                   {/* Price position between SL and TP */}
                   <div>
                     <div className="flex justify-between text-[9px] font-mono mb-0.5">
-                      <span className="text-red-400">SL {slDist.toFixed(2)}%</span>
+                      <span className="text-red-400">SL {slDist !== null ? slDist.toFixed(2) + '%' : '—'}</span>
                       <span className={isPositive ? 'text-emerald-400' : 'text-red-400'}>
                         {isPositive ? '+' : ''}{pos.pnl_pct.toFixed(3)}%
                       </span>
-                      <span className="text-emerald-400">TP {tpDist.toFixed(2)}%</span>
+                      <span className="text-emerald-400">TP {tpDist !== null ? tpDist.toFixed(2) + '%' : '—'}</span>
                     </div>
                     <div className="relative h-3 bg-[#1a2334] rounded-full overflow-hidden">
-                      {/* SL zone */}
-                      <div className="absolute left-0 top-0 h-full bg-red-500/20" style={{ width: `${Math.max(5, Math.min(slDist / (Math.abs(slDist) + Math.abs(tpDist)) * 100, 95))}%` }} />
-                      {/* TP zone */}
-                      <div className="absolute right-0 top-0 h-full bg-emerald-500/20" style={{ width: `${Math.max(5, Math.min(tpDist / (Math.abs(slDist) + Math.abs(tpDist)) * 100, 95))}%` }} />
+                      {/* SL zone (only if SL exists) */}
+                      {slDist !== null && tpDist !== null && (
+                        <>
+                          <div className="absolute left-0 top-0 h-full bg-red-500/20" style={{ width: `${Math.max(5, Math.min(slDist / (Math.abs(slDist) + Math.abs(tpDist)) * 100, 95))}%` }} />
+                          <div className="absolute right-0 top-0 h-full bg-emerald-500/20" style={{ width: `${Math.max(5, Math.min(tpDist / (Math.abs(slDist) + Math.abs(tpDist)) * 100, 95))}%` }} />
+                        </>
+                      )}
                       {/* Current price indicator */}
                       <div
                         className="absolute top-0 h-full w-0.5 bg-white z-10"
                         style={{ left: `${progressPct}%` }}
                       />
+                      {(slDist === null || tpDist === null) && (
+                        <div className="absolute inset-0 flex items-center justify-center text-[8px] text-gray-500 font-mono">
+                          manual entry — no SL/TP set
+                        </div>
+                      )}
                     </div>
                   </div>
 

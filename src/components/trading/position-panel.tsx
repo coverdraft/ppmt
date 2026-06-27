@@ -49,13 +49,17 @@ export function PositionPanel() {
             const pnlUsdt = pos.pnl_usdt || 0
             const isPositive = pnlPct >= 0
 
-            // Distance to TP/SL
-            const distToTP = isLong
-              ? ((pos.current_tp - currentPrice) / currentPrice) * 100
-              : ((currentPrice - pos.current_tp) / currentPrice) * 100
-            const distToSL = isLong
-              ? ((currentPrice - pos.current_sl) / currentPrice) * 100
-              : ((pos.current_sl - currentPrice) / currentPrice) * 100
+            // Distance to TP/SL — null-safe (manual entries have no SL/TP)
+            const distToTP = pos.current_tp !== null && currentPrice > 0
+              ? (isLong
+                  ? ((pos.current_tp - currentPrice) / currentPrice) * 100
+                  : ((currentPrice - pos.current_tp) / currentPrice) * 100)
+              : null
+            const distToSL = pos.current_sl !== null && currentPrice > 0
+              ? (isLong
+                  ? ((currentPrice - pos.current_sl) / currentPrice) * 100
+                  : ((pos.current_sl - currentPrice) / currentPrice) * 100)
+              : null
 
             return (
               <div key={idx} className="space-y-2">
@@ -94,12 +98,12 @@ export function PositionPanel() {
                       <div className="text-gray-300">${pos.size_usdt?.toFixed(2)}</div>
                     </div>
                     <div>
-                      <span className="text-emerald-500">TP {distToTP.toFixed(2)}%</span>
-                      <div className="text-emerald-400">{pos.current_tp?.toFixed(4)}</div>
+                      <span className="text-emerald-500">TP {distToTP !== null ? distToTP.toFixed(2) + '%' : '—'}</span>
+                      <div className="text-emerald-400">{pos.current_tp !== null ? pos.current_tp.toFixed(4) : 'manual'}</div>
                     </div>
                     <div>
-                      <span className="text-red-500">SL {distToSL.toFixed(2)}%</span>
-                      <div className="text-red-400">{pos.current_sl?.toFixed(4)}</div>
+                      <span className="text-red-500">SL {distToSL !== null ? distToSL.toFixed(2) + '%' : '—'}</span>
+                      <div className="text-red-400">{pos.current_sl !== null ? pos.current_sl.toFixed(4) : 'manual'}</div>
                     </div>
                   </div>
                 </div>
@@ -132,7 +136,7 @@ export function PositionPanel() {
                 {/* Catastrophic SL warning */}
                 <div className="flex items-center gap-1 text-[10px] text-gray-600 font-mono">
                   <ShieldAlert className="w-3 h-3" />
-                  Cat SL: {pos.catastrophic_sl?.toFixed(4)}
+                  Cat SL: {pos.catastrophic_sl !== null ? pos.catastrophic_sl.toFixed(4) : '—'}
                 </div>
 
                 {/* Close button (paper trading) */}

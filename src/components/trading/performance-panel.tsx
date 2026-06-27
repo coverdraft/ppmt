@@ -4,6 +4,7 @@
 'use client'
 
 import { useTradingStore } from '@/stores/trading-store'
+import { INITIAL_CAPITAL } from '@/lib/paper-trading-engine'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { TrendingUp, TrendingDown, Target, Shield, BarChart3, Dice5 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
@@ -23,9 +24,10 @@ export function PerformancePanel() {
   } = useTradingStore()
 
   // Equity curve chart (simple SVG)
+  // INITIAL_CAPITAL (10000) imported as the baseline reference.
   const recentEquity = equityCurve.slice(-100)
-  const eqMin = Math.min(...recentEquity, 1000)
-  const eqMax = Math.max(...recentEquity, 1000)
+  const eqMin = Math.min(...recentEquity, INITIAL_CAPITAL)
+  const eqMax = Math.max(...recentEquity, INITIAL_CAPITAL)
   const eqRange = eqMax - eqMin || 1
 
   const chartH = 60
@@ -105,7 +107,7 @@ export function PerformancePanel() {
             />
             {/* Baseline at 1000 */}
             {(() => {
-              const baseY = chartH - ((1000 - eqMin) / eqRange) * (chartH - 10) - 5
+              const baseY = chartH - ((INITIAL_CAPITAL - eqMin) / eqRange) * (chartH - 10) - 5
               return <line x1="0" y1={baseY} x2={chartW} y2={baseY} stroke="#1e2a3d" strokeWidth="1" strokeDasharray="4,4" vectorEffect="non-scaling-stroke" />
             })()}
           </svg>
