@@ -19,13 +19,6 @@ import { MoneyManager } from '@/components/trading/money-manager'
 import { TokenSelector } from '@/components/trading/token-selector'
 import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import { useState, useEffect } from 'react'
 import {
   Brain, GraduationCap, CandlestickChart, LayoutGrid,
@@ -55,8 +48,6 @@ export default function TerminalPage() {
     riskRewardRatio,
   } = useTradingStore()
 
-  const [selectedSymbol, setSelectedSymbol] = useState(symbol)
-  const [selectedTimeframe, setSelectedTimeframe] = useState(timeframe)
   const [activeTab, setActiveTab] = useState('dashboard')
   const [currentTime, setCurrentTime] = useState('')
 
@@ -74,7 +65,7 @@ export default function TerminalPage() {
     if (isRunning) {
       emit('stop-trading')
     } else {
-      emit('start-trading', { symbol: selectedSymbol, timeframe: selectedTimeframe, capital: 1000 })
+      emit('start-trading')
     }
   }
 
@@ -86,16 +77,6 @@ export default function TerminalPage() {
 
   const handleToggleAuto = (enabled: boolean) => {
     emit('toggle-auto', { enabled })
-  }
-
-  const handleSymbolChange = (val: string) => {
-    setSelectedSymbol(val)
-    emit('switch-symbol', { symbol: val })
-  }
-
-  const handleTimeframeChange = (val: string) => {
-    setSelectedTimeframe(val)
-    emit('switch-timeframe', { timeframe: val })
   }
 
   const hasPosition = positions && positions.length > 0
@@ -124,19 +105,13 @@ export default function TerminalPage() {
 
         <div className="h-4 w-px bg-[#1e2a3d] shrink-0" />
 
-        {/* Timeframe Selector */}
+        {/* Live price indicator (engine always streams real-time, no timeframe) */}
         <div className="flex items-center gap-2 shrink-0">
           <span className="text-[10px] text-gray-500 font-mono">TF</span>
-          <Select value={selectedTimeframe} onValueChange={handleTimeframeChange}>
-            <SelectTrigger className="h-7 w-20 bg-[#121a26] border-[#1e2a3d] text-xs font-mono">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent className="bg-[#121a26] border-[#1e2a3d]">
-              <SelectItem value="5m" className="text-xs font-mono">5m</SelectItem>
-              <SelectItem value="15m" className="text-xs font-mono">15m</SelectItem>
-              <SelectItem value="1h" className="text-xs font-mono">1h</SelectItem>
-            </SelectContent>
-          </Select>
+          <Badge variant="outline" className="h-7 bg-[#121a26] border-emerald-500/30 text-emerald-400 text-xs font-mono px-2 flex items-center gap-1">
+            <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+            LIVE
+          </Badge>
         </div>
 
         <div className="h-4 w-px bg-[#1e2a3d] shrink-0" />
@@ -379,7 +354,7 @@ export default function TerminalPage() {
         </div>
         <div className="flex items-center gap-3">
           <span className="text-[9px] text-gray-600 font-mono">
-            PPMT v0.70 • PAPER TRADING • Live Binance Prices • 25 Tokens
+            PPMT v0.70 • PAPER TRADING • Live Binance Prices • 50 Tokens
           </span>
           <span className="text-[9px] text-gray-600 font-mono">|</span>
           <span className="text-[9px] text-gray-500 font-mono">

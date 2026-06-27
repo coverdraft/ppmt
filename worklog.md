@@ -75,3 +75,85 @@ Stage Summary:
 - Stop Trading just pauses new entries; prices, signals, equity, open positions keep flowing
 - Kill Switch closes all positions but ticker keeps running; user can resume with Start Trading
 - is_running flag in store correctly reflects "new entries enabled" while data continues updating
+
+---
+Task ID: 7
+Agent: main
+Task: Replace demo with live paper trading on Binance prices — user wants real P&L
+
+Work Log:
+- User complaint: "esta como en un bucle tipo demo.. ni gana ni pierde" — random walk has no edge, PnL stuck near 0
+- User request: paper trading real, seleccionar activos, comprar/vender manualmente
+- Created src/lib/live-price-feed.ts:
+  * WebSocket client to wss://stream.binance.com:9443/stream
+  * Subscribes to @ticker stream (24h ticker, ~1 update/s per symbol)
+  * No API key, fully public
+  * Auto-reconnect with exponential backoff (2s -> 30s cap)
+  * Dynamic symbol subscription (subscribe/unsubscribe at runtime)
+- Created src/lib/paper-trading-engine.ts:
+  * Capital: 10,000 USDT (was 1,000)
+  * Fees: 0.10% taker on every fill
+  * Slippage: 0.05% on market orders
+  * Methods: marketBuy, marketSell, closePosition, killSwitch
+  * BUY = open or add to LONG position
+  * SELL = close LONG (partial/full) OR open SHORT
+  * Trailing stop + break-even + SL/TP enforced on REAL prices every snapshot
+  * Optional auto-mode: every 30s picks top-24h-momentum token (>2% move, >$50M volume) and opens small position
+  * 25 supported tokens (BTC, ETH, BNB, SOL, XRP, ADA, AVAX, DOGE, DOT, LINK, ATOM, LTC, BCH, NEAR, APT, ARB, OP, INJ, FIL, AAVE, MKR, SUI, TIA, RUNE, FTM)
+- Created src/components/trading/manual-trade-panel.tsx:
+  * Symbol dropdown (25 tokens with names)
+  * USDT amount input with quick presets (50/100/500 USDT, 25%/50%/100% of cash)
+  * Live price + 24h change display
+  * BUY/LONG and SELL/SHORT buttons
+  * Estimated qty display
+  * Trading-blocked warning when kill switch active
+- Modified src/components/trading/position-panel.tsx:
+  * Added CLOSE button per position (closes at market with slippage+fee)
+- Modified src/components/trading/token-selector.tsx:
+  * Imports SUPPORTED_TOKENS from paper-trading-engine (25 tokens, was 10)
+- Modified src/lib/use-trading-socket.ts:
+  * Replaced DemoEngine with PaperTradingEngine + LivePriceFeed
+  * New emit events: 'manual-buy', 'manual-sell', 'close-position'
+  * Bridge socket (if NEXT_PUBLIC_BRIDGE_URL set) is now supplementary
+  * Paper engine runs independently on live Binance prices
+- Modified src/stores/trading-store.ts: engineMode type accepts 'paper'
+- Modified src/app/page.tsx: added ManualTradePanel to dashboard center column
+- All files verified for brace/paren/bracket balance (8/8 OK)
+- Committed as 9e16d7f on terminal-web
+- Pushed to GitHub
+
+Stage Summary:
+- Terminal now operates in true paper trading mode with live Binance prices
+- User can manually buy/sell any of 25 tokens from the dashboard
+- P&L reflects actual market moves — no more "stuck near zero" demo loop
+- Each position has a CLOSE button for instant exit
+- Capital starts at 10,000 USDT; realistic fees and slippage applied
+- Optional auto-mode toggle for momentum-based auto entries
+- User needs to: git pull origin terminal-web on Mac, restart next dev
+
+---
+Task ID: 8
+Agent: main
+Task: Fix 5 user-reported issues — only 12 tokens, FFFF pattern buffer, ENTROPY meaning, Position Sizing dropdown loop, multi-token operations
+
+Work Log:
+- User report (verbatim): "tiene solo 12 token deberia tener todos los que pueda... puede hacer mutli operaciones in diferentes token ? ENTROPY 0.281 que quire decir? PATTERN BUFFER F F F F todos estane n ffff y no cambia ... POSITION SIZING METHOD Risk Parity ... quiero cambiar a risk kelly no me deja solo salta del que estaba hasta el nuevo que puse"
+- Diagnosis:
+  * activeTokens was SUPPORTED_TOKENS.slice(0,12) despite 50 tokens defined
+  * SAX threshold 0.05% too high — BTC/ETH ticks rarely move 0.05% in 1.5s, so buffer was mostly F
+  * ENTROPY had no UI explanation
+  * MoneyManager Select was controlled by store, but next 1.5s snapshot caused Radix Select to flicker back to old value before new value settled
+  * Multi-position already supported by engine Map; only maxConcurrentPositions was limiting
+- Wrote /home/z/my-project/scripts/apply_ppmt_fixes.py with 6 surgical edits across 5 files
+- Verified brace balance on all 5 files (OK)
+- Caught bug: my optimistic state used `mm.positionSizingMethod` before `const mm = moneyManager` was declared — wrote fix_mm_order.py to move declaration
+- Pushed as 2f6af17 on terminal-web
+
+Stage Summary:
+- 50 tokens now active by default (was 12) — wider universe for auto-scanner
+- Pattern Buffer uses 5-symbol SAX (B/D/F/U/V) with 0.02% threshold — dynamic, no more FFFF
+- ENTROPY shows tooltip + interpretation label (low uncertainty / normal / choppy)
+- Position Sizing dropdown uses optimistic local state — no more loop/flicker
+- maxConcurrentPositions raised to 8 (was 3 in store, 5 in engine) — multi-token ops supported
+- Auto-mode: lower thresholds (0.8% / $5M / 10s) — actually finds trades now
+- User needs to: git pull origin terminal-web on Mac, restart next dev

@@ -14,9 +14,9 @@ export interface Position {
   entry_price: number
   entry_time: string
   size_usdt: number
-  current_sl: number
-  current_tp: number
-  catastrophic_sl: number
+  current_sl: number | null   // null for manual entries (no auto SL set)
+  current_tp: number | null   // null for manual entries
+  catastrophic_sl: number | null
   pnl_pct: number
   pnl_usdt: number
   expected_sequence?: string[][]
@@ -310,8 +310,9 @@ const initialState = {
   engineMode: 'disconnected' as const,
   isRunning: false,
   currentPrice: 0,
-  symbol: 'SOL/USDT',
-  timeframe: '5m',
+  // Aligned with PaperTradingEngine defaults (BTC/USDT, 'live')
+  symbol: 'BTC/USDT',
+  timeframe: 'live',
   exchange: 'MEXC',
   patternBuffer: [],
   entropy: 0,
@@ -319,15 +320,16 @@ const initialState = {
   latestSignal: null,
   signalsHistory: [],
   positions: [],
-  portfolioValue: 1000,
-  cash: 1000,
+  // Match INITIAL_CAPITAL from paper-trading-engine.ts (10000 USDT)
+  portfolioValue: 10000,
+  cash: 10000,
   unrealizedPnl: 0,
   realizedPnl: 0,
   totalPnlPct: 0,
   exposurePct: 0,
   dailyReturnPct: 0,
   leverage: 3,
-  autoMode: true,
+  autoMode: false,  // matches engine default (autoMode: false)
   circuitBreakers: { max_drawdown: false, daily_loss: false, volatility: false },
   isTradingAllowed: true,
   killSwitchActive: false,
@@ -337,7 +339,7 @@ const initialState = {
   winningTrades: 0,
   winRate: 0,
   maxDrawdown: 0,
-  equityCurve: [1000],
+  equityCurve: [10000],
   equityTimestamps: [Date.now() / 1000],
   monteCarlo: null,
   livingTrieStats: null,
@@ -355,10 +357,10 @@ const initialState = {
   learningStage: 'BOOTSTRAP',
   driftDetected: false,
   lastRetrainTime: null as number | null,
-  // Multi-token
-  activeTokens: ['SOL/USDT', 'BTC/USDT', 'ETH/USDT'] as string[],
+  // Multi-token — all 50 supported tokens active by default (matches engine)
+  activeTokens: [] as string[],  // engine will populate on first snapshot
   tokenStates: {} as Record<string, TokenState>,
-  selectedToken: 'SOL/USDT',
+  selectedToken: 'BTC/USDT',
   portfolioAllocations: [] as PortfolioAllocation[],
   // Money manager
   moneyManager: defaultMoneyManager,
@@ -501,7 +503,7 @@ export const useTradingStore = create<TradingState>((set, get) => ({
   setConnected: (connected, mode) =>
     set({
       isConnected: connected,
-      engineMode: (mode as any) || (connected ? 'demo' : 'disconnected'),
+      engineMode: (mode as any) || (connected ? 'paper' : 'disconnected'),
     }),
 
   updateMoneyManager: (settings) =>

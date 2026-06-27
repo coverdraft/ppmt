@@ -21,6 +21,7 @@ import {
 } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useTradingSocket } from '@/lib/use-trading-socket'
+import { INITIAL_CAPITAL } from '@/lib/paper-trading-engine'
 
 const TOKEN_ICONS: Record<string, string> = {
   'SOL/USDT': '◎',
@@ -40,7 +41,7 @@ export function PortfolioManager() {
     portfolioValue, cash, realizedPnl, unrealizedPnl,
     tokenStates, activeTokens, selectedToken,
     exposurePct, totalTrades, winRate, maxDrawdown,
-    equityCurve, equityTimestamps,
+    equityCurve, equityTimestamps, totalPnlPct,
   } = useTradingStore()
   const { emit } = useTradingSocket()
 
@@ -48,7 +49,8 @@ export function PortfolioManager() {
   const activeTokensList = tokens.filter(t => t.isActive)
   const totalPnl = realizedPnl + unrealizedPnl
   const isPositive = totalPnl >= 0
-  const totalPnlPct = portfolioValue > 0 ? ((portfolioValue - 1000) / 1000) * 100 : 0
+  // totalPnlPct comes from the store (computed correctly by the engine
+  // using INITIAL_CAPITAL). Previously hardcoded 1000 which gave wrong %.
 
   // Build donut chart data
   const allocationData = activeTokensList.map(t => ({
@@ -62,7 +64,7 @@ export function PortfolioManager() {
   const equityData = equityCurve.slice(-60).map((val, i) => ({
     time: equityTimestamps.slice(-60)[i],
     value: val,
-    baseline: 1000,
+    baseline: INITIAL_CAPITAL,
   }))
 
   const formatTime = (ts: number) => {

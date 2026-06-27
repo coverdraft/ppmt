@@ -12,7 +12,7 @@
  */
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useTradingStore } from '@/stores/trading-store'
 import { useTradingSocket } from '@/lib/use-trading-socket'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -46,6 +46,12 @@ export function ManualTradePanel() {
   const [symbol, setSymbol] = useState(selectedToken || 'BTC/USDT')
   const [amount, setAmount] = useState('100')
   const [lastResult, setLastResult] = useState<{ ok: boolean; msg: string } | null>(null)
+
+  // Sync local symbol with store selectedToken (e.g. when user clicks
+  // a token in TokenSelector or PortfolioManager)
+  useEffect(() => {
+    if (selectedToken) setSymbol(selectedToken)
+  }, [selectedToken])
 
   // Live ticker for the selected symbol
   const ticker = tokenStates[symbol]
