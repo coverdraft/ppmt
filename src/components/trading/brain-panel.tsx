@@ -3,6 +3,7 @@
  */
 'use client'
 
+import { useState, useEffect } from 'react'
 import { useTradingStore } from '@/stores/trading-store'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -39,7 +40,19 @@ export function BrainPanel() {
     livingTrieStats,
     candlesProcessed,
     latestSignal,
+    lastTickAt,
+    tickCount,
   } = useTradingStore()
+
+  // Live 'Xs ago' indicator — proves the buffer IS updating even when
+  // most symbols are F (flat). Uses a 1s re-render to stay fresh.
+  const [, forceRender] = useState(0)
+  useEffect(() => {
+    const id = setInterval(() => forceRender(v => v + 1), 1000)
+    return () => clearInterval(id)
+  }, [])
+  const secsAgo = lastTickAt ? Math.max(0, Math.round((Date.now() - lastTickAt) / 1000)) : null
+  const isLive = secsAgo !== null && secsAgo <= 3
 
   const regimeInfo = REGIME_LABELS[regime] || { label: regime.toUpperCase(), color: 'bg-gray-500/20 text-gray-400 border-gray-500/30' }
 
@@ -66,22 +79,34 @@ export function BrainPanel() {
 
         {/* SAX Pattern Buffer */}
         <div>
-          <div className="text-[10px] text-gray-500 font-mono mb-1">PATTERN BUFFER</div>
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-[10px] text-gray-500 font-mono">PATTERN BUFFER</span>
+            <span className={`text-[9px] font-mono flex items-center gap-1 ${isLive ? 'text-emerald-400' : 'text-amber-400'}`}>
+              <span className={`inline-block w-1.5 h-1.5 rounded-full ${isLive ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
+              {secsAgo === null ? 'waiting' : isLive ? 'live' : `${secsAgo}s ago`}
+            </span>
+          </div>
           <div className="flex gap-1 flex-wrap">
             {patternBuffer.length > 0 ? (
-              patternBuffer.map((sym, i) => (
-                <span
-                  key={i}
-                  className={`inline-flex items-center justify-center w-6 h-6 rounded text-xs font-mono font-bold border ${
-                    SAX_COLORS[sym] || 'bg-gray-500/30 text-gray-300 border-gray-500/40'
-                  } ${i === patternBuffer.length - 1 ? 'ring-1 ring-blue-400/50' : ''}`}
-                >
-                  {sym}
-                </span>
-              ))
+              patternBuffer.map((sym, i) => {
+                const isLatest = i === patternBuffer.length - 1
+                return (
+                  <span
+                    key={i}
+                    className={`inline-flex items-center justify-center w-6 h-6 rounded text-xs font-mono font-bold border ${
+                      SAX_COLORS[sym] || 'bg-gray-500/30 text-gray-300 border-gray-500/40'
+                    } ${isLatest ? 'ring-2 ring-blue-400/70 animate-pulse' : ''}`}
+                  >
+                    {sym}
+                  </span>
+                )
+              })
             ) : (
               <span className="text-xs text-gray-600 font-mono">waiting...</span>
             )}
+          </div>
+          <div className="text-[8px] text-gray-600 font-mono mt-1">
+            tick #{tickCount.toLocaleString()} • {patternBuffer.length}/12 symbols
           </div>
         </div>
 

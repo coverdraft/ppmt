@@ -223,6 +223,8 @@ export interface TradingState {
   // History
   tradeHistory: TradeRecord[]
   candlesProcessed: number
+  lastTickAt: number
+  tickCount: number
   websocketStatus: string
 
   // ─── Chart Data Series ─────────────────────
@@ -347,6 +349,8 @@ const initialState = {
   livingTrieStats: null,
   tradeHistory: [],
   candlesProcessed: 0,
+  lastTickAt: 0,
+  tickCount: 0,
   websocketStatus: 'disconnected',
   // Chart data
   entropyHistory: [] as EntropyPoint[],

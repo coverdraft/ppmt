@@ -159,6 +159,8 @@ export function getTokenName(symbol: string): string {
   return META_BY_INTERNAL.get(symbol)?.name || symbol
 }
 
+import { logClient } from './client-logger'
+
 const COINBASE_WS_URL = 'wss://ws-feed.exchange.coinbase.com'
 // Use our own Next.js API route as a proxy. The browser cannot call
 // api.coingecko.com directly because CoinGecko does not send
@@ -203,6 +205,7 @@ export class LivePriceFeed {
 
       this.ws.onopen = () => {
         console.log('[PriceFeed] Connected to Coinbase WebSocket')
+        logClient.wsConnect('Coinbase WebSocket connected')
         // Subscribe to ticker channel — gives us real-time price updates
         this.ws!.send(JSON.stringify({
           type: 'subscribe',
@@ -265,10 +268,12 @@ export class LivePriceFeed {
         this.connected = false
         if (this.intentionallyClosed) return
         console.log('[PriceFeed] WS closed, scheduling reconnect...')
+        logClient.wsDisconnect('WebSocket closed, reconnecting')
         this.scheduleReconnect()
       }
     } catch (e) {
       console.error('[PriceFeed] Failed to construct WebSocket:', e)
+      logClient.error('WebSocket construction failed', { error: String(e) })
       this.scheduleReconnect()
     }
   }
@@ -314,8 +319,10 @@ export class LivePriceFeed {
       if (!resp.ok) {
         if (resp.status === 429) {
           console.warn('[PriceFeed] CoinGecko rate-limited (429) — will retry next cycle')
+          logClient.error('CoinGecko rate-limited (429)', { will_retry: True })
         } else {
           console.warn(`[PriceFeed] CoinGecko HTTP ${resp.status}`)
+          logClient.error(`CoinGecko HTTP ${resp.status}`, { status: resp.status })
         }
         return
       }
@@ -361,6 +368,7 @@ export class LivePriceFeed {
       // Network errors are expected occasionally — silent
       if (e?.name !== 'TypeError') {
         console.warn('[PriceFeed] CoinGecko fetch failed:', e?.message || e)
+        logClient.error('CoinGecko fetch failed', { error: e?.message || String(e) })
       }
     }
   }

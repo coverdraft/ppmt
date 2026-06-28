@@ -20,6 +20,7 @@
 import type { TokenState, MoneyManagerSettings } from '@/stores/trading-store'
 import type { LivePriceFeed, TickerData } from './live-price-feed'
 import { SUPPORTED_TOKENS_LIST, getTokenName } from './live-price-feed'
+import { logClient } from './client-logger'
 
 export interface PaperTradingState {
   is_running: boolean
@@ -193,6 +194,8 @@ export class PaperTradingEngine {
   private candlesProcessed: number = 0
   private maxPatternDepthObserved: number = 0
   private lastTriePruneTime: number = 0
+  private lastTickAt: number = 0  // ms epoch of last pattern-buffer update
+  private tickCount: number = 0   // total ticks since engine start
 
   constructor(priceFeed: LivePriceFeed) {
     this.priceFeed = priceFeed
@@ -431,6 +434,7 @@ export class PaperTradingEngine {
     this.positions.delete(symbol)
 
     console.log(`[Paper] CLOSE ${symbol} @ ${fillPrice} (pnl ${pnl.toFixed(2)} USDT)`)
+    logClient.tradeClose(symbol, { fill_price: fillPrice, pnl_usdt: pnl, pnl_pct: pnlPct, close_reason: reason || 'manual' })
     return { success: true, fillPrice, qty: pos.qty, fee, pnl }
   }
 
@@ -516,6 +520,7 @@ export class PaperTradingEngine {
 
     if (candidates.length === 0) {
       console.log('[Paper/Auto] No candidates with live prices yet')
+      logClient.autoTradeSkipped('no candidates with live prices')
       return
     }
 
@@ -528,6 +533,7 @@ export class PaperTradingEngine {
       // Don't exceed max concurrent positions
       if (this.positions.size >= this.moneyManager.maxConcurrentPositions) {
         console.log(`[Paper/Auto] Max concurrent positions reached (${this.positions.size}/${this.moneyManager.maxConcurrentPositions})`)
+        logClient.autoTradeSkipped('max concurrent positions reached', { open: this.positions.size, max: this.moneyManager.maxConcurrentPositions })
         break
       }
 
@@ -538,6 +544,7 @@ export class PaperTradingEngine {
       )
       if (usdtAmount < 10) {
         console.log('[Paper/Auto] Insufficient cash for new entry')
+        logClient.autoTradeSkipped('insufficient cash', { cash: this.cash })
         break
       }
 
@@ -555,6 +562,7 @@ export class PaperTradingEngine {
       if (this.signals.length > 50) this.signals = this.signals.slice(0, 50)
 
       console.log(`[Paper/Auto] Signal: ${direction} ${top.symbol} (${top.changePct.toFixed(2)}% 24h, vol ${(top.quoteVolume/1e6).toFixed(1)}M)`)
+      logClient.signal(direction, { symbol: top.symbol, change_pct: top.changePct, volume_usd: top.quoteVolume, confidence: signal.confidence, ev: signal.ev_score })
 
       const result = direction === 'LONG'
         ? this.marketBuy(top.symbol, usdtAmount)
@@ -563,6 +571,7 @@ export class PaperTradingEngine {
       if (result.success) {
         opened++
         console.log(`[Paper/Auto] OPENED ${direction} ${top.symbol} @ ${result.fillPrice?.toFixed(4)} (${usdtAmount.toFixed(2)} USDT)`)
+        logClient.tradeOpen(top.symbol, { direction, entry_price: result.fillPrice, size_usdt: usdtAmount, qty: result.qty })
         const pos = this.positions.get(top.symbol)
         if (pos) {
           const mm = this.moneyManager
@@ -663,13 +672,16 @@ export class PaperTradingEngine {
 
       const pct = ((t.price - last) / last) * 100
       // 5-symbol SAX alphabet — captures more variance than U/D/F.
-      // Lower threshold (0.02% vs old 0.05%) means BTC/ETH ticks
-      // are no longer dominated by 'F' (flat).
+      // Thresholds tuned for 1.5s ticks on liquid tokens:
+      //   0.008% = $5 move on BTC ($60k)  — typical small tick
+      //   0.030% = $18 move on BTC        — meaningful tick
+      // Before this was 0.02% / 0.15% which made 90%+ of ticks
+      // appear as 'F' (flat) — buffer looked frozen.
       const sym_char =
-        pct >=  0.15 ? 'V' :
-        pct >=  0.02 ? 'U' :
-        pct <= -0.15 ? 'B' :
-        pct <= -0.02 ? 'D' : 'F'
+        pct >=  0.030 ? 'V' :
+        pct >=  0.008 ? 'U' :
+        pct <= -0.030 ? 'B' :
+        pct <= -0.008 ? 'D' : 'F'
 
       // Append to per-token pattern buffer
       let buf = this.patternBufferPerToken.get(sym) || []
@@ -690,7 +702,9 @@ export class PaperTradingEngine {
       }
 
       this.candlesProcessed++
+      this.tickCount++
     }
+    this.lastTickAt = Date.now()
 
     // Prune trie periodically if it gets too large (keep top 5000)
     if (now - this.lastTriePruneTime > 60 && this.livingTrie.size > 5000) {
@@ -886,6 +900,8 @@ export class PaperTradingEngine {
         status: 'CLOSED',
       })),
       candles_processed: this.candlesProcessed,
+      last_tick_at: this.lastTickAt,
+      tick_count: this.tickCount,
       websocket_status: wsConnected ? 'connected' : 'reconnecting',
       reconnect_count: 0,
       token_states: tokenStates,
