@@ -1,17 +1,53 @@
-/**
- * StatusHeader — Top bar with connection status, mode indicator, and controls.
- * Auto-mode switch uses optimistic local state to prevent flicker
- * caused by race between user click and next snapshot from engine.
- */
-'use client'
+#!/usr/bin/env python3
+"""
+PPMT Patch v8 — Add DEBUG EXPORT button to header.
 
-import { useState, useEffect } from 'react'
-import { useTradingStore } from '@/stores/trading-store'
-import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
-import { Switch } from '@/components/ui/switch'
-import { Label } from '@/components/ui/label'
-import {
+Adds a button next to KILL that copies a full engine state snapshot to clipboard
+so the user can paste it back in the chat for AI analysis.
+
+The snapshot includes:
+  - Engine status (isRunning, autoMode, isConnected, websocketStatus, tickCount)
+  - strategies_perf (per-strategy P&L, win rate, open positions)
+  - All open positions (symbol, direction, entry, SL, TP, P&L, strategy)
+  - Last 30 closed trades (for win-rate and timing analysis)
+  - Money manager settings (risk%, max positions, etc.)
+  - Circuit breakers state
+  - Active tokens count
+  - Timestamp + session metadata
+
+The button copies the snapshot as a fenced markdown code block so when the user
+pastes it back in the chat, it's clearly delimited.
+
+Files modified:
+  1. src/components/trading/header.tsx — add EXPORT button + exportDebugSnapshot fn
+
+Run: python3 /home/z/my-project/scripts/add_debug_export_button.py
+"""
+
+import sys
+from pathlib import Path
+
+ROOT = Path("/tmp/my-project")
+HEADER = ROOT / "src/components/trading/header.tsx"
+
+if not HEADER.exists():
+    print(f"ERROR: header not found at {HEADER}")
+    sys.exit(1)
+
+src = HEADER.read_text()
+
+# ─── 1. Add ClipboardCopy + Download icons to imports ─────────────────
+OLD_IMPORTS = """import {
+  Power,
+  PowerOff,
+  Skull,
+  Wifi,
+  WifiOff,
+  Zap,
+  Activity,
+} from 'lucide-react'"""
+
+NEW_IMPORTS = """import {
   Power,
   PowerOff,
   Skull,
@@ -21,16 +57,27 @@ import {
   Activity,
   ClipboardCopy,
   Download,
-} from 'lucide-react'
+} from 'lucide-react'"""
 
-interface StatusHeaderProps {
-  onStartStop: () => void
-  onKillSwitch: () => void
-  onToggleAuto: (enabled: boolean) => void
-}
+if OLD_IMPORTS not in src:
+    print("ERROR: imports block not found")
+    sys.exit(1)
+src = src.replace(OLD_IMPORTS, NEW_IMPORTS, 1)
+print("+ imports: added ClipboardCopy, Download")
 
-export function StatusHeader({ onStartStop, onKillSwitch, onToggleAuto }: StatusHeaderProps) {
-  const {
+# ─── 2. Pull more state from the store ────────────────────────────────
+OLD_DESTRUCT = """  const {
+    isConnected,
+    engineMode,
+    isRunning,
+    autoMode,
+    symbol,
+    timeframe,
+    currentPrice,
+    killSwitchActive,
+  } = useTradingStore()"""
+
+NEW_DESTRUCT = """  const {
     isConnected,
     engineMode,
     isRunning,
@@ -53,107 +100,33 @@ export function StatusHeader({ onStartStop, onKillSwitch, onToggleAuto }: Status
     selectedToken,
     kellyPercent,
     suggestedPositionSize,
-  } = useTradingStore()
+  } = useTradingStore()"""
 
-  // Optimistic local state for the auto-mode switch.
-  // Syncs from the store on prop change, but updates immediately on
-  // user click so the switch doesn't flicker between snapshots.
-  const [autoLocal, setAutoLocal] = useState(autoMode)
-  useEffect(() => {
-    setAutoLocal(autoMode)
-  }, [autoMode])
+if OLD_DESTRUCT not in src:
+    print("ERROR: destructuring block not found")
+    sys.exit(1)
+src = src.replace(OLD_DESTRUCT, NEW_DESTRUCT, 1)
+print("+ store: pulled debug fields into header")
 
-  const handleAutoToggle = (checked: boolean) => {
-    setAutoLocal(checked) // immediate visual feedback
-    onToggleAuto(checked)
-  }
+# ─── 3. Add exportDebugSnapshot function + button ─────────────────────
+# Insert the function before the component return, and the button before </div> closing right section.
 
-  const modeColor = engineMode === 'live'
-    ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30'
-    : engineMode === 'paper'
-    ? 'bg-blue-500/20 text-blue-400 border-blue-500/30'
-    : engineMode === 'demo'
-    ? 'bg-amber-500/20 text-amber-400 border-amber-500/30'
-    : 'bg-red-500/20 text-red-400 border-red-500/30'
-
-  const modeLabel = engineMode === 'live' ? 'LIVE'
-    : engineMode === 'paper' ? 'PAPER'
-    : engineMode === 'demo' ? 'DEMO'
-    : 'OFFLINE'
-
-  return (
-    <header className="flex items-center justify-between px-4 py-2 bg-[#0d1117] border-b border-[#1e2a3d]">
-      {/* Left: Logo + Status */}
-      <div className="flex items-center gap-3">
-        <div className="flex items-center gap-2">
-          <Zap className="w-5 h-5 text-blue-400" />
-          <span className="font-bold text-white text-lg tracking-tight">PPMT</span>
-          <span className="text-[10px] text-gray-500 font-mono">TERMINAL</span>
-        </div>
-
-        <div className="h-4 w-px bg-[#1e2a3d]" />
-
-        <Badge variant="outline" className={`${modeColor} text-[10px] font-mono px-2 py-0.5`}>
-          {isConnected ? <Wifi className="w-3 h-3 mr-1" /> : <WifiOff className="w-3 h-3 mr-1" />}
-          {modeLabel}
-        </Badge>
-
-        {isRunning && (
-          <div className="flex items-center gap-1">
-            <Activity className="w-3 h-3 text-emerald-400 animate-pulse" />
-            <span className="text-[10px] text-emerald-400 font-mono">RUNNING</span>
-          </div>
-        )}
-      </div>
-
-      {/* Center: Market Info */}
-      <div className="flex items-center gap-4">
-        <div className="text-center">
-          <div className="text-xs text-gray-400 font-mono">{symbol}</div>
-          <div className="text-lg font-bold text-white font-mono">
-            ${currentPrice > 0 ? currentPrice.toFixed(2) : '---.--'}
-          </div>
-        </div>
-        <Badge variant="outline" className="text-[10px] font-mono text-gray-400 border-gray-600">
-          {timeframe}
-        </Badge>
-      </div>
-
-      {/* Right: Controls */}
-      <div className="flex items-center gap-3">
-        <div className="flex items-center gap-2">
-          <Switch
-            id="auto-mode"
-            checked={autoLocal}
-            onCheckedChange={handleAutoToggle}
-            className="data-[state=checked]:bg-emerald-600 data-[state=unchecked]:bg-gray-700"
-          />
-          <Label htmlFor="auto-mode" className="text-[10px] text-gray-400 font-mono">
-            AUTO
-          </Label>
-        </div>
-
-        <Button
+OLD_CLOSING = """        <Button
           size="sm"
-          variant={isRunning ? 'destructive' : 'default'}
-          onClick={onStartStop}
-          className="h-7 text-xs font-mono gap-1"
-          disabled={!isConnected}
+          variant="destructive"
+          onClick={onKillSwitch}
+          className="h-7 text-xs font-mono gap-1 bg-red-900 hover:bg-red-800"
+          disabled={killSwitchActive || !isConnected}
         >
-          {isRunning ? (
-            <>
-              <PowerOff className="w-3 h-3" />
-              STOP
-            </>
-          ) : (
-            <>
-              <Power className="w-3 h-3" />
-              START
-            </>
-          )}
+          <Skull className="w-3 h-3" />
+          KILL
         </Button>
+      </div>
+    </header>
+  )
+}"""
 
-        <Button
+NEW_CLOSING = """        <Button
           size="sm"
           variant="destructive"
           onClick={onKillSwitch}
@@ -254,11 +227,7 @@ export function StatusHeader({ onStartStop, onKillSwitch, onToggleAuto }: Status
     }
 
     const json = JSON.stringify(snapshot, null, 2)
-    const markdown = `## PPMT Engine Snapshot — ${ts}
-
-\`\`\`json
-${json}
-\`\`\``
+    const markdown = `## PPMT Engine Snapshot — ${ts}\n\n\`\`\`json\n${json}\n\`\`\``
 
     // Copy to clipboard
     if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -266,9 +235,7 @@ ${json}
         () => {
           console.log('%c[PPMT EXPORT] Snapshot copied to clipboard', 'color:#4ade80;font-weight:bold')
           console.log(`%c${json}`, 'color:#94a3b8')
-          alert(`✅ Snapshot copiado al portapapeles (${(markdown.length / 1024).toFixed(1)} KB)
-
-Pegalo en el chat para análisis.`)
+          alert(`✅ Snapshot copiado al portapapeles (${(markdown.length / 1024).toFixed(1)} KB)\n\nPegalo en el chat para análisis.`)
         },
         (err) => {
           console.error('[PPMT EXPORT] Clipboard failed:', err)
@@ -292,4 +259,39 @@ Pegalo en el chat para análisis.`)
     ;(window as any).__ppmtSnapshot = markdown
     ;(window as any).__ppmtSnapshotJson = snapshot
   }
-}
+}"""
+
+if OLD_CLOSING not in src:
+    print("ERROR: closing block not found")
+    sys.exit(1)
+src = src.replace(OLD_CLOSING, NEW_CLOSING, 1)
+print("+ header: added EXPORT button + exportDebugSnapshot function")
+
+# ─── Write back ───────────────────────────────────────────────────────
+HEADER.write_text(src)
+print()
+print("=" * 60)
+print("  v8 DEBUG EXPORT — Applied successfully")
+print("=" * 60)
+print()
+print(f"Modified: {HEADER.relative_to(ROOT)}")
+print()
+print("What changed:")
+print("  + Header now pulls extra state from store (positions, tradeHistory,")
+print("    strategies_perf, websocketStatus, moneyManager, circuitBreakers)")
+print("  + Added EXPORT button between KILL and end of header")
+print("  + exportDebugSnapshot() builds JSON snapshot, copies to clipboard")
+print("    as markdown code block, exposes window.__ppmtSnapshot for fallback")
+print()
+print("Snapshot contents:")
+print("  - meta: timestamps, engine status, tick stats, WS status")
+print("  - strategies_perf: per-strategy A/B/C/D performance")
+print("  - open_positions: live positions with SL/TP/P&L/age")
+print("  - recent_closed_trades: last 30 closed trades")
+print("  - money_manager + circuit_breakers settings")
+print()
+print("On your Mac:")
+print("  1. git pull origin terminal-web")
+print("  2. kill -9 $(lsof -ti :3000) 2>/dev/null; sleep 1; npm run dev")
+print("  3. Click EXPORT button in header → snapshot copied to clipboard")
+print("  4. Paste in chat — AI gets full engine state for analysis")
