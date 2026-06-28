@@ -242,7 +242,14 @@ function computeATR(prices: number[], period: number = 60): number {
     sum += Math.abs(prices[i] - prices[i - 1])
     count++
   }
-  return count > 0 ? sum / count : 0
+  if (count === 0) return 0
+  const rawATR = sum / count
+  // FIX v10: Floor ATR at 0.1% of last price so SL/TP is at least 0.4% away.
+  // Without this, low-price tokens (HBAR $0.07, JUP $0.21) get ATR ~ 0.0001
+  // and CatSL ends up within the bid-ask spread — every trade stops out instantly.
+  const lastPrice = prices[prices.length - 1]
+  const minATR = lastPrice > 0 ? lastPrice * 0.001 : 0
+  return Math.max(rawATR, minATR)
 }
 
 function computeBollinger(prices: number[], period: number = 50, mult: number = 2) {
@@ -642,11 +649,15 @@ export class PaperTradingEngine {
       this.lastTickPrices.set(sym, t.price)
       if (last === undefined) continue
       const pct = ((t.price - last) / last) * 100
+      // FIX v10: Lower thresholds — Coinbase ticks update every 1.5s and most
+      // moves are < 0.02%, so the old thresholds produced 90% 'F' symbols,
+      // entropy = 1.0 (max chaos), and match_score = 0 for every pattern.
+      // New thresholds: U/D at 0.01%, V/B at 0.08%.
       const sym_char =
-        pct >= 0.15 ? 'V' :
-        pct >= 0.02 ? 'U' :
-        pct <= -0.15 ? 'B' :
-        pct <= -0.02 ? 'D' : 'F'
+        pct >= 0.08 ? 'V' :
+        pct >= 0.01 ? 'U' :
+        pct <= -0.08 ? 'B' :
+        pct <= -0.01 ? 'D' : 'F'
       let buf = this.patternBufferPerToken.get(sym) || []
       buf.push(sym_char)
       if (buf.length > 12) buf = buf.slice(-12)
@@ -740,10 +751,20 @@ export class PaperTradingEngine {
         }
       }
 
+      // FIX v10: Minimum 60s hold before SL/CAT_SL can fire.
+      // Without this, the tight ATR-based SL triggers within 1.5s of entry
+      // because the first tick after entry is usually the spread crossing back.
+      // (Trailing stop and break-even still run; only SL/CAT_SL are gated.)
+      const minHoldMs = 60 * 1000  // 60 seconds
+      const skipStopLoss = holdMs < minHoldMs
+
       // ─── SL/TP/CatSL trigger ───
+      // FIX v10: SL and CAT_SL are gated by skipStopLoss (60s minimum hold).
+      // TP is NOT gated — if price hits take-profit immediately, we take the win.
+      // Trailing SL is also allowed (only fires when in profit).
       let hit = false
       let reason = ''
-      if (pos.current_sl !== null) {
+      if (!skipStopLoss && pos.current_sl !== null) {
         if (isLong && price <= pos.current_sl) { hit = true; reason = pnlPct > 0 ? 'CLOSED_BY_TRAILING_SL' : 'CLOSED_BY_SL' }
         if (!isLong && price >= pos.current_sl) { hit = true; reason = pnlPct > 0 ? 'CLOSED_BY_TRAILING_SL' : 'CLOSED_BY_SL' }
       }
@@ -751,7 +772,7 @@ export class PaperTradingEngine {
         if (isLong && price >= pos.current_tp) { hit = true; reason = 'CLOSED_BY_TP' }
         if (!isLong && price <= pos.current_tp) { hit = true; reason = 'CLOSED_BY_TP' }
       }
-      if (pos.catastrophic_sl !== null) {
+      if (!skipStopLoss && pos.catastrophic_sl !== null) {
         if (isLong && price <= pos.catastrophic_sl) { hit = true; reason = 'CLOSED_BY_CAT_SL' }
         if (!isLong && price >= pos.catastrophic_sl) { hit = true; reason = 'CLOSED_BY_CAT_SL' }
       }
@@ -1269,7 +1290,7 @@ export class PaperTradingEngine {
       current_price: parseFloat(currentPrice.toFixed(currentPrice < 1 ? 6 : currentPrice < 100 ? 4 : 2)),
       symbol: this.selectedToken,
       timeframe: 'live',
-      exchange: 'BINANCE',
+      exchange: 'COINBASE',  // FIX v10: was BINANCE (geo-blocked from Spain)
       pattern_buffer: this.patternBufferPerToken.get(this.selectedToken) || [],
       entropy: parseFloat(entropy.toFixed(3)),
       regime,

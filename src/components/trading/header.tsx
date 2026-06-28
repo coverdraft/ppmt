@@ -358,11 +358,31 @@ export function StatusHeader({ onStartStop, onKillSwitch, onToggleAuto }: Status
     const closedTrades = allTrades.filter((t: any) => t.status === 'CLOSED')
     const wins = closedTrades.filter((t: any) => t.pnl_usdt > 0)
     const losses = closedTrades.filter((t: any) => t.pnl_usdt < 0)
-    const slHits = closedTrades.filter((t: any) => t.close_reason === 'SL' || t.close_reason === 'STOP_LOSS')
-    const tpHits = closedTrades.filter((t: any) => t.close_reason === 'TP' || t.close_reason === 'TAKE_PROFIT')
-    const catSLHits = closedTrades.filter((t: any) => t.close_reason === 'CAT_SL' || t.close_reason === 'CATASTROPHIC_SL')
-    const trailingHits = closedTrades.filter((t: any) => t.close_reason === 'TRAILING' || t.close_reason === 'TRAILING_STOP')
-    const timeStops = closedTrades.filter((t: any) => t.close_reason === 'TIME_STOP')
+    // FIX v10: strip 'CLOSED_BY_' prefix from reasons before classifying
+    const normalizeReason = (r: string | undefined): string => {
+      if (!r) return ''
+      return r.replace(/^CLOSED_BY_/, '')
+    }
+    const slHits = closedTrades.filter((t: any) => {
+      const r = normalizeReason(t.close_reason)
+      return r === 'SL' || r === 'STOP_LOSS'
+    })
+    const tpHits = closedTrades.filter((t: any) => {
+      const r = normalizeReason(t.close_reason)
+      return r === 'TP' || r === 'TAKE_PROFIT'
+    })
+    const catSLHits = closedTrades.filter((t: any) => {
+      const r = normalizeReason(t.close_reason)
+      return r === 'CAT_SL' || r === 'CATASTROPHIC_SL'
+    })
+    const trailingHits = closedTrades.filter((t: any) => {
+      const r = normalizeReason(t.close_reason)
+      return r === 'TRAILING' || r === 'TRAILING_STOP'
+    })
+    const timeStops = closedTrades.filter((t: any) => {
+      const r = normalizeReason(t.close_reason)
+      return r === 'TIME_STOP'
+    })
 
     // Win/loss streaks (most recent)
     const recentStreaks: any[] = []
@@ -396,9 +416,10 @@ export function StatusHeader({ onStartStop, onKillSwitch, onToggleAuto }: Status
         TRAILING: trailingHits.length,
         TIME_STOP: timeStops.length,
         MANUAL: closedTrades.filter((t: any) => t.close_reason === 'MANUAL' || t.close_reason === 'CLOSED').length,
-        other: closedTrades.filter((t: any) =>
-          !['SL','STOP_LOSS','TP','TAKE_PROFIT','CAT_SL','CATASTROPHIC_SL','TRAILING','TRAILING_STOP','TIME_STOP','MANUAL','CLOSED'].includes(t.close_reason)
-        ).length,
+        other: closedTrades.filter((t: any) => {
+          const r = normalizeReason(t.close_reason)
+          return !['SL','STOP_LOSS','TP','TAKE_PROFIT','CAT_SL','CATASTROPHIC_SL','TRAILING','TRAILING_STOP','TIME_STOP','MANUAL','CLOSED'].includes(r)
+        }).length,
       },
       recent_streaks: recentStreaks.slice(-5),
       avg_hold_min: closedTrades.length
