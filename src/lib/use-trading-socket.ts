@@ -37,6 +37,18 @@ let GLOBAL_FEED: LivePriceFeed | null = null
 let GLOBAL_LISTENER: ((state: any) => void) | null = null
 let GLOBAL_REFCOUNT = 0
 
+/**
+ * Returns the singleton PaperTradingEngine instance, or null if no
+ * component has mounted yet (the engine is created on first mount
+ * of useTradingSocket).
+ *
+ * Used by /api/engine-state to expose the engine snapshot via HTTP
+ * for remote debugging.
+ */
+export function getGlobalEngine(): PaperTradingEngine | null {
+  return GLOBAL_ENGINE
+}
+
 export function useTradingSocket() {
   const socketRef = useRef<any>(null)
   const paperRef = useRef<PaperTradingEngine | null>(null)
@@ -97,6 +109,8 @@ export function useTradingSocket() {
         livingTrieStats: data.living_trie_stats,
         tradeHistory: data.trade_history || [],
         candlesProcessed: data.candles_processed,
+        lastTickAt: data.last_tick_at || 0,
+        tickCount: data.tick_count || 0,
         websocketStatus: data.websocket_status,
         isConnected: true,
         tokenStates: data.token_states || {},
@@ -288,6 +302,8 @@ export function useTradingSocket() {
         livingTrieStats: state.living_trie_stats,
         tradeHistory: state.trade_history || [],
         candlesProcessed: state.candles_processed,
+        lastTickAt: state.last_tick_at || 0,
+        tickCount: state.tick_count || 0,
         isConnected: true,
         tokenStates: state.token_states || {},
         activeTokens: state.active_tokens || ['BTC/USDT'],

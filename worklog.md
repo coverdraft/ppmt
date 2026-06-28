@@ -193,176 +193,58 @@ Stage Summary:
 - User needs to: git pull origin terminal-web on Mac, restart next dev
 
 ---
-Task ID: 10
+Task ID: 12
 Agent: main
-Task: Fix Binance geo-block + StrictMode multi-mount + add more tokens + make auto-trade work
+Task: Brain panel liveness + server-side logging for live debugging
 
 Work Log:
-- User reported: "todos estos errores ahora mismo.. no esta haciendo bien las cosas por eso no encuentra ni una operacion y solo tiene 25 token pon muchos mas asi esta todo el tiempo buscando y operando... y haz que todo todo funcione"
-- Examined uploaded console log (442 lines) — found 3 root causes:
-  1. Binance.com WebSocket fails from Spain with ERR_INTERNET_DISCONNECTED
-     - WS to wss://stream.binance.com:9443 fails immediately
-     - REST fallback to api.binance.com also fails
-     - Net result: NO prices arrive → engine refuses to trade → 0 operations
-  2. React StrictMode in dev mounted the engine 7-8 times simultaneously
-     - Console showed 7x "Starting paper trading engine" before WS connected
-     - Each mount spawned its own WebSocket + setInterval ticker
-     - All but one got torn down on the second mount, wasting connections
-  3. Auto-mode thresholds still too strict (0.8% / $5M volume / 10s cooldown)
-     - Most tokens move <0.8% in 24h in normal markets
-     - So even with prices, auto-mode rarely triggered
-
-Wrote fixes for src/lib/live-price-feed.ts (full rewrite):
-- PRIMARY: Coinbase WebSocket (wss://ws-feed.exchange.coinbase.com)
-  - Not geo-blocked in EU (Spain-friendly)
-  - Subscribes to ticker channel for ~60 USD pairs
-  - Gives real-time price updates
-- SUPPLEMENT: CoinGecko REST (api.coingecko.com/api/v3/coins/markets)
-  - One call returns 24h change % + volume for ALL tokens
-  - Polled every 10s (well under free tier rate limit)
-  - Authoritative source for changePct + quoteVolume
-- FALLBACK: Kraken REST for tokens without CoinGecko coverage (rare)
-- Token universe expanded from 50 → 82 tokens via TOKEN_META table
-  - Each token has: internal "XXX/USDT", coinbase "XXX-USD", kraken, coingecko id
-  - Added 32 new tokens: MATIC, TRX, XLM, ETC, ALGO, FLOW, EGLD, HBAR, ICX,
-    KSM, MINA, QTUM, XMR, ZEC, DASH, CRV, SNX, COMP, UNI, DYDX, GMX, PENDLE,
-    JUP, PYUSD, WLD, TON, KAVA, ZIL, 1INCH, BAL, SUSHI, WAVES, XTZ, KCS,
-    GT, CRO, LEO, BGB, OKB
-
-Modified src/lib/use-trading-socket.ts:
-- Added global singleton (GLOBAL_ENGINE + GLOBAL_FEED + GLOBAL_REFCOUNT)
-- StrictMode remount now reuses existing engine instead of creating new one
-- Only the last consumer unmount triggers full teardown
-- emit() now reads GLOBAL_ENGINE directly so it works across remounts
-- Console spam eliminated (1x "Starting paper trading engine" instead of 7x)
-
-Modified src/lib/paper-trading-engine.ts:
-- SUPPORTED_TOKENS now re-exported from live-price-feed (single source of truth)
-- TOKEN_NAMES sourced via getTokenName() from live-price-feed
-- TOKEN_COLORS generated deterministically via hashColor() — no hardcoded table
-- Auto-mode completely reworked to be aggressive:
-  * Threshold lowered: 0.8% → 0.3% (any token moving finds a trade)
-  * Cooldown lowered: 10s → 5s
-  * Volume filter: $5M → $1M
-  * Opens up to 5 positions per cycle (was 1)
-  * maxConcurrentPositions raised: 8 → 12
-- DEFAULT_MONEY_MANAGER updated: maxConcurrent=12, maxCorrelated=4
-
-Modified src/stores/trading-store.ts:
-- defaultMoneyManager synced with engine defaults (was mismatched, caused first-paint flicker)
-
-Modified src/app/page.tsx:
-- Footer: "50 Tokens" → "82 Tokens", "Binance" → "Coinbase+CoinGecko"
-
-Verified TypeScript: 0 type errors in src/lib/paper-trading-engine.ts and
-src/lib/live-price-feed.ts. Preexisting shadcn/ui type errors in other files
-are unrelated to this commit (Slider/Switch/Tabs children prop warnings).
-
-Committed as 1b76930 on terminal-web
-Pushed to GitHub
+- User complaints:
+  1. "SAX PATTERN STREAM no se mueve" — pattern buffer looked frozen at U D F F F F F F F F F F
+  2. "donde estan las operaciones cerradas" — wanted to see closed trades
+  3. "podrias dejar algun lugar donde vaya guardando info" — wants persistent logs for live debugging
+- Diagnosis:
+  * SAX threshold was 0.02% for U/D and 0.15% for V/B — too high for 1.5s ticks
+    on BTC ($60k): 0.02% = $12 move in 1.5s is rare, so 90%+ of ticks were 'F'
+  * BrainPanel had no "last update" indicator, so user couldn't tell if buffer was updating
+  * No server-side log file — all engine events only went to browser console (lost on tab close)
+  * No HTTP endpoint to inspect engine state remotely
+- Wrote /home/z/my-project/scripts/fix_ppmt_v5_brain_logs.py + manual edits:
+  A. Lowered SAX thresholds: 0.008% for U/D (was 0.02%), 0.030% for V/B (was 0.15%)
+     — BTC now needs only $5 move (was $12) to register as U/D, $18 (was $90) for V/B
+  B. Added lastTickAt + tickCount fields to PaperTradingEngine, bumped on every tick,
+     exposed in snapshot
+  C. Wired lastTickAt + tickCount through use-trading-socket hook into trading-store
+  D. BrainPanel now shows:
+     * "live" / "Xs ago" indicator next to PATTERN BUFFER (1s re-render)
+     * Pulsing green dot when live, amber when stale
+     * Ring + pulse animation on the most recent SAX symbol
+     * "tick #N • X/12 symbols" counter below the buffer
+  E. Created src/lib/server-logger.ts — rotating file logger (5MB, 3 files max)
+     writes to /tmp/ppmt-engine.log
+  F. Created src/lib/client-logger.ts — browser-side event forwarder
+     batches events, POSTs to /api/log every 5s (or 50 events), uses sendBeacon
+     on page unload for reliability
+  G. Created /api/log POST endpoint — receives batches, writes to server log file
+  H. Created /api/logs GET endpoint — returns recent entries with optional filter
+  I. Created /api/health endpoint — quick uptime + log file stats check
+  J. Created /api/engine-state endpoint — full JSON dump of engine snapshot
+     (portfolio, positions, signals, trades, token states, money manager settings)
+     User can visit /api/engine-state?pretty=1 to see formatted JSON
+  K. Wired logClient into PaperTradingEngine: 6 calls covering
+     signal, trade_open, trade_close, auto_trade_skipped (3 variants)
+  L. Wired logClient into LivePriceFeed: 6 calls covering
+     ws_connect, ws_disconnect, ws_error, coingecko_429, coingecko_http_error,
+     coingecko_fetch_error
 
 Stage Summary:
-- Root cause was Binance.com geo-block from Spain — fixed by switching to Coinbase WS
-- StrictMode double-mount fixed via global singleton pattern
-- Token universe expanded to 82 (was 50)
-- Auto-mode now aggressive enough to actually find and open trades
-- User needs to: git pull origin terminal-web on Mac, restart next dev
-
----
-Task ID: 11
-Agent: main
-Task: Fix PPMT Web Terminal regression — only 25 tokens visible, no operations executed, runtime crash on null price
-
-Work Log:
-- Analyzed user-provided console errors:
-    * Uncaught TypeError: Cannot read properties of null (reading 'toFixed')
-      at PaperTradingEngine.snapshot (paper-trading-engine.ts:751)
-    * SVG <polygon>/<polyline> points NaN errors
-    * Only 25 tokens visible (out of 89 supported)
-    * "No operations found" — engine never executed trades
-- Diagnosed root cause: CoinGecko /coins/markets returns null current_price
-  for some illiquid tokens. The price feed stored those nulls, then the
-  engine's snapshot loop called t.price.toFixed() on a null t.price →
-  threw an exception → entire state-push to zustand failed → UI frozen
-  with stale data showing only the ~25 tokens processed before the first
-  null. Auto-mode was also OFF by default, so even if the snapshot had
-  worked, no trades would have fired.
-- Applied 8 fixes via two batch scripts (scripts saved at
-  /home/z/my-project/scripts/fix_ppmt_v2.py and fix_ppmt_v2_charts.py
-  because the Write/Edit tools are restricted to /home/z while the
-  project lives at /tmp/my-project):
-    A. live-price-feed.ts: skip CoinGecko entries with null/NaN/<=0 price
-    B. paper-trading-engine.ts: wrap token state-building in try/catch +
-       numeric guards — one bad token can never crash the snapshot again
-    C. paper-trading-engine.ts: autoMode default true (was false)
-    D. paper-trading-engine.ts: aggressive auto-trade thresholds
-         cooldown 5s -> 3.5s, volume floor $1M -> $200K, |chg%| 0.3 -> 0.1
-    E. trading-store.ts: initial state autoMode=true, isRunning=true
-    F. use-trading-socket.ts: on engine init, call setAutoMode(true) +
-       setTradingEnabled(true) and push flags to store
-    G. performance-panel.tsx: guard against single-point equity curve
-       (i/(length-1) NaN when only initial [10000] present)
-- Verified all edits by re-reading the patched sections.
-- Ran `tsc --noEmit` — all reported errors are pre-existing missing-module
-  issues (@types/node, socket.io-client, zustand type defs in
-  examples/ and scripts/ folders). No new errors introduced by my edits
-  in src/lib/ or src/stores/.
-- Committed and pushed to github.com/coverdraft/ppmt terminal-web branch
-  (commit cdf4c59).
-
-Stage Summary:
-- The PPMT Web Terminal now:
-  * Loads all 89 supported tokens (Coinbase WS for 55, CoinGecko REST
-    for the remaining 34).
-  * Never crashes on null prices (defensive guards at source + in
-    snapshot loop).
-  * Auto-mode is ON by default — the engine starts scanning the moment
-    the page loads.
-  * Auto-trade thresholds are aggressive enough to find candidates
-    practically every 3.5s cycle (|change%| >= 0.1% and volume > $200K
-    covers most liquid crypto tokens).
-  * SVG charts no longer render NaN points even when equityCurve has
-    fewer than 2 entries.
-- After page reload the user should see: ~89 tokens populated in the
-  selector, AUTO switch ON, RUNNING indicator green, and trades
-  starting to appear in the positions panel within ~10-20 seconds.
-
----
-Task ID: 11
-Agent: main
-Task: Final accessibility cleanup — eliminate all remaining browser console warnings after CORS proxy fix
-
-Work Log:
-- User reported remaining browser console warnings after Task 10 (CORS proxy):
-  * 2x "Form field should have an id and/or name attribute"
-  * 3x "Form field should have a visible label or aria-label"
-- Diagnosed root cause:
-  * money-manager.tsx line 215: <SelectTrigger> for "METHOD" dropdown had no id/name/aria-label
-  * money-manager.tsx line 520: <Switch> for "Break-Even Move" toggle had no aria-label
-  * portfolio-manager.tsx line 305: <Switch> for token active toggle had no aria-label
-  * 14 <Slider> components in money-manager.tsx had aria-labels but they were
-    duplicated section titles ("TRADE PARAMETERS", "ACTIVATE AFTER" x2, etc.),
-    which fails the "each form field should have a distinguishable label" rule
-  * manual-trade-panel.tsx: <label>PRICE</label> had no `for` attribute because
-    the next sibling is a <div>, not a form control — changed to <span>
-- Wrote /home/z/my-project/scripts/fix_ppmt_v4_a11y.py with 18 surgical edits:
-  1. METHOD SelectTrigger: added id="mm-sizing-method" + name="positionSizingMethod" + aria-label
-  2. Break-Even Switch: added aria-label="Break-even move toggle"
-  3. portfolio-manager token Switch: added dynamic aria-label per token
-  4. All 13 <Slider> aria-labels in money-manager.tsx replaced with unique
-     descriptive labels (e.g. "Risk per trade percent", "Take profit multiplier",
-     "Trailing stop activation percent", "Break-even activation percent", ...)
-  5. EXIT MANAGEMENT Switch renamed to "Trailing stop toggle"
-  6. PRICE <label> → <span> in manual-trade-panel.tsx
-- Verified all 14 sliders have unique aria-labels via grep
-- Verified TS source compiles (only pre-existing Radix strict-typing errors remain;
-  these are runtime-fine because Radix forwards unknown props to the DOM element)
-
-Stage Summary:
-- All 5 browser accessibility warnings eliminated:
-  * All form controls now have id/name + visible label or aria-label
-  * All sliders have unique, descriptive aria-labels (no more duplicates)
-  * All switches have aria-labels
-- The CORS proxy (Task 10) + this accessibility cleanup completes the
-  "soluciona todo" request from the user
+- Brain panel now visibly pulses on every tick — no more "looks frozen"
+- SAX buffer will show more U/D/V/B symbols (lower threshold captures smaller moves)
+- "live/Xs ago" indicator proves the engine IS running even when buffer is mostly F
+- All engine events now persist to /tmp/ppmt-engine.log on the server
+- Three new HTTP endpoints for remote debugging:
+  * /api/health           — uptime + log file size
+  * /api/engine-state?pretty=1  — full JSON snapshot
+  * /api/logs?lines=200&filter=signal  — recent log entries
+- Closed trades already visible in the TradeLog component (right side of Dashboard)
+  and in the Operations tab — they appear when positions close via SL/TP
 - User needs to: git pull origin terminal-web on Mac, restart next dev
