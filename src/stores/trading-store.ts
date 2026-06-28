@@ -19,6 +19,7 @@ export interface Position {
   catastrophic_sl: number | null
   pnl_pct: number
   pnl_usdt: number
+  strategy?: string  // 'A' | 'B' | 'C' | 'D' — which strategy opened this
   expected_sequence?: string[][]
   sequence_index?: number
 }
@@ -251,6 +252,23 @@ export interface TradingState {
   suggestedPositionSize: number  // calculated position size in USDT
   riskRewardRatio: number        // current R:R of open position
 
+  // ─── Multi-Strategy Performance ─────────────
+  strategies_perf: Record<string, {
+    name: string
+    description: string
+    cash: number
+    allocated: number
+    realized_pnl: number
+    unrealized_pnl: number
+    total_pnl_pct: number
+    total_trades: number
+    winning_trades: number
+    win_rate: number
+    open_positions: number
+    last_signal_time: number
+    color: string
+  }>
+
   // Actions
   setState: (data: Partial<TradingState>) => void
   setConnected: (connected: boolean, mode?: string) => void
@@ -373,6 +391,7 @@ const initialState = {
   kellyPercent: 0,
   suggestedPositionSize: 0,
   riskRewardRatio: 0,
+  strategies_perf: {} as Record<string, any>,
 }
 
 function trimArray<T>(arr: T[], max: number = MAX_CHART_POINTS): T[] {

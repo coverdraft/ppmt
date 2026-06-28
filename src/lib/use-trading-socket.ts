@@ -123,6 +123,7 @@ export function useTradingSocket() {
         kellyPercent: data.kelly_percent || 0,
         suggestedPositionSize: data.suggested_position_size || 0,
         riskRewardRatio: data.risk_reward_ratio || 0,
+        strategies_perf: data.strategies_perf || {},
       })
       if (mountedRef.current) {
         setConnected(true, data.mode || 'paper')
@@ -312,6 +313,7 @@ export function useTradingSocket() {
         kellyPercent: state.kelly_percent || 0,
         suggestedPositionSize: state.suggested_position_size || 0,
         riskRewardRatio: state.risk_reward_ratio || 0,
+        strategies_perf: state.strategies_perf || {},
       })
     }
 

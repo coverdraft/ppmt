@@ -1,26 +1,62 @@
 /**
- * PaperTradingEngine — Realistic paper trading with live market prices.
+ * PaperTradingEngine v3 — Multi-strategy parallel paper trading.
  *
- * Replaces DemoEngine. Key differences:
- *  - Prices come from a LivePriceFeed (Coinbase WS + CoinGecko/Kraken REST),
- *    not random walk. Spain-friendly: no Binance.com geo-block.
- *  - User can manually BUY / SELL / CLOSE positions on any of 82 tokens.
- *  - Real fees (0.1% taker) and slippage (0.05%) applied to every fill.
- *  - PnL reflects actual market movement, not synthetic noise.
- *  - Capital starts at 10,000 USDT and can grow or shrink for real.
+ * STRATEGIES (each with own capital allocation):
+ *   A: Momentum 24h     (30% = 3000 USDT) — top movers by |changePct|
+ *   B: Mean Reversion   (25% = 2500 USDT) — RSI oversold/overbought
+ *   C: Range Breakout   (25% = 2500 USDT) — breaks rolling 60-tick high/low
+ *   D: Vol Squeeze      (20% = 2000 USDT) — Bollinger squeeze + first move
  *
- * State output is compatible with the DemoEngine interface so the
- * existing useTradingSocket hook and store work without changes.
+ * BUG FIXES vs v2:
+ *   ✓ Circuit breakers actually enforced (drawdown > maxDrawdownPct stops new entries)
+ *   ✓ checkStops() runs even when trading is paused (was a critical bug)
+ *   ✓ Trailing stop + break-even work on ALL positions (manual + auto)
+ *   ✓ SL/TP are ATR-based (reactive to recent volatility, not stale 24h range)
+ *   ✓ maxCorrelatedPositions enforced via sector grouping
+ *   ✓ Time stop: 4h max hold, close at market
+ *   ✓ Cooldown 30min post-stop-out per token
+ *   ✓ Only WS-connected tokens (Coinbase) are eligible for auto-trading
  *
- * Auto-mode (optional): when enabled, generates momentum-based signals
- * (top movers by 24h change% with volume confirmation) and opens
- * small positions automatically. Off by default — user controls.
+ * Each strategy has independent:
+ *   - Cash pool, realized P&L, trade count, win count
+ *   - Cooldown timer, position count
+ *   - Signal generation logic
+ *
+ * 5-min console report shows per-strategy performance for comparison.
  */
 
 import type { TokenState, MoneyManagerSettings } from '@/stores/trading-store'
 import type { LivePriceFeed, TickerData } from './live-price-feed'
 import { SUPPORTED_TOKENS_LIST, getTokenName } from './live-price-feed'
-import { logClient } from './client-logger'
+
+// ─── Types ────────────────────────────────────────────────────────────
+export type StrategyName = 'A' | 'B' | 'C' | 'D'
+
+export interface StrategyPerf {
+  name: string
+  description: string
+  cash: number
+  allocated: number
+  realized_pnl: number
+  unrealized_pnl: number
+  total_pnl_pct: number
+  total_trades: number
+  winning_trades: number
+  win_rate: number
+  open_positions: number
+  last_signal_time: number
+  color: string
+}
+
+interface StrategyState {
+  cash: number
+  allocated: number
+  realizedPnl: number
+  totalTrades: number
+  winningTrades: number
+  lastSignalTime: number
+  positions: Set<string>
+}
 
 export interface PaperTradingState {
   is_running: boolean
@@ -69,6 +105,7 @@ export interface PaperTradingState {
   kelly_percent: number
   suggested_position_size: number
   risk_reward_ratio: number
+  strategies_perf: Record<string, StrategyPerf>
 }
 
 export interface OrderResult {
@@ -93,6 +130,7 @@ export interface PaperPosition {
   catastrophic_sl: number | null
   pnl_pct: number
   pnl_usdt: number
+  strategy: StrategyName
 }
 
 interface PaperTrade extends PaperPosition {
@@ -110,18 +148,16 @@ interface PaperOrder {
   usdt: number
   fee: number
   type: 'MARKET'
+  strategy: StrategyName
 }
 
-// Token universe comes from live-price-feed.ts (82 tokens across Coinbase + Kraken + CoinGecko).
-// Re-exported here so existing imports keep working.
+// ─── Token universe ───────────────────────────────────────────────────
 export const SUPPORTED_TOKENS = SUPPORTED_TOKENS_LIST as readonly string[]
 
-// Token names are also sourced from live-price-feed (single source of truth).
 export const TOKEN_NAMES: Record<string, string> = Object.fromEntries(
   SUPPORTED_TOKENS_LIST.map(s => [s, getTokenName(s)])
 )
 
-// Deterministic color per token (hash-based, stable across renders)
 function hashColor(s: string): string {
   let h = 0
   for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0
@@ -132,10 +168,127 @@ const TOKEN_COLORS: Record<string, string> = Object.fromEntries(
   SUPPORTED_TOKENS_LIST.map(s => [s, hashColor(s)])
 )
 
+// Tokens with Coinbase WS subscription — only these are eligible for auto-trading.
+// The rest (CoinGecko-only) update every 30s, too stale for real-time signals.
+const WS_ELIGIBLE_TOKENS: string[] = [
+  'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'ADA/USDT',
+  'AVAX/USDT', 'DOGE/USDT', 'DOT/USDT', 'LINK/USDT', 'MATIC/USDT',
+  'LTC/USDT', 'BCH/USDT', 'ATOM/USDT', 'XLM/USDT', 'NEAR/USDT',
+  'APT/USDT', 'ARB/USDT', 'OP/USDT', 'INJ/USDT', 'FIL/USDT',
+  'AAVE/USDT', 'MKR/USDT', 'SUI/USDT', 'TIA/USDT', 'SEI/USDT',
+  'STX/USDT', 'IMX/USDT', 'GRT/USDT', 'LDO/USDT', 'SAND/USDT',
+  'MANA/USDT', 'AXS/USDT', 'PEPE/USDT', 'WIF/USDT', 'SHIB/USDT',
+  'PYTH/USDT', 'JTO/USDT', 'RNDR/USDT', 'ICP/USDT', 'ETC/USDT',
+  'ALGO/USDT', 'FLOW/USDT', 'HBAR/USDT', 'MINA/USDT', 'ZEC/USDT',
+  'CRV/USDT', 'SNX/USDT', 'COMP/USDT', 'UNI/USDT', 'DYDX/USDT',
+  'JUP/USDT', 'WLD/USDT',
+]
+
+// Sector grouping for correlation control
+const TOKEN_SECTOR: Record<string, string> = {
+  'BTC/USDT': 'btc', 'BCH/USDT': 'btc',
+  'ETH/USDT': 'eth', 'LDO/USDT': 'eth', 'ARB/USDT': 'eth', 'OP/USDT': 'eth', 'MATIC/USDT': 'eth',
+  'SOL/USDT': 'sol', 'JUP/USDT': 'sol', 'JTO/USDT': 'sol', 'WIF/USDT': 'sol',
+  'AVAX/USDT': 'l1', 'NEAR/USDT': 'l1', 'APT/USDT': 'l1', 'SUI/USDT': 'l1', 'TIA/USDT': 'l1', 'SEI/USDT': 'l1',
+  'ADA/USDT': 'l1', 'DOT/USDT': 'l1', 'ATOM/USDT': 'l1', 'ALGO/USDT': 'l1', 'HBAR/USDT': 'l1',
+  'ICP/USDT': 'l1', 'FLOW/USDT': 'l1', 'XTZ/USDT': 'l1', 'XLM/USDT': 'l1', 'INJ/USDT': 'l1',
+  'FIL/USDT': 'l1', 'STX/USDT': 'l1', 'MINA/USDT': 'l1', 'TON/USDT': 'l1',
+  'XRP/USDT': 'majors', 'LTC/USDT': 'majors', 'BNB/USDT': 'majors', 'TRX/USDT': 'majors',
+  'ETC/USDT': 'majors', 'XMR/USDT': 'majors', 'ZEC/USDT': 'majors', 'DASH/USDT': 'majors',
+  'LINK/USDT': 'defi', 'UNI/USDT': 'defi', 'AAVE/USDT': 'defi', 'COMP/USDT': 'defi',
+  'CRV/USDT': 'defi', 'SNX/USDT': 'defi', 'DYDX/USDT': 'defi', 'MKR/USDT': 'defi',
+  'DOGE/USDT': 'meme', 'SHIB/USDT': 'meme', 'PEPE/USDT': 'meme', 'FLOKI/USDT': 'meme',
+  'RNDR/USDT': 'ai', 'WLD/USDT': 'ai', 'FET/USDT': 'ai', 'AGIX/USDT': 'ai', 'OCEAN/USDT': 'ai',
+  'AXS/USDT': 'gaming', 'SAND/USDT': 'gaming', 'MANA/USDT': 'gaming', 'GALA/USDT': 'gaming',
+  'ENJ/USDT': 'gaming', 'CHZ/USDT': 'gaming', 'IMX/USDT': 'gaming',
+  'GRT/USDT': 'infra', 'PYTH/USDT': 'infra',
+}
+
+function getSector(symbol: string): string {
+  return TOKEN_SECTOR[symbol] || 'other'
+}
+
+// ─── Indicators ───────────────────────────────────────────────────────
+interface PriceSample { ts: number; price: number }
+
+function computeRSI(prices: number[], period: number = 14): number {
+  if (prices.length < period + 1) return 50
+  let gains = 0, losses = 0
+  for (let i = 1; i <= period; i++) {
+    const ch = prices[i] - prices[i - 1]
+    if (ch >= 0) gains += ch
+    else losses -= ch
+  }
+  let avgGain = gains / period
+  let avgLoss = losses / period
+  for (let i = period + 1; i < prices.length; i++) {
+    const ch = prices[i] - prices[i - 1]
+    const g = ch > 0 ? ch : 0
+    const l = ch < 0 ? -ch : 0
+    avgGain = (avgGain * (period - 1) + g) / period
+    avgLoss = (avgLoss * (period - 1) + l) / period
+  }
+  if (avgLoss === 0) return 100
+  const rs = avgGain / avgLoss
+  return 100 - (100 / (1 + rs))
+}
+
+function computeATR(prices: number[], period: number = 60): number {
+  if (prices.length < 2) return 0
+  const start = Math.max(1, prices.length - period)
+  let sum = 0
+  let count = 0
+  for (let i = start; i < prices.length; i++) {
+    sum += Math.abs(prices[i] - prices[i - 1])
+    count++
+  }
+  return count > 0 ? sum / count : 0
+}
+
+function computeBollinger(prices: number[], period: number = 50, mult: number = 2) {
+  const last = prices[prices.length - 1] || 0
+  const slice = prices.slice(-period)
+  if (slice.length < 5) return { middle: last, upper: 0, lower: 0, width: 0 }
+  const mean = slice.reduce((a, b) => a + b, 0) / slice.length
+  const variance = slice.reduce((s, p) => s + (p - mean) ** 2, 0) / slice.length
+  const std = Math.sqrt(variance)
+  return {
+    middle: mean,
+    upper: mean + mult * std,
+    lower: mean - mult * std,
+    width: mean > 0 ? (mult * 2 * std) / mean : 0,
+  }
+}
+
+function computeRollingRange(prices: number[], period: number = 60) {
+  const slice = prices.slice(-period)
+  if (slice.length === 0) return { high: 0, low: 0 }
+  return { high: Math.max(...slice), low: Math.min(...slice) }
+}
+
+// ─── Constants ────────────────────────────────────────────────────────
+export const INITIAL_CAPITAL = 10000
+const TAKER_FEE_PCT = 0.10
+const SLIPPAGE_PCT = 0.05
+
+const STRATEGY_ALLOCATION: Record<StrategyName, number> = {
+  A: 3000,
+  B: 2500,
+  C: 2500,
+  D: 2000,
+}
+
+const STRATEGY_INFO: Record<StrategyName, { name: string; description: string; color: string }> = {
+  A: { name: 'Momentum', description: 'Top 24h movers with volume confirmation', color: '#3b82f6' },
+  B: { name: 'Mean Reversion', description: 'RSI oversold/overbought counter-trend', color: '#10b981' },
+  C: { name: 'Breakout', description: 'Rolling 60-tick high/low breaks', color: '#f59e0b' },
+  D: { name: 'Squeeze', description: 'Bollinger band squeeze + expansion', color: '#8b5cf6' },
+}
+
 const DEFAULT_MONEY_MANAGER: MoneyManagerSettings = {
-  riskPerTradePct: 2,
-  maxConcurrentPositions: 12,
-  maxCorrelatedPositions: 4,
+  riskPerTradePct: 3,
+  maxConcurrentPositions: 8,
+  maxCorrelatedPositions: 3,
   maxDrawdownPct: 25,
   dailyLossLimitPct: 8,
   positionSizingMethod: 'risk_parity',
@@ -145,60 +298,57 @@ const DEFAULT_MONEY_MANAGER: MoneyManagerSettings = {
   takeProfitMultiplier: 2.5,
   stopLossATR: 1.5,
   trailingStopEnabled: true,
-  trailingStopActivationPct: 1.5,
-  trailingStopDistancePct: 0.8,
+  trailingStopActivationPct: 1.0,
+  trailingStopDistancePct: 0.5,
   breakEvenEnabled: true,
-  breakEvenActivationPct: 0.8,
+  breakEvenActivationPct: 0.5,
 }
 
-export const INITIAL_CAPITAL = 10000 // USDT
-const TAKER_FEE_PCT = 0.10           // 0.1% per fill
-const SLIPPAGE_PCT = 0.05            // 0.05% on market orders
-
+// ─── Engine ───────────────────────────────────────────────────────────
 export class PaperTradingEngine {
-  private cash: number = INITIAL_CAPITAL
+  private strategies: Record<StrategyName, StrategyState>
   private positions: Map<string, PaperPosition> = new Map()
   private trades: PaperTrade[] = []
   private orders: PaperOrder[] = []
   private signals: any[] = []
   private equity: number[] = [INITIAL_CAPITAL]
   private timestamps: number[] = [Date.now() / 1000]
-  private totalTrades: number = 0
-  private winningTrades: number = 0
-  private realizedPnl: number = 0
   private running: boolean = false
   private tradingEnabled: boolean = true
-  // Auto-mode is ON by default so the engine starts scanning and trading
-  // the moment the page loads. User can toggle it off via the header.
   private autoMode: boolean = true
   private interval: ReturnType<typeof setInterval> | null = null
   private priceFeed: LivePriceFeed
-  // All 50 supported tokens are active by default — gives the auto-scanner
-  // a wide universe to find real momentum. User can toggle off via UI.
   private activeTokens: string[] = [...SUPPORTED_TOKENS]
   private selectedToken: string = 'BTC/USDT'
   private moneyManager: MoneyManagerSettings = { ...DEFAULT_MONEY_MANAGER }
-  private lastAutoSignalTime: number = 0
   private startedAt: number = Date.now() / 1000
 
-  // ─── Pattern Buffer + Living Trie (real learning) ────────
-  // SAX-like encoding of recent price moves per token.
-  // Each tick: encode the move since last tick as a symbol:
-  //   U = up > +0.05%, D = down < -0.05%, F = flat
-  // Pattern buffer is the last N symbols for the selected token.
-  // Living trie counts unique observed patterns (sequences of
-  // length 3-6) and grows over time as more ticks are processed.
+  // Pattern buffer (kept for UI compatibility)
   private lastTickPrices: Map<string, number> = new Map()
   private patternBufferPerToken: Map<string, string[]> = new Map()
-  private livingTrie: Map<string, number> = new Map() // pattern -> count
+  private livingTrie: Map<string, number> = new Map()
   private candlesProcessed: number = 0
   private maxPatternDepthObserved: number = 0
   private lastTriePruneTime: number = 0
-  private lastTickAt: number = 0  // ms epoch of last pattern-buffer update
-  private tickCount: number = 0   // total ticks since engine start
+
+  // Price history for indicators (200 samples = 5 min at 1.5s)
+  private priceHistory: Map<string, PriceSample[]> = new Map()
+
+  // Cooldown after stop-out (timestamp when cooldown expires)
+  private cooldownUntil: Map<string, number> = new Map()
+
+  // Console report timer
+  private lastReportTime: number = 0
+  private lastCBLogTime: number = 0
 
   constructor(priceFeed: LivePriceFeed) {
     this.priceFeed = priceFeed
+    this.strategies = {
+      A: { cash: STRATEGY_ALLOCATION.A, allocated: STRATEGY_ALLOCATION.A, realizedPnl: 0, totalTrades: 0, winningTrades: 0, lastSignalTime: 0, positions: new Set() },
+      B: { cash: STRATEGY_ALLOCATION.B, allocated: STRATEGY_ALLOCATION.B, realizedPnl: 0, totalTrades: 0, winningTrades: 0, lastSignalTime: 0, positions: new Set() },
+      C: { cash: STRATEGY_ALLOCATION.C, allocated: STRATEGY_ALLOCATION.C, realizedPnl: 0, totalTrades: 0, winningTrades: 0, lastSignalTime: 0, positions: new Set() },
+      D: { cash: STRATEGY_ALLOCATION.D, allocated: STRATEGY_ALLOCATION.D, realizedPnl: 0, totalTrades: 0, winningTrades: 0, lastSignalTime: 0, positions: new Set() },
+    }
   }
 
   startTicking(onTick: (state: PaperTradingState) => void, intervalMs: number = 1500) {
@@ -222,8 +372,8 @@ export class PaperTradingEngine {
     return this.running
   }
 
-  /** Manual market buy — opens or adds to a LONG position. */
-  marketBuy(symbol: string, usdtAmount: number): OrderResult {
+  // ─── Market orders (strategy-aware) ───────────────────────────────
+  marketBuy(symbol: string, usdtAmount: number, strategy: StrategyName = 'A'): OrderResult {
     if (!this.tradingEnabled) {
       return { success: false, error: 'Trading disabled (kill switch active). Click Start Trading.' }
     }
@@ -236,15 +386,16 @@ export class PaperTradingEngine {
 
     const fillPrice = ticker.price * (1 + SLIPPAGE_PCT / 100)
     const grossUsdt = usdtAmount
-    const fee = grossUsdt * TAKER_FEE_PCT / 100
+    const fee = (grossUsdt * TAKER_FEE_PCT) / 100
     const totalCost = grossUsdt + fee
 
-    if (totalCost > this.cash) {
-      return { success: false, error: `Insufficient cash. Need ${totalCost.toFixed(2)} USDT, have ${this.cash.toFixed(2)} USDT` }
+    const strat = this.strategies[strategy]
+    if (totalCost > strat.cash) {
+      return { success: false, error: `Insufficient cash in ${strategy}. Need ${totalCost.toFixed(2)}, have ${strat.cash.toFixed(2)}` }
     }
 
     const qty = grossUsdt / fillPrice
-    this.cash -= totalCost
+    strat.cash -= totalCost
 
     const existing = this.positions.get(symbol)
     if (existing && existing.direction === 'LONG') {
@@ -267,31 +418,22 @@ export class PaperTradingEngine {
         catastrophic_sl: null,
         pnl_pct: 0,
         pnl_usdt: 0,
+        strategy,
       })
+      strat.positions.add(symbol)
     }
 
     this.orders.unshift({
       timestamp: new Date().toISOString(),
-      side: 'BUY',
-      symbol,
-      qty,
-      price: fillPrice,
-      usdt: grossUsdt,
-      fee,
-      type: 'MARKET',
+      side: 'BUY', symbol, qty, price: fillPrice,
+      usdt: grossUsdt, fee, type: 'MARKET', strategy,
     })
     if (this.orders.length > 100) this.orders = this.orders.slice(0, 100)
-
-    console.log(`[Paper] BUY ${symbol} ${qty.toFixed(6)} @ ${fillPrice} (fee ${fee.toFixed(2)} USDT)`)
+    console.log(`[Paper/${strategy}] BUY ${symbol} ${qty.toFixed(6)} @ ${fillPrice} (fee ${fee.toFixed(2)})`)
     return { success: true, fillPrice, qty, fee }
   }
 
-  /**
-   * Manual market sell.
-   *  - If a LONG position exists for the symbol: closes it (partial or full).
-   *  - Otherwise: opens a SHORT position (paper — no borrowing mechanics).
-   */
-  marketSell(symbol: string, usdtAmount: number): OrderResult {
+  marketSell(symbol: string, usdtAmount: number, strategy: StrategyName = 'A'): OrderResult {
     if (!this.tradingEnabled) {
       return { success: false, error: 'Trading disabled (kill switch active). Click Start Trading.' }
     }
@@ -303,19 +445,19 @@ export class PaperTradingEngine {
     }
 
     const fillPrice = ticker.price * (1 - SLIPPAGE_PCT / 100)
-    const fee = usdtAmount * TAKER_FEE_PCT / 100
-
+    const fee = (usdtAmount * TAKER_FEE_PCT) / 100
     const existing = this.positions.get(symbol)
 
+    // Close LONG if it exists — credit the ORIGINAL strategy
     if (existing && existing.direction === 'LONG') {
-      // Close (partial or full) the LONG position
+      const origStrat = this.strategies[existing.strategy]
       const closeQty = Math.min(usdtAmount / fillPrice, existing.qty)
       const proceeds = closeQty * fillPrice
       const pnl = (fillPrice - existing.entry_price) * closeQty - fee
-      this.cash += proceeds - fee
-      this.realizedPnl += pnl
-      this.totalTrades++
-      if (pnl > 0) this.winningTrades++
+      origStrat.cash += proceeds - fee
+      origStrat.realizedPnl += pnl
+      origStrat.totalTrades++
+      if (pnl > 0) origStrat.winningTrades++
 
       const closedFully = closeQty >= existing.qty - 1e-9
       if (closedFully) {
@@ -327,6 +469,7 @@ export class PaperTradingEngine {
           pnl_usdt: pnl,
         })
         this.positions.delete(symbol)
+        origStrat.positions.delete(symbol)
       } else {
         existing.qty -= closeQty
         existing.size_usdt -= closeQty * existing.entry_price
@@ -340,18 +483,19 @@ export class PaperTradingEngine {
         })
       }
       if (this.trades.length > 100) this.trades = this.trades.slice(0, 100)
-
-      console.log(`[Paper] SELL (close LONG) ${symbol} ${closeQty.toFixed(6)} @ ${fillPrice} (pnl ${pnl.toFixed(2)} USDT)`)
+      console.log(`[Paper/${existing.strategy}] SELL (close LONG) ${symbol} ${closeQty.toFixed(6)} @ ${fillPrice} (pnl ${pnl.toFixed(2)})`)
       return { success: true, fillPrice, qty: closeQty, fee, pnl }
     }
 
-    // No LONG position — open SHORT
+    // Open SHORT with the CALLING strategy
+    const strat = this.strategies[strategy]
     const grossUsdt = usdtAmount
-    const totalCost = fee // only fee deducted from cash for short (margin returned on close)
-    if (totalCost > this.cash) {
-      return { success: false, error: `Insufficient cash for short margin/fee. Need ${totalCost.toFixed(2)} USDT` }
+    const margin = grossUsdt
+    const totalCost = margin + fee
+    if (totalCost > strat.cash) {
+      return { success: false, error: `Insufficient cash in ${strategy} for short margin. Need ${totalCost.toFixed(2)}` }
     }
-    this.cash -= totalCost
+    strat.cash -= totalCost
     const qty = grossUsdt / fillPrice
 
     if (existing && existing.direction === 'SHORT') {
@@ -374,26 +518,21 @@ export class PaperTradingEngine {
         catastrophic_sl: null,
         pnl_pct: 0,
         pnl_usdt: 0,
+        strategy,
       })
+      strat.positions.add(symbol)
     }
 
     this.orders.unshift({
       timestamp: new Date().toISOString(),
-      side: 'SELL',
-      symbol,
-      qty,
-      price: fillPrice,
-      usdt: grossUsdt,
-      fee,
-      type: 'MARKET',
+      side: 'SELL', symbol, qty, price: fillPrice,
+      usdt: grossUsdt, fee, type: 'MARKET', strategy,
     })
     if (this.orders.length > 100) this.orders = this.orders.slice(0, 100)
-
-    console.log(`[Paper] SELL (open SHORT) ${symbol} ${qty.toFixed(6)} @ ${fillPrice} (fee ${fee.toFixed(2)} USDT)`)
+    console.log(`[Paper/${strategy}] SELL (open SHORT) ${symbol} ${qty.toFixed(6)} @ ${fillPrice} (fee ${fee.toFixed(2)})`)
     return { success: true, fillPrice, qty, fee }
   }
 
-  /** Close an entire position by symbol at current market price. */
   closePosition(symbol: string): OrderResult {
     const pos = this.positions.get(symbol)
     if (!pos) return { success: false, error: `No open position for ${symbol}` }
@@ -406,22 +545,21 @@ export class PaperTradingEngine {
       ? ticker.price * (1 - SLIPPAGE_PCT / 100)
       : ticker.price * (1 + SLIPPAGE_PCT / 100)
 
+    const strat = this.strategies[pos.strategy]
     const grossProceeds = pos.qty * fillPrice
-    const fee = grossProceeds * TAKER_FEE_PCT / 100
+    const fee = (grossProceeds * TAKER_FEE_PCT) / 100
     const pnl = isLong
       ? (fillPrice - pos.entry_price) * pos.qty - fee
       : (pos.entry_price - fillPrice) * pos.qty - fee
 
     if (isLong) {
-      this.cash += grossProceeds - fee
+      strat.cash += grossProceeds - fee
     } else {
-      // SHORT: return the original margin plus PnL minus fee
-      this.cash += pos.size_usdt + pnl
+      strat.cash += pos.size_usdt + pnl
     }
-
-    this.realizedPnl += pnl
-    this.totalTrades++
-    if (pnl > 0) this.winningTrades++
+    strat.realizedPnl += pnl
+    strat.totalTrades++
+    if (pnl > 0) strat.winningTrades++
 
     this.trades.unshift({
       ...pos,
@@ -432,9 +570,9 @@ export class PaperTradingEngine {
     })
     if (this.trades.length > 100) this.trades = this.trades.slice(0, 100)
     this.positions.delete(symbol)
+    strat.positions.delete(symbol)
 
-    console.log(`[Paper] CLOSE ${symbol} @ ${fillPrice} (pnl ${pnl.toFixed(2)} USDT)`)
-    logClient.tradeClose(symbol, { fill_price: fillPrice, pnl_usdt: pnl, pnl_pct: pnlPct, close_reason: reason || 'manual' })
+    console.log(`[Paper/${pos.strategy}] CLOSE ${symbol} @ ${fillPrice} (pnl ${pnl.toFixed(2)})`)
     return { success: true, fillPrice, qty: pos.qty, fee, pnl }
   }
 
@@ -462,16 +600,14 @@ export class PaperTradingEngine {
     }
   }
 
-  setTimeframe(tf: string) { /* no-op for paper — prices are real-time regardless */ }
+  setTimeframe(_tf: string) { /* no-op */ }
 
   setActiveTokens(tokens: string[]) {
     const prev = new Set(this.activeTokens)
     this.activeTokens = tokens
-    // Always include the selected token so its price keeps streaming
     if (!tokens.includes(this.selectedToken)) {
       this.activeTokens = [...tokens, this.selectedToken]
     }
-    // Update price feed subscriptions if set changed
     const same = this.activeTokens.length === prev.size &&
       this.activeTokens.every(t => prev.has(t))
     if (!same) {
@@ -483,184 +619,20 @@ export class PaperTradingEngine {
     this.moneyManager = { ...this.moneyManager, ...settings }
   }
 
-  /**
-   * Auto-mode: aggressively hunts for entries every ~5s.
-   * Strategy:
-   *   1. Scan all active tokens with live prices + >$1M volume (low bar)
-   *   2. Pick top movers by |24h change| (>=0.3% threshold — very loose)
-   *   3. Open positions for top 3 candidates at once (up to maxConcurrent)
-   *   4. LONG for positive momentum, SHORT for negative
-   *   5. Attach SL/TP based on money manager settings
-   * Designed to actually trade: should produce 5-15 trades per hour
-   * in normal market conditions.
-   */
-  private maybeAutoTrade() {
-    if (!this.autoMode || !this.tradingEnabled) return
+  // ─── Price history ────────────────────────────────────────────────
+  private updatePriceHistory() {
     const now = Date.now()
-    // 3.5s cooldown — fast enough to keep the engine visibly hunting
-    // opportunities, slow enough to not spam orders on every tick.
-    if (now - this.lastAutoSignalTime < 3500) return
-    this.lastAutoSignalTime = now
-
-    // Find strongest movers among active tokens with live prices.
-    // Very loose thresholds (>$200K volume, |change%| >= 0.1%) so the
-    // engine finds candidates practically every cycle. Most crypto
-    // tokens move >0.1% over 24h — this is a momentum-following scan.
-    const candidates = this.activeTokens
-      .map(sym => this.priceFeed.getData(sym))
-      .filter((t): t is TickerData =>
-        t !== null
-        && typeof t.price === 'number' && isFinite(t.price) && t.price > 0
-        && typeof t.quoteVolume === 'number' && isFinite(t.quoteVolume)
-        && t.quoteVolume > 200_000
-      )
-      .filter(t => typeof t.changePct === 'number' && isFinite(t.changePct) && Math.abs(t.changePct) >= 0.1)
-      .sort((a, b) => Math.abs(b.changePct) - Math.abs(a.changePct))
-      .slice(0, 5)
-
-    if (candidates.length === 0) {
-      console.log('[Paper/Auto] No candidates with live prices yet')
-      logClient.autoTradeSkipped('no candidates with live prices')
-      return
-    }
-
-    // Try to open positions for as many candidates as possible, up to maxConcurrent
-    let opened = 0
-    for (const top of candidates) {
-      // Don't open if already in a position for this symbol
-      if (this.positions.has(top.symbol)) continue
-
-      // Don't exceed max concurrent positions
-      if (this.positions.size >= this.moneyManager.maxConcurrentPositions) {
-        console.log(`[Paper/Auto] Max concurrent positions reached (${this.positions.size}/${this.moneyManager.maxConcurrentPositions})`)
-        logClient.autoTradeSkipped('max concurrent positions reached', { open: this.positions.size, max: this.moneyManager.maxConcurrentPositions })
-        break
-      }
-
-      // Position size: risk % * 5, capped at 10% of cash
-      const usdtAmount = Math.min(
-        this.cash * (this.moneyManager.riskPerTradePct / 100) * 5,
-        this.cash * 0.10
-      )
-      if (usdtAmount < 10) {
-        console.log('[Paper/Auto] Insufficient cash for new entry')
-        logClient.autoTradeSkipped('insufficient cash', { cash: this.cash })
-        break
-      }
-
-      const direction = top.changePct > 0 ? 'LONG' : 'SHORT'
-      const signal = {
-        timestamp: new Date().toISOString(),
-        direction,
-        symbol: top.symbol,
-        confidence: Math.min(0.95, 0.5 + Math.abs(top.changePct) / 20),
-        ev_score: 0.6 + Math.abs(top.changePct) / 30,
-        pattern_path: `AUTO_MOMENTUM_24H_${direction}`,
-        expected_move_pct: Math.max(0.5, Math.abs(top.changePct) * 0.3),
-      }
-      this.signals.unshift(signal)
-      if (this.signals.length > 50) this.signals = this.signals.slice(0, 50)
-
-      console.log(`[Paper/Auto] Signal: ${direction} ${top.symbol} (${top.changePct.toFixed(2)}% 24h, vol ${(top.quoteVolume/1e6).toFixed(1)}M)`)
-      logClient.signal(direction, { symbol: top.symbol, change_pct: top.changePct, volume_usd: top.quoteVolume, confidence: signal.confidence, ev: signal.ev_score })
-
-      const result = direction === 'LONG'
-        ? this.marketBuy(top.symbol, usdtAmount)
-        : this.marketSell(top.symbol, usdtAmount)
-
-      if (result.success) {
-        opened++
-        console.log(`[Paper/Auto] OPENED ${direction} ${top.symbol} @ ${result.fillPrice?.toFixed(4)} (${usdtAmount.toFixed(2)} USDT)`)
-        logClient.tradeOpen(top.symbol, { direction, entry_price: result.fillPrice, size_usdt: usdtAmount, qty: result.qty })
-        const pos = this.positions.get(top.symbol)
-        if (pos) {
-          const mm = this.moneyManager
-          const move = pos.entry_price * (signal.expected_move_pct / 100)
-          pos.current_sl = direction === 'LONG'
-            ? pos.entry_price - move * mm.stopLossATR
-            : pos.entry_price + move * mm.stopLossATR
-          pos.current_tp = direction === 'LONG'
-            ? pos.entry_price + move * mm.takeProfitMultiplier
-            : pos.entry_price - move * mm.takeProfitMultiplier
-          pos.catastrophic_sl = direction === 'LONG'
-            ? pos.entry_price - move * 3
-            : pos.entry_price + move * 3
-        }
-      } else {
-        console.warn(`[Paper/Auto] Entry failed: ${result.error}`)
-      }
-    }
-    if (opened === 0 && candidates.length > 0) {
-      console.log(`[Paper/Auto] ${candidates.length} candidates, 0 opened (already in position or no cash)`)
-    } else if (opened > 0) {
-      console.log(`[Paper/Auto] Opened ${opened} new positions this cycle (total ${this.positions.size})`)
+    for (const sym of this.activeTokens) {
+      const t = this.priceFeed.getData(sym)
+      if (!t) continue
+      const arr = this.priceHistory.get(sym) || []
+      arr.push({ ts: now, price: t.price })
+      if (arr.length > 200) arr.shift()
+      this.priceHistory.set(sym, arr)
     }
   }
 
-  /** Check SL/TP for all open positions on every snapshot. */
-  private checkStops() {
-    if (!this.tradingEnabled) return
-    const mm = this.moneyManager
-
-    for (const [sym, pos] of Array.from(this.positions.entries())) {
-      const ticker = this.priceFeed.getData(sym)
-      if (!ticker) continue
-      const price = ticker.price
-      const isLong = pos.direction === 'LONG'
-
-      const pnlPct = isLong
-        ? ((price - pos.entry_price) / pos.entry_price) * 100
-        : ((pos.entry_price - price) / pos.entry_price) * 100
-
-      // Trailing stop
-      if (mm.trailingStopEnabled && pnlPct > mm.trailingStopActivationPct) {
-        const trailDist = pos.entry_price * (mm.trailingStopDistancePct / 100)
-        if (isLong && pos.current_sl !== null) {
-          pos.current_sl = Math.max(pos.current_sl, price - trailDist)
-        } else if (!isLong && pos.current_sl !== null) {
-          pos.current_sl = Math.min(pos.current_sl, price + trailDist)
-        }
-      }
-
-      // Break-even
-      if (mm.breakEvenEnabled && pnlPct > mm.breakEvenActivationPct) {
-        if (isLong && pos.current_sl !== null && pos.current_sl < pos.entry_price) {
-          pos.current_sl = pos.entry_price
-          pos.status = 'BREAK_EVEN_SECURED'
-        } else if (!isLong && pos.current_sl !== null && pos.current_sl > pos.entry_price) {
-          pos.current_sl = pos.entry_price
-          pos.status = 'BREAK_EVEN_SECURED'
-        }
-      }
-
-      // SL/TP trigger
-      let hit = false
-      let reason = ''
-      if (pos.current_sl !== null) {
-        if (isLong && price <= pos.current_sl) { hit = true; reason = 'CLOSED_BY_SL' }
-        if (!isLong && price >= pos.current_sl) { hit = true; reason = pnlPct > 0 ? 'CLOSED_BY_TRAILING_SL' : 'CLOSED_BY_SL' }
-      }
-      if (pos.current_tp !== null) {
-        if (isLong && price >= pos.current_tp) { hit = true; reason = 'CLOSED_BY_TP' }
-        if (!isLong && price <= pos.current_tp) { hit = true; reason = 'CLOSED_BY_TP' }
-      }
-
-      if (hit) {
-        this.closePosition(sym)
-        // Override the close reason
-        if (this.trades[0]) this.trades[0].close_reason = reason
-      }
-    }
-  }
-
-  /**
-   * Update the pattern buffer + living trie based on price changes
-   * since the last tick. This is the real "learning" mechanism:
-   *   - Encode each token's move as U/D/F (SAX alphabet of size 3)
-   *   - Append to per-token pattern buffer (circular, last 12 symbols)
-   *   - For each suffix length 3..6, count the pattern in the trie
-   *   - This grows the trie organically as more candles stream in.
-   */
+  // ─── Pattern buffer (kept for UI) ─────────────────────────────────
   private updatePatternsAndTrie() {
     const now = Date.now() / 1000
     for (const sym of this.activeTokens) {
@@ -668,28 +640,17 @@ export class PaperTradingEngine {
       if (!t) continue
       const last = this.lastTickPrices.get(sym)
       this.lastTickPrices.set(sym, t.price)
-      if (last === undefined) continue // skip first tick (no reference)
-
+      if (last === undefined) continue
       const pct = ((t.price - last) / last) * 100
-      // 5-symbol SAX alphabet — captures more variance than U/D/F.
-      // Thresholds tuned for 1.5s ticks on liquid tokens:
-      //   0.008% = $5 move on BTC ($60k)  — typical small tick
-      //   0.030% = $18 move on BTC        — meaningful tick
-      // Before this was 0.02% / 0.15% which made 90%+ of ticks
-      // appear as 'F' (flat) — buffer looked frozen.
       const sym_char =
-        pct >=  0.030 ? 'V' :
-        pct >=  0.008 ? 'U' :
-        pct <= -0.030 ? 'B' :
-        pct <= -0.008 ? 'D' : 'F'
-
-      // Append to per-token pattern buffer
+        pct >= 0.15 ? 'V' :
+        pct >= 0.02 ? 'U' :
+        pct <= -0.15 ? 'B' :
+        pct <= -0.02 ? 'D' : 'F'
       let buf = this.patternBufferPerToken.get(sym) || []
       buf.push(sym_char)
       if (buf.length > 12) buf = buf.slice(-12)
       this.patternBufferPerToken.set(sym, buf)
-
-      // Update living trie with all suffixes length 3..6
       const bufStr = buf.join('')
       for (let len = 3; len <= 6; len++) {
         if (buf.length < len) break
@@ -700,13 +661,8 @@ export class PaperTradingEngine {
           this.maxPatternDepthObserved = len
         }
       }
-
       this.candlesProcessed++
-      this.tickCount++
     }
-    this.lastTickAt = Date.now()
-
-    // Prune trie periodically if it gets too large (keep top 5000)
     if (now - this.lastTriePruneTime > 60 && this.livingTrie.size > 5000) {
       const entries = Array.from(this.livingTrie.entries())
         .sort((a, b) => b[1] - a[1])
@@ -716,10 +672,452 @@ export class PaperTradingEngine {
     }
   }
 
+  // ─── Stops (FIXED: always runs, ATR-based, time stop, cooldown) ──
+  private checkStops() {
+    // CRITICAL FIX: removed `if (!this.tradingEnabled) return`
+    // Stops MUST always run, even when trading is paused.
+    const mm = this.moneyManager
+    const now = Date.now()
+
+    for (const [sym, pos] of Array.from(this.positions.entries())) {
+      const ticker = this.priceFeed.getData(sym)
+      if (!ticker) continue
+      const price = ticker.price
+      const isLong = pos.direction === 'LONG'
+
+      // ─── Time stop: 4h max hold ───
+      const entryTime = new Date(pos.entry_time).getTime()
+      const holdMs = now - entryTime
+      if (holdMs > 4 * 60 * 60 * 1000) {
+        console.log(`[Paper/TimeStop] ${sym} held ${Math.round(holdMs / 60000)}min — closing at market`)
+        this.closePosition(sym)
+        if (this.trades[0]) this.trades[0].close_reason = 'CLOSED_BY_TIME_STOP'
+        this.cooldownUntil.set(sym, now + 30 * 60 * 1000)
+        continue
+      }
+
+      const pnlPct = isLong
+        ? ((price - pos.entry_price) / pos.entry_price) * 100
+        : ((pos.entry_price - price) / pos.entry_price) * 100
+
+      // ─── Set ATR-based SL/TP for entries without them (manual entries) ───
+      if (pos.current_sl === null || pos.current_tp === null) {
+        const hist = this.priceHistory.get(sym) || []
+        const prices = hist.map(h => h.price)
+        const atr = computeATR(prices, 60)
+        if (atr > 0) {
+          if (pos.current_sl === null) {
+            pos.current_sl = isLong
+              ? pos.entry_price - atr * 1.5
+              : pos.entry_price + atr * 1.5
+          }
+          if (pos.current_tp === null) {
+            pos.current_tp = isLong
+              ? pos.entry_price + atr * 3
+              : pos.entry_price - atr * 3
+          }
+        }
+      }
+
+      // ─── Trailing stop (works for ALL positions, not just auto) ───
+      if (mm.trailingStopEnabled && pnlPct > mm.trailingStopActivationPct && pos.current_sl !== null) {
+        const trailDist = pos.entry_price * (mm.trailingStopDistancePct / 100)
+        if (isLong) {
+          pos.current_sl = Math.max(pos.current_sl, price - trailDist)
+        } else {
+          pos.current_sl = Math.min(pos.current_sl, price + trailDist)
+        }
+      }
+
+      // ─── Break-even ───
+      if (mm.breakEvenEnabled && pnlPct > mm.breakEvenActivationPct && pos.current_sl !== null) {
+        if (isLong && pos.current_sl < pos.entry_price) {
+          pos.current_sl = pos.entry_price
+          pos.status = 'BREAK_EVEN_SECURED'
+        } else if (!isLong && pos.current_sl > pos.entry_price) {
+          pos.current_sl = pos.entry_price
+          pos.status = 'BREAK_EVEN_SECURED'
+        }
+      }
+
+      // ─── SL/TP/CatSL trigger ───
+      let hit = false
+      let reason = ''
+      if (pos.current_sl !== null) {
+        if (isLong && price <= pos.current_sl) { hit = true; reason = pnlPct > 0 ? 'CLOSED_BY_TRAILING_SL' : 'CLOSED_BY_SL' }
+        if (!isLong && price >= pos.current_sl) { hit = true; reason = pnlPct > 0 ? 'CLOSED_BY_TRAILING_SL' : 'CLOSED_BY_SL' }
+      }
+      if (pos.current_tp !== null) {
+        if (isLong && price >= pos.current_tp) { hit = true; reason = 'CLOSED_BY_TP' }
+        if (!isLong && price <= pos.current_tp) { hit = true; reason = 'CLOSED_BY_TP' }
+      }
+      if (pos.catastrophic_sl !== null) {
+        if (isLong && price <= pos.catastrophic_sl) { hit = true; reason = 'CLOSED_BY_CAT_SL' }
+        if (!isLong && price >= pos.catastrophic_sl) { hit = true; reason = 'CLOSED_BY_CAT_SL' }
+      }
+
+      if (hit) {
+        // Cooldown 30min after SL/CatSL (not after TP or trailing SL)
+        if (reason === 'CLOSED_BY_SL' || reason === 'CLOSED_BY_CAT_SL') {
+          this.cooldownUntil.set(sym, now + 30 * 60 * 1000)
+        }
+        this.closePosition(sym)
+        if (this.trades[0]) this.trades[0].close_reason = reason
+      }
+    }
+  }
+
+  // ─── Auto trading (4 strategies in parallel) ──────────────────────
+  private maybeAutoTrade() {
+    if (!this.autoMode || !this.tradingEnabled) return
+
+    // ─── Circuit breaker: stop new entries if drawdown exceeded ───
+    const totalValue = this.computeTotalValue()
+    const totalPnlPct = ((totalValue - INITIAL_CAPITAL) / INITIAL_CAPITAL) * 100
+    if (totalPnlPct < -this.moneyManager.maxDrawdownPct) {
+      if (Date.now() - this.lastCBLogTime > 60000) {
+        console.log(`[Paper/CB] Drawdown ${totalPnlPct.toFixed(2)}% > ${this.moneyManager.maxDrawdownPct}% — auto-trading paused`)
+        this.lastCBLogTime = Date.now()
+      }
+      return
+    }
+
+    this.runStrategyA_Momentum()
+    this.runStrategyB_MeanRev()
+    this.runStrategyC_Breakout()
+    this.runStrategyD_Squeeze()
+  }
+
+  // ─── Strategy A: Momentum 24h ─────────────────────────────────────
+  private runStrategyA_Momentum() {
+    const strat = this.strategies.A
+    const now = Date.now()
+    if (now - strat.lastSignalTime < 15000) return // 15s cooldown
+    strat.lastSignalTime = now
+
+    const candidates = WS_ELIGIBLE_TOKENS
+      .map(sym => this.priceFeed.getData(sym))
+      .filter((t): t is TickerData => t !== null)
+      .filter(t => t.quoteVolume >= 50_000_000)
+      .filter(t => Math.abs(t.changePct) >= 1.5)
+      .filter(t => !this.cooldownUntil.has(t.symbol) || now > (this.cooldownUntil.get(t.symbol) || 0))
+      .filter(t => !this.positions.has(t.symbol))
+      .filter(t => this.checkCorrelationLimit(t.symbol))
+      .sort((a, b) => Math.abs(b.changePct) - Math.abs(a.changePct))
+      .slice(0, 3)
+
+    if (candidates.length === 0) return
+
+    for (const top of candidates) {
+      if (strat.positions.size >= 2) break
+      const usdtAmount = Math.min(strat.cash * 0.03, strat.cash * 0.08)
+      if (usdtAmount < 30) break
+
+      const direction: 'LONG' | 'SHORT' = top.changePct > 0 ? 'LONG' : 'SHORT'
+      const hist = this.priceHistory.get(top.symbol) || []
+      const atr = computeATR(hist.map(h => h.price), 60)
+      if (atr <= 0) continue
+
+      const result = direction === 'LONG'
+        ? this.marketBuy(top.symbol, usdtAmount, 'A')
+        : this.marketSell(top.symbol, usdtAmount, 'A')
+
+      if (result.success) {
+        const pos = this.positions.get(top.symbol)
+        if (pos) {
+          pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 1.5 : pos.entry_price + atr * 1.5
+          pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 3 : pos.entry_price - atr * 3
+          pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 4 : pos.entry_price + atr * 4
+        }
+        this.signals.unshift({
+          timestamp: new Date().toISOString(),
+          direction, symbol: top.symbol, strategy: 'A',
+          confidence: Math.min(0.95, 0.55 + Math.abs(top.changePct) / 15),
+          pattern_path: `MOMENTUM_24H_${direction}`,
+        })
+        if (this.signals.length > 50) this.signals = this.signals.slice(0, 50)
+        console.log(`[Strat A/Momentum] OPEN ${direction} ${top.symbol} @ ${result.fillPrice?.toFixed(4)} (${usdtAmount.toFixed(0)} USDT, ATR ${atr.toFixed(4)})`)
+      }
+    }
+  }
+
+  // ─── Strategy B: Mean Reversion (RSI) ─────────────────────────────
+  private runStrategyB_MeanRev() {
+    const strat = this.strategies.B
+    const now = Date.now()
+    if (now - strat.lastSignalTime < 30000) return // 30s cooldown
+    strat.lastSignalTime = now
+
+    const candidates = WS_ELIGIBLE_TOKENS
+      .map(sym => {
+        const t = this.priceFeed.getData(sym)
+        if (!t || t.quoteVolume < 30_000_000) return null
+        const hist = this.priceHistory.get(sym) || []
+        if (hist.length < 20) return null
+        const prices = hist.map(h => h.price)
+        const rsi = computeRSI(prices, 14)
+        if (rsi >= 30 && rsi <= 70) return null
+        return { ticker: t, rsi }
+      })
+      .filter((x): x is { ticker: TickerData; rsi: number } => x !== null)
+      .filter(x => !this.cooldownUntil.has(x.ticker.symbol) || now > (this.cooldownUntil.get(x.ticker.symbol) || 0))
+      .filter(x => !this.positions.has(x.ticker.symbol))
+      .filter(x => this.checkCorrelationLimit(x.ticker.symbol))
+      .sort((a, b) => Math.abs(a.rsi - 50) - Math.abs(b.rsi - 50))
+      .slice(0, 2)
+
+    if (candidates.length === 0) return
+
+    for (const c of candidates) {
+      if (strat.positions.size >= 2) break
+      const usdtAmount = Math.min(strat.cash * 0.03, strat.cash * 0.08)
+      if (usdtAmount < 30) break
+
+      const direction: 'LONG' | 'SHORT' = c.rsi < 30 ? 'LONG' : 'SHORT'
+      const hist = this.priceHistory.get(c.ticker.symbol) || []
+      const atr = computeATR(hist.map(h => h.price), 60)
+      if (atr <= 0) continue
+
+      const result = direction === 'LONG'
+        ? this.marketBuy(c.ticker.symbol, usdtAmount, 'B')
+        : this.marketSell(c.ticker.symbol, usdtAmount, 'B')
+
+      if (result.success) {
+        const pos = this.positions.get(c.ticker.symbol)
+        if (pos) {
+          pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 1.5 : pos.entry_price + atr * 1.5
+          pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 2 : pos.entry_price - atr * 2
+          pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 3 : pos.entry_price + atr * 3
+        }
+        this.signals.unshift({
+          timestamp: new Date().toISOString(),
+          direction, symbol: c.ticker.symbol, strategy: 'B',
+          confidence: Math.min(0.9, 0.5 + Math.abs(c.rsi - 50) / 50),
+          pattern_path: `MEANREV_RSI${c.rsi.toFixed(0)}_${direction}`,
+        })
+        if (this.signals.length > 50) this.signals = this.signals.slice(0, 50)
+        console.log(`[Strat B/MeanRev] OPEN ${direction} ${c.ticker.symbol} RSI=${c.rsi.toFixed(1)} @ ${result.fillPrice?.toFixed(4)} (${usdtAmount.toFixed(0)} USDT)`)
+      }
+    }
+  }
+
+  // ─── Strategy C: Range Breakout ───────────────────────────────────
+  private runStrategyC_Breakout() {
+    const strat = this.strategies.C
+    const now = Date.now()
+    if (now - strat.lastSignalTime < 10000) return // 10s cooldown
+    strat.lastSignalTime = now
+
+    const candidates = WS_ELIGIBLE_TOKENS
+      .map(sym => {
+        const t = this.priceFeed.getData(sym)
+        if (!t || t.quoteVolume < 30_000_000) return null
+        const hist = this.priceHistory.get(sym) || []
+        if (hist.length < 70) return null
+        const prices = hist.map(h => h.price)
+        const range = computeRollingRange(prices.slice(0, -1), 60)
+        const current = prices[prices.length - 1]
+        const isBreakout = current > range.high
+        const isBreakdown = current < range.low
+        if (!isBreakout && !isBreakdown) return null
+        return { ticker: t, isBreakout }
+      })
+      .filter((x): x is { ticker: TickerData; isBreakout: boolean } => x !== null)
+      .filter(x => !this.cooldownUntil.has(x.ticker.symbol) || now > (this.cooldownUntil.get(x.ticker.symbol) || 0))
+      .filter(x => !this.positions.has(x.ticker.symbol))
+      .filter(x => this.checkCorrelationLimit(x.ticker.symbol))
+      .slice(0, 2)
+
+    if (candidates.length === 0) return
+
+    for (const c of candidates) {
+      if (strat.positions.size >= 2) break
+      const usdtAmount = Math.min(strat.cash * 0.03, strat.cash * 0.08)
+      if (usdtAmount < 30) break
+
+      const direction: 'LONG' | 'SHORT' = c.isBreakout ? 'LONG' : 'SHORT'
+      const hist = this.priceHistory.get(c.ticker.symbol) || []
+      const atr = computeATR(hist.map(h => h.price), 60)
+      if (atr <= 0) continue
+
+      const result = direction === 'LONG'
+        ? this.marketBuy(c.ticker.symbol, usdtAmount, 'C')
+        : this.marketSell(c.ticker.symbol, usdtAmount, 'C')
+
+      if (result.success) {
+        const pos = this.positions.get(c.ticker.symbol)
+        if (pos) {
+          pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 1 : pos.entry_price + atr * 1
+          pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 3 : pos.entry_price - atr * 3
+          pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 2 : pos.entry_price + atr * 2
+        }
+        this.signals.unshift({
+          timestamp: new Date().toISOString(),
+          direction, symbol: c.ticker.symbol, strategy: 'C',
+          confidence: 0.65,
+          pattern_path: `BREAKOUT_${direction}`,
+        })
+        if (this.signals.length > 50) this.signals = this.signals.slice(0, 50)
+        console.log(`[Strat C/Breakout] OPEN ${direction} ${c.ticker.symbol} broke ${c.isBreakout ? 'high' : 'low'} @ ${result.fillPrice?.toFixed(4)} (${usdtAmount.toFixed(0)} USDT)`)
+      }
+    }
+  }
+
+  // ─── Strategy D: Volatility Squeeze ───────────────────────────────
+  private runStrategyD_Squeeze() {
+    const strat = this.strategies.D
+    const now = Date.now()
+    if (now - strat.lastSignalTime < 60000) return // 60s cooldown
+    strat.lastSignalTime = now
+
+    const candidates = WS_ELIGIBLE_TOKENS
+      .map(sym => {
+        const t = this.priceFeed.getData(sym)
+        if (!t || t.quoteVolume < 20_000_000) return null
+        const hist = this.priceHistory.get(sym) || []
+        if (hist.length < 55) return null
+        const prices = hist.map(h => h.price)
+        const bb = computeBollinger(prices, 50, 2)
+        if (bb.width > 0.01) return null // not squeezed
+        const current = prices[prices.length - 1]
+        const isLong = current > bb.upper
+        const isShort = current < bb.lower
+        if (!isLong && !isShort) return null
+        return { ticker: t, isLong, bbWidth: bb.width }
+      })
+      .filter((x): x is { ticker: TickerData; isLong: boolean; bbWidth: number } => x !== null)
+      .filter(x => !this.cooldownUntil.has(x.ticker.symbol) || now > (this.cooldownUntil.get(x.ticker.symbol) || 0))
+      .filter(x => !this.positions.has(x.ticker.symbol))
+      .filter(x => this.checkCorrelationLimit(x.ticker.symbol))
+      .slice(0, 1)
+
+    if (candidates.length === 0) return
+
+    for (const c of candidates) {
+      if (strat.positions.size >= 1) break
+      const usdtAmount = Math.min(strat.cash * 0.03, strat.cash * 0.08)
+      if (usdtAmount < 30) break
+
+      const direction: 'LONG' | 'SHORT' = c.isLong ? 'LONG' : 'SHORT'
+      const hist = this.priceHistory.get(c.ticker.symbol) || []
+      const atr = computeATR(hist.map(h => h.price), 60)
+      if (atr <= 0) continue
+
+      const result = direction === 'LONG'
+        ? this.marketBuy(c.ticker.symbol, usdtAmount, 'D')
+        : this.marketSell(c.ticker.symbol, usdtAmount, 'D')
+
+      if (result.success) {
+        const pos = this.positions.get(c.ticker.symbol)
+        if (pos) {
+          pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 1 : pos.entry_price + atr * 1
+          pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 4 : pos.entry_price - atr * 4
+          pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 2 : pos.entry_price + atr * 2
+        }
+        this.signals.unshift({
+          timestamp: new Date().toISOString(),
+          direction, symbol: c.ticker.symbol, strategy: 'D',
+          confidence: 0.7,
+          pattern_path: `SQUEEZE_${direction}`,
+        })
+        if (this.signals.length > 50) this.signals = this.signals.slice(0, 50)
+        console.log(`[Strat D/Squeeze] OPEN ${direction} ${c.ticker.symbol} bbWidth=${(c.bbWidth * 100).toFixed(2)}% @ ${result.fillPrice?.toFixed(4)} (${usdtAmount.toFixed(0)} USDT)`)
+      }
+    }
+  }
+
+  // ─── Helpers ──────────────────────────────────────────────────────
+  private checkCorrelationLimit(symbol: string): boolean {
+    const sector = getSector(symbol)
+    const sameSector = Array.from(this.positions.keys())
+      .filter(s => getSector(s) === sector)
+    return sameSector.length < this.moneyManager.maxCorrelatedPositions
+  }
+
+  private computeTotalValue(): number {
+    let total = 0
+    for (const s of Object.values(this.strategies)) {
+      total += s.cash
+    }
+    for (const [sym, pos] of this.positions) {
+      const ticker = this.priceFeed.getData(sym)
+      const price = ticker?.price ?? pos.entry_price
+      const isLong = pos.direction === 'LONG'
+      if (isLong) {
+        total += pos.qty * price
+      } else {
+        const pnl = (pos.entry_price - price) * pos.qty
+        total += pos.size_usdt + pnl
+      }
+    }
+    return total
+  }
+
+  private computeStrategyUnrealized(name: StrategyName): number {
+    let unrealized = 0
+    for (const [sym, pos] of this.positions) {
+      if (pos.strategy !== name) continue
+      const ticker = this.priceFeed.getData(sym)
+      const price = ticker?.price ?? pos.entry_price
+      const isLong = pos.direction === 'LONG'
+      const pnl = isLong
+        ? (price - pos.entry_price) * pos.qty
+        : (pos.entry_price - price) * pos.qty
+      unrealized += pnl
+    }
+    return unrealized
+  }
+
+  private computeStrategyExposure(name: StrategyName): number {
+    let exposure = 0
+    for (const [sym, pos] of this.positions) {
+      if (pos.strategy !== name) continue
+      const ticker = this.priceFeed.getData(sym)
+      const price = ticker?.price ?? pos.entry_price
+      if (pos.direction === 'LONG') {
+        exposure += pos.qty * price
+      } else {
+        exposure += pos.size_usdt
+      }
+    }
+    return exposure
+  }
+
+  private maybeReport() {
+    const now = Date.now()
+    if (now - this.lastReportTime < 5 * 60 * 1000) return // 5 min
+    this.lastReportTime = now
+
+    const totalValue = this.computeTotalValue()
+    console.log('\n━━━━━━━━━━ Strategy Performance Report ━━━━━━━━━━')
+    for (const name of ['A', 'B', 'C', 'D'] as StrategyName[]) {
+      const strat = this.strategies[name]
+      const info = STRATEGY_INFO[name]
+      const unrl = this.computeStrategyUnrealized(name)
+      const expo = this.computeStrategyExposure(name)
+      const stratValue = strat.cash + expo + unrl
+      const pnlPct = ((stratValue - strat.allocated) / strat.allocated) * 100
+      const wr = strat.totalTrades > 0 ? (strat.winningTrades / strat.totalTrades) * 100 : 0
+      console.log(
+        `[${name} ${info.name.padEnd(15)}] ` +
+        `P&L ${strat.realizedPnl >= 0 ? '+' : ''}${strat.realizedPnl.toFixed(2)} ` +
+        `(${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%) ` +
+        `trades=${strat.totalTrades} WR=${wr.toFixed(0)}% ` +
+        `open=${strat.positions.size} cash=${strat.cash.toFixed(0)}`
+      )
+    }
+    const totalPct = ((totalValue - INITIAL_CAPITAL) / INITIAL_CAPITAL) * 100
+    console.log(`[Portfolio Total]   ${totalValue.toFixed(2)} USDT (${totalPct >= 0 ? '+' : ''}${totalPct.toFixed(2)}%)`)
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n')
+  }
+
+  // ─── Snapshot ─────────────────────────────────────────────────────
   private snapshot(): PaperTradingState {
+    this.updatePriceHistory()
     this.updatePatternsAndTrie()
     this.checkStops()
     this.maybeAutoTrade()
+    this.maybeReport()
 
     const wsConnected = this.priceFeed.isConnected()
     const liveSymbols = this.priceFeed.getAvailableSymbols()
@@ -741,14 +1139,15 @@ export class PaperTradingEngine {
       pos.pnl_pct = pnlPct
       pos.pnl_usdt = pnl
       unrealized += pnl
-      exposure += pos.qty * price
-      positionsArray.push({
-        ...pos,
-        current_price: price,
-      })
+      if (isLong) {
+        exposure += pos.qty * price
+      } else {
+        exposure += pos.size_usdt
+      }
+      positionsArray.push({ ...pos, current_price: price })
     }
 
-    const totalValue = this.cash + exposure
+    const totalValue = this.computeTotalValue()
     this.equity.push(totalValue)
     this.timestamps.push(Date.now() / 1000)
     if (this.equity.length > 500) {
@@ -759,27 +1158,23 @@ export class PaperTradingEngine {
     const maxEq = Math.max(...this.equity)
     const dd = maxEq > 0 ? ((maxEq - totalValue) / maxEq) * 100 : 0
 
-    // Daily return: based on last 24h of equity samples (approx)
-    const dayAgoIdx = Math.max(0, this.equity.length - (24 * 60 * 60 / 1.5))
+    // Aggregate across strategies
+    const totalCash = Object.values(this.strategies).reduce((s, x) => s + x.cash, 0)
+    const totalRealized = Object.values(this.strategies).reduce((s, x) => s + x.realizedPnl, 0)
+    const totalTrades = Object.values(this.strategies).reduce((s, x) => s + x.totalTrades, 0)
+    const totalWinning = Object.values(this.strategies).reduce((s, x) => s + x.winningTrades, 0)
+
+    // Daily return
+    const dayAgoIdx = Math.max(0, this.equity.length - Math.floor(24 * 60 * 60 / 1.5))
     const dailyReturn = this.equity.length > 1
       ? ((totalValue - this.equity[dayAgoIdx]) / this.equity[dayAgoIdx]) * 100
       : 0
 
-    // Token states from live price feed.
-    // IMPORTANT: be fully defensive against null / NaN / undefined prices.
-    // CoinGecko can return null current_price for illiquid tokens; if we
-    // call .toFixed() on null we crash the whole snapshot, which would
-    // freeze the UI and stop all auto-trading. Skip any token without a
-    // valid finite numeric price.
+    // Token states
     const tokenStates: Record<string, TokenState> = {}
     for (const sym of this.activeTokens) {
-      try {
-        const t = this.priceFeed.getData(sym)
-        if (!t) continue
-        if (typeof t.price !== 'number' || !isFinite(t.price) || t.price <= 0) continue
-        if (typeof t.changePct !== 'number' || !isFinite(t.changePct)) continue
-        if (typeof t.quoteVolume !== 'number' || !isFinite(t.quoteVolume)) continue
-
+      const t = this.priceFeed.getData(sym)
+      if (t) {
         const pos = this.positions.get(sym)
         tokenStates[sym] = {
           symbol: t.symbol,
@@ -791,39 +1186,36 @@ export class PaperTradingEngine {
           unrealizedPnl: pos ? parseFloat(pos.pnl_usdt.toFixed(4)) : 0,
           realizedPnl: 0,
           allocationPct: totalValue > 0 && pos
-            ? parseFloat(((pos.qty * t.price) / totalValue * 100).toFixed(1))
+            ? parseFloat(((pos.direction === 'LONG' ? pos.qty * t.price : pos.size_usdt) / totalValue * 100).toFixed(1))
             : 0,
           isActive: true,
           isTrading: !!pos,
-          winRate: this.totalTrades > 0 ? this.winningTrades / this.totalTrades : 0,
+          winRate: totalTrades > 0 ? totalWinning / totalTrades : 0,
           totalTrades: this.trades.filter(tr => tr.symbol === sym).length,
           equity: this.equity,
           color: TOKEN_COLORS[sym] || '#6b7280',
         }
-      } catch {
-        // Never let one bad token crash the whole snapshot
-        continue
       }
     }
 
-    // Sort active tokens by 24h change % to surface top movers
+    // Sort active tokens by |24h change|
     const sortedActive = [...this.activeTokens]
       .map(s => ({ s, ch: this.priceFeed.getData(s)?.changePct ?? -999 }))
       .sort((a, b) => Math.abs(b.ch) - Math.abs(a.ch))
       .map(x => x.s)
 
-    // Kelly calculation
-    const wr = this.totalTrades > 0 ? this.winningTrades / this.totalTrades : 0
+    // Kelly
+    const wr = totalTrades > 0 ? totalWinning / totalTrades : 0
     const mm = this.moneyManager
     const R = mm.takeProfitMultiplier
     const kellyPercent = wr > 0 && wr < 1 ? Math.max(0, wr - ((1 - wr) / R)) : 0
     const suggestedPositionSize = kellyPercent * mm.kellyFraction * totalValue
 
-    // Current price (selected token)
+    // Current price
     const selTicker = this.priceFeed.getData(this.selectedToken)
     const currentPrice = selTicker?.price ?? 0
 
-    // Regime classification based on broad market (top 5 by volume)
+    // Regime
     const top5 = [...liveSymbols]
       .map(s => this.priceFeed.getData(s)!)
       .filter(Boolean)
@@ -837,13 +1229,38 @@ export class PaperTradingEngine {
       : Math.abs(avgChange) < 0.5 ? 'ranging'
       : 'volatile'
 
-    // Entropy: derived from dispersion of token changes
+    // Entropy
     const changes = sortedActive
       .map(s => this.priceFeed.getData(s)?.changePct ?? 0)
       .slice(0, 10)
     const mean = changes.reduce((a, b) => a + b, 0) / (changes.length || 1)
     const variance = changes.reduce((a, b) => a + (b - mean) ** 2, 0) / (changes.length || 1)
     const entropy = Math.min(1, Math.sqrt(variance) / 5)
+
+    // Strategies perf
+    const strategies_perf: Record<string, StrategyPerf> = {}
+    for (const name of ['A', 'B', 'C', 'D'] as StrategyName[]) {
+      const strat = this.strategies[name]
+      const info = STRATEGY_INFO[name]
+      const unrl = this.computeStrategyUnrealized(name)
+      const expo = this.computeStrategyExposure(name)
+      const stratValue = strat.cash + expo + unrl
+      strategies_perf[name] = {
+        name: info.name,
+        description: info.description,
+        cash: parseFloat(strat.cash.toFixed(2)),
+        allocated: strat.allocated,
+        realized_pnl: parseFloat(strat.realizedPnl.toFixed(2)),
+        unrealized_pnl: parseFloat(unrl.toFixed(2)),
+        total_pnl_pct: parseFloat(((stratValue - strat.allocated) / strat.allocated * 100).toFixed(2)),
+        total_trades: strat.totalTrades,
+        winning_trades: strat.winningTrades,
+        win_rate: strat.totalTrades > 0 ? parseFloat((strat.winningTrades / strat.totalTrades).toFixed(3)) : 0,
+        open_positions: strat.positions.size,
+        last_signal_time: strat.lastSignalTime,
+        color: info.color,
+      }
+    }
 
     return {
       is_running: this.tradingEnabled,
@@ -860,9 +1277,9 @@ export class PaperTradingEngine {
       signals_history: this.signals.slice(0, 20),
       positions: positionsArray,
       portfolio_value: parseFloat(totalValue.toFixed(2)),
-      cash: parseFloat(this.cash.toFixed(2)),
+      cash: parseFloat(totalCash.toFixed(2)),
       unrealized_pnl: parseFloat(unrealized.toFixed(4)),
-      realized_pnl: parseFloat(this.realizedPnl.toFixed(4)),
+      realized_pnl: parseFloat(totalRealized.toFixed(4)),
       total_pnl_pct: parseFloat(((totalValue - INITIAL_CAPITAL) / INITIAL_CAPITAL * 100).toFixed(2)),
       exposure_pct: totalValue > 0 ? parseFloat((exposure / totalValue * 100).toFixed(1)) : 0,
       daily_return_pct: parseFloat(dailyReturn.toFixed(2)),
@@ -870,16 +1287,16 @@ export class PaperTradingEngine {
       auto_mode: this.autoMode,
       circuit_breakers: {
         max_drawdown: dd > mm.maxDrawdownPct,
-        daily_loss: this.realizedPnl < -(INITIAL_CAPITAL * mm.dailyLossLimitPct / 100),
+        daily_loss: totalRealized < -(INITIAL_CAPITAL * mm.dailyLossLimitPct / 100),
         volatility: false,
       },
       is_trading_allowed: dd < mm.maxDrawdownPct + 5,
       kill_switch_active: !this.tradingEnabled,
       max_drawdown_pct: parseFloat(dd.toFixed(2)),
-      daily_loss_pct: parseFloat(Math.max(0, -this.realizedPnl / (INITIAL_CAPITAL / 100)).toFixed(2)),
-      total_trades: this.totalTrades,
-      winning_trades: this.winningTrades,
-      win_rate: this.totalTrades > 0 ? parseFloat((this.winningTrades / this.totalTrades).toFixed(3)) : 0,
+      daily_loss_pct: parseFloat(Math.max(0, -totalRealized / (INITIAL_CAPITAL / 100)).toFixed(2)),
+      total_trades: totalTrades,
+      winning_trades: totalWinning,
+      win_rate: totalTrades > 0 ? parseFloat((totalWinning / totalTrades).toFixed(3)) : 0,
       max_drawdown: parseFloat(dd.toFixed(2)),
       equity_curve: this.equity,
       equity_timestamps: this.timestamps,
@@ -895,13 +1312,8 @@ export class PaperTradingEngine {
         trading_observations: this.candlesProcessed,
         last_update: new Date().toISOString(),
       },
-      trade_history: this.trades.slice(0, 20).map(t => ({
-        ...t,
-        status: 'CLOSED',
-      })),
+      trade_history: this.trades.slice(0, 20).map(t => ({ ...t, status: 'CLOSED' })),
       candles_processed: this.candlesProcessed,
-      last_tick_at: this.lastTickAt,
-      tick_count: this.tickCount,
       websocket_status: wsConnected ? 'connected' : 'reconnecting',
       reconnect_count: 0,
       token_states: tokenStates,
@@ -911,6 +1323,7 @@ export class PaperTradingEngine {
       kelly_percent: parseFloat(kellyPercent.toFixed(4)),
       suggested_position_size: parseFloat(suggestedPositionSize.toFixed(2)),
       risk_reward_ratio: R,
+      strategies_perf,
     }
   }
 }
