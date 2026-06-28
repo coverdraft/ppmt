@@ -1,220 +1,86 @@
-/**
- * StatusHeader — Top bar with connection status, mode indicator, and controls.
- * Auto-mode switch uses optimistic local state to prevent flicker
- * caused by race between user click and next snapshot from engine.
- */
-'use client'
+#!/usr/bin/env python3
+"""
+PPMT Patch v9 — Comprehensive diagnostic EXPORT.
 
-import { useState, useEffect } from 'react'
-import { useTradingStore } from '@/stores/trading-store'
-import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
-import { Switch } from '@/components/ui/switch'
-import { Label } from '@/components/ui/label'
-import {
-  Power,
-  PowerOff,
-  Skull,
-  Wifi,
-  WifiOff,
-  Zap,
-  Activity,
-  ClipboardCopy,
-  Download,
-} from 'lucide-react'
+Replaces the basic exportDebugSnapshot with a far richer one that captures
+every dimension the AI needs to diagnose engine health:
 
-interface StatusHeaderProps {
-  onStartStop: () => void
-  onKillSwitch: () => void
-  onToggleAuto: (enabled: boolean) => void
-}
+  1. ENGINE HEALTH      — running, auto, connected, ws status, tick rate
+  2. MONEY              — balance, equity, realized PnL, unrealized PnL,
+                          daily return, exposure, total return %
+  3. STRATEGIES         — A/B/C/D per-strategy cash, P&L, win rate,
+                          open count, last signal age
+  4. POSITIONS          — all open positions with SL/TP/CatSL, age, strategy
+  5. TRADES             — last 50 closed trades with close_reason
+                          + aggregated stats (win/loss streaks, avg PnL)
+  6. PATTERNS / BRAIN   — patternBuffer, entropy, regime, pattern matches,
+                          pattern_match_history trends
+  7. MACHINE LEARNING   — learningStage, driftDetected, lastRetrainTime,
+                          observations count, learning stage history
+  8. SIGNALS            — last 20 generated signals with confidence + EV
+  9. RISK               — circuit breakers state, money manager settings,
+                          Kelly %, suggested position size, R:R
+ 10. TOKENS             — active tokens, per-token state (price, PnL,
+                          positions, win rate, volume)
+ 11. LOOP HEALTH        — ticks per minute, seconds since last tick,
+                          candles processed, equity curve sample (last 30)
+ 12. MONTE CARLO        — risk of ruin, prob of profit, p95 drawdown
 
-export function StatusHeader({ onStartStop, onKillSwitch, onToggleAuto }: StatusHeaderProps) {
-  const {
-    isConnected,
-    engineMode,
-    isRunning,
-    autoMode,
-    symbol,
-    timeframe,
-    currentPrice,
-    killSwitchActive,
-    // debug export fields (v9 — comprehensive snapshot)
-    positions,
-    tradeHistory,
-    strategies_perf,
-    websocketStatus,
-    tickCount,
-    candlesProcessed,
-    lastTickAt,
-    moneyManager,
-    circuitBreakers,
-    activeTokens,
-    selectedToken,
-    kellyPercent,
-    suggestedPositionSize,
-    // v9 additions
-    exchange,
-    patternBuffer,
-    entropy,
-    regime,
-    livingTrieStats,
-    signalsHistory,
-    latestSignal,
-    learningStage,
-    learningStageHistory,
-    driftDetected,
-    lastRetrainTime,
-    winRateHistory,
-    confidenceHistory,
-    patternMatchHistory,
-    entropyHistory,
-    regimeHistory,
-    equityCurve,
-    equityTimestamps,
-    portfolioValue,
-    cash,
-    unrealizedPnl,
-    realizedPnl,
-    totalPnlPct,
-    dailyReturnPct,
-    exposurePct,
-    leverage,
-    maxDrawdownPct,
-    dailyLossPct,
-    maxDrawdown,
-    totalTrades,
-    winningTrades,
-    winRate,
-    monteCarlo,
-    tokenStates,
-    riskRewardRatio,
-  } = useTradingStore()
+The snapshot is copied to clipboard as markdown JSON code block, ready
+to paste back in chat. Also exposes window.__ppmtSnapshot for fallback.
 
-  // Optimistic local state for the auto-mode switch.
-  // Syncs from the store on prop change, but updates immediately on
-  // user click so the switch doesn't flicker between snapshots.
-  const [autoLocal, setAutoLocal] = useState(autoMode)
-  useEffect(() => {
-    setAutoLocal(autoMode)
-  }, [autoMode])
+Files modified:
+  1. src/components/trading/header.tsx — replace exportDebugSnapshot fn
 
-  const handleAutoToggle = (checked: boolean) => {
-    setAutoLocal(checked) // immediate visual feedback
-    onToggleAuto(checked)
-  }
+Run: python3 /home/z/my-project/scripts/v9_comprehensive_export.py
+"""
 
-  const modeColor = engineMode === 'live'
-    ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30'
-    : engineMode === 'paper'
-    ? 'bg-blue-500/20 text-blue-400 border-blue-500/30'
-    : engineMode === 'demo'
-    ? 'bg-amber-500/20 text-amber-400 border-amber-500/30'
-    : 'bg-red-500/20 text-red-400 border-red-500/30'
+import sys
+from pathlib import Path
 
-  const modeLabel = engineMode === 'live' ? 'LIVE'
-    : engineMode === 'paper' ? 'PAPER'
-    : engineMode === 'demo' ? 'DEMO'
-    : 'OFFLINE'
+ROOT = Path("/tmp/my-project")
+HEADER = ROOT / "src/components/trading/header.tsx"
 
-  return (
-    <header className="flex items-center justify-between px-4 py-2 bg-[#0d1117] border-b border-[#1e2a3d]">
-      {/* Left: Logo + Status */}
-      <div className="flex items-center gap-3">
-        <div className="flex items-center gap-2">
-          <Zap className="w-5 h-5 text-blue-400" />
-          <span className="font-bold text-white text-lg tracking-tight">PPMT</span>
-          <span className="text-[10px] text-gray-500 font-mono">TERMINAL</span>
-        </div>
+if not HEADER.exists():
+    print(f"ERROR: header not found at {HEADER}")
+    sys.exit(1)
 
-        <div className="h-4 w-px bg-[#1e2a3d]" />
+src = HEADER.read_text()
 
-        <Badge variant="outline" className={`${modeColor} text-[10px] font-mono px-2 py-0.5`}>
-          {isConnected ? <Wifi className="w-3 h-3 mr-1" /> : <WifiOff className="w-3 h-3 mr-1" />}
-          {modeLabel}
-        </Badge>
+# Find and replace the existing exportDebugSnapshot function block.
+# The function starts at "/**\n   * Build a full engine-state snapshot" and
+# ends at the final "}\n}" before EOF.
 
-        {isRunning && (
-          <div className="flex items-center gap-1">
-            <Activity className="w-3 h-3 text-emerald-400 animate-pulse" />
-            <span className="text-[10px] text-emerald-400 font-mono">RUNNING</span>
-          </div>
-        )}
-      </div>
+START_MARKER = "  /**\n   * Build a full engine-state snapshot"
+END_MARKER = "  function exportDebugSnapshot() {"
 
-      {/* Center: Market Info */}
-      <div className="flex items-center gap-4">
-        <div className="text-center">
-          <div className="text-xs text-gray-400 font-mono">{symbol}</div>
-          <div className="text-lg font-bold text-white font-mono">
-            ${currentPrice > 0 ? currentPrice.toFixed(2) : '---.--'}
-          </div>
-        </div>
-        <Badge variant="outline" className="text-[10px] font-mono text-gray-400 border-gray-600">
-          {timeframe}
-        </Badge>
-      </div>
+# We'll find the function start, then find its closing brace.
+start_idx = src.find(START_MARKER)
+if start_idx == -1:
+    print("ERROR: could not find start of exportDebugSnapshot")
+    sys.exit(1)
 
-      {/* Right: Controls */}
-      <div className="flex items-center gap-3">
-        <div className="flex items-center gap-2">
-          <Switch
-            id="auto-mode"
-            checked={autoLocal}
-            onCheckedChange={handleAutoToggle}
-            className="data-[state=checked]:bg-emerald-600 data-[state=unchecked]:bg-gray-700"
-          />
-          <Label htmlFor="auto-mode" className="text-[10px] text-gray-400 font-mono">
-            AUTO
-          </Label>
-        </div>
+# Find the "function exportDebugSnapshot() {" line — start of function body
+func_body_idx = src.find(END_MARKER, start_idx)
+if func_body_idx == -1:
+    print("ERROR: could not find function body")
+    sys.exit(1)
 
-        <Button
-          size="sm"
-          variant={isRunning ? 'destructive' : 'default'}
-          onClick={onStartStop}
-          className="h-7 text-xs font-mono gap-1"
-          disabled={!isConnected}
-        >
-          {isRunning ? (
-            <>
-              <PowerOff className="w-3 h-3" />
-              STOP
-            </>
-          ) : (
-            <>
-              <Power className="w-3 h-3" />
-              START
-            </>
-          )}
-        </Button>
+# Find the closing "}" of the function. The function ends with "  }\n}".
+# We need to find the matching close. Simplest: find the LAST "  }\n}" after
+# the function body start — the function is the last thing in the file.
+end_search_from = func_body_idx
+last_close = src.rfind("  }\n}", end_search_from)
+if last_close == -1:
+    print("ERROR: could not find function close brace")
+    sys.exit(1)
+# Include the closing "}" of the component function
+end_idx = last_close + len("  }\n}")
 
-        <Button
-          size="sm"
-          variant="destructive"
-          onClick={onKillSwitch}
-          className="h-7 text-xs font-mono gap-1 bg-red-900 hover:bg-red-800"
-          disabled={killSwitchActive || !isConnected}
-        >
-          <Skull className="w-3 h-3" />
-          KILL
-        </Button>
+old_block = src[start_idx:end_idx]
+print(f"Found existing exportDebugSnapshot: {len(old_block)} chars, replacing...")
 
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => exportDebugSnapshot()}
-          className="h-7 text-xs font-mono gap-1 bg-[#1e2a3d] hover:bg-[#2a3a5d] border-[#3a4a6d] text-gray-300"
-          title="Copy full engine snapshot to clipboard for AI debugging"
-        >
-          <ClipboardCopy className="w-3 h-3" />
-          EXPORT
-        </Button>
-      </div>
-    </header>
-  )
-
-  /**
+NEW_BLOCK = '''  /**
    * Build a comprehensive engine-state snapshot and copy it to the clipboard
    * as a fenced markdown JSON code block, ready to paste back in chat for
    * AI analysis.
@@ -613,11 +479,7 @@ export function StatusHeader({ onStartStop, onKillSwitch, onToggleAuto }: Status
     }
 
     const json = JSON.stringify(snapshot, null, 2)
-    const hintsSection = hints.length
-      ? '### Auto-detected issues\n' + hints.map(h => `- ${h}`).join('\n') + '\n\n'
-      : ''
-    const mdFence = '```'
-    const markdown = `## PPMT Engine Snapshot v9 — ${ts}\n\n${hintsSection}${mdFence}json\n${json}\n${mdFence}`
+    const markdown = `## PPMT Engine Snapshot v9 — ${ts}\\n\\n${hints.length ? '### Auto-detected issues\\n' + hints.map(h => `- ${h}`).join('\\n') + '\\n\\n' : ''}\`\`\`json\\n${json}\\n\`\`\``
 
     // Copy to clipboard
     if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -631,7 +493,7 @@ export function StatusHeader({ onStartStop, onKillSwitch, onToggleAuto }: Status
           }
           console.log('%cFull snapshot:', 'color:#60a5fa')
           console.log(snapshot)
-          alert(`✅ Snapshot v9 copiado (${(markdown.length / 1024).toFixed(1)} KB)\n\n${hints.length ? '⚠️ ' + hints.length + ' issues detectados — ver consola para detalle' : '✓ Sin issues detectados'}\n\nPegalo en el chat para análisis.`)
+          alert(`✅ Snapshot v9 copiado (${(markdown.length / 1024).toFixed(1)} KB)\\n\\n${hints.length ? '⚠️ ' + hints.length + ' issues detectados — ver consola para detalle' : '✓ Sin issues detectados'}\\n\\nPegalo en el chat para análisis.`)
         },
         (err) => {
           console.error('[PPMT EXPORT v9] Clipboard failed:', err)
@@ -653,4 +515,45 @@ export function StatusHeader({ onStartStop, onKillSwitch, onToggleAuto }: Status
     ;(window as any).__ppmtSnapshot = markdown
     ;(window as any).__ppmtSnapshotJson = snapshot
   }
-}
+}'''
+
+src = src[:start_idx] + NEW_BLOCK + src[end_idx:]
+
+HEADER.write_text(src)
+print(f"OK — header.tsx updated ({len(src)} bytes)")
+print()
+print("=" * 70)
+print("  v9 COMPREHENSIVE EXPORT — Applied")
+print("=" * 70)
+print()
+print("Snapshot now captures 12 dimensions:")
+print("  1.  meta          — engine health, ws status, tick rate, session info")
+print("  2.  money         — balance, equity, PnL (realized+unrealized), exposure")
+print("  3.  strategies    — A/B/C/D cash, P&L, win rate, last signal age")
+print("  4.  open_positions — SL/TP/CatSL, age, distance to SL/TP in %")
+print("  5.  trades        — last 50 closed + aggregate stats (PF, avg win/loss,")
+print("                       close_reasons breakdown, win/loss streaks, hold time)")
+print("  6.  patterns      — buffer, entropy, regime, Living Trie, trend history")
+print("  7.  machine_learning — stage, drift, retrain age, confidence trend,")
+print("                          win rate trend, learning stage transitions")
+print("  8.  signals       — last 20 generated signals + signal rate per hour")
+print("  9.  risk          — circuit breakers, money manager, Monte Carlo")
+print(" 10.  tokens        — top 30 tokens by |PnL| with price/volume/win rate")
+print(" 11.  loop_health   — equity curve sample, equity delta, session length")
+print(" 12.  _hints        — auto-detected anomalies (stalled loop, breakers, etc)")
+print()
+print("AI auto-hints flag things like:")
+print("  - LOOP STALLED (no ticks > 60s)")
+print("  - WEBSOCKET DISCONNECTED")
+print("  - CIRCUIT BREAKERS active")
+print("  - PROFIT FACTOR < 1 (losing money)")
+print("  - CATASTROPHIC SL hits (SL not respected)")
+print("  - MODEL DRIFT detected")
+print("  - ML still in BOOTSTRAP (weak signals)")
+print("  - Strategies that haven't traded recently")
+print()
+print("On your Mac:")
+print("  1. git pull origin terminal-web")
+print("  2. kill -9 $(lsof -ti :3000) 2>/dev/null; sleep 1; npm run dev")
+print("  3. Click EXPORT button in header → snapshot v9 copied to clipboard")
+print("  4. Paste in chat — AI gets full 12-dimension view for analysis")
