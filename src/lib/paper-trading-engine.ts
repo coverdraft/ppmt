@@ -244,11 +244,13 @@ function computeATR(prices: number[], period: number = 60): number {
   }
   if (count === 0) return 0
   const rawATR = sum / count
-  // FIX v10: Floor ATR at 0.1% of last price so SL/TP is at least 0.4% away.
-  // Without this, low-price tokens (HBAR $0.07, JUP $0.21) get ATR ~ 0.0001
-  // and CatSL ends up within the bid-ask spread — every trade stops out instantly.
+  // FIX v10: Floor ATR at 0.1% of price (SL ≥ 0.4%).
+  // FIX v12: Bump floor to 0.3% of price (SL ≥ 0.45%, TP ≥ 0.9%).
+  //   v10's 0.1% floor was still too tight — Coinbase spread noise is ~0.05%,
+  //   so 3 normal spreads hit the SL. Snapshot showed 17/20 trades stopping
+  //   out in 1-13min, all near the 60s min-hold boundary.
   const lastPrice = prices[prices.length - 1]
-  const minATR = lastPrice > 0 ? lastPrice * 0.001 : 0
+  const minATR = lastPrice > 0 ? lastPrice * 0.003 : 0
   return Math.max(rawATR, minATR)
 }
 
@@ -337,6 +339,12 @@ export class PaperTradingEngine {
   private candlesProcessed: number = 0
   private maxPatternDepthObserved: number = 0
   private lastTriePruneTime: number = 0
+  // FIX v11: tickCount + lastTickAt were lost when v7 rewrote the engine.
+  // Without these, the BrainPanel always shows "tick #0" and the EXPORT v9
+  // snapshot always reports tick_count=0 / last_tick_at=null — making it
+  // look like the WebSocket loop is dead even when it's running fine.
+  private tickCount: number = 0
+  private lastTickAt: number = 0
 
   // Price history for indicators (200 samples = 5 min at 1.5s)
   private priceHistory: Map<string, PriceSample[]> = new Map()
@@ -673,7 +681,9 @@ export class PaperTradingEngine {
         }
       }
       this.candlesProcessed++
+      this.tickCount++          // FIX v11: tick = one symbol's pattern update
     }
+    this.lastTickAt = Date.now()  // FIX v11: stamp the moment we finished a tick batch
     if (now - this.lastTriePruneTime > 60 && this.livingTrie.size > 5000) {
       const entries = Array.from(this.livingTrie.entries())
         .sort((a, b) => b[1] - a[1])
@@ -752,10 +762,11 @@ export class PaperTradingEngine {
       }
 
       // FIX v10: Minimum 60s hold before SL/CAT_SL can fire.
-      // Without this, the tight ATR-based SL triggers within 1.5s of entry
-      // because the first tick after entry is usually the spread crossing back.
+      // FIX v12: Bump to 180s (3 min) — snapshot showed trades stopping out at
+      // 1-2min, just past the 60s boundary. With 0.45% SL (v12 BUG B), 180s
+      // gives the trade enough time to develop without being stopped by noise.
       // (Trailing stop and break-even still run; only SL/CAT_SL are gated.)
-      const minHoldMs = 60 * 1000  // 60 seconds
+      const minHoldMs = 180 * 1000  // 3 minutes
       const skipStopLoss = holdMs < minHoldMs
 
       // ─── SL/TP/CatSL trigger ───
@@ -816,25 +827,40 @@ export class PaperTradingEngine {
     if (now - strat.lastSignalTime < 15000) return // 15s cooldown
     strat.lastSignalTime = now
 
+    // FIX v12: Use RECENT price-history momentum (last 30 ticks ≈ 45s),
+    // not 24h changePct. 24h change is stale — a token that pumped +5% in 24h
+    // may have peaked 12h ago and is now reverting. Snapshot showed 9/10 last
+    // trades were SHORT (24h changePct < 0) and they all got stopped out on
+    // bounces. Recent momentum is what's actually tradeable.
     const candidates = WS_ELIGIBLE_TOKENS
-      .map(sym => this.priceFeed.getData(sym))
-      .filter((t): t is TickerData => t !== null)
-      .filter(t => t.quoteVolume >= 50_000_000)
-      .filter(t => Math.abs(t.changePct) >= 1.5)
-      .filter(t => !this.cooldownUntil.has(t.symbol) || now > (this.cooldownUntil.get(t.symbol) || 0))
-      .filter(t => !this.positions.has(t.symbol))
-      .filter(t => this.checkCorrelationLimit(t.symbol))
-      .sort((a, b) => Math.abs(b.changePct) - Math.abs(a.changePct))
+      .map(sym => {
+        const t = this.priceFeed.getData(sym)
+        if (!t || t.quoteVolume < 50_000_000) return null
+        const hist = this.priceHistory.get(sym) || []
+        if (hist.length < 30) return null
+        // Recent momentum: last 30 ticks (45s) price change %
+        const recent = hist.slice(-30)
+        const recentMomentum = ((recent[recent.length - 1].price - recent[0].price) / recent[0].price) * 100
+        if (Math.abs(recentMomentum) < 0.3) return null  // need ≥0.3% move in 45s
+        return { ticker: t, recentMomentum }
+      })
+      .filter((x): x is { ticker: TickerData; recentMomentum: number } => x !== null)
+      .filter(x => !this.cooldownUntil.has(x.ticker.symbol) || now > (this.cooldownUntil.get(x.ticker.symbol) || 0))
+      .filter(x => !this.positions.has(x.ticker.symbol))
+      .filter(x => this.checkCorrelationLimit(x.ticker.symbol))
+      .sort((a, b) => Math.abs(b.recentMomentum) - Math.abs(a.recentMomentum))
       .slice(0, 3)
 
     if (candidates.length === 0) return
 
     for (const top of candidates) {
       if (strat.positions.size >= 2) break
-      const usdtAmount = Math.min(strat.cash * 0.03, strat.cash * 0.08)
-      if (usdtAmount < 30) break
+      // FIX v12 BUG H: position size 3% → 5% (so wins cover fees+slippage)
+      const usdtAmount = Math.min(strat.cash * 0.05, strat.cash * 0.10)
+      if (usdtAmount < 50) break
 
-      const direction: 'LONG' | 'SHORT' = top.changePct > 0 ? 'LONG' : 'SHORT'
+      // FIX v12 BUG A: direction from RECENT momentum, not 24h changePct
+      const direction: 'LONG' | 'SHORT' = top.recentMomentum > 0 ? 'LONG' : 'SHORT'
       const hist = this.priceHistory.get(top.symbol) || []
       const atr = computeATR(hist.map(h => h.price), 60)
       if (atr <= 0) continue
@@ -850,11 +876,20 @@ export class PaperTradingEngine {
           pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 3 : pos.entry_price - atr * 3
           pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 4 : pos.entry_price + atr * 4
         }
+        // FIX v12 BUG D: Compute ev_score + expected_move_pct so ML/Kelly can work.
+        //   ev_score = confidence × expected_move_pct / 2  (heuristic)
+        //   expected_move_pct = (ATR × 3 / entry_price) × 100  (the TP distance)
+        const expected_move_pct = +((atr * 3 / (pos?.entry_price || 1)) * 100).toFixed(3)
+        const ev_score = +(Math.min(0.95, 0.55 + Math.abs(top.recentMomentum) / 5) * expected_move_pct / 2).toFixed(3)
+        // FIX v12 BUG G: Confidence floor 0.55 → 0.65
+        const confA = Math.max(0.65, Math.min(0.95, 0.55 + Math.abs(top.recentMomentum) / 5))
         this.signals.unshift({
           timestamp: new Date().toISOString(),
           direction, symbol: top.symbol, strategy: 'A',
-          confidence: Math.min(0.95, 0.55 + Math.abs(top.changePct) / 15),
+          confidence: confA,
           pattern_path: `MOMENTUM_24H_${direction}`,
+          ev_score,
+          expected_move_pct,
         })
         if (this.signals.length > 50) this.signals = this.signals.slice(0, 50)
         console.log(`[Strat A/Momentum] OPEN ${direction} ${top.symbol} @ ${result.fillPrice?.toFixed(4)} (${usdtAmount.toFixed(0)} USDT, ATR ${atr.toFixed(4)})`)
@@ -876,8 +911,11 @@ export class PaperTradingEngine {
         const hist = this.priceHistory.get(sym) || []
         if (hist.length < 20) return null
         const prices = hist.map(h => h.price)
+        // FIX v12 BUG E: Widen RSI thresholds 30/70 → 40/60 for more signals.
+        //   On 1.5s ticks RSI rarely hits <30 or >70, so strategy B rarely fired.
+        //   40/60 is still a meaningful mean-reversion zone but triggers ~5x more.
         const rsi = computeRSI(prices, 14)
-        if (rsi >= 30 && rsi <= 70) return null
+        if (rsi >= 40 && rsi <= 60) return null
         return { ticker: t, rsi }
       })
       .filter((x): x is { ticker: TickerData; rsi: number } => x !== null)
@@ -999,7 +1037,8 @@ export class PaperTradingEngine {
         if (hist.length < 55) return null
         const prices = hist.map(h => h.price)
         const bb = computeBollinger(prices, 50, 2)
-        if (bb.width > 0.01) return null // not squeezed
+        // FIX v12 BUG F: Widen squeeze threshold 1% → 3% for more setups.
+        if (bb.width > 0.03) return null // not squeezed
         const current = prices[prices.length - 1]
         const isLong = current > bb.upper
         const isShort = current < bb.lower
@@ -1335,6 +1374,8 @@ export class PaperTradingEngine {
       },
       trade_history: this.trades.slice(0, 20).map(t => ({ ...t, status: 'CLOSED' })),
       candles_processed: this.candlesProcessed,
+      tick_count: this.tickCount,            // FIX v11
+      last_tick_at: this.lastTickAt,         // FIX v11: ms epoch; 0 = never ticked
       websocket_status: wsConnected ? 'connected' : 'reconnecting',
       reconnect_count: 0,
       token_states: tokenStates,

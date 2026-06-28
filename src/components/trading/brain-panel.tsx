@@ -106,7 +106,7 @@ export function BrainPanel() {
             )}
           </div>
           <div className="text-[8px] text-gray-600 font-mono mt-1">
-            tick #{tickCount.toLocaleString()} • {patternBuffer.length}/12 symbols
+            tick #{tickCount.toLocaleString()} • {patternBuffer.length}/12 SAX
           </div>
         </div>
 
