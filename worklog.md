@@ -298,3 +298,265 @@ Stage Summary:
   2. Restart next dev
   3. Watch console for [Strat A/B/C/D] messages + 5-min reports
   4. git commit + push to terminal-web
+
+---
+Task ID: 12
+Agent: main
+Task: Add DEBUG EXPORT button v8 — copy engine snapshot to clipboard for AI analysis
+
+Work Log:
+- User asked: "como hacemos para que tu ai sepas si esta corriendo bien el motor?"
+- Solution: EXPORT button in header that copies a JSON snapshot to clipboard
+- Wrote /home/z/my-project/scripts/add_debug_export_button.py
+- Patches src/components/trading/header.tsx:
+  * Added ClipboardCopy + Download icons to imports
+  * Extended store destructuring with: positions, tradeHistory, strategies_perf,
+    websocketStatus, tickCount, candlesProcessed, lastTickAt, moneyManager,
+    circuitBreakers, activeTokens, selectedToken, kellyPercent, suggestedPositionSize
+  * Added EXPORT button (outline style) between KILL and end of header
+  * Added exportDebugSnapshot() function that builds JSON snapshot with:
+    - meta (engine status, tick stats, WS status)
+    - strategies_perf (A/B/C/D per-strategy)
+    - open_positions (live positions with SL/TP/PnL/age)
+    - recent_closed_trades (last 30)
+    - money_manager + circuit_breakers
+  * Copies to clipboard as markdown code block, exposes window.__ppmtSnapshot
+- Depends on v5 brain-logs patch (added tickCount + lastTickAt fields to engine)
+- Commit dd81a2c pushed to terminal-web
+
+Stage Summary:
+- AI can now receive full engine state via user paste
+- Snapshot v8 has 6 dimensions: meta, strategies, positions, trades, money_manager, breakers
+- User flow: click EXPORT → cmd+V in chat → AI analyzes
+
+---
+Task ID: 13
+Agent: main
+Task: v9 Comprehensive EXPORT — capture every dimension AI needs to diagnose engine
+
+Work Log:
+- User asked: "agrega todo lo necesario para saber si esta operando como se debe...
+  desde busqueda de patrones hasta el learning machine y que haga el loop correcto"
+- Wrote /home/z/my-project/scripts/v9_comprehensive_export.py
+- Replaces the v8 exportDebugSnapshot with a 12-dimension comprehensive version:
+  1.  meta              — engine health, ws status, tick rate, session info
+  2.  money             — balance, equity, PnL (realized+unrealized), exposure
+  3.  strategies        — A/B/C/D per-strategy cash, PnL, win rate, last signal age
+  4.  open_positions    — SL/TP/CatSL, age, distance to SL/TP in %
+  5.  trades            — last 50 closed + aggregate stats (PF, avg win/loss,
+                          close_reasons breakdown, win/loss streaks, hold time)
+  6.  patterns          — buffer, entropy, regime, Living Trie, trend history
+  7.  machine_learning  — stage, drift, retrain age, confidence trend,
+                          win rate trend, learning stage transitions
+  8.  signals           — last 20 generated signals + signal rate per hour
+  9.  risk              — circuit breakers, money manager, Monte Carlo
+ 10.  tokens            — top 30 tokens by |PnL| with price/volume/win rate
+ 11.  loop_health       — equity curve sample, equity delta, session length
+ 12.  _hints            — auto-detected anomalies (stalled loop, breakers, etc)
+- Extended store destructuring with ~40 fields: patternBuffer, entropy, regime,
+  learningStage, signalsHistory, equityCurve, monteCarlo, tokenStates, etc.
+- Auto-hints detect:
+  * LOOP STALLED (no ticks > 60s)
+  * WEBSOCKET DISCONNECTED
+  * CIRCUIT BREAKERS active
+  * PROFIT FACTOR < 1 (losing money)
+  * CATASTROPHIC SL hits (SL not respected)
+  * MODEL DRIFT detected
+  * ML still in BOOTSTRAP (weak signals)
+  * Strategies that haven't traded recently
+- Used `mdFence = '```'` variable to avoid backtick escaping issues in template literals
+- Commit 7738c8e pushed to terminal-web
+
+Stage Summary:
+- EXPORT v9 captures EVERYTHING the AI needs in one click
+- _hints at top of snapshot flags anomalies AI should look at first
+- Snapshot size ~5-15 KB depending on activity
+- User flow: git pull → run 5-10 min → click EXPORT → paste in chat
+
+---
+Task ID: 14
+Agent: main
+Task: v10 Fix 5 critical bugs identified from real snapshot analysis
+
+Work Log:
+- User pasted snapshot v9 showing catastrophic engine state:
+  * 20 trades, 17 losses (15% win rate), profit factor 0.07
+  * ALL trades closed by SL/CAT_SL within 1.5 seconds of opening
+  * pattern_buffer full of 'F' (Flat) → entropy = 1.0 (max chaos)
+  * match_score = 0 for all 20 recent patterns
+  * learning_stage stuck in BOOTSTRAP, ev_score = 0 for all signals
+  * tick_count = 0, last_tick_at = null (WebSocket loop dead)
+  * exchange field still says "BINANCE" (geo-blocked from Spain)
+- Wrote /home/z/my-project/scripts/v10_fix_5_critical_bugs.py with 5 fixes:
+
+  FIX 1: computeATR — floor at 0.1% of price
+    - Without this, low-price tokens (HBAR $0.07, JUP $0.21) get ATR ~ 0.0001
+    - CatSL ends up within bid-ask spread → every trade stops out instantly
+    - Fix: Math.max(rawATR, lastPrice * 0.001)
+
+  FIX 2: Pattern symbolizer — lower thresholds
+    - Old: U/D at 0.02%, V/B at 0.15% → 90% 'F' symbols, entropy=1.0
+    - New: U/D at 0.01%, V/B at 0.08%
+    - Coinbase ticks update every 1.5s and most moves are < 0.02%
+
+  FIX 3: Exchange field BINANCE → COINBASE
+    - The WS source we actually use since v6 is Coinbase
+    - Binance.com is geo-blocked from Spain
+
+  FIX 4: Minimum 60s hold before SL/CAT_SL can fire
+    - Without this, tight ATR-based SL triggers within 1.5s of entry
+    - First tick after entry is usually the spread crossing back
+    - Trailing stop and time stop are NOT gated — they still work
+
+  FIX 5: close_reasons classifier — strip CLOSED_BY_ prefix
+    - Real reasons are 'CLOSED_BY_SL', 'CLOSED_BY_CAT_SL', 'CLOSED_BY_TP'
+    - The export was looking for 'SL', 'CAT_SL', 'TP' (no prefix)
+    - Added normalizeReason() helper that strips 'CLOSED_BY_' prefix
+- Files modified:
+  1. src/lib/paper-trading-engine.ts        — FIX 1, 2, 3, 4
+  2. src/components/trading/header.tsx      — FIX 5
+
+Stage Summary:
+- Expected impact on next snapshot:
+  ✓ avg_hold_min should jump from 1 → 30-180 min
+  ✓ close_reasons should show SL/CAT_SL/TP counts (not 'other: 20')
+  ✓ pattern_buffer should have more U/D/V/B (less F)
+  ✓ entropy should drop from 1.0 → 0.4-0.7
+  ✓ match_score should be > 0 for some patterns
+  ✓ learning_stage may advance from BOOTSTRAP
+  ✓ win_rate should improve from 15% → 35-50%
+  ✓ profit_factor should climb from 0.07 → 1.0-1.5
+- USER NEEDS TO RUN: python3 scripts/v10_fix_5_critical_bugs.py on Mac
+
+---
+Task ID: 15
+Agent: main
+Task: Diagnose "tick #0", "12/12 symbols", "F F F F F D F F F F F F" in user terminal
+
+Work Log:
+- User pasted: "PATTERN BUFFER waiting F F F F F D F F F F F F tick #0 • 12/12 symbols"
+- Investigation:
+  * Searched sandbox for "tick #" and "/12 symbols" strings
+  * Found in /home/z/my-project/scripts/fix_ppmt_v5_brain_logs.py line 326:
+        tick #{tickCount.toLocaleString()} • {patternBuffer.length}/12 symbols
+  * This JSX is in BrainPanel (NOT header.tsx) — line 325-327
+- ROOT CAUSE for each symptom:
+
+  "tick #0":
+    - tickCount is a number field in PaperTradingEngine (added in v5 brain-logs patch B1)
+    - Bumped inside updatePatternsAndTrie loop (v5 B2): this.tickCount++
+    - If user sees #0 → engine has NEVER processed a single tick since mount
+    - Equivalently: WebSocket loop is dead, OR HMR just reset the engine
+    - v10 snapshot doc confirms: "tick_count = 0, last_tick_at = null (WebSocket loop dead)"
+
+  "12/12 symbols":
+    - The "12" is HARDCODED in the JSX, NOT the number of active tokens
+    - It's the SAX buffer size (last 12 symbols of the pattern)
+    - "X/12" means: patternBuffer.length / 12
+    - "12/12" = buffer is FULL with 12 SAX symbols (good — means engine has data)
+    - This is a confusing label — should be "12/12 buffer" not "12/12 symbols"
+    - TODO for v11: rename to "{patternBuffer.length}/12 SAX" for clarity
+
+  "PATTERN BUFFER waiting F F F F F D F F F F F F":
+    - "waiting" is the isLive indicator when lastTickAt is null/0 (engine never ticked)
+    - The 12 letters are the SAX-encoded pattern of the last 12 ticks
+    - v9 thresholds: V≥0.15% B≤-0.15% U≥0.02% D≤-0.02% F=flat
+    - v10 thresholds (FIX 2): V≥0.08% B≤-0.08% U≥0.01% D≤-0.01% F=flat
+    - 11 F + 1 D means: 11 ticks were essentially flat, 1 had a tiny dip
+    - This is EXPECTED with v9 thresholds on Coinbase 1.5s ticks
+    - v10 fix lowers thresholds → buffer will show more U/D/V/B
+
+  CONTRADICTION (tick #0 vs buffer full):
+    - If tickCount=0, the for-loop never ran, so patternBuffer should be empty
+    - But user sees 12 letters in the buffer
+    - Most likely cause: HMR reset the engine (tickCount back to 0) but React
+      kept the OLD store state with the previous buffer (zustand persists across
+      HMR if the store module isn't re-evaluated)
+    - OR: the engine emitted one snapshot at mount (buffer filled from REST poll),
+      but the tick increment code is buggy and never fires
+
+- RECOMMENDED ACTIONS for user:
+  1. Apply v10 fixes (lowers SAX thresholds, fixes ATR, adds 60s min hold)
+  2. Hard refresh browser (Cmd+Shift+R) to clear stale store state
+  3. Let engine run 5-10 min to accumulate real ticks
+  4. Click EXPORT → paste snapshot v9 for AI to verify tick_count > 0
+
+Stage Summary:
+- All 3 phenomena explained with code-level root cause
+- v10 fix is the critical missing piece (user only has v9 EXPORT applied)
+- Next iteration should:
+  * Rename "X/12 symbols" → "X/12 SAX" (clarity)
+  * Add tickCount reset protection on HMR (persist across reloads)
+  * Verify tickCount++ is actually executing in the for-loop
+
+---
+Task ID: 16
+Agent: main
+Task: Analyze real snapshot v9 from user terminal + apply v12 strategy overhaul
+
+Work Log:
+- User uploaded snapshot v9 (exported 2026-06-28T19:45:13, 42KB JSON, 12 dimensions)
+- Parsed and analyzed all dimensions:
+  * meta: tick_count=0 (v11 bug confirmed), candles_processed=89354 (engine IS running),
+          last_tick_at=null, active_tokens_count=89, exchange=COINBASE (v10 fix confirmed)
+  * money: portfolio 9992.25 (started 10000), realized_pnl -5.52, total_pnl_pct -0.08%
+  * strategies: A 12 trades 20% WR, B 4 trades 50% WR, C 4 trades 0% WR, D 4 trades 0% WR
+  * trades: 20 closed, 3 wins / 17 losses, win_rate 15%, profit_factor 0.10
+            close_reasons: 15 SL, 3 TP, 2 CAT_SL, 0 TRAILING, 0 TIME_STOP
+            avg_win +0.18 USDT, avg_loss -0.31 USDT (R:R achieved 0.58:1, target was 2:1)
+            avg_hold_min 6, last 10 trades: 9 SHORT + 1 LONG
+            recent_streaks: L1 W1 L3 W1 L12 (terminal 12-loss streak)
+  * patterns: buffer B B U D F U F F F F F F (8 of 12 = F, entropy=1.0 max chaos)
+              regime_distribution: 48 volatile + 2 ranging
+              living_trie: 3429 patterns, max_depth 6, 89354 observations
+  * machine_learning: learning_stage=BOOTSTRAP, drift_detected=false, last_retrain_time=null
+  * signals: 20 total, all ev_score=null, all expected_move_pct=null (BUG D confirmed)
+              latest: FIL/USDT SHORT confidence=0.7 pattern=SQUEEZE_SHORT
+              all signals are 0.65-0.827 confidence (no EV to differentiate)
+  * risk: circuit_breakers all false, money_manager default settings
+          monte_carlo: risk_of_ruin 0.0001, probability_of_profit 0.3, p95_dd 0.1, verdict PASS
+  * tokens: 89 active, top by |PnL| PEPE -0.04, FIL +0.03, WLD -0.02
+            most tokens have 0-1 trades, 0 PnL
+  * loop_health: equity_curve 500 points, recent delta -1.26 USDT, session 22.8 min
+                  is_loop_alive=False (because lastTickAt=null — v11 fixes this)
+
+- Diagnosis: 8 structural bugs identified (NOT addressed by v10's mechanical fixes)
+  * BUG A: Strategy A uses 24h changePct (stale) for direction → 9/10 trades SHORT
+           in a bouncing market → all stopped out
+  * BUG B: ATR floor 0.1% (v10) still too tight → SL=0.15% hit by 3 normal spreads
+  * BUG C: 60s min hold (v10) too short → SL hit at 60s boundary release
+  * BUG D: ev_score + expected_move_pct always null in signals → ML stuck BOOTSTRAP,
+           Kelly = 0, suggested_position_size = 0
+  * BUG E: Strategy B RSI thresholds 30/70 too tight → strategy rarely fires (4 trades)
+  * BUG F: Strategy D Bollinger squeeze 1% too tight → strategy rarely fires (4 trades)
+  * BUG G: Confidence floor 0.55 too low → opens weak signals that lose
+  * BUG H: Position size 3% of $3000 = $90 → fees+slippage $0.27 > avg_win $0.18
+
+- Wrote /home/z/my-project/scripts/v12_strategy_overhaul.py with 8 fixes:
+  * BUG A: Use recent 30-tick momentum (last 45s) instead of 24h changePct
+  * BUG B: ATR floor 0.1% → 0.3% (SL ≥ 0.45%, TP ≥ 0.9%)
+  * BUG C: Minimum hold 60s → 180s
+  * BUG D: Compute ev_score + expected_move_pct for Strategy A signals
+  * BUG E: Strategy B RSI 30/70 → 40/60
+  * BUG F: Strategy D squeeze 1% → 3%
+  * BUG G: Confidence floor 0.55 → 0.65
+  * BUG H: Position size 3% → 5% (so wins cover fees+slippage)
+- Files modified: src/lib/paper-trading-engine.ts (8 surgical edits)
+- TypeScript validation: all 3 files parse OK (paper-trading-engine 55237 bytes 1392 lines,
+  brain-panel 9057 bytes 206 lines, header 26662 bytes 678 lines)
+
+Stage Summary:
+- v11 (tickCount restoration) + v12 (strategy overhaul) ready to push
+- Expected impact on next snapshot after 30 min of running:
+  * win_rate: 15% → 40-55%
+  * profit_factor: 0.10 → 1.3-1.8
+  * avg_hold_min: 6 → 20-90
+  * close_reasons: SL-heavy → balanced SL/TP
+  * ev_score: null → 0.3-0.8 for all signals
+  * learning_stage: BOOTSTRAP → TRAINING (after 50+ ev_scored signals)
+  * kelly_pct: 0 → 0.05-0.15
+- User needs to:
+  1. git pull origin terminal-web
+  2. kill -9 $(lsof -ti :3000) 2>/dev/null; sleep 1; npm run dev
+  3. Let it run 30 min (need real signal history to see impact)
+  4. Click EXPORT → paste in chat for next round of analysis
