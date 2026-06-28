@@ -706,10 +706,12 @@ export class PaperTradingEngine {
       const price = ticker.price
       const isLong = pos.direction === 'LONG'
 
-      // ─── Time stop: 4h max hold ───
+      // ─── Time stop: 2h max hold (FIX v13 BUG P: was 4h — snapshot showed
+      //   3 trades held 110-131min that drifted into SL. Momentum is gone
+      //   after 2h; close before drift turns into SL hit.) ───
       const entryTime = new Date(pos.entry_time).getTime()
       const holdMs = now - entryTime
-      if (holdMs > 4 * 60 * 60 * 1000) {
+      if (holdMs > 2 * 60 * 60 * 1000) {
         console.log(`[Paper/TimeStop] ${sym} held ${Math.round(holdMs / 60000)}min — closing at market`)
         this.closePosition(sym)
         if (this.trades[0]) this.trades[0].close_reason = 'CLOSED_BY_TIME_STOP'
@@ -839,9 +841,12 @@ export class PaperTradingEngine {
         const hist = this.priceHistory.get(sym) || []
         if (hist.length < 30) return null
         // Recent momentum: last 30 ticks (45s) price change %
+        // FIX v12: 0.3% threshold was too strict — Strategy A made 0 trades
+        // in 3h of running. Most tokens move <0.3% in 45s even in volatile
+        // regime. Lower to 0.15% so Strategy A actually fires.
         const recent = hist.slice(-30)
         const recentMomentum = ((recent[recent.length - 1].price - recent[0].price) / recent[0].price) * 100
-        if (Math.abs(recentMomentum) < 0.3) return null  // need ≥0.3% move in 45s
+        if (Math.abs(recentMomentum) < 0.15) return null  // need ≥0.15% move in 45s
         return { ticker: t, recentMomentum }
       })
       .filter((x): x is { ticker: TickerData; recentMomentum: number } => x !== null)
@@ -929,10 +934,17 @@ export class PaperTradingEngine {
 
     for (const c of candidates) {
       if (strat.positions.size >= 2) break
-      const usdtAmount = Math.min(strat.cash * 0.03, strat.cash * 0.08)
-      if (usdtAmount < 30) break
+      // FIX v13 BUG L: position size 3% → 5% (matches A; covers fees+slippage)
+      const usdtAmount = Math.min(strat.cash * 0.05, strat.cash * 0.10)
+      if (usdtAmount < 50) break
 
-      const direction: 'LONG' | 'SHORT' = c.rsi < 30 ? 'LONG' : 'SHORT'
+      // FIX v12 BUG J: Direction was c.rsi < 30 ? 'LONG' : 'SHORT' but v12 BUG E
+      // widened entry filter to RSI<40 (LONG) or RSI>60 (SHORT). When RSI was
+      // 30-40, we'd enter as LONG but direction logic said SHORT. All 8 recent
+      // Strategy B signals were SHORT (100% bias). Fix: use < 50 as midpoint.
+      // RSI<50 = bearish → contrarian LONG (mean reversion up)
+      // RSI>50 = bullish → contrarian SHORT (mean reversion down)
+      const direction: 'LONG' | 'SHORT' = c.rsi < 50 ? 'LONG' : 'SHORT'
       const hist = this.priceHistory.get(c.ticker.symbol) || []
       const atr = computeATR(hist.map(h => h.price), 60)
       if (atr <= 0) continue
@@ -948,11 +960,17 @@ export class PaperTradingEngine {
           pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 2 : pos.entry_price - atr * 2
           pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 3 : pos.entry_price + atr * 3
         }
+        // FIX v13 BUG K: Same ev_score computation as Strategy A.
+        const expected_move_pct_b = +((atr * 2 / (pos?.entry_price || 1)) * 100).toFixed(3)
+        const confB = Math.max(0.65, Math.min(0.9, 0.5 + Math.abs(c.rsi - 50) / 50))
+        const ev_score_b = +(confB * expected_move_pct_b / 2).toFixed(3)
         this.signals.unshift({
           timestamp: new Date().toISOString(),
           direction, symbol: c.ticker.symbol, strategy: 'B',
-          confidence: Math.min(0.9, 0.5 + Math.abs(c.rsi - 50) / 50),
+          confidence: confB,
           pattern_path: `MEANREV_RSI${c.rsi.toFixed(0)}_${direction}`,
+          ev_score: ev_score_b,
+          expected_move_pct: expected_move_pct_b,
         })
         if (this.signals.length > 50) this.signals = this.signals.slice(0, 50)
         console.log(`[Strat B/MeanRev] OPEN ${direction} ${c.ticker.symbol} RSI=${c.rsi.toFixed(1)} @ ${result.fillPrice?.toFixed(4)} (${usdtAmount.toFixed(0)} USDT)`)
@@ -991,8 +1009,9 @@ export class PaperTradingEngine {
 
     for (const c of candidates) {
       if (strat.positions.size >= 2) break
-      const usdtAmount = Math.min(strat.cash * 0.03, strat.cash * 0.08)
-      if (usdtAmount < 30) break
+      // FIX v13 BUG L: position size 3% → 5%
+      const usdtAmount = Math.min(strat.cash * 0.05, strat.cash * 0.10)
+      if (usdtAmount < 50) break
 
       const direction: 'LONG' | 'SHORT' = c.isBreakout ? 'LONG' : 'SHORT'
       const hist = this.priceHistory.get(c.ticker.symbol) || []
@@ -1008,13 +1027,19 @@ export class PaperTradingEngine {
         if (pos) {
           pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 1 : pos.entry_price + atr * 1
           pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 3 : pos.entry_price - atr * 3
-          pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 2 : pos.entry_price + atr * 2
+          // FIX v13 BUG M: CatSL 2×ATR → 3.5×ATR (was 1×ATR away from SL — too tight)
+          pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 3.5 : pos.entry_price + atr * 3.5
         }
+        // FIX v13 BUG K: ev_score for Strategy C (breakout).
+        const expected_move_pct_c = +((atr * 3 / (pos?.entry_price || 1)) * 100).toFixed(3)
+        const ev_score_c = +(0.65 * expected_move_pct_c / 2).toFixed(3)
         this.signals.unshift({
           timestamp: new Date().toISOString(),
           direction, symbol: c.ticker.symbol, strategy: 'C',
           confidence: 0.65,
           pattern_path: `BREAKOUT_${direction}`,
+          ev_score: ev_score_c,
+          expected_move_pct: expected_move_pct_c,
         })
         if (this.signals.length > 50) this.signals = this.signals.slice(0, 50)
         console.log(`[Strat C/Breakout] OPEN ${direction} ${c.ticker.symbol} broke ${c.isBreakout ? 'high' : 'low'} @ ${result.fillPrice?.toFixed(4)} (${usdtAmount.toFixed(0)} USDT)`)
@@ -1037,8 +1062,9 @@ export class PaperTradingEngine {
         if (hist.length < 55) return null
         const prices = hist.map(h => h.price)
         const bb = computeBollinger(prices, 50, 2)
-        // FIX v12 BUG F: Widen squeeze threshold 1% → 3% for more setups.
-        if (bb.width > 0.03) return null // not squeezed
+        // FIX v13 BUG N: Squeeze threshold 3% → 1.5% (3% captured too much noise,
+        //   0 wins in 4 trades). Real squeeze = bb.width < 1.5%. Fewer but cleaner.
+        if (bb.width > 0.015) return null // not squeezed
         const current = prices[prices.length - 1]
         const isLong = current > bb.upper
         const isShort = current < bb.lower
@@ -1055,8 +1081,9 @@ export class PaperTradingEngine {
 
     for (const c of candidates) {
       if (strat.positions.size >= 1) break
-      const usdtAmount = Math.min(strat.cash * 0.03, strat.cash * 0.08)
-      if (usdtAmount < 30) break
+      // FIX v13 BUG L: position size 3% → 5%
+      const usdtAmount = Math.min(strat.cash * 0.05, strat.cash * 0.10)
+      if (usdtAmount < 50) break
 
       const direction: 'LONG' | 'SHORT' = c.isLong ? 'LONG' : 'SHORT'
       const hist = this.priceHistory.get(c.ticker.symbol) || []
@@ -1072,13 +1099,19 @@ export class PaperTradingEngine {
         if (pos) {
           pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 1 : pos.entry_price + atr * 1
           pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 4 : pos.entry_price - atr * 4
-          pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 2 : pos.entry_price + atr * 2
+          // FIX v13 BUG N: CatSL 2×ATR → 3.5×ATR (was too tight, caused CAT_SL hits)
+          pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 3.5 : pos.entry_price + atr * 3.5
         }
+        // FIX v13 BUG K: ev_score for Strategy D (squeeze expansion).
+        const expected_move_pct_d = +((atr * 4 / (pos?.entry_price || 1)) * 100).toFixed(3)
+        const ev_score_d = +(0.7 * expected_move_pct_d / 2).toFixed(3)
         this.signals.unshift({
           timestamp: new Date().toISOString(),
           direction, symbol: c.ticker.symbol, strategy: 'D',
           confidence: 0.7,
           pattern_path: `SQUEEZE_${direction}`,
+          ev_score: ev_score_d,
+          expected_move_pct: expected_move_pct_d,
         })
         if (this.signals.length > 50) this.signals = this.signals.slice(0, 50)
         console.log(`[Strat D/Squeeze] OPEN ${direction} ${c.ticker.symbol} bbWidth=${(c.bbWidth * 100).toFixed(2)}% @ ${result.fillPrice?.toFixed(4)} (${usdtAmount.toFixed(0)} USDT)`)
