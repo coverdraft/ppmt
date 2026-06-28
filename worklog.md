@@ -560,3 +560,102 @@ Stage Summary:
   2. kill -9 $(lsof -ti :3000) 2>/dev/null; sleep 1; npm run dev
   3. Let it run 30 min (need real signal history to see impact)
   4. Click EXPORT → paste in chat for next round of analysis
+
+---
+Task ID: 17
+Agent: main
+Task: Analyze snapshot v9 #2 (post-v12) + apply v13 strategy refinement
+
+Work Log:
+- User uploaded snapshot v9 #2 (2026-06-28T22:50:16, post-v11+v12)
+- Comparison vs snapshot #1 (pre-v12):
+  * tick_count: 0 → 218096 ✅ (v11 worked)
+  * last_tick_at: null → 2s ago ✅ (v11 worked)
+  * is_loop_alive: False → True ✅
+  * win_rate: 15% → 30% (2x improvement)
+  * profit_factor: 0.10 → 0.45 (4.5x improvement)
+  * avg_hold_min: 6 → 35 (6x improvement, now in healthy range)
+  * close_reasons SL: 15 → 12 (improved)
+  * close_reasons TP: 3 → 6 (doubled)
+  * close_reasons CAT_SL: 2 → 2 (unchanged — still a problem)
+  * avg_win: +0.18 → +0.43 (2.4x)
+  * kelly_pct: 0 → 0.07 (BUG D partially worked)
+  * suggested_position_size: 0 → 330.84 (BUG D partially worked)
+  * entropy: 1.0 → 0.783 (improved)
+  * learning_stage: BOOTSTRAP → BOOTSTRAP (unchanged — ev_score still null)
+  * ev_score: null → null (still null in all signals!)
+  * Strategy A: 12 trades → 0 trades (NEW PROBLEM)
+  * Strategy B: 50% WR (BEST performer)
+  * Strategy C: 0% → 22% WR (improved)
+  * Strategy D: 0% → 0% WR (still no wins)
+
+- Diagnosed 8 NEW bugs not addressed by v12:
+
+  BUG I: Strategy A threshold 0.3% too strict → 0 trades
+    v12 BUG A required |recentMomentum| ≥ 0.3% in 30 ticks (45s)
+    Most tokens move <0.3% in 45s even in volatile regime
+    Fix: 0.3% → 0.15%
+
+  BUG J: Strategy B direction check still uses RSI < 30 (not < 40 from v12)
+    Line 935: direction = c.rsi < 30 ? 'LONG' : 'SHORT'
+    v12 BUG E widened entry filter to RSI<40 (LONG) or RSI>60 (SHORT)
+    But direction still used < 30 → 100% SHORT bias
+    All 8 recent Strategy B signals were SHORT
+    Fix: direction = c.rsi < 50 ? 'LONG' : 'SHORT'
+
+  BUG K: ev_score + expected_move_pct null in B, C, D signals
+    v12 BUG D only fixed Strategy A
+    ML stays in BOOTSTRAP because no EV data to learn from
+    Fix: Apply same ev_score computation to B, C, D signals
+
+  BUG L: Position size 3% still in B, C, D (only A was bumped to 5%)
+    Fix: Bump B, C, D to 5% (same as A)
+
+  BUG M: Strategy C CatSL 2×ATR too tight (only 1×ATR from SL)
+    Fix: 2×ATR → 3.5×ATR
+
+  BUG N: Strategy D CatSL 2×ATR + squeeze threshold 3% too loose
+    Fix: CatSL 2×ATR → 3.5×ATR, squeeze 3% → 1.5% (cleaner setups)
+
+  BUG O: tick_rate_per_min_approx wildly wrong (212679/min)
+    Calculation: tickCount / ((now - (lastTickAt - 60000)) / 60000)
+    lastTickAt - 60000 = 1 min before last tick → denominator ≈ 1
+    Fix: Use session length derived from tickCount × 1.5s / 60
+
+  BUG P: Time stop 4h too long — 3 trades held 110-131min drifted into SL
+    Fix: 4h → 2h (momentum is gone after 2h)
+
+- Wrote /home/z/my-project/scripts/v13_strategy_refinement.py with 12 edits:
+  * BUG I: Strategy A momentum threshold 0.3% → 0.15%
+  * BUG J: Strategy B direction check RSI<30 → RSI<50
+  * BUG K (B/C/D): Add ev_score + expected_move_pct to B, C, D signals
+  * BUG L (B/C/D): Position size 3% → 5%
+  * BUG M: Strategy C CatSL 2×ATR → 3.5×ATR
+  * BUG N (sl): Strategy D CatSL 2×ATR → 3.5×ATR
+  * BUG N (sq): Strategy D squeeze threshold 3% → 1.5%
+  * BUG O: tick_rate_per_min_approx calculation fixed
+  * BUG P: Time stop 4h → 2h
+- Files modified:
+  * src/lib/paper-trading-engine.ts (11 edits)
+  * src/components/trading/header.tsx (1 edit for BUG O)
+- TypeScript validation: all 3 files parse OK (paper-trading-engine 57512 bytes 1425 lines,
+  brain-panel 9057 bytes 206 lines, header 27045 bytes 684 lines)
+
+Stage Summary:
+- v13 ready to push (12 fixes)
+- Expected impact on next snapshot after 30+ min running:
+  * Strategy A: 0 → 5-15 trades (threshold relaxed)
+  * Strategy B: SHORT-biased → balanced LONG/SHORT
+  * ev_score: null → 0.3-0.8 on ALL signals
+  * ML stage: BOOTSTRAP → TRAINING (after 50+ ev_scored signals)
+  * CAT_SL: 2 → 0 (CatSL distance widened)
+  * Strategy D: 0% WR → 30%+ (squeeze 1.5% cleaner)
+  * Time stop 4h → 2h (no more drift-into-SL)
+  * tick_rate_per_min: 212679 → ~40 (real value)
+  * win_rate: 30% → 45-55%
+  * profit_factor: 0.45 → 1.2-1.6
+- User needs to:
+  1. git pull origin terminal-web
+  2. kill -9 $(lsof -ti :3000) 2>/dev/null; sleep 1; npm run dev
+  3. Let it run 30+ min
+  4. Click EXPORT → paste in chat

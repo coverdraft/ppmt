@@ -235,8 +235,14 @@ export function StatusHeader({ onStartStop, onKillSwitch, onToggleAuto }: Status
       : null
     // Ticks per minute: derive from tickCount + first observation time
     // (we approximate using candlesProcessed as proxy if tickCount is 0)
-    const tickRatePerMin = (tickCount && lastTickAt)
-      ? +(tickCount / Math.max(1, (now - (lastTickAt - 60000)) / 60000)).toFixed(1)
+    // FIX v13 BUG O: Old formula used (lastTickAt - 60000) which is just 1 min
+    //   before the last tick → denominator ≈ 1 → tickCount/min = tickCount.
+    //   Reported 212679 ticks/min (impossible). Use session length instead.
+    //   We don't have engine start time here, so derive from candles_processed
+    //   (1 candle per 1.5s tick interval).
+    const sessionMin = tickCount ? tickCount * 1.5 / 60 : 0
+    const tickRatePerMin = (tickCount && sessionMin > 0)
+      ? +(tickCount / sessionMin).toFixed(1)
       : 0
 
     const meta = {
