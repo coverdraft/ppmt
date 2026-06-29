@@ -757,6 +757,14 @@ export class PaperTradingEngine {
       }
 
       if (hit) {
+        // FIX v0.85: Loud per-symbol log so the user can verify SL/TP fires
+        // immediately for EVERY asset (not just one). Matches src/lib engine.
+        const holdSec = Math.round(holdMs / 1000)
+        console.log(
+          `[Paper/checkStops] 🔥 ${sym} ${pos.direction} CLOSED by ${reason} ` +
+          `| entry=${pos.entry_price} sl=${pos.current_sl} tp=${pos.current_tp} ` +
+          `catSL=${pos.catastrophic_sl} | triggerPrice=${price} | held=${holdSec}s | pnl=${pnlPct.toFixed(3)}%`
+        )
         // Cooldown 30min after SL/CatSL (not after TP or trailing SL)
         if (reason === 'CLOSED_BY_SL' || reason === 'CLOSED_BY_CAT_SL') {
           this.cooldownUntil.set(sym, now + 30 * 60 * 1000)

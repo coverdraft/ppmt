@@ -778,37 +778,34 @@ export class PaperTradingEngine {
         }
       }
 
-      // FIX v10: Minimum 60s hold before SL/CAT_SL can fire.
-      // FIX v12: Bump to 180s (3 min) — snapshot showed trades stopping out at
-      // 1-2min, just past the 60s boundary. With 0.45% SL (v12 BUG B), 180s
-      // gives the trade enough time to develop without being stopped by noise.
-      // (Trailing stop and break-even still run; only SL/CAT_SL are gated.)
-      const minHoldMs = 180 * 1000  // 3 minutes
-      const skipStopLoss = holdMs < minHoldMs
-
-      // ─── SL/TP/CatSL trigger ───
-      // FIX v10: SL and CAT_SL are gated by skipStopLoss (60s minimum hold).
-      // TP is NOT gated — if price hits take-profit immediately, we take the win.
-      // Trailing SL is also allowed (only fires when in profit).
+      // ─── SL/TP/CatSL trigger (IMMEDIATE — exchange-like behavior) ───
+      // FIX v0.85 (UNIVERSAL — applies to ALL assets, not just one):
+      //   Removed the 3-minute `skipStopLoss` grace period that was deferring
+      //   SL/CAT_SL execution during the first 180s after entry. The grace
+      //   period was added in v12 to avoid noise stopouts, but the user
+      //   reported a SHORT XRP/USDT position where price (1.0510) exceeded
+      //   SL (1.0497) and the position did not close — this is NOT how real
+      //   exchanges behave. Standard exchange SL orders fire IMMEDIATELY
+      //   when price crosses the SL level, regardless of how recently the
+      //   position was opened. We now match that behavior across every
+      //   symbol in `this.positions`.
+      //
+      //   TP, trailing SL, break-even, and catastrophic SL all fire
+      //   immediately on every tick (1.5s cadence). No gating, no deferral.
+      //   The previous FIX v10/v12 grace period is fully removed.
+      //
+      //   If a position needs protection from early noise stopouts, that
+      //   should be solved by widening the SL distance (ATR multiplier)
+      //   at entry time, not by silently ignoring SL breaches.
       let hit = false
       let reason = ''
-      if (!skipStopLoss && pos.current_sl !== null) {
+      if (pos.current_sl !== null) {
         if (isLong && price <= pos.current_sl) { hit = true; reason = pnlPct > 0 ? 'CLOSED_BY_TRAILING_SL' : 'CLOSED_BY_SL' }
         if (!isLong && price >= pos.current_sl) { hit = true; reason = pnlPct > 0 ? 'CLOSED_BY_TRAILING_SL' : 'CLOSED_BY_SL' }
       }
-      // FIX v0.84: Debug log when SL is breached but skipped due to minHoldMs
-      if (skipStopLoss && pos.current_sl !== null) {
-        const slBreached = (isLong && price <= pos.current_sl) || (!isLong && price >= pos.current_sl)
-        if (slBreached) {
-          const lastWarn = this._noPriceWarn.get(sym + ':slskip') || 0
-          if (now - lastWarn > 10_000) {
-            console.warn(`[Paper/checkStops] ⏳ ${sym} SL=${pos.current_sl} breached (price=${price}) but held <3min — SL deferred`)
-            this._noPriceWarn.set(sym + ':slskip', now)
-          }
-        }
-      }
-      // FIX v0.84: Debug log when SL is breached but NOT closing (sanity check)
-      if (!skipStopLoss && pos.current_sl !== null && !hit) {
+      // Sanity check: SL breached but hit=false should now be impossible.
+      // Keep the guard so any future regression is loud.
+      if (pos.current_sl !== null && !hit) {
         const slBreached = (isLong && price <= pos.current_sl) || (!isLong && price >= pos.current_sl)
         if (slBreached) {
           console.error(`[Paper/checkStops] 🚨 BUG: ${sym} SL=${pos.current_sl} breached (price=${price}) but hit=false — investigating`)
@@ -818,12 +815,22 @@ export class PaperTradingEngine {
         if (isLong && price >= pos.current_tp) { hit = true; reason = 'CLOSED_BY_TP' }
         if (!isLong && price <= pos.current_tp) { hit = true; reason = 'CLOSED_BY_TP' }
       }
-      if (!skipStopLoss && pos.catastrophic_sl !== null) {
+      if (pos.catastrophic_sl !== null) {
         if (isLong && price <= pos.catastrophic_sl) { hit = true; reason = 'CLOSED_BY_CAT_SL' }
         if (!isLong && price >= pos.catastrophic_sl) { hit = true; reason = 'CLOSED_BY_CAT_SL' }
       }
 
       if (hit) {
+        // FIX v0.85: Loud per-symbol log so the user can verify SL/TP fires
+        // immediately for EVERY asset (not just XRP). Includes entry, SL/TP
+        // level, trigger price, hold time, and PnL — enough to debug any
+        // future "why didn't this close?" report.
+        const holdSec = Math.round(holdMs / 1000)
+        console.log(
+          `[Paper/checkStops] 🔥 ${sym} ${pos.direction} CLOSED by ${reason} ` +
+          `| entry=${pos.entry_price} sl=${pos.current_sl} tp=${pos.current_tp} ` +
+          `catSL=${pos.catastrophic_sl} | triggerPrice=${price} | held=${holdSec}s | pnl=${pnlPct.toFixed(3)}%`
+        )
         // Cooldown 30min after SL/CatSL (not after TP or trailing SL)
         if (reason === 'CLOSED_BY_SL' || reason === 'CLOSED_BY_CAT_SL') {
           this.cooldownUntil.set(sym, now + 30 * 60 * 1000)

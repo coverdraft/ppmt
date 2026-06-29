@@ -355,7 +355,7 @@ export default function TerminalPage() {
         </div>
         <div className="flex items-center gap-3">
           <span className="text-[9px] text-gray-600 font-mono">
-            PPMT v0.81 • PAPER TRADING • Live Coinbase+CoinGecko Prices • 82 Tokens • Trade Chart
+            PPMT v0.85 • PAPER TRADING • Live Coinbase+CoinGecko Prices • 82 Tokens • Trade Chart • Immediate SL
           </span>
           <span className="text-[9px] text-gray-600 font-mono">|</span>
           <span className="text-[9px] text-gray-500 font-mono">
