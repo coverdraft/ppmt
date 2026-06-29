@@ -358,6 +358,10 @@ export class PaperTradingEngine {
   private lastReportTime: number = 0
   private lastCBLogTime: number = 0
 
+  // v15 VOL CB: timestamp when volatility pause expires (0 = no pause)
+  private volPauseUntil: number = 0
+  private lastVolCBLogTime: number = 0
+
   // FIX v0.84: Throttle "no price data" warnings per symbol (once per 30s)
   private _noPriceWarn: Map<string, number> = new Map()
 
@@ -850,6 +854,31 @@ export class PaperTradingEngine {
   // ─── Auto trading (4 strategies in parallel) ──────────────────────
   private maybeAutoTrade() {
     if (!this.autoMode || !this.tradingEnabled) return
+    const now = Date.now()
+
+    // ─── v15 VOL CB: pause new entries when market volatility is extreme ───
+    // Detects violent market-wide moves (avg ATR/price > 1.5% across top tokens)
+    // and pauses NEW entries for 10 minutes. Open positions keep managing normally.
+    // Calm market: avgAtrPct ≈ 0.2-0.5%.  Volatile: 0.8-1.2%.  Extreme: >1.5%.
+    if (now < this.volPauseUntil) {
+      const minsLeft = Math.ceil((this.volPauseUntil - now) / 60000)
+      if (now - this.lastVolCBLogTime > 60000) {
+        console.log(`[Paper/VolCB] ⛔ Volatility pause active — ${minsLeft}min left. New entries skipped.`)
+        this.lastVolCBLogTime = now
+      }
+      return
+    }
+    const volNow = this.computeMarketVolatility()
+    if (volNow.extreme) {
+      this.volPauseUntil = now + 10 * 60 * 1000  // 10 min
+      console.log(
+        `[Paper/VolCB] 🌋 Extreme market volatility detected — ` +
+        `avgATR/price=${volNow.avgAtrPct.toFixed(3)}% across ${volNow.tokenCount} tokens. ` +
+        `Pausing new entries for 10min. Open positions continue managing.`
+      )
+      this.lastVolCBLogTime = now
+      return
+    }
 
     // ─── Circuit breaker: stop new entries if drawdown exceeded ───
     const totalValue = this.computeTotalValue()
@@ -1228,6 +1257,40 @@ export class PaperTradingEngine {
     return exposure
   }
 
+  /**
+   * v15 VOL CB: Compute real-time market-wide volatility.
+   * Returns avgAtrPct = average of (ATR(60) / price * 100) across top-volume
+   * tokens with sufficient price history. This is a TRUE real-time vol measure
+   * (last ~90s of price action), unlike the 24h avgChange 'regime' which is stale.
+   *
+   * Thresholds (calibrated for 1.5s tick / 60-sample ATR ≈ 90s window):
+   *   calm     < 0.5%
+   *   normal   0.5 - 0.8%
+   *   high     0.8 - 1.5%
+   *   extreme  > 1.5%   ← triggers circuit breaker
+   */
+  private computeMarketVolatility(): { avgAtrPct: number; tokenCount: number; extreme: boolean } {
+    let sumAtrPct = 0
+    let count = 0
+    for (const sym of WS_ELIGIBLE_TOKENS) {
+      const ticker = this.priceFeed.getData(sym)
+      if (!ticker || ticker.quoteVolume < 50_000_000) continue
+      const hist = this.priceHistory.get(sym) || []
+      if (hist.length < 60) continue
+      const prices = hist.slice(-60).map(h => h.price)
+      const atr = computeATR(prices, 60)
+      if (atr <= 0 || ticker.price <= 0) continue
+      sumAtrPct += (atr / ticker.price) * 100
+      count++
+    }
+    const avgAtrPct = count > 0 ? sumAtrPct / count : 0
+    return {
+      avgAtrPct,
+      tokenCount: count,
+      extreme: count >= 3 && avgAtrPct > 1.5,  // need ≥3 tokens agreeing to avoid single-token pump false positives
+    }
+  }
+
   private maybeReport() {
     const now = Date.now()
     if (now - this.lastReportTime < 5 * 60 * 1000) return // 5 min
@@ -1418,6 +1481,10 @@ export class PaperTradingEngine {
       pattern_buffer: this.patternBufferPerToken.get(this.selectedToken) || [],
       entropy: parseFloat(entropy.toFixed(3)),
       regime,
+      vol_regime: (() => {
+        const v = this.computeMarketVolatility()
+        return { avg_atr_pct: parseFloat(v.avgAtrPct.toFixed(3)), token_count: v.tokenCount, extreme: v.extreme, paused: Date.now() < this.volPauseUntil, pause_remaining_ms: Math.max(0, this.volPauseUntil - Date.now()) }
+      })(),
       latest_signal: this.signals[0] || null,
       signals_history: this.signals.slice(0, 20),
       positions: positionsArray,
