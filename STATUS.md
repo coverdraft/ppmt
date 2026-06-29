@@ -1,6 +1,6 @@
 # PPMT — Estado del Proyecto (Jun 2026)
 
-> Documento vivo. Última actualización: **v61b** (commit `061e9b9`).
+> Documento vivo. Última actualización: **v62a** (commit `4dace4e`).
 > Idioma: español (consistencia con el equipo).
 
 ---
@@ -24,7 +24,7 @@ sistema es **profitable estable** antes de mandarlo a producción (HF Space 24/7
 | Strat | Tipo | Allocation | Tamaño base | RSI/Signal | Estado |
 |------|------|-----------|-------------|------------|--------|
 | **A** | Momentum 24h | 30% = 3.000 USDT | 0.050 (v60b) | top movers \|chg\| + RSI 25/75 | Activa |
-| **B** | Mean Reversion | 25% = 2.500 USDT | 0.20 (v60b) + PYRAMID +50% @+1.0R (v61b) | RSI 30/70 oversold/overbought | Workhorse |
+| **B** | Mean Reversion | 25% = 2.500 USDT | 0.20 (v60b) + PYRAMID +75% @+1.0R (v62a) | RSI 30/70 oversold/overbought | Workhorse |
 | **C** | Range Breakout | 25% = 2.500 USDT | 0.025 | rolling 60-tick high/low | Pausada (inerte) |
 | **D** | Vol Squeeze | 20% = 2.000 USDT | 0.025 | Bollinger squeeze + first move | Inerte (no dispara) |
 
@@ -54,9 +54,9 @@ if (atrPct < 0.6) {
   size_mult = 1.0;            // Full size in volatile markets
 }
 
-// v61b NEW — PYRAMID on Strategy B (only)
+// v61b/v62a — PYRAMID on Strategy B (only)
 if (!pos.pyramid_done && pos.strategy === 'B' && rMultiple >= 1.0) {
-  // Add 50% more size at current price
+  // Add 75% more size at current price (v62a: was 50% in v61b)
   // Recompute entry_price as weighted avg
   // Reset SL to new_entry - 1.5*new_ATR (gives pyramided position room)
   // Reset partial1/2/3_done + lock_done + trail_active so they re-fire
@@ -66,8 +66,8 @@ if (!pos.pyramid_done && pos.strategy === 'B' && rMultiple >= 1.0) {
 
 **Por qué funciona**: en régimen calmado el motor pierde más a menudo (señales
 débiles). Reducir tamaño con tiered 0.4/0.7/1.0 corta MaxDD de 0.28 % → 0.23 %.
-El pyramiding en B (+50 % a +1.0R) agrega tamaño solo a trades confirmados
-ganadores — nunca a perdedores.
+El pyramiding en B (+75 % a +1.0R) agrega tamaño solo a trades confirmados
+ganadores — nunca a perdedores. Sharpe sube de +8.30 (v60b) → +9.82 (v62a).
 
 ### 2.4 Costes de transacción simulados
 
@@ -101,9 +101,10 @@ Cada versión se valida en **12 seeds** (`[42, 1337, 31337, 7, 99, 1234, 7777,
 | v58d | 79.4 % | +32.12 | 0.21 % | 67 % | 2.53 | +0.77 | A size 0.030 |
 | v59f | 79.4 % | +36.03 | 0.23 % | 67 % | 2.63 | +0.77 | **A 0.040 + B 0.175 + TIERED sizing** |
 | v60b | 79.4 % | +42.89 | 0.28 % | 67 % | 2.56 | +0.77 | A 0.050 + B 0.20 |
-| **v61b** ⭐ | 79.6 % | **+46.02** | 0.29 % | 67 % | **2.66** | +0.76 | **PYRAMID B +50% @+1.0R** |
+| v61b | 79.6 % | +46.02 | 0.29 % | 67 % | 2.66 | +0.76 | PYRAMID B +50% @+1.0R |
+| **v62a** ⭐ | 79.6 % | **+48.56** | 0.29 % | 67 % | **2.72** | +0.75 | **PYRAMID B +75% @+1.0R** |
 
-**Proyección v61b**: `+46.02 / 4h × 6 = +276 USDT/día` (en 10.000 USDT paper).
+**Proyección v62a**: `+48.56 / 4h × 6 = +291 USDT/día` (en 10.000 USDT paper).
 
 ---
 
@@ -171,14 +172,14 @@ El usuario pide **más ganancia en menos tiempo**. Líneas de trabajo:
 
 - **Repo**: https://github.com/coverdraft/ppmt
 - **Branch activa**: `terminal-web`
-- **Worklog completo**: `worklog.md` (34 tareas documentadas)
-- **Scripts backtest**: `scripts/backtest/v38_push_v37e.py` → `v61_push.py`
-- **Backups motor**: `src/lib/paper-trading-engine.ts.bak.{v14,v15,v31b,v38g,v43a,v49c,v51e,v53h,v58d,v59f,v60b}`
-- **Engine actual**: `src/lib/paper-trading-engine.ts` (v61b, commit `061e9b9`)
+- **Worklog completo**: `worklog.md` (35 tareas documentadas)
+- **Scripts backtest**: `scripts/backtest/v38_push_v37e.py` → `v62_push.py`
+- **Backups motor**: `src/lib/paper-trading-engine.ts.bak.{v14,v15,v31b,v38g,v43a,v49c,v51e,v53h,v58d,v59f,v60b,v61b}`
+- **Engine actual**: `src/lib/paper-trading-engine.ts` (v62a, commit `4dace4e`)
 
 Para revertir a cualquier versión:
 ```bash
-cp src/lib/paper-trading-engine.ts.bak.v60b src/lib/paper-trading-engine.ts
+cp src/lib/paper-trading-engine.ts.bak.v61b src/lib/paper-trading-engine.ts
 ```
 
 ---
