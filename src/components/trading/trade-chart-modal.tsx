@@ -34,12 +34,12 @@ import {
   type IChartApi, type ISeriesApi, type IPriceLine,
   type UTCTimestamp,
 } from 'lightweight-charts'
-import { useTradingStore, type Position, type TradeRecord } from '@/stores/trading-store'
+import { useTradingStore, type Position, type TradeRecord, type TraderNote, type TraderNoteLabel } from '@/stores/trading-store'
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
 } from '@/components/ui/dialog'
 import { Badge } from '@/components/ui/badge'
-import { ArrowUp, ArrowDown, TrendingUp, TrendingDown, X, Loader2, Radio } from 'lucide-react'
+import { ArrowUp, ArrowDown, TrendingUp, TrendingDown, X, Loader2, Radio, StickyNote, Check } from 'lucide-react'
 
 // ─── Helpers ────────────────────────────────────────────────────────────
 
@@ -88,6 +88,7 @@ export function TradeChartModal() {
     chartModalTrade, setChartModalTrade,
     currentPrice, symbol: selectedSymbol,
     tokenStates, positions,
+    traderNotes, setTraderNote,
   } = useTradingStore()
 
   // ─── Refs ────────────────────────────────────────────────────────────
@@ -654,8 +655,156 @@ export function TradeChartModal() {
               Source: Coinbase / Kraken · {candles.length} candles · {interval} · auto-refresh 5s
             </span>
           </div>
+
+          {/* ─── Trader Notes (Camino B) ────────────────────────────────────
+              Post-close labels the user can attach to a CLOSED trade.
+              This does NOT alter the trade — it only annotates the outcome
+              so the AI can find systematic patterns in the next EXPORT.
+              For OPEN positions, show a disabled hint instead. */}
+          {trade && (() => {
+            const tradeKey = `${trade.symbol}__${trade.entry_time}`
+            return (
+              <TraderNotePanel
+                tradeKey={tradeKey}
+                symbol={trade.symbol}
+                entryTime={trade.entry_time}
+                isClosed={isClosedTrade}
+                note={traderNotes[tradeKey]}
+                setTraderNote={setTraderNote}
+              />
+            )
+          })()}
         </div>
       </DialogContent>
     </Dialog>
+  )
+}
+
+// ─── TraderNotePanel ────────────────────────────────────────────────────
+// Sub-component for the post-close trader notes UI.
+// Extracted so the main modal render stays readable.
+//
+// Behavior:
+//   - 4 quick-label buttons (BAD_ENTRY / BAD_SL / BAD_TP / GOOD_TRADE)
+//     Clicking a selected label again deselects it (toggle).
+//   - Free-text textarea (optional, max 280 chars).
+//   - "Saved" indicator appears briefly after changes (auto-persists on
+//     every keystroke via setTraderNote — no explicit Save button needed).
+//   - For OPEN positions, the whole panel is collapsed to a hint that
+//     says "you can tag this trade after it closes" — we explicitly do
+//     NOT allow notes on open positions to avoid contaminating live
+//     decisions with pre-judgement.
+//
+// All state lives in the Zustand store (traderNotes) so it survives
+// modal close/reopen and is included in the next EXPORT.
+
+interface TraderNotePanelProps {
+  tradeKey: string
+  symbol: string
+  entryTime: string
+  isClosed: boolean
+  note: TraderNote | undefined
+  setTraderNote: (key: string, note: { label?: TraderNoteLabel | null; text?: string }) => void
+}
+
+const LABEL_OPTIONS: { value: TraderNoteLabel; label: string; color: string; hint: string }[] = [
+  { value: 'BAD_ENTRY', label: 'Mala entrada', color: 'bg-rose-600/20 text-rose-300 border-rose-600/50', hint: 'Entry timing/zone was wrong' },
+  { value: 'BAD_SL',    label: 'SL mal puesto', color: 'bg-amber-600/20 text-amber-300 border-amber-600/50', hint: 'SL too tight / wide / wrong place' },
+  { value: 'BAD_TP',    label: 'TP mal puesto', color: 'bg-orange-600/20 text-orange-300 border-orange-600/50', hint: 'TP too tight / wide / wrong place' },
+  { value: 'GOOD_TRADE',label: 'Buena gestión', color: 'bg-emerald-600/20 text-emerald-300 border-emerald-600/50', hint: 'Keep doing this (positive label)' },
+]
+
+function TraderNotePanel({ tradeKey, symbol, entryTime, isClosed, note, setTraderNote }: TraderNotePanelProps) {
+  const [justSaved, setJustSaved] = useState(false)
+  const savedTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Show "Saved ✓" indicator for 1.2s after any change
+  const flashSaved = useCallback(() => {
+    if (savedTimer.current) clearTimeout(savedTimer.current)
+    setJustSaved(true)
+    savedTimer.current = setTimeout(() => setJustSaved(false), 1200)
+  }, [])
+
+  const onLabelClick = (label: TraderNoteLabel) => {
+    // Toggle: if same label clicked again, deselect (set to null)
+    const newLabel = note?.label === label ? null : label
+    setTraderNote(tradeKey, { label: newLabel })
+    flashSaved()
+  }
+
+  const onTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const text = e.target.value.slice(0, 280) // hard cap
+    setTraderNote(tradeKey, { text })
+    flashSaved()
+  }
+
+  // ─── Open position: just a hint, no editable UI ─────────────────────
+  if (!isClosed) {
+    return (
+      <div className="mt-3 p-2.5 border border-gray-800 rounded-md bg-gray-900/40">
+        <div className="flex items-center gap-2 text-[10px] text-gray-500 font-mono">
+          <StickyNote className="w-3 h-3" />
+          <span>Trader Note disponible cuando la posición cierre — para etiquetar la operación sin alterarla.</span>
+        </div>
+      </div>
+    )
+  }
+
+  // ─── Closed trade: full label UI ────────────────────────────────────
+  return (
+    <div className="mt-3 p-3 border border-gray-800 rounded-md bg-gray-900/40">
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-2 text-[11px] text-gray-400 font-mono">
+          <StickyNote className="w-3.5 h-3.5 text-amber-400" />
+          <span>Trader Note</span>
+          <span className="text-gray-700">·</span>
+          <span className="text-gray-600">no altera la operación — solo la etiqueta para análisis</span>
+        </div>
+        {justSaved && (
+          <span className="flex items-center gap-1 text-[10px] text-emerald-400 font-mono">
+            <Check className="w-3 h-3" /> Saved
+          </span>
+        )}
+      </div>
+
+      {/* Quick-label buttons */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-1.5 mb-2">
+        {LABEL_OPTIONS.map(opt => {
+          const active = note?.label === opt.value
+          return (
+            <button
+              key={opt.value}
+              onClick={() => onLabelClick(opt.value)}
+              title={opt.hint}
+              className={`px-2 py-1.5 text-[10px] font-mono rounded border transition-colors ${
+                active
+                  ? opt.color + ' ring-1 ring-offset-0'
+                  : 'bg-gray-900/60 text-gray-500 border-gray-800 hover:border-gray-700 hover:text-gray-400'
+              }`}
+            >
+              {opt.label}
+            </button>
+          )
+        })}
+      </div>
+
+      {/* Free-text note */}
+      <textarea
+        value={note?.text ?? ''}
+        onChange={onTextChange}
+        placeholder="Nota opcional (ej: 'entró justo antes de noticia', 'SL muy tight para ATR=0.8%')..."
+        rows={2}
+        maxLength={280}
+        className="w-full px-2 py-1.5 text-[11px] font-mono bg-gray-950/60 border border-gray-800 rounded text-gray-300 placeholder-gray-700 focus:outline-none focus:border-gray-600 resize-none"
+      />
+      <div className="flex justify-between items-center mt-1">
+        <span className="text-[9px] text-gray-700 font-mono">
+          {symbol} · entry {entryTime ? new Date(entryTime).toLocaleString('es-ES', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'}
+        </span>
+        <span className="text-[9px] text-gray-700 font-mono">
+          {(note?.text ?? '').length}/280
+        </span>
+      </div>
+    </div>
   )
 }

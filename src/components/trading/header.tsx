@@ -89,6 +89,8 @@ export function StatusHeader({ onStartStop, onKillSwitch, onToggleAuto }: Status
     monteCarlo,
     tokenStates,
     riskRewardRatio,
+    // v0.86 — trader notes (Camino B labels for post-close analysis)
+    traderNotes,
   } = useTradingStore()
 
   // Optimistic local state for the auto-mode switch.
@@ -342,22 +344,34 @@ export function StatusHeader({ onStartStop, onKillSwitch, onToggleAuto }: Status
     // ─── 5. TRADES (last 50 closed + aggregate stats) ─────
     const recentTrades = (tradeHistory || [])
       .slice(-50)
-      .map((t: any) => ({
-        symbol: t.symbol,
-        direction: t.direction,
-        status: t.status,
-        entry_price: +t.entry_price?.toFixed(4),
-        close_price: t.close_price ? +t.close_price.toFixed(4) : null,
-        close_reason: t.close_reason || null,
-        pnl_pct: +t.pnl_pct?.toFixed(2),
-        pnl_usdt: +t.pnl_usdt?.toFixed(2),
-        size_usdt: +t.size_usdt?.toFixed(2),
-        opened_at: t.entry_time,
-        closed_at: t.closed_at || null,
-        hold_min: (t.entry_time && t.closed_at)
-          ? Math.round((new Date(t.closed_at).getTime() - new Date(t.entry_time).getTime()) / 60000)
-          : null,
-      }))
+      .map((t: any) => {
+        // v0.86: attach trader note (label + text) if present for this trade.
+        // Key matches the chart modal: `${symbol}__${entry_time}`.
+        const noteKey = `${t.symbol}__${t.entry_time}`
+        const note = traderNotes?.[noteKey]
+        return {
+          symbol: t.symbol,
+          direction: t.direction,
+          status: t.status,
+          entry_price: +t.entry_price?.toFixed(4),
+          close_price: t.close_price ? +t.close_price.toFixed(4) : null,
+          close_reason: t.close_reason || null,
+          pnl_pct: +t.pnl_pct?.toFixed(2),
+          pnl_usdt: +t.pnl_usdt?.toFixed(2),
+          size_usdt: +t.size_usdt?.toFixed(2),
+          opened_at: t.entry_time,
+          closed_at: t.closed_at || null,
+          hold_min: (t.entry_time && t.closed_at)
+            ? Math.round((new Date(t.closed_at).getTime() - new Date(t.entry_time).getTime()) / 60000)
+            : null,
+          // v0.86: trader note (null if untagged)
+          trader_note: note ? {
+            label: note.label,
+            text: note.text,
+            updated_at: new Date(note.updated_at).toISOString(),
+          } : null,
+        }
+      })
 
     // Aggregate trade stats
     const allTrades = tradeHistory || []
@@ -618,6 +632,28 @@ export function StatusHeader({ onStartStop, onKillSwitch, onToggleAuto }: Status
     })
 
     // ─── Assemble final snapshot ───────────────────────────
+    // v0.86: trader_notes section — aggregates all user-tagged trades so
+    // the AI can quickly see the distribution of labels (BAD_ENTRY / BAD_SL
+    // / BAD_TP / GOOD_TRADE) and correlate them with trade features.
+    const traderNotesEntries = Object.entries(traderNotes || {})
+    const traderNotesAgg = {
+      total_tagged: traderNotesEntries.length,
+      by_label: {
+        BAD_ENTRY:  traderNotesEntries.filter(([, n]: [string, any]) => n?.label === 'BAD_ENTRY').length,
+        BAD_SL:     traderNotesEntries.filter(([, n]: [string, any]) => n?.label === 'BAD_SL').length,
+        BAD_TP:     traderNotesEntries.filter(([, n]: [string, any]) => n?.label === 'BAD_TP').length,
+        GOOD_TRADE: traderNotesEntries.filter(([, n]: [string, any]) => n?.label === 'GOOD_TRADE').length,
+      },
+      // Full notes (key + label + text) so the AI can read the free-text
+      // comments and correlate them with specific trades.
+      all_notes: traderNotesEntries.map(([key, n]: [string, any]) => ({
+        trade_key: key,
+        label: n?.label ?? null,
+        text: n?.text ?? '',
+        updated_at: n?.updated_at ? new Date(n.updated_at).toISOString() : null,
+      })),
+    }
+
     const snapshot = {
       _version: 'ppmt-export-v9',
       _exported_at: iso,
@@ -631,6 +667,8 @@ export function StatusHeader({ onStartStop, onKillSwitch, onToggleAuto }: Status
         stats: tradeStats,
         recent: recentTrades,
       },
+      // v0.86: trader notes (Camino B) — user tags for post-close analysis
+      trader_notes: traderNotesAgg,
       patterns,
       machine_learning: ml,
       signals,
