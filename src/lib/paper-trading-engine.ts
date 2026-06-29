@@ -795,15 +795,16 @@ export class PaperTradingEngine {
         }
       }
 
-      // ─── v43a: Lock profit + Multi-Partial TP + Trailing (before SL/TP check) ───
+      // ─── v49c: Lock profit + Multi-Partial TP + Trailing (before SL/TP check) ───
       // These run on every tick to manage open positions proactively.
       // Lock:     move SL to entry+0.2R when +0.5R reached (locks small profit)
       // Partial1: close 15% at +0.5R (small profit-booking)
       // Partial2: close 25% at +1.0R, then enable trailing on remainder (60%)
-      // Trail:    0.4 ATR trailing stop on remainder (overrides TP)
-      // 12-seed validation: WR 72.5%, P&L +13.92, Profitable 67%, MaxDD 0.29%, AvgR +0.61
+      // Trail:    0.30 ATR trailing stop on remainder (v49c: tighter than v43a's 0.4)
+      // 12-seed validation: WR 73.1%, P&L +20.18, Profitable 67%, MaxDD 0.27%, AvgR +0.66
       // vs v38g:  WR 61.8%, P&L +11.01, Profitable 67%, MaxDD 0.31%, AvgR +0.41
-      // → +10.7pp WR, +27% P&L, +0.20 AvgR, -0.02pp MaxDD
+      // vs v43a:  WR 72.5%, P&L +13.73, Profitable 67%, MaxDD 0.28%, AvgR +0.61
+      // → +11.3pp WR vs v38g, +47% P&L vs v43a, +0.25 AvgR vs v38g
       if (pos.initial_atr && pos.initial_sl_distance && pos.initial_sl_distance > 0) {
         const rMultiple = isLong
           ? (price - pos.entry_price) / pos.initial_sl_distance
@@ -837,7 +838,7 @@ export class PaperTradingEngine {
               : this.marketBuy(sym, partialQty1 * pos.entry_price, pos.strategy)
             if (partialResult1.success) {
               pos.qty -= partialQty1
-              console.log(`[Paper/v43a] ${sym} PARTIAL_TP1 15% @ ${price} (R=${rMultiple.toFixed(2)})`)
+              console.log(`[Paper/v49c] ${sym} PARTIAL_TP1 15% @ ${price} (R=${rMultiple.toFixed(2)})`)
             }
           }
           pos.partial1_done = true
@@ -857,13 +858,13 @@ export class PaperTradingEngine {
               : this.marketBuy(sym, partialQty2 * pos.entry_price, pos.strategy)
             if (partialResult2.success) {
               pos.qty -= partialQty2
-              console.log(`[Paper/v43a] ${sym} PARTIAL_TP2 25% @ ${price} (R=${rMultiple.toFixed(2)})`)
+              console.log(`[Paper/v49c] ${sym} PARTIAL_TP2 25% @ ${price} (R=${rMultiple.toFixed(2)})`)
             }
           }
           pos.partial2_done = true
           pos.trail_active = true
-          // Set initial trail SL at current price - 0.4 ATR (v43a: 0.5→0.4, tighter)
-          const trailDist = pos.initial_atr * 0.4
+          // Set initial trail SL at current price - 0.30 ATR (v49c: 0.4→0.30, tighter)
+          const trailDist = pos.initial_atr * 0.30
           if (isLong) {
             const newSL = price - trailDist
             if (pos.current_sl === null || newSL > pos.current_sl) pos.current_sl = newSL
@@ -873,9 +874,9 @@ export class PaperTradingEngine {
           }
         }
 
-        // 3. Update trailing stop if active (v43a: 0.4 ATR, was 0.5)
+        // 3. Update trailing stop if active (v49c: 0.30 ATR, was 0.4 in v43a)
         if (pos.trail_active && pos.max_favorable_price) {
-          const trailDist = pos.initial_atr * 0.4
+          const trailDist = pos.initial_atr * 0.30
           if (isLong) {
             const newSL = pos.max_favorable_price - trailDist
             if (pos.current_sl === null || newSL > pos.current_sl) pos.current_sl = newSL
@@ -1018,11 +1019,11 @@ export class PaperTradingEngine {
         const hist = this.priceHistory.get(sym) || []
         if (hist.length < 30) return null
         // Recent momentum: last 30 ticks (45s) price change %
-        // v31b: momentum 0.40% (was 0.15) + RSI 25-75 filter for quality
-        // Backtest: 0.15 gave WR 41%, 0.40 + RSI filter gives WR 63.5%
+        // v49c: momentum 0.55% (was 0.40 v31b) — stricter quality filter
+        // Backtest: 0.15 gave WR 41%, 0.40 + RSI filter gives WR 63.5%, 0.55 gives WR 73.1% (12-seed)
         const recent = hist.slice(-30)
         const recentMomentum = ((recent[recent.length - 1].price - recent[0].price) / recent[0].price) * 100
-        if (Math.abs(recentMomentum) < 0.40) return null  // need ≥0.40% move (strong signals only)
+        if (Math.abs(recentMomentum) < 0.55) return null  // v49c: need ≥0.55% move (was 0.40)
         const rsiA = computeRSI(prices, 14)
         if (rsiA < 25 || rsiA > 75) return null  // skip extreme zones (mean reversion territory)
         return { ticker: t, recentMomentum }
@@ -1064,7 +1065,7 @@ export class PaperTradingEngine {
       if (result.success) {
         const pos = this.positions.get(top.symbol)
         if (pos) {
-          // v43a: SL 1.4 ATR + lock 0.5R + partial1 15% at 0.5R + partial2 25% at 1.0R + trail 0.4 ATR + ATR floor 0.58%
+          // v49c: SL 1.4 ATR + lock 0.5R + partial1 15% at 0.5R + partial2 25% at 1.0R + trail 0.30 ATR + ATR floor 0.58% + momentum 0.55%
           //   8-seed validation: WR 66.7%, P&L +30.97, Profitable 88% of seeds, MaxDD 0.26%
           pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 1.4 : pos.entry_price + atr * 1.4
           pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 1.2 : pos.entry_price - atr * 1.2
@@ -1161,7 +1162,7 @@ export class PaperTradingEngine {
       if (result.success) {
         const pos = this.positions.get(c.ticker.symbol)
         if (pos) {
-          // v43a: SL 1.4 ATR + v43a state init (lock 0.5R / partial1 15% at 0.5R / partial2 25% at 1.0R / trail 0.4 ATR)
+          // v49c: SL 1.4 ATR + v49c state init (lock 0.5R / partial1 15% at 0.5R / partial2 25% at 1.0R / trail 0.30 ATR)
           pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 1.4 : pos.entry_price + atr * 1.4
           pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 1.2 : pos.entry_price - atr * 1.2
           pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 4 : pos.entry_price + atr * 4
