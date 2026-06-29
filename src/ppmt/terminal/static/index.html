@@ -573,6 +573,10 @@ function handleCandle(data) {
   if (S.position && isOpen(S.position)) {
     updateLivePnL();
   }
+  // v0.61.0 (CHART-MODAL): Live-update modal candle + current price line
+  if (modalChartState.isOpen) {
+    updateModalLiveCandle(data);
+  }
 }
 
 // ─── LIVE/STALE Indicator ──────────────────────────────────────
@@ -726,6 +730,11 @@ function handlePositionUpdate(data) {
   // Update chart markers for entry/exit
   updateChartPosition(data);
   
+  // v0.61.0 (CHART-MODAL): Live-update modal SL/TP markers if open
+  if (modalChartState.isOpen && modalChartState.mode === 'live') {
+    refreshModalLivePosition(data);
+  }
+  
   // Refresh trade history when position closes
   if (!isOpen(data) && historyOpen) {
     fetchHistory();
@@ -810,6 +819,7 @@ function updatePositionPanel() {
   }
   
   el.innerHTML = `
+    <div onclick="openPositionModal()" class="cursor-pointer hover:bg-bg3/40 rounded transition p-1 -m-1" title="Click to open chart">
     <div class="flex items-center justify-between mb-3">
       <div class="flex items-center gap-2">
         <span class="text-sm font-black ${dirColor} px-2 py-0.5 rounded border ${dirBg}">${dir}</span>
@@ -854,6 +864,8 @@ function updatePositionPanel() {
         <span class="text-txt3 text-xs">USDT:</span>
         <span class="text-sm font-bold ${pnlColor}">${(pos.size_usdt * livePnlPct / 100).toFixed(2)}</span>
       </div>
+    </div>
+    <div class="mt-2 text-center text-txt3 text-[0.6rem] uppercase tracking-wider">▸ click to view on chart</div>
     </div>`;
 }
 
@@ -1266,7 +1278,8 @@ function renderHistory(trades) {
     const dirColor = t.direction === 'LONG' ? 'text-grn' : 'text-red';
     const ts = new Date(t.timestamp);
     const timeStr = ts.toLocaleTimeString('en-US', {hour12:false, hour:'2-digit', minute:'2-digit', second:'2-digit'});
-    return `<tr class="hover:bg-bg3">
+    const tradeId = t.id || 0;
+    return `<tr class="hover:bg-bg3 cursor-pointer transition" onclick="openTradeModal(${tradeId})" title="Click to view chart">
       <td class="px-2 py-1 text-txt3">${timeStr}</td>
       <td class="px-2 py-1 text-txt2">${(t.symbol || '').replace('/USDT','')}</td>
       <td class="px-2 py-1 ${dirColor} font-bold">${t.direction || '--'}</td>
@@ -1442,7 +1455,7 @@ function showBacktestModal(data) {
           <div class="text-red font-bold text-base">${data.max_drawdown}%</div>
         </div>
       </div>
-      <button onclick="document.getElementById('backtestModal').remove()" 
+      <button onclick="document.getElementById('backtestModal').remove()"
               class="mt-5 w-full bg-purple-700 hover:bg-purple-600 text-white text-sm font-bold py-2 rounded transition">
         Close
       </button>
@@ -1450,6 +1463,574 @@ function showBacktestModal(data) {
   document.body.appendChild(modal);
   // Close on backdrop click
   modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
+}
+
+// ─────────────────────────────────────────────────────────────────
+// v0.61.0 (CHART-MODAL) — Position/Trade Chart Modal
+// ─────────────────────────────────────────────────────────────────
+// Click on an open position card → openPositionModal()
+// Click on a closed trade row    → openTradeModal(tradeId)
+//
+// Modal opens a SECOND lightweight-charts instance (separate vars
+// from the main `chart`/`candleSeries` globals) showing the trade's
+// candles with markers + horizontal price lines for:
+//   - entry price (blue dashed)
+//   - current SL (red dashed)
+//   - current TP (green dashed)
+//   - catastrophic SL (red dotted, faint)
+//   - exit price (yellow, only for closed trades)
+//
+// For OPEN positions, the modal subscribes to live candle + position
+// updates via the existing WebSocket (handleCandle / handlePositionUpdate
+// already call into the modal via modalChartState.isOpen flag).
+// ─────────────────────────────────────────────────────────────────
+
+const modalChartState = {
+  isOpen: false,
+  mode: null,        // 'live' | 'closed'
+  chart: null,
+  candleSeries: null,
+  volumeSeries: null,
+  entryLine: null,
+  slLine: null,
+  tpLine: null,
+  catSlLine: null,
+  exitLine: null,
+  currentPriceLine: null,
+  symbol: null,
+  timeframe: null,
+  tradeId: null,
+  candles: [],       // cached candles for marker timestamp alignment
+};
+
+function closeTradeModal() {
+  const modal = document.getElementById('tradeChartModal');
+  if (modal) modal.remove();
+  // Reset state
+  modalChartState.isOpen = false;
+  modalChartState.mode = null;
+  modalChartState.chart = null;
+  modalChartState.candleSeries = null;
+  modalChartState.volumeSeries = null;
+  modalChartState.entryLine = null;
+  modalChartState.slLine = null;
+  modalChartState.tpLine = null;
+  modalChartState.catSlLine = null;
+  modalChartState.exitLine = null;
+  modalChartState.currentPriceLine = null;
+  modalChartState.symbol = null;
+  modalChartState.timeframe = null;
+  modalChartState.tradeId = null;
+  modalChartState.candles = [];
+}
+
+// Click on the open position card → open live modal
+async function openPositionModal() {
+  if (!S.position) {
+    console.warn('[MODAL] no open position to show');
+    return;
+  }
+  const pos = S.position;
+  const symbol = pos.symbol || S.symbol;
+  const timeframe = S.timeframe || '5m';
+  await openTradeModalInternal({
+    mode: 'live',
+    symbol: symbol,
+    timeframe: timeframe,
+    entryPrice: pos.entry_price,
+    entryTime: pos.entry_time,
+    slPrice: pos.current_sl,
+    tpPrice: pos.current_tp,
+    catSlPrice: pos.catastrophic_sl,
+    exitPrice: null,
+    direction: pos.direction,
+    sizeUsdt: pos.size_usdt,
+    status: pos.status,
+    pnlPct: pos.pnl_pct,
+    closeReason: null,
+    tradeId: null,
+  });
+}
+
+// Click on a history row → open closed-trade modal
+async function openTradeModal(tradeId) {
+  if (!tradeId) {
+    console.warn('[MODAL] no tradeId provided');
+    return;
+  }
+  // Fetch the trade record by id
+  let trade = null;
+  try {
+    const r = await fetch('/api/trade/' + tradeId);
+    if (r.ok) trade = await r.json();
+  } catch (e) {
+    console.error('[MODAL] failed to fetch trade', e);
+  }
+  if (!trade || trade.error) {
+    // Fallback: pull from history list and find by id
+    try {
+      const r = await fetch('/api/trades/history');
+      if (r.ok) {
+        const data = await r.json();
+        trade = (data.trades || []).find(t => t.id === tradeId);
+      }
+    } catch (e) {
+      console.error('[MODAL] failed to fetch history fallback', e);
+    }
+  }
+  if (!trade) {
+    console.warn('[MODAL] trade not found id=' + tradeId);
+    return;
+  }
+  await openTradeModalInternal({
+    mode: 'closed',
+    symbol: trade.symbol,
+    timeframe: trade.timeframe || '5m',
+    entryPrice: trade.entry_price,
+    entryTime: trade.entry_time,
+    slPrice: trade.sl_price,
+    tpPrice: trade.tp_price,
+    catSlPrice: trade.catastrophic_sl,
+    exitPrice: trade.exit_price,
+    direction: trade.direction,
+    sizeUsdt: trade.size_usdt,
+    status: trade.status,
+    pnlPct: trade.pnl_pct,
+    closeReason: trade.close_reason,
+    tradeId: tradeId,
+  });
+}
+
+// Internal: build the modal + chart + markers
+async function openTradeModalInternal(opts) {
+  // Remove any existing modal
+  closeTradeModal();
+
+  const dirColor = opts.direction === 'LONG' ? 'text-grn' : 'text-red';
+  const pnlColor = (opts.pnlPct || 0) >= 0 ? 'text-grn' : 'text-red';
+  const statusLabel = opts.mode === 'live'
+    ? (opts.status || 'ACTIVE')
+    : (opts.closeReason || opts.status || 'CLOSED');
+  const symbolShort = (opts.symbol || '').replace('/USDT', '');
+  const entryTimeStr = opts.entryTime
+    ? new Date(opts.entryTime).toLocaleString('en-US', {hour12:false})
+    : '--';
+  const titlePrefix = opts.mode === 'live' ? 'LIVE POSITION' : 'TRADE #' + opts.tradeId;
+
+  // Build modal DOM
+  const modal = document.createElement('div');
+  modal.id = 'tradeChartModal';
+  modal.className = 'fixed inset-0 bg-black/80 flex items-center justify-center z-50';
+  modal.innerHTML = `
+    <div class="bg-bg2 border border-bdr2 rounded-lg w-full mx-4 shadow-2xl flex flex-col" style="max-width:1100px; max-height:92vh;">
+      <!-- Header -->
+      <div class="flex items-center justify-between p-4 border-b border-bdr">
+        <div class="flex items-center gap-3">
+          <span class="text-base font-black ${dirColor} px-2 py-0.5 rounded border border-bdr">${opts.direction || '--'}</span>
+          <span class="text-lg font-bold text-txt">${symbolShort}/USDT</span>
+          <span class="text-xs text-txt3">${opts.timeframe || '--'}</span>
+          <span class="text-xs text-txt3">·</span>
+          <span class="text-xs text-accent uppercase tracking-wider">${titlePrefix}</span>
+        </div>
+        <div class="flex items-center gap-3">
+          ${opts.mode === 'live'
+            ? '<span class="text-xs text-grn flex items-center gap-1"><span class="inline-block w-2 h-2 bg-grn rounded-full animate-pulse"></span>LIVE</span>'
+            : ''}
+          <button onclick="closeTradeModal()" class="text-txt3 hover:text-txt transition" title="Close (Esc)">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- Stats strip -->
+      <div class="grid grid-cols-7 gap-2 p-3 border-b border-bdr text-xs">
+        <div><div class="text-txt3 mb-0.5">Entry</div><div class="text-txt font-bold">${formatPrice(opts.entryPrice)}</div></div>
+        <div><div class="text-txt3 mb-0.5">SL</div><div class="text-red font-bold">${formatPrice(opts.slPrice)}</div></div>
+        <div><div class="text-txt3 mb-0.5">TP</div><div class="text-grn font-bold">${formatPrice(opts.tpPrice)}</div></div>
+        <div><div class="text-txt3 mb-0.5">Cat. SL</div><div class="text-txt2">${formatPrice(opts.catSlPrice)}</div></div>
+        ${opts.exitPrice
+          ? `<div><div class="text-txt3 mb-0.5">Exit</div><div class="text-yel font-bold">${formatPrice(opts.exitPrice)}</div></div>`
+          : `<div><div class="text-txt3 mb-0.5">Size</div><div class="text-txt2">${(opts.sizeUsdt || 0).toFixed(1)} U</div></div>`}
+        <div><div class="text-txt3 mb-0.5">P&L</div><div class="${pnlColor} font-bold">${opts.pnlPct != null ? (opts.pnlPct >= 0 ? '+' : '') + opts.pnlPct.toFixed(2) + '%' : '--'}</div></div>
+        <div><div class="text-txt3 mb-0.5">${opts.mode === 'live' ? 'Opened' : 'Closed'}</div><div class="text-txt2 text-[0.65rem]">${entryTimeStr}</div></div>
+      </div>
+
+      <!-- Chart container -->
+      <div class="p-3 flex-1 min-h-0">
+        <div id="tradeChartContainer" style="width:100%; height:480px; position:relative;">
+          <div id="tradeChartLoading" class="absolute inset-0 flex items-center justify-center text-txt3 text-sm">
+            <svg class="animate-spin w-5 h-5 mr-2" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path></svg>
+            Loading candles...
+          </div>
+        </div>
+      </div>
+
+      <!-- Footer / legend -->
+      <div class="flex items-center justify-between p-3 border-t border-bdr text-xs">
+        <div class="flex items-center gap-4 flex-wrap">
+          <span class="flex items-center gap-1"><span class="inline-block w-3 h-0.5 bg-accent"></span><span class="text-txt3">Entry</span></span>
+          <span class="flex items-center gap-1"><span class="inline-block w-3 h-0.5 bg-red"></span><span class="text-txt3">SL</span></span>
+          <span class="flex items-center gap-1"><span class="inline-block w-3 h-0.5 bg-grn"></span><span class="text-txt3">TP</span></span>
+          ${opts.catSlPrice ? '<span class="flex items-center gap-1"><span class="inline-block w-3 h-0.5 bg-red opacity-50" style="border-top:1px dotted"></span><span class="text-txt3">Cat SL</span></span>' : ''}
+          ${opts.exitPrice ? '<span class="flex items-center gap-1"><span class="inline-block w-3 h-0.5 bg-yel"></span><span class="text-txt3">Exit</span></span>' : ''}
+          ${opts.mode === 'live' ? '<span class="flex items-center gap-1"><span class="inline-block w-3 h-0.5 bg-blue-400"></span><span class="text-txt3">Current</span></span>' : ''}
+        </div>
+        <div class="text-txt3">${statusLabel}</div>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+
+  // Close on backdrop click
+  modal.addEventListener('click', (e) => { if (e.target === modal) closeTradeModal(); });
+  // Esc key closes
+  const escHandler = (e) => { if (e.key === 'Escape') { closeTradeModal(); document.removeEventListener('keydown', escHandler); } };
+  document.addEventListener('keydown', escHandler);
+
+  // Set state BEFORE fetching candles so live updates don't race
+  modalChartState.isOpen = true;
+  modalChartState.mode = opts.mode;
+  modalChartState.symbol = opts.symbol;
+  modalChartState.timeframe = opts.timeframe;
+  modalChartState.tradeId = opts.tradeId;
+
+  // Fetch candles
+  const apiSymbol = (opts.symbol || '').replace('/', '-');
+  let candles = [];
+  try {
+    const r = await fetch('/api/ohlcv/' + apiSymbol + '/' + (opts.timeframe || '5m') + '?limit=500');
+    if (r.ok) {
+      const data = await r.json();
+      candles = data.candles || [];
+    }
+  } catch (e) {
+    console.error('[MODAL] failed to fetch ohlcv', e);
+  }
+
+  // Hide loading
+  const loading = document.getElementById('tradeChartLoading');
+  if (loading) loading.remove();
+
+  if (candles.length === 0) {
+    const cc = document.getElementById('tradeChartContainer');
+    if (cc) cc.innerHTML = '<div class="absolute inset-0 flex items-center justify-center text-red text-sm">No candle data available for ' + apiSymbol + '</div>';
+    return;
+  }
+
+  modalChartState.candles = candles;
+  renderTradeModalChart(candles, opts);
+
+  // For live positions, also fetch the latest position state via REST
+  // (the WS will keep updating from here on)
+  if (opts.mode === 'live') {
+    try {
+      const r = await fetch('/api/position/' + apiSymbol);
+      if (r.ok) {
+        const data = await r.json();
+        if (data.position) {
+          refreshModalLivePosition(data.position);
+        }
+      }
+    } catch (e) {
+      console.warn('[MODAL] live position fetch failed (non-fatal)', e);
+    }
+  }
+}
+
+function renderTradeModalChart(candles, opts) {
+  const container = document.getElementById('tradeChartContainer');
+  if (!container) return;
+  container.innerHTML = '';
+
+  const chart = LightweightCharts.createChart(container, {
+    width: container.clientWidth,
+    height: 480,
+    layout: {
+      background: { type: 'solid', color: '#0f0f12' },
+      textColor: '#9ca3af',
+      fontSize: 11,
+    },
+    grid: {
+      vertLines: { color: 'rgba(55,65,81,0.3)' },
+      horzLines: { color: 'rgba(55,65,81,0.3)' },
+    },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    rightPriceScale: { borderColor: 'rgba(75,85,99,0.5)' },
+    timeScale: {
+      borderColor: 'rgba(75,85,99,0.5)',
+      timeVisible: true,
+      secondsVisible: false,
+    },
+  });
+
+  const candleSeries = chart.addCandlestickSeries({
+    upColor: '#10b981',
+    downColor: '#ef4444',
+    borderUpColor: '#10b981',
+    borderDownColor: '#ef4444',
+    wickUpColor: '#10b981',
+    wickDownColor: '#ef4444',
+  });
+  candleSeries.setData(candles.map(c => ({
+    time: c.time, open: c.open, high: c.high, low: c.low, close: c.close
+  })));
+
+  // Volume as histogram on a separate price scale
+  const volumeSeries = chart.addHistogramSeries({
+    color: 'rgba(75,85,99,0.4)',
+    priceFormat: { type: 'volume' },
+    priceScaleId: '',
+  });
+  volumeSeries.priceScale().applyOptions({
+    scaleMargins: { top: 0.85, bottom: 0 },
+  });
+  volumeSeries.setData(candles.map(c => ({
+    time: c.time, value: c.volume,
+    color: c.close >= c.open ? 'rgba(16,185,129,0.25)' : 'rgba(239,68,68,0.25)',
+  })));
+
+  modalChartState.chart = chart;
+  modalChartState.candleSeries = candleSeries;
+  modalChartState.volumeSeries = volumeSeries;
+
+  // Add price lines for entry / SL / TP / cat_sl / exit
+  addModalPriceLines(opts);
+
+  // Add entry/exit markers
+  addModalMarkers(candles, opts);
+
+  // Fit content to last 100 candles (or all if fewer)
+  const visibleCount = Math.min(100, candles.length);
+  chart.timeScale().setVisibleLogicalRange({
+    from: Math.max(0, candles.length - visibleCount),
+    to: candles.length - 1 + 5,
+  });
+
+  // Resize observer
+  const ro = new ResizeObserver(() => {
+    if (modalChartState.chart && container.clientWidth > 0) {
+      modalChartState.chart.applyOptions({ width: container.clientWidth });
+    }
+  });
+  ro.observe(container);
+  // Store observer on container for cleanup
+  container._ro = ro;
+}
+
+function addModalPriceLines(opts) {
+  const series = modalChartState.candleSeries;
+  if (!series) return;
+
+  // Entry (blue dashed)
+  if (opts.entryPrice) {
+    modalChartState.entryLine = series.createPriceLine({
+      price: opts.entryPrice,
+      color: '#3b82f6',
+      lineWidth: 2,
+      lineStyle: LightweightCharts.LineStyle.Dashed,
+      axisLabelVisible: true,
+      title: 'ENTRY',
+    });
+  }
+  // SL (red dashed)
+  if (opts.slPrice) {
+    modalChartState.slLine = series.createPriceLine({
+      price: opts.slPrice,
+      color: '#ef4444',
+      lineWidth: 2,
+      lineStyle: LightweightCharts.LineStyle.Dashed,
+      axisLabelVisible: true,
+      title: 'SL',
+    });
+  }
+  // TP (green dashed)
+  if (opts.tpPrice) {
+    modalChartState.tpLine = series.createPriceLine({
+      price: opts.tpPrice,
+      color: '#10b981',
+      lineWidth: 2,
+      lineStyle: LightweightCharts.LineStyle.Dashed,
+      axisLabelVisible: true,
+      title: 'TP',
+    });
+  }
+  // Catastrophic SL (red dotted, faint)
+  if (opts.catSlPrice) {
+    modalChartState.catSlLine = series.createPriceLine({
+      price: opts.catSlPrice,
+      color: 'rgba(239,68,68,0.5)',
+      lineWidth: 1,
+      lineStyle: LightweightCharts.LineStyle.Dotted,
+      axisLabelVisible: false,
+      title: 'CAT_SL',
+    });
+  }
+  // Exit (yellow, only for closed trades)
+  if (opts.exitPrice) {
+    modalChartState.exitLine = series.createPriceLine({
+      price: opts.exitPrice,
+      color: '#eab308',
+      lineWidth: 2,
+      lineStyle: LightweightCharts.LineStyle.Solid,
+      axisLabelVisible: true,
+      title: 'EXIT',
+    });
+  }
+}
+
+function addModalMarkers(candles, opts) {
+  const series = modalChartState.candleSeries;
+  if (!series) return;
+  const markers = [];
+
+  // Entry marker
+  if (opts.entryPrice && opts.entryTime) {
+    const entryTs = parseTimeToSeconds(opts.entryTime);
+    const candleTime = findClosestCandleTime(candles, entryTs);
+    if (candleTime) {
+      markers.push({
+        time: candleTime,
+        position: opts.direction === 'LONG' ? 'belowBar' : 'aboveBar',
+        color: opts.direction === 'LONG' ? '#10b981' : '#ef4444',
+        shape: opts.direction === 'LONG' ? 'arrowUp' : 'arrowDown',
+        text: (opts.direction || '') + ' ENTRY',
+      });
+    }
+  }
+
+  // Exit marker (closed trades only)
+  if (opts.exitPrice && opts.mode === 'closed') {
+    // Use last candle time as exit time approximation (close timestamp
+    // from trade record is in `entry_time` field actually — we use the
+    // close timestamp from the trade's `timestamp` field if available
+    // via the history record. For now, use the last candle.)
+    const lastCandle = candles[candles.length - 1];
+    if (lastCandle) {
+      markers.push({
+        time: lastCandle.time,
+        position: 'aboveBar',
+        color: '#eab308',
+        shape: 'circle',
+        text: 'EXIT ' + (opts.closeReason || ''),
+      });
+    }
+  }
+
+  if (markers.length > 0) {
+    // Sort by time ascending (lightweight-charts requirement)
+    markers.sort((a, b) => a.time - b.time);
+    try {
+      series.setMarkers(markers);
+    } catch (e) {
+      console.warn('[MODAL] setMarkers failed', e);
+    }
+  }
+}
+
+function parseTimeToSeconds(t) {
+  if (!t) return null;
+  if (typeof t === 'number') return t > 1e10 ? Math.floor(t / 1000) : t;
+  const d = new Date(t);
+  if (isNaN(d.getTime())) return null;
+  return Math.floor(d.getTime() / 1000);
+}
+
+function findClosestCandleTime(candles, targetTs) {
+  if (!candles.length || !targetTs) return null;
+  let best = candles[0];
+  let bestDiff = Math.abs(candles[0].time - targetTs);
+  for (let i = 1; i < candles.length; i++) {
+    const diff = Math.abs(candles[i].time - targetTs);
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      best = candles[i];
+    }
+  }
+  return best.time;
+}
+
+// Live update: SL/TP/entry moved (walk-forward, trailing, break-even)
+function refreshModalLivePosition(pos) {
+  if (!modalChartState.isOpen || modalChartState.mode !== 'live') return;
+  if (!modalChartState.candleSeries) return;
+
+  // Update SL line
+  if (modalChartState.slLine && pos.current_sl != null) {
+    modalChartState.slLine.applyOptions({ price: pos.current_sl });
+  } else if (!modalChartState.slLine && pos.current_sl != null) {
+    modalChartState.slLine = modalChartState.candleSeries.createPriceLine({
+      price: pos.current_sl, color: '#ef4444', lineWidth: 2,
+      lineStyle: LightweightCharts.LineStyle.Dashed,
+      axisLabelVisible: true, title: 'SL',
+    });
+  }
+
+  // Update TP line
+  if (modalChartState.tpLine && pos.current_tp != null) {
+    modalChartState.tpLine.applyOptions({ price: pos.current_tp });
+  } else if (!modalChartState.tpLine && pos.current_tp != null) {
+    modalChartState.tpLine = modalChartState.candleSeries.createPriceLine({
+      price: pos.current_tp, color: '#10b981', lineWidth: 2,
+      lineStyle: LightweightCharts.LineStyle.Dashed,
+      axisLabelVisible: true, title: 'TP',
+    });
+  }
+
+  // Update P&L display in header strip
+  if (pos.pnl_pct != null) {
+    const pnlColor = pos.pnl_pct >= 0 ? 'text-grn' : 'text-red';
+    const pnlCells = document.querySelectorAll('#tradeChartModal .grid.grid-cols-7 > div:nth-child(6) > div:last-child');
+    pnlCells.forEach(c => {
+      c.className = pnlColor + ' font-bold';
+      c.textContent = (pos.pnl_pct >= 0 ? '+' : '') + pos.pnl_pct.toFixed(2) + '%';
+    });
+  }
+
+  // Update status badge
+  const statusDiv = document.querySelector('#tradeChartModal .border-t.border-bdr > div:last-child');
+  if (statusDiv && pos.status) {
+    statusDiv.textContent = pos.status;
+  }
+}
+
+// Live update: new candle arrived
+function updateModalLiveCandle(data) {
+  if (!modalChartState.isOpen) return;
+  if (!modalChartState.candleSeries) return;
+  // Only update if the candle's symbol matches
+  const dataSymbol = (data.symbol || S.symbol || '').replace('-', '/').toUpperCase();
+  const modalSymbol = (modalChartState.symbol || '').replace('-', '/').toUpperCase();
+  if (dataSymbol && modalSymbol && dataSymbol !== modalSymbol) return;
+
+  // lightweight-charts expects time in seconds
+  const ts = data.time > 1e10 ? Math.floor(data.time / 1000) : data.time;
+  try {
+    modalChartState.candleSeries.update({
+      time: ts,
+      open: data.open,
+      high: data.high,
+      low: data.low,
+      close: data.close,
+    });
+  } catch (e) {
+    // Likely "Cannot update oldest data" — ignore
+  }
+
+  // Update current price line (blue)
+  const currentPrice = data.ticker_price || data.close;
+  if (currentPrice) {
+    if (modalChartState.currentPriceLine) {
+      modalChartState.currentPriceLine.applyOptions({ price: currentPrice });
+    } else {
+      modalChartState.currentPriceLine = modalChartState.candleSeries.createPriceLine({
+        price: currentPrice,
+        color: '#60a5fa',
+        lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dotted,
+        axisLabelVisible: true,
+        title: 'NOW',
+      });
+    }
+  }
 }
 </script>
 </body>

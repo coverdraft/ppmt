@@ -174,7 +174,43 @@ _RISK_CONFIG: dict = {
 _LIVE_SESSIONS: dict[str, dict] = {}
 
 # v0.60.0 (TERMINAL-v2.1): Trade history — in-memory list of closed trades.
+# v0.61.0 (CHART-MODAL): Extended with id, entry_time, sl_price, tp_price,
+# catastrophic_sl so the chart modal can render entry/SL/TP/exit markers.
 _TRADE_HISTORY: list[dict] = []
+_TRADE_ID_COUNTER: int = 0
+
+
+def _next_trade_id() -> int:
+    """Atomically increment and return the next trade id (process-scoped)."""
+    global _TRADE_ID_COUNTER
+    _TRADE_ID_COUNTER += 1
+    return _TRADE_ID_COUNTER
+
+
+def _build_trade_record(closed, timeframe: str) -> dict:
+    """Build a trade history record from a closed PositionState.
+
+    Centralizes the schema so SL/TP divergence closes and SL/TP closes
+    both produce identical record shapes.
+    """
+    return {
+        "id": _next_trade_id(),
+        "timestamp": int(time.time() * 1000),       # close time (ms)
+        "entry_time": closed.entry_time,            # ISO 8601 string (set at open)
+        "symbol": closed.symbol,
+        "timeframe": timeframe,
+        "direction": str(closed.direction),
+        "entry_price": float(closed.entry_price),
+        "exit_price": float(closed.close_price) if closed.close_price is not None else None,
+        "sl_price": float(closed.current_sl) if closed.current_sl else None,
+        "tp_price": float(closed.current_tp) if closed.current_tp else None,
+        "catastrophic_sl": float(closed.catastrophic_sl) if closed.catastrophic_sl else None,
+        "size_usdt": float(closed.size_usdt),
+        "pnl_pct": round(closed.pnl_pct or 0, 4),
+        "pnl_usdt": round(closed.pnl_usdt or 0, 4),
+        "close_reason": closed.close_reason or closed.status,
+        "status": str(closed.status),
+    }
 
 
 def get_storage() -> PPMTStorage:
@@ -313,6 +349,92 @@ async def portfolio_live():
 async def get_trade_history():
     """Return all closed trades from the current server session."""
     return {"trades": _TRADE_HISTORY, "count": len(_TRADE_HISTORY)}
+
+
+# ─── REST: Trade by ID ─────────────────────────────────────────
+# v0.61.0 (CHART-MODAL): Fetch a single closed trade by its id.
+# Used by the chart modal to render entry/exit/SL/TP markers.
+@app.get("/api/trade/{trade_id}")
+async def get_trade_by_id(trade_id: int):
+    """Return a single closed trade by id, or 404 if not found."""
+    for t in _TRADE_HISTORY:
+        if t.get("id") == trade_id:
+            return t
+    return {"error": "trade not found", "id": trade_id}
+
+
+# ─── REST: OHLCV candles ──────────────────────────────────────
+# v0.61.0 (CHART-MODAL): Historical candles for the chart modal.
+# Reuses _DirectPollExchange (already imported inline in the WS handler)
+# so no new dependency. Returns timestamps in SECONDS (lightweight-charts
+# expects seconds, not ms).
+@app.get("/api/ohlcv/{symbol}/{timeframe}")
+async def get_ohlcv(symbol: str, timeframe: str, limit: int = 500):
+    """Fetch historical OHLCV candles from Binance.
+
+    Args:
+        symbol:    Trading pair, accepts "SOL-USDT" or "SOL/USDT" (normalized).
+        timeframe: e.g. "1m", "5m", "1h".
+        limit:     Number of candles (max 1000, default 500).
+
+    Returns:
+        {candles: [{time, open, high, low, close, volume}, ...]}
+        `time` is UNIX seconds (lightweight-charts compatible).
+    """
+    # Normalize symbol: "SOL-USDT" or "SOL/USDT" → "SOLUSDT" (Binance format)
+    api_symbol = symbol.replace("-", "").replace("/", "").upper()
+    limit = max(1, min(int(limit), 1000))  # clamp 1..1000
+
+    try:
+        from ppmt.engine.realtime import _DirectPollExchange
+        exchange = _DirectPollExchange("binance")
+        ohlcv_raw = await exchange.fetch_ohlcv(api_symbol, timeframe, limit=limit)
+    except Exception as e:
+        logger.warning(f"[OHLCV] fetch failed for {api_symbol} {timeframe}: {e}")
+        return {"error": "fetch_failed", "detail": str(e), "candles": []}
+
+    if not ohlcv_raw:
+        return {"candles": [], "count": 0, "symbol": symbol, "timeframe": timeframe}
+
+    # Convert [[ts_ms, o, h, l, c, v], ...] → list of dicts with time in SECONDS
+    candles = []
+    for row in ohlcv_raw:
+        if len(row) < 6:
+            continue
+        ts_ms, o, h, l, c, v = row[0], row[1], row[2], row[3], row[4], row[5]
+        candles.append({
+            "time": int(ts_ms) // 1000,   # ms → seconds for lightweight-charts
+            "open": float(o),
+            "high": float(h),
+            "low": float(l),
+            "close": float(c),
+            "volume": float(v) if v is not None else 0.0,
+        })
+
+    return {
+        "candles": candles,
+        "count": len(candles),
+        "symbol": symbol,
+        "timeframe": timeframe,
+    }
+
+
+# ─── REST: Open Position Detail ───────────────────────────────
+# v0.61.0 (CHART-MODAL): Returns the current open position (if any)
+# for a given symbol, with full SL/TP/catastrophic_sl fields needed
+# by the chart modal. The terminal supports a single open position
+# per symbol per session.
+@app.get("/api/position/{symbol}")
+async def get_open_position(symbol: str):
+    """Return the open PositionState for `symbol`, or null if flat.
+
+    `symbol` accepts both "SOL-USDT" and "SOL/USDT".
+    """
+    canon = symbol.replace("-", "/").upper()
+    pos = _OPEN_POSITIONS.get(canon)
+    if pos is None:
+        return {"position": None, "symbol": canon}
+    return {"position": pos, "symbol": canon}
 
 
 # ─── REST: Backtest ──────────────────────────────────────────────
@@ -1704,16 +1826,8 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                             _ACTIVE_SYMBOLS.pop(symbol, None)
                             _OPEN_POSITIONS.pop(symbol, None)
                             # v0.60.0 (TERMINAL-v2.1): Append to trade history
-                            _TRADE_HISTORY.append({
-                                "timestamp": int(time.time() * 1000),
-                                "symbol": symbol,
-                                "timeframe": timeframe,
-                                "direction": closed.direction,
-                                "entry_price": closed.entry_price,
-                                "exit_price": closed.close_price,
-                                "pnl_pct": round(closed.pnl_pct or 0, 4),
-                                "close_reason": closed.close_reason or "DIVERGENCE",
-                            })
+                            # v0.61.0 (CHART-MODAL): Use shared builder with full SL/TP/entry_time fields
+                            _TRADE_HISTORY.append(_build_trade_record(closed, timeframe))
                             logger.info(
                                 f"[WS] DIVERGENCE EXIT: score={_break_score:.2f} @ {current_price:.6f} "
                                 f"PnL={closed.pnl_pct:+.2f}%"
@@ -1745,16 +1859,8 @@ async def paper_live_websocket(websocket: WebSocket, symbol: str, timeframe: str
                             logger.info(f"[WS] Session tracker: closed {_session_key} → {closed.status}")
 
                         # v0.60.0 (TERMINAL-v2.1): Append to trade history
-                        _TRADE_HISTORY.append({
-                            "timestamp": int(time.time() * 1000),
-                            "symbol": symbol,
-                            "timeframe": timeframe,
-                            "direction": closed.direction,
-                            "entry_price": closed.entry_price,
-                            "exit_price": closed.close_price,
-                            "pnl_pct": round(closed.pnl_pct or 0, 4),
-                            "close_reason": closed.close_reason or closed.status,
-                        })
+                        # v0.61.0 (CHART-MODAL): Use shared builder with full SL/TP/entry_time fields
+                        _TRADE_HISTORY.append(_build_trade_record(closed, timeframe))
 
                         # v0.58.0: TAREA 21 — Determine log tag + emit learning feed
                         _close_tag = "LEARN"

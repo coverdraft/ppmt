@@ -2266,3 +2266,108 @@ User uploaded engine snapshot v9 showing:
 - PAT is never committed to the repo
 - All patches are reversible (rollback_to field)
 - No source code modifications outside `tuning/` without explicit user request
+
+---
+## 2026-06-29 — Feature: Position/Trade chart modal (v0.61.0 CHART-MODAL)
+
+**Agent**: tuning-bot
+**Trigger**: user requested a visual chart for open & closed positions showing entry/exit/SL/TP, with real-time updates for open positions
+
+### What was built
+
+Click any open position card or closed trade row → a modal opens with a Japanese
+candlestick chart (lightweight-charts, already loaded) showing:
+- Last 500 candles from Binance (volume-colored histogram on bottom)
+- Horizontal price lines:
+  - Blue dashed = entry price
+  - Red dashed = current SL (moves live for open positions)
+  - Green dashed = current TP (moves live for open positions)
+  - Red dotted faint = catastrophic SL
+  - Yellow solid = exit price (closed trades only)
+  - Blue dotted = current price (open positions only, moves live)
+- Entry marker (arrowUp/arrowDown at the closest candle to entry_time)
+- Exit marker (circle at the last candle, labeled with close_reason)
+
+For open positions, the modal subscribes to the existing WebSocket stream
+(`handleCandle` + `handlePositionUpdate`) and:
+- Updates the current candle in real-time
+- Moves the SL/TP price lines when walk-forward / trailing / break-even adjusts them
+- Updates the P&L% and status badge in the header strip
+- Adds a blue "NOW" price line that follows the live ticker
+
+### Backend changes (v2_server.py)
+
+- Added `_TRADE_ID_COUNTER` + `_next_trade_id()` helper for unique trade IDs
+- Added `_build_trade_record(closed, timeframe)` factory that produces the full
+  trade record schema (id, entry_time, sl_price, tp_price, catastrophic_sl,
+  size_usdt, pnl_usdt, status) — replaces the two ad-hoc append sites
+- Both append sites (SL/TP close at line ~1775 and divergence close at line ~1744)
+  now call `_build_trade_record()` for schema consistency
+- New endpoint `GET /api/ohlcv/{symbol}/{timeframe}?limit=500` — fetches OHLCV
+  from Binance via `_DirectPollExchange`, returns candles with `time` in SECONDS
+  (lightweight-charts compatible)
+- New endpoint `GET /api/trade/{trade_id}` — fetches a single closed trade by id
+- New endpoint `GET /api/position/{symbol}` — fetches the open PositionState
+  for a given symbol (used by modal to get the freshest SL/TP on open)
+
+### Frontend changes (index.html)
+
+- `updatePositionPanel()` (line ~812): wrapped the entire position card in a
+  clickable div with `onclick="openPositionModal()"` + visual hint
+- `renderHistory()` (line ~1267): added `onclick="openTradeModal(${tradeId})"`
+  to each closed trade row + cursor-pointer styling
+- `handleCandle()` (line ~576): now also calls `updateModalLiveCandle(data)`
+  if the modal is open
+- `handlePositionUpdate()` (line ~729): now also calls `refreshModalLivePosition(data)`
+  if the modal is in live mode
+- New block at the end of `<script>` (lines ~1468-2034):
+  - `modalChartState` — separate state object (does NOT clobber the main `chart`/`candleSeries` globals)
+  - `closeTradeModal()` — cleanup
+  - `openPositionModal()` — entry point from position card click
+  - `openTradeModal(tradeId)` — entry point from history row click
+  - `openTradeModalInternal(opts)` — builds modal DOM, fetches candles, renders chart
+  - `renderTradeModalChart(candles, opts)` — creates chart + candle + volume series
+  - `addModalPriceLines(opts)` — entry/SL/TP/cat_sl/exit price lines
+  - `addModalMarkers(candles, opts)` — entry/exit arrow markers
+  - `parseTimeToSeconds(t)` — handles ISO string or ms epoch
+  - `findClosestCandleTime(candles, targetTs)` — aligns marker to nearest candle
+  - `refreshModalLivePosition(pos)` — live SL/TP/PnL/status updates
+  - `updateModalLiveCandle(data)` — live candle + current price line updates
+
+### Tests performed
+
+- Python syntax validated via `ast.parse()`
+- JS brace/paren/bracket balance validated programmatically
+- Server started on port 18765 with `PYTHONPATH=src`
+- All 5 new/existing endpoints tested with curl:
+  - GET /api/health → 200
+  - GET /api/ohlcv/BTC-USDT/5m?limit=3 → 3 candles from Binance, time in seconds
+  - GET /api/trade/1 → graceful "trade not found" (no trades in fresh session)
+  - GET /api/position/BTC-USDT → graceful null (no open position)
+  - GET /api/trades/history → empty list, count=0
+
+### Safety / Non-regression
+
+- All new endpoints are pure additions; no existing endpoint signature changed
+- The extended `_TRADE_HISTORY` schema is BACKWARD COMPATIBLE: old fields
+  (timestamp, symbol, timeframe, direction, entry_price, exit_price, pnl_pct,
+  close_reason) keep the same names and types. New fields (id, entry_time,
+  sl_price, tp_price, catastrophic_sl, size_usdt, pnl_usdt, status) are added.
+- Frontend uses a separate `modalChartState` object — does NOT touch the main
+  chart's globals (`chart`, `candleSeries`, `chartMarkers`).
+- Modal closes on backdrop click, X button, or Escape key.
+- ResizeObserver on the modal chart container ensures responsiveness.
+- No new CDN dependencies (lightweight-charts was already loaded).
+
+### Files changed
+
+- `src/ppmt/terminal/v2_server.py` — backend changes (+~95 lines)
+- `src/ppmt/terminal/static/index.html` — frontend changes (+~570 lines)
+- `worklog.md` — this entry
+
+### Next steps
+
+- User restarts the v2 server to pick up the new endpoints
+- User opens the terminal in browser, clicks on a position or trade row
+- Verifies the modal opens with candles + markers + price lines
+- For open positions, verifies the SL/TP/current price move live
