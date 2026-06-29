@@ -4,24 +4,31 @@
  * Click any position in PositionPanel or any trade in TradeLog → opens this modal.
  * Shows:
  *   - Candlestick chart of recent price action (Coinbase/Kraken OHLCV via /api/candles)
- *   - Entry price marker (blue line + label)
+ *   - Entry price marker (blue solid line + label)
  *   - Take Profit level (green dashed line + label)
  *   - Stop Loss level (red dashed line + label)
  *   - Catastrophic SL (red dotted line, faint)
  *   - Exit price marker (purple dot) — for CLOSED trades only
- *   - Current price marker (yellow dot) — for OPEN trades, updates in real-time
+ *   - Current price marker (yellow dot, pulsing) — for OPEN trades, updates in real-time
  *
  * Real-time updates:
- *   - For OPEN positions: subscribes to the trading store's currentPrice for
- *     the symbol; updates the live price marker every tick.
- *   - For CLOSED trades: no live updates (historical view only).
+ *   - Candles auto-refresh every 5s from /api/candles (new candles appear live)
+ *   - For OPEN positions: the last candle's close updates on every price tick
+ *     using tokenStates[symbol].price (NOT the global currentPrice, which is
+ *     for the selected symbol only)
+ *   - SL/TP lines update live if trailing stop / break-even moves them
+ *     (reads from the store's positions array, not the snapshot)
  *
- * If SL/TP changes while the modal is open (trailing stop moved), the
- * markers update live because they read from the store's positions array.
+ * Robustness:
+ *   - Uses callback ref for the chart container to handle Radix Dialog's
+ *     portal mounting timing (container may not be available on first render)
+ *   - Uses chartReady state to defer data setting until chart exists
+ *   - Incremental updates: setData only when candle count changes (new candle),
+ *     series.update() for price-only changes (no chart flicker / zoom reset)
  */
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, useCallback } from 'react'
 import {
   createChart, ColorType, CrosshairMode, LineStyle,
   type IChartApi, type ISeriesApi, type IPriceLine,
@@ -32,7 +39,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
 } from '@/components/ui/dialog'
 import { Badge } from '@/components/ui/badge'
-import { ArrowUp, ArrowDown, TrendingUp, TrendingDown, X, Loader2 } from 'lucide-react'
+import { ArrowUp, ArrowDown, TrendingUp, TrendingDown, X, Loader2, Radio } from 'lucide-react'
 
 // ─── Helpers ────────────────────────────────────────────────────────────
 
@@ -47,7 +54,6 @@ interface Candle {
 
 function fmtPrice(p: number | null | undefined): string {
   if (p === null || p === undefined || isNaN(p)) return '—'
-  // Use 4 decimals for low-priced alts, 2 for big caps
   if (p >= 1000) return p.toFixed(2)
   if (p >= 1) return p.toFixed(4)
   if (p >= 0.01) return p.toFixed(5)
@@ -55,6 +61,7 @@ function fmtPrice(p: number | null | undefined): string {
 }
 
 function fmtTime(iso: string): string {
+  if (!iso) return '—'
   try {
     return new Date(iso).toLocaleString('es-ES', {
       day: '2-digit', month: '2-digit',
@@ -77,17 +84,28 @@ function timeToSeconds(iso: string | undefined): number | null {
 // ─── Component ──────────────────────────────────────────────────────────
 
 export function TradeChartModal() {
-  const { chartModalTrade, setChartModalTrade, currentPrice, positions } = useTradingStore()
+  const {
+    chartModalTrade, setChartModalTrade,
+    currentPrice, symbol: selectedSymbol,
+    tokenStates, positions,
+  } = useTradingStore()
 
-  const chartContainerRef = useRef<HTMLDivElement>(null)
+  // ─── Refs ────────────────────────────────────────────────────────────
+  // Use a callback ref + state so the chart-creation effect fires after
+  // Radix Dialog mounts the content via portal (containerEl is null on
+  // first render, becomes available after portal mount).
+  const [containerEl, setContainerEl] = useState<HTMLDivElement | null>(null)
+  const [chartReady, setChartReady] = useState(false)
   const chartRef = useRef<IChartApi | null>(null)
   const seriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
   const entryLineRef = useRef<IPriceLine | null>(null)
   const tpLineRef = useRef<IPriceLine | null>(null)
   const slLineRef = useRef<IPriceLine | null>(null)
   const catSlLineRef = useRef<IPriceLine | null>(null)
-  const exitMarkerRef = useRef<any[]>([])
+  const lastCandleTimeRef = useRef<number>(0)
+  const lastAppliedCandlesRef = useRef<number>(0)
 
+  // ─── State ───────────────────────────────────────────────────────────
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [interval, setIntervalSel] = useState<'1m' | '5m' | '15m' | '1h'>('5m')
@@ -97,42 +115,45 @@ export function TradeChartModal() {
   const trade = chartModalTrade as (Position | TradeRecord) | null
 
   // ─── Detect open vs closed ───────────────────────────────────────────
-  // A Position has `status` like 'OPEN' and no `close_price`.
-  // A TradeRecord has `close_price` and `close_reason`.
-  const isOpenPosition = !!(trade && (trade as Position).entry_price !== undefined &&
-    (trade as Position).status === 'OPEN' && (trade as any).close_price === undefined)
+  // TradeRecord always has close_price (it's in the interface).
+  // Position never has close_price.
+  // This is the ONLY reliable way to tell them apart — status can be
+  // 'OPEN', 'BREAK_EVEN_SECURED', 'TRAILING', etc. for open positions.
+  const isClosedTrade = !!trade && (trade as TradeRecord).close_price !== undefined && (trade as TradeRecord).close_price !== null
+  const isOpenPosition = !!trade && !isClosedTrade
 
-  const isClosedTrade = !!(trade && (trade as TradeRecord).close_price !== undefined)
-
-  // If open, read live SL/TP from the store's positions array (they may have
-  // moved due to trailing stop / break-even adjustments)
-  const livePosition: Position | null = isOpenPosition
-    ? positions.find(p => p.symbol === (trade as Position).symbol &&
+  // For open positions, read live SL/TP from the store's positions array
+  // (they may have moved due to trailing stop / break-even adjustments)
+  const livePosition: Position | null = isOpenPosition && trade
+    ? positions.find(p =>
+        p.symbol === (trade as Position).symbol &&
         p.direction === (trade as Position).direction &&
         p.entry_time === (trade as Position).entry_time) || null
     : null
 
-  // ─── Fetch candles when modal opens or interval changes ──────────────
-  useEffect(() => {
-    if (!isOpen || !trade) return
+  // ─── Live price for the trade's symbol ───────────────────────────────
+  // CRITICAL: the store's `currentPrice` is for the SELECTED symbol (e.g., BTC),
+  // NOT for the trade's symbol. We must use tokenStates[symbol].price to get
+  // the correct live price for the trade's token.
+  const tradeSymbol = trade?.symbol || ''
+  const tokenPrice = tradeSymbol ? tokenStates[tradeSymbol]?.price || 0 : 0
+  const livePrice = tokenPrice > 0
+    ? tokenPrice
+    : (tradeSymbol === selectedSymbol ? currentPrice : 0)
 
-    let cancelled = false
-    setLoading(true)
-    setError(null)
-    setCandles([])
-
-    const symbol = trade.symbol
-    const url = `/api/candles?symbol=${encodeURIComponent(symbol)}&interval=${interval}&limit=300`
-
+  // ─── Fetch candles ───────────────────────────────────────────────────
+  const fetchCandles = useCallback(() => {
+    if (!trade) return
+    const url = `/api/candles?symbol=${encodeURIComponent(trade.symbol)}&interval=${interval}&limit=300`
     fetch(url)
       .then(r => r.json())
       .then(data => {
-        if (cancelled) return
         if (data.error && (!data.candles || data.candles.length === 0)) {
           setError(data.error)
           setLoading(false)
           return
         }
+        setError(null)
         const cs: Candle[] = (data.candles || []).map((c: any) => ({
           time: c.time as number,
           open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume,
@@ -141,19 +162,29 @@ export function TradeChartModal() {
         setLoading(false)
       })
       .catch(e => {
-        if (cancelled) return
         setError('Fetch failed: ' + (e?.message || 'unknown'))
         setLoading(false)
       })
+  }, [trade, interval])
 
-    return () => { cancelled = true }
-  }, [isOpen, trade, interval])
-
-  // ─── Create chart on mount, destroy on unmount ───────────────────────
+  // Initial fetch + poll every 5s for fresh candles while modal is open
   useEffect(() => {
-    if (!isOpen || !chartContainerRef.current) return
+    if (!isOpen || !trade) return
+    setLoading(true)
+    setCandles([])
+    setError(null)
+    lastCandleTimeRef.current = 0
+    lastAppliedCandlesRef.current = 0
+    fetchCandles()
+    const poll = setInterval(fetchCandles, 5000)
+    return () => clearInterval(poll)
+  }, [isOpen, trade, interval, fetchCandles])
 
-    const chart = createChart(chartContainerRef.current, {
+  // ─── Create chart when container is ready ────────────────────────────
+  useEffect(() => {
+    if (!isOpen || !containerEl) return
+
+    const chart = createChart(containerEl, {
       layout: {
         background: { type: ColorType.Solid, color: '#0d1117' },
         textColor: '#9ca3af',
@@ -178,7 +209,7 @@ export function TradeChartModal() {
         timeVisible: true,
         secondsVisible: false,
       },
-      width: chartContainerRef.current.clientWidth,
+      width: containerEl.clientWidth,
       height: 420,
     })
     chartRef.current = chart
@@ -192,6 +223,7 @@ export function TradeChartModal() {
       wickDownColor: '#ef4444',
     })
     seriesRef.current = series
+    setChartReady(true)
 
     // ─── Resize observer ──────────────────────────────────────────────
     const resizeObserver = new ResizeObserver(entries => {
@@ -202,7 +234,7 @@ export function TradeChartModal() {
         }
       }
     })
-    resizeObserver.observe(chartContainerRef.current)
+    resizeObserver.observe(containerEl)
 
     return () => {
       resizeObserver.disconnect()
@@ -213,58 +245,95 @@ export function TradeChartModal() {
       tpLineRef.current = null
       slLineRef.current = null
       catSlLineRef.current = null
-      exitMarkerRef.current = []
+      lastCandleTimeRef.current = 0
+      lastAppliedCandlesRef.current = 0
+      setChartReady(false)
     }
-  }, [isOpen])
+  }, [isOpen, containerEl])
 
-  // ─── Apply candle data ───────────────────────────────────────────────
+  // ─── Apply candle data (incremental: setData on new candle, update on price change) ─
   useEffect(() => {
-    if (!seriesRef.current || candles.length === 0) return
+    if (!chartReady || !seriesRef.current || candles.length === 0) return
 
-    const data = candles.map(c => ({
-      time: c.time as UTCTimestamp,
-      open: c.open, high: c.high, low: c.low, close: c.close,
-    }))
-    seriesRef.current.setData(data)
+    const lastCandle = candles[candles.length - 1]
+    const lastTime = lastCandle.time
 
-    // Add exit marker for closed trades
-    if (isClosedTrade && trade) {
-      const exitTime = timeToSeconds((trade as TradeRecord).closed_at)
-      const exitPrice = (trade as TradeRecord).close_price
-      if (exitTime && exitPrice && seriesRef.current) {
-        // Clear old markers
-        exitMarkerRef.current = []
-        // Set a single marker at exit time
-        try {
-          seriesRef.current.setMarkers([{
-            time: exitTime as UTCTimestamp,
-            position: 'aboveBar',
-            color: '#a855f7',
-            shape: 'circle',
-            text: `EXIT ${fmtPrice(exitPrice)}`,
-          }])
-        } catch (e) {
-          // Marker time must exist in the data series; if exit is outside
-          // the candle range (very old trade), the marker is skipped.
+    // Full setData when:
+    //   - first load (lastAppliedCandlesRef === 0)
+    //   - new candle arrived (lastTime changed)
+    //   - candle count changed significantly (e.g., interval switch)
+    if (lastTime !== lastCandleTimeRef.current || lastAppliedCandlesRef.current === 0) {
+      const data = candles.map(c => ({
+        time: c.time as UTCTimestamp,
+        open: c.open, high: c.high, low: c.low, close: c.close,
+      }))
+      seriesRef.current.setData(data)
+      lastCandleTimeRef.current = lastTime
+      lastAppliedCandlesRef.current = candles.length
+
+      // Fit content on first load only (don't reset zoom on every new candle)
+      if (chartRef.current && lastAppliedCandlesRef.current === candles.length) {
+        // Only fitContent if this is the initial load (chart was empty before)
+        // We detect this by checking if we had 0 candles before
+      }
+
+      // Re-fit on first load
+      if (chartRef.current && candles.length > 0 && lastAppliedCandlesRef.current === candles.length) {
+        // Only fitContent once per chart session
+        // (subsequent new candles just extend the view)
+      }
+
+      // Add exit marker for closed trades (only on full setData)
+      if (isClosedTrade && trade) {
+        const exitTime = timeToSeconds((trade as TradeRecord).closed_at)
+        const exitPrice = (trade as TradeRecord).close_price
+        if (exitTime && exitPrice) {
+          // Check if exit time is within the candle range
+          const firstTime = candles[0].time
+          const lastCandleTime = candles[candles.length - 1].time
+          if (exitTime >= firstTime && exitTime <= lastCandleTime + (lastTime - candles[candles.length - 2]?.time || 60)) {
+            try {
+              seriesRef.current.setMarkers([{
+                time: exitTime as UTCTimestamp,
+                position: 'aboveBar',
+                color: '#a855f7',
+                shape: 'circle',
+                text: `EXIT ${fmtPrice(exitPrice)}`,
+              }])
+            } catch (e) {
+              // Marker time must exist in the data series
+            }
+          }
         }
       }
-    } else if (seriesRef.current) {
+    } else {
+      // Same candle, just updated close — use update() (no zoom reset)
       try {
-        seriesRef.current.setMarkers([])
-      } catch {}
+        seriesRef.current.update({
+          time: lastCandle.time as UTCTimestamp,
+          open: lastCandle.open, high: lastCandle.high, low: lastCandle.low, close: lastCandle.close,
+        })
+      } catch (e) {
+        // Ignore
+      }
     }
 
-    // Fit content to show all candles
-    if (chartRef.current) {
-      chartRef.current.timeScale().fitContent()
+    // Fit content on first load only
+    if (chartRef.current && lastAppliedCandlesRef.current === candles.length && candles.length > 0) {
+      // Check if we should fitContent (only when chart was just created)
+      // We use a ref to track if we've already fit
+      if (!(chartRef.current as any).__ppmtFitted) {
+        chartRef.current.timeScale().fitContent()
+        ;(chartRef.current as any).__ppmtFitted = true
+      }
     }
-  }, [candles, trade, isClosedTrade])
+  }, [chartReady, candles, trade, isClosedTrade])
 
   // ─── Update price lines (entry / TP / SL / cat SL) ───────────────────
   // Reads from `livePosition` if open, otherwise from `trade` snapshot.
   useEffect(() => {
     const series = seriesRef.current
-    if (!series || !trade) return
+    if (!series || !trade || !chartReady) return
 
     // Clear old lines
     if (entryLineRef.current) { series.removePriceLine(entryLineRef.current); entryLineRef.current = null }
@@ -285,9 +354,9 @@ export function TradeChartModal() {
     }
 
     // For open positions, use live SL/TP (may have moved); for closed, use snapshot
-    const tp = isOpenPosition ? (livePosition?.current_tp ?? (trade as any).current_tp) : null
-    const sl = isOpenPosition ? (livePosition?.current_sl ?? (trade as any).current_sl) : null
-    const catSl = isOpenPosition ? (livePosition?.catastrophic_sl ?? (trade as any).catastrophic_sl) : null
+    const tp = isOpenPosition ? (livePosition?.current_tp ?? (trade as any).current_tp) : (trade as any).current_tp
+    const sl = isOpenPosition ? (livePosition?.current_sl ?? (trade as any).current_sl) : (trade as any).current_sl
+    const catSl = isOpenPosition ? (livePosition?.catastrophic_sl ?? (trade as any).catastrophic_sl) : (trade as any).catastrophic_sl
 
     if (tp !== null && tp !== undefined) {
       tpLineRef.current = series.createPriceLine({
@@ -319,35 +388,28 @@ export function TradeChartModal() {
         title: 'CAT SL',
       })
     }
-  }, [trade, livePosition, isOpenPosition, candles])
+  }, [trade, livePosition, isOpenPosition, chartReady, candles])
 
   // ─── Real-time price marker for open positions ───────────────────────
-  // Updates the last candle's close + adds a yellow marker on each tick.
+  // Updates the last candle's close to the live price on each tick.
+  // Uses tokenStates[symbol].price (NOT the global currentPrice).
   useEffect(() => {
-    if (!isOpenPosition || !trade || !seriesRef.current || candles.length === 0) return
+    if (!isOpenPosition || !trade || !seriesRef.current || !chartReady || candles.length === 0) return
+    if (livePrice <= 0) return
 
-    const symbol = trade.symbol
-    // Only update if the current price is for this symbol (or assume it is,
-    // since the engine snapshots the price for the open symbol)
-    if (currentPrice <= 0) return
-
-    // Update last candle's close to current price (live ticking)
     const lastCandle = candles[candles.length - 1]
-    const updated = {
-      ...lastCandle,
-      close: currentPrice,
-      high: Math.max(lastCandle.high, currentPrice),
-      low: Math.min(lastCandle.low, currentPrice),
-    }
     try {
       seriesRef.current.update({
-        time: updated.time as UTCTimestamp,
-        open: updated.open, high: updated.high, low: updated.low, close: updated.close,
+        time: lastCandle.time as UTCTimestamp,
+        open: lastCandle.open,
+        high: Math.max(lastCandle.high, livePrice),
+        low: Math.min(lastCandle.low, livePrice),
+        close: livePrice,
       })
     } catch (e) {
       // Ignore — typically "time already passed" errors when crossing candle boundaries
     }
-  }, [currentPrice, isOpenPosition, trade, candles])
+  }, [livePrice, isOpenPosition, trade, chartReady, candles])
 
   if (!trade) return null
 
@@ -360,14 +422,28 @@ export function TradeChartModal() {
   const pnlUsdt = (trade as any).pnl_usdt ?? 0
   const isWin = pnlPct >= 0
 
-  const tp = isOpenPosition ? (livePosition?.current_tp ?? (trade as any).current_tp) : null
-  const sl = isOpenPosition ? (livePosition?.current_sl ?? (trade as any).current_sl) : null
-  const catSl = isOpenPosition ? (livePosition?.catastrophic_sl ?? (trade as any).catastrophic_sl) : null
+  const tp = isOpenPosition ? (livePosition?.current_tp ?? (trade as any).current_tp) : (trade as any).current_tp
+  const sl = isOpenPosition ? (livePosition?.current_sl ?? (trade as any).current_sl) : (trade as any).current_sl
+  const catSl = isOpenPosition ? (livePosition?.catastrophic_sl ?? (trade as any).catastrophic_sl) : (trade as any).catastrophic_sl
   const exitPrice = isClosedTrade ? (trade as TradeRecord).close_price : null
   const exitTime = isClosedTrade ? (trade as TradeRecord).closed_at : null
   const closeReason = isClosedTrade ? (trade as TradeRecord).close_reason : null
 
   const strategyLabel = (trade as any).strategy || '—'
+  const statusLabel = isOpenPosition
+    ? ((trade as Position).status || 'OPEN')
+    : 'CLOSED'
+
+  // Distance calculations using the CORRECT per-symbol live price
+  const distToTP = tp !== null && tp !== undefined && entryPrice > 0
+    ? (isLong ? ((tp - entryPrice) / entryPrice) * 100 : ((entryPrice - tp) / entryPrice) * 100)
+    : null
+  const distToSL = sl !== null && sl !== undefined && entryPrice > 0
+    ? (isLong ? ((sl - entryPrice) / entryPrice) * 100 : ((entryPrice - sl) / entryPrice) * 100)
+    : null
+  const distToLive = livePrice > 0 && entryPrice > 0
+    ? (isLong ? ((livePrice - entryPrice) / entryPrice) * 100 : ((entryPrice - livePrice) / entryPrice) * 100)
+    : null
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => { if (!open) setChartModalTrade(null) }}>
@@ -401,8 +477,14 @@ export function TradeChartModal() {
                   : 'bg-gray-700/40 text-gray-300 border-gray-600'
               }`}
             >
-              {isOpenPosition ? 'OPEN' : 'CLOSED'}
+              {statusLabel}
             </Badge>
+            {isOpenPosition && (
+              <Badge variant="outline" className="text-[9px] font-mono bg-yellow-500/10 text-yellow-400 border-yellow-500/30 flex items-center gap-1">
+                <Radio className="w-2.5 h-2.5 animate-pulse" />
+                LIVE
+              </Badge>
+            )}
             {strategyLabel !== '—' && (
               <Badge variant="outline" className="text-[10px] font-mono bg-purple-500/20 text-purple-400 border-purple-500/30">
                 STRAT {strategyLabel}
@@ -428,31 +510,38 @@ export function TradeChartModal() {
             Entry: {fmtTime(entryTime)} · Size: ${sizeUsdt?.toFixed(2) || '—'} USDT
             {isClosedTrade && exitTime && ` · Exit: ${fmtTime(exitTime)}`}
             {isClosedTrade && closeReason && ` · ${closeReason}`}
+            {isOpenPosition && livePrice > 0 && distToLive !== null && (
+              <span className={distToLive >= 0 ? 'text-emerald-400 ml-2' : 'text-red-400 ml-2'}>
+                · Live: {fmtPrice(livePrice)} ({distToLive >= 0 ? '+' : ''}{distToLive.toFixed(3)}%)
+              </span>
+            )}
           </DialogDescription>
         </DialogHeader>
 
         {/* Chart area */}
         <div className="px-4 py-3">
-          {loading && (
+          {loading && candles.length === 0 && (
             <div className="flex items-center justify-center h-[420px] text-gray-400">
               <Loader2 className="w-5 h-5 animate-spin mr-2" />
               <span className="font-mono text-xs">Loading candles from {trade.symbol}...</span>
             </div>
           )}
 
-          {error && !loading && (
+          {error && candles.length === 0 && (
             <div className="flex flex-col items-center justify-center h-[420px] text-gray-400">
               <X className="w-8 h-8 text-red-500 mb-2" />
               <div className="font-mono text-xs text-red-400 mb-1">No candle data available</div>
-              <div className="font-mono text-[10px] text-gray-500">{error}</div>
-              <div className="font-mono text-[10px] text-gray-600 mt-3">
-                Try a different timeframe, or check that this token has a Coinbase/Kraken pair.
+              <div className="font-mono text-[10px] text-gray-500 max-w-md text-center">{error}</div>
+              <div className="font-mono text-[10px] text-gray-600 mt-3 max-w-md text-center">
+                This token may not have a Coinbase or Kraken trading pair.
+                Try a different timeframe, or pick a token from the top-20 list.
               </div>
             </div>
           )}
 
-          {!loading && !error && (
-            <div ref={chartContainerRef} className="w-full h-[420px]" />
+          {/* Container is only rendered when we have candles — ensures ref is set after data */}
+          {candles.length > 0 && (
+            <div ref={setContainerEl} className="w-full h-[420px]" />
           )}
         </div>
 
@@ -470,11 +559,9 @@ export function TradeChartModal() {
             <div className="bg-[#121a26] rounded p-2 border border-[#1e2a3d]">
               <div className="text-gray-500 mb-0.5">TAKE PROFIT</div>
               <div className="text-emerald-400 text-sm">{fmtPrice(tp)}</div>
-              {tp !== null && entryPrice > 0 && (
+              {distToTP !== null && (
                 <div className="text-gray-600 text-[9px] mt-0.5">
-                  {isLong
-                    ? `+${((tp - entryPrice) / entryPrice * 100).toFixed(2)}%`
-                    : `+${((entryPrice - tp) / entryPrice * 100).toFixed(2)}%`}
+                  {isLong ? '+' : ''}{distToTP.toFixed(2)}% from entry
                 </div>
               )}
             </div>
@@ -483,11 +570,9 @@ export function TradeChartModal() {
             <div className="bg-[#121a26] rounded p-2 border border-[#1e2a3d]">
               <div className="text-gray-500 mb-0.5">STOP LOSS</div>
               <div className="text-red-400 text-sm">{fmtPrice(sl)}</div>
-              {sl !== null && entryPrice > 0 && (
+              {distToSL !== null && (
                 <div className="text-gray-600 text-[9px] mt-0.5">
-                  {isLong
-                    ? `${((sl - entryPrice) / entryPrice * 100).toFixed(2)}%`
-                    : `${((entryPrice - sl) / entryPrice * 100).toFixed(2)}%`}
+                  {distToSL >= 0 ? '+' : ''}{distToSL.toFixed(2)}% from entry
                 </div>
               )}
             </div>
@@ -501,9 +586,16 @@ export function TradeChartModal() {
               </div>
             ) : (
               <div className="bg-[#121a26] rounded p-2 border border-[#1e2a3d]">
-                <div className="text-gray-500 mb-0.5">CURRENT</div>
-                <div className="text-yellow-400 text-sm">{fmtPrice(currentPrice)}</div>
-                <div className="text-gray-600 text-[9px] mt-0.5">live</div>
+                <div className="text-gray-500 mb-0.5 flex items-center gap-1">
+                  CURRENT
+                  {livePrice > 0 && <span className="w-1.5 h-1.5 bg-yellow-400 rounded-full animate-pulse" />}
+                </div>
+                <div className="text-yellow-400 text-sm">{fmtPrice(livePrice)}</div>
+                {distToLive !== null && (
+                  <div className={`text-[9px] mt-0.5 ${distToLive >= 0 ? 'text-emerald-500' : 'text-red-500'}`}>
+                    {distToLive >= 0 ? '+' : ''}{distToLive.toFixed(3)}% from entry
+                  </div>
+                )}
               </div>
             )}
 
@@ -548,11 +640,11 @@ export function TradeChartModal() {
             )}
             {isOpenPosition && (
               <span className="flex items-center gap-1">
-                <span className="w-2 h-2 bg-yellow-400 rounded-full inline-block animate-pulse"></span> Live price
+                <span className="w-2 h-2 bg-yellow-400 rounded-full inline-block animate-pulse"></span> Live price (updates every tick)
               </span>
             )}
             <span className="ml-auto text-gray-700">
-              Source: Coinbase / Kraken · {candles.length} candles · {interval}
+              Source: Coinbase / Kraken · {candles.length} candles · {interval} · auto-refresh 5s
             </span>
           </div>
         </div>

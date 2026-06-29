@@ -13,7 +13,7 @@ import { Button } from '@/components/ui/button'
 import { Target, ArrowUp, ArrowDown, ShieldAlert, X, CandlestickChart } from 'lucide-react'
 
 export function PositionPanel() {
-  const { positions, symbol, currentPrice, setChartModalTrade } = useTradingStore()
+  const { positions, symbol, currentPrice, tokenStates, setChartModalTrade } = useTradingStore()
   const { emit } = useTradingSocket()
   const [closingSymbol, setClosingSymbol] = useState<string | null>(null)
 
@@ -24,6 +24,20 @@ export function PositionPanel() {
   }
 
   const hasPosition = positions && positions.length > 0
+
+  /**
+   * Get the live price for a specific position's symbol.
+   * IMPORTANT: the store's `currentPrice` is for the SELECTED symbol only
+   * (e.g., BTC). For positions in other tokens (JTO, SOL, etc.), we must
+   * look up the price in `tokenStates[symbol].price`. Falls back to
+   * `currentPrice` only when the position's symbol matches the selected one.
+   */
+  const getPriceForSymbol = (sym: string): number => {
+    if (!sym) return 0
+    const ts = tokenStates[sym]
+    if (ts && ts.price && ts.price > 0) return ts.price
+    return sym === symbol ? currentPrice : 0
+  }
 
   return (
     <Card className="bg-[#0d1117] border-[#1e2a3d] h-full">
@@ -49,16 +63,20 @@ export function PositionPanel() {
             const pnlUsdt = pos.pnl_usdt || 0
             const isPositive = pnlPct >= 0
 
+            // Per-symbol live price (NOT the global currentPrice which is for selected symbol only)
+            const posPrice = getPriceForSymbol(pos.symbol || symbol)
+
             // Distance to TP/SL — null-safe (manual entries have no SL/TP)
-            const distToTP = pos.current_tp !== null && currentPrice > 0
+            // Uses posPrice (per-symbol) not currentPrice (global/selected)
+            const distToTP = pos.current_tp !== null && posPrice > 0
               ? (isLong
-                  ? ((pos.current_tp - currentPrice) / currentPrice) * 100
-                  : ((currentPrice - pos.current_tp) / currentPrice) * 100)
+                  ? ((pos.current_tp - posPrice) / posPrice) * 100
+                  : ((posPrice - pos.current_tp) / posPrice) * 100)
               : null
-            const distToSL = pos.current_sl !== null && currentPrice > 0
+            const distToSL = pos.current_sl !== null && posPrice > 0
               ? (isLong
-                  ? ((currentPrice - pos.current_sl) / currentPrice) * 100
-                  : ((pos.current_sl - currentPrice) / currentPrice) * 100)
+                  ? ((posPrice - pos.current_sl) / posPrice) * 100
+                  : ((pos.current_sl - posPrice) / posPrice) * 100)
               : null
 
             return (
