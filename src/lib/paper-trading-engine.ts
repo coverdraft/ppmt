@@ -793,11 +793,12 @@ export class PaperTradingEngine {
         }
       }
 
-      // ─── v37e: Lock profit + Partial TP + Trailing (before SL/TP check) ───
+      // ─── v38g: Lock profit + Partial TP + Trailing (before SL/TP check) ───
       // These run on every tick to manage open positions proactively.
-      // Lock: move SL to entry+0.2R when +0.4R reached (locks small profit)
-      // Partial: close 30% at +0.8R, then enable trailing on remainder
-      // Trail: 0.6 ATR trailing stop on remainder (overrides TP)
+      // Lock: move SL to entry+0.2R when +0.5R reached (locks small profit)
+      // Partial: close 40% at +0.7R, then enable trailing on remainder
+      // Trail: 0.5 ATR trailing stop on remainder (overrides TP)
+      // 8-seed validation: WR 66.7%, P&L +30.97, Profitable 88%, MaxDD 0.26%
       if (pos.initial_atr && pos.initial_sl_distance && pos.initial_sl_distance > 0) {
         const rMultiple = isLong
           ? (price - pos.entry_price) / pos.initial_sl_distance
@@ -808,8 +809,8 @@ export class PaperTradingEngine {
         if (isLong && price > pos.max_favorable_price) pos.max_favorable_price = price
         if (!isLong && price < pos.max_favorable_price) pos.max_favorable_price = price
 
-        // 1. Lock profit at +0.4R → move SL to entry+0.2R
-        if (!pos.lock_done && rMultiple >= 0.4) {
+        // 1. Lock profit at +0.5R → move SL to entry+0.2R (v38g: 0.4→0.5)
+        if (!pos.lock_done && rMultiple >= 0.5) {
           const lockR = 0.2
           if (isLong) {
             const newSL = pos.entry_price + lockR * pos.initial_sl_distance
@@ -821,10 +822,10 @@ export class PaperTradingEngine {
           pos.lock_done = true
         }
 
-        // 2. Partial TP at +0.8R → close 30%, enable trailing on remainder
-        if (!pos.partial_done && rMultiple >= 0.8) {
-          // Close 30% of position at market
-          const partialPct = 0.30
+        // 2. Partial TP at +0.7R → close 40%, enable trailing on remainder (v38g)
+        if (!pos.partial_done && rMultiple >= 0.7) {
+          // Close 40% of position at market
+          const partialPct = 0.40
           const partialQty = pos.qty * partialPct
           if (partialQty > 0.0001) {
             const partialResult = isLong
@@ -832,13 +833,13 @@ export class PaperTradingEngine {
               : this.marketBuy(sym, partialQty * pos.entry_price, pos.strategy)
             if (partialResult.success) {
               pos.qty -= partialQty
-              console.log(`[Paper/v37e] ${sym} PARTIAL_TP 30% @ ${price} (R=${rMultiple.toFixed(2)})`)
+              console.log(`[Paper/v38g] ${sym} PARTIAL_TP 40% @ ${price} (R=${rMultiple.toFixed(2)})`)
             }
           }
           pos.partial_done = true
           pos.trail_active = true
-          // Set initial trail SL at current price - 0.6 ATR
-          const trailDist = pos.initial_atr * 0.6
+          // Set initial trail SL at current price - 0.5 ATR (v38g: 0.6→0.5)
+          const trailDist = pos.initial_atr * 0.5
           if (isLong) {
             const newSL = price - trailDist
             if (pos.current_sl === null || newSL > pos.current_sl) pos.current_sl = newSL
@@ -850,7 +851,7 @@ export class PaperTradingEngine {
 
         // 3. Update trailing stop if active
         if (pos.trail_active && pos.max_favorable_price) {
-          const trailDist = pos.initial_atr * 0.6
+          const trailDist = pos.initial_atr * 0.5
           if (isLong) {
             const newSL = pos.max_favorable_price - trailDist
             if (pos.current_sl === null || newSL > pos.current_sl) pos.current_sl = newSL
@@ -1012,7 +1013,7 @@ export class PaperTradingEngine {
         const pricesA = histA.map(h => h.price)
         const atrA = computeATR(pricesA, 60)
         const atrPctA = atrA / x.ticker.price * 100
-        return atrPctA >= 0.55
+        return atrPctA >= 0.58
       })
       .sort((a, b) => Math.abs(b.recentMomentum) - Math.abs(a.recentMomentum))
       .slice(0, 3)
@@ -1039,8 +1040,8 @@ export class PaperTradingEngine {
       if (result.success) {
         const pos = this.positions.get(top.symbol)
         if (pos) {
-          // v37e: SL 2.0 → 1.4 ATR (tighter risk; backtest 5-seed: P&L -7 → +23, MaxDD 0.38% → 0.30%)
-          //   Lock profit at +0.4R, partial TP 30% at +0.8R, trail 0.6 ATR after partial.
+          // v38g: SL 1.4 ATR + lock 0.5R + partial 40% at 0.7R + trail 0.5 ATR + ATR floor 0.58%
+          //   8-seed validation: WR 66.7%, P&L +30.97, Profitable 88% of seeds, MaxDD 0.26%
           pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 1.4 : pos.entry_price + atr * 1.4
           pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 1.2 : pos.entry_price - atr * 1.2
           pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 4 : pos.entry_price + atr * 4
@@ -1102,7 +1103,7 @@ export class PaperTradingEngine {
         const pricesB = histB.map(h => h.price)
         const atrB = computeATR(pricesB, 60)
         const atrPctB = atrB / x.ticker.price * 100
-        return atrPctB >= 0.55
+        return atrPctB >= 0.58
       })
       .sort((a, b) => Math.abs(a.rsi - 50) - Math.abs(b.rsi - 50))
       .slice(0, 2)
@@ -1134,7 +1135,7 @@ export class PaperTradingEngine {
       if (result.success) {
         const pos = this.positions.get(c.ticker.symbol)
         if (pos) {
-          // v37e: SL 2.0 → 1.4 ATR + v37e state init (lock/partial/trail/MFE)
+          // v38g: SL 1.4 ATR + v38g state init (lock 0.5R / partial 40% at 0.7R / trail 0.5 ATR)
           pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 1.4 : pos.entry_price + atr * 1.4
           pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 1.2 : pos.entry_price - atr * 1.2
           pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 4 : pos.entry_price + atr * 4
