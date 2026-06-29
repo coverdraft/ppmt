@@ -48,6 +48,25 @@ export interface TradeRecord {
   size_usdt: number
 }
 
+// ─── Trader Notes (Camino B) ─────────────────────────────
+// Post-close labels the user can attach to a trade from the chart modal.
+// Stored keyed by `${symbol}__${entry_time}` so they survive reloads.
+// The AI reads these from the EXPORT and correlates them with trade
+// features (strategy, regime, ATR bucket, direction) to propose
+// systematic fixes — without contaminating live trade execution.
+export type TraderNoteLabel =
+  | 'BAD_ENTRY'        // "mala entrada" — entry timing/zone was wrong
+  | 'BAD_SL'           // "SL mal puesto" — SL too tight / too wide / wrong place
+  | 'BAD_TP'           // "TP mal puesto" — TP too tight / too wide / wrong place
+  | 'GOOD_TRADE'       // "buena gestión" — keep doing this (positive label)
+
+export interface TraderNote {
+  label: TraderNoteLabel | null
+  text: string         // free-text note (optional, can be empty)
+  created_at: number   // epoch ms
+  updated_at: number   // epoch ms
+}
+
 export interface MonteCarloResult {
   risk_of_ruin: number
   probability_of_profit: number
@@ -276,6 +295,19 @@ export interface TradingState {
   chartModalTrade: Position | TradeRecord | null
   setChartModalTrade: (trade: Position | TradeRecord | null) => void
 
+  // ─── Trader Notes (Camino B — post-close labels) ──────
+  // User can tag a CLOSED trade with one of 3 quick labels + an optional
+  // free-text note. This does NOT alter the trade in any way — it only
+  // annotates the outcome so the AI (me) can find systematic patterns in
+  // the next EXPORT (e.g. "70% of trades tagged 'SL bad' were SHORT in
+  // volatile regime → widen ATR multiplier for that combo").
+  //
+  // Key format: `${symbol}__${entry_time}` — entry_time is unique per trade
+  // and stable across reloads (engine assigns it at open time).
+  traderNotes: Record<string, TraderNote>
+  setTraderNote: (tradeKey: string, note: Partial<TraderNote>) => void
+  getTraderNote: (tradeKey: string) => TraderNote | undefined
+
   // Actions
   setState: (data: Partial<TradingState>) => void
   setConnected: (connected: boolean, mode?: string) => void
@@ -401,6 +433,8 @@ const initialState = {
   strategies_perf: {} as Record<string, any>,
   // Trade chart modal — null by default (modal closed)
   chartModalTrade: null,
+  // Trader notes — empty by default (populated as user tags trades)
+  traderNotes: {} as Record<string, TraderNote>,
 }
 
 function trimArray<T>(arr: T[], max: number = MAX_CHART_POINTS): T[] {
@@ -558,6 +592,31 @@ export const useTradingStore = create<TradingState>((set, get) => ({
 
   setChartModalTrade: (trade) =>
     set({ chartModalTrade: trade }),
+
+  // ─── Trader Notes actions ───────────────────────────────
+  // setTraderNote: upserts a note for a trade key. Accepts partial updates
+  // so the UI can call it with just { label } or just { text } without
+  // clobbering the other field. Preserves created_at on updates.
+  setTraderNote: (tradeKey, note) =>
+    set((state) => {
+      const existing = state.traderNotes[tradeKey]
+      const now = Date.now()
+      const merged: TraderNote = {
+        label: note.label !== undefined ? note.label : (existing?.label ?? null),
+        text: note.text !== undefined ? note.text : (existing?.text ?? ''),
+        created_at: existing?.created_at ?? now,
+        updated_at: now,
+      }
+      // If label is null AND text is empty, treat as "delete" — keep store clean
+      if (merged.label === null && merged.text.trim() === '') {
+        const next = { ...state.traderNotes }
+        delete next[tradeKey]
+        return { traderNotes: next }
+      }
+      return { traderNotes: { ...state.traderNotes, [tradeKey]: merged } }
+    }),
+
+  getTraderNote: (tradeKey) => get().traderNotes[tradeKey],
 
   reset: () => set(initialState),
 }))
