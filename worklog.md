@@ -723,3 +723,42 @@ Stage Summary:
   * Marker API: if exit time is older than the candle window, exit marker is skipped
   * Real-time updates only work while the modal is open; chart doesn't auto-scroll
     forward in time (only updates the current candle's close)
+
+---
+Task ID: 15
+Agent: main (super-z)
+Task: Fix 3 critical bugs in chart modal — open/closed detection, per-symbol live price, container ref timing
+
+Work Log:
+- User reported positions showing "TP 100.00% / SL -100.00%" — clearly wrong
+- Diagnosed root cause: store's `currentPrice` is for the SELECTED symbol
+  (e.g., BTC at ~$100k), not for the position's symbol (e.g., JTO at ~$0.82).
+  All distance calculations were using the wrong price.
+- Diagnosed second bug: `isOpenPosition` check used `status === 'OPEN'`,
+  but the engine emits statuses like 'BREAK_EVEN_SECURED', 'TRAILING', etc.
+  for open positions. Positions with non-OPEN status were treated as closed,
+  losing real-time updates and live SL/TP tracking.
+- Diagnosed third bug: Radix Dialog mounts content via portal, so the chart
+  container ref was null on first render. The chart-creation effect ran
+  before the container existed, so the chart was never created.
+
+Fixes applied:
+1. isOpenPosition: now uses `close_price !== undefined` (TradeRecord has it,
+   Position doesn't) — status-agnostic, reliable detection
+2. Live price: reads `tokenStates[symbol].price` with fallback to
+   `currentPrice` only when position's symbol === selectedSymbol
+3. Container ref: switched to callback ref pattern + chartReady state —
+   chart is created only after container exists in DOM
+4. Bonus: 5s polling for fresh candles while modal open
+5. Bonus: incremental updates (setData on new candle, update() on price change)
+6. Bonus: LIVE badge with pulsing radio icon for open positions
+7. Bonus: distance-to-entry shown in header for open positions
+8. Bonus: position-panel.tsx distance calculations also fixed (same root cause)
+
+Stage Summary:
+- 3 critical bugs fixed, chart modal now works correctly for all position types
+- Real-time updates now use the correct per-symbol price
+- Auto-refresh every 5s keeps candles fresh
+- Build verified, typecheck clean (only pre-existing errors in scripts/terminal/)
+- User flow unchanged: git pull origin terminal-web && npm run dev
+- Click any position or trade → chart opens with correct live data
