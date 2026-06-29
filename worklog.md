@@ -1267,3 +1267,66 @@ Stage Summary:
 - Next: v59 will explore higher-frequency trading, pyramiding, 4-partial TP,
   and new strategy types (scalp, grid, vol-breakout) to break WR plateau
   and push P&L higher in less time per user request
+
+---
+Task ID: 32
+Agent: main
+Task: v59 push + GitHub save — find champion beyond v58d for more profit in less time
+
+Work Log:
+- User request: "guarda toda esta info https://github.com/coverdraft/ppmt de como se componen y como vamos.. quiero seguir investigando como mejorar y mejorar wr y rr recuerda que tenemos que tener mucha mas ganancia y en mas corto tiempo... asi que analiza bien todo y sigue testeando pero guradamos todas estas porque se probaran.."
+- TRACEABILITY SAVE (Task 31+32):
+  * Copied 26 backtest scripts (v38-v58) to ppmt/scripts/backtest/ (commit 45ee9db)
+  * Copied worklog.md to ppmt root (32 task entries, 66KB)
+  * Created ppmt/STATUS.md — comprehensive project state doc with composition,
+    version stack, lessons learned, next explorations
+- v59 tested 12 variants on 12 seeds (3 levers: frequency / size / speed):
+  * v59a (ATR floor 0.50): HURTS — too many bad trades in calm regime
+  * v59b (ATR floor 0.55): HURTS — same
+  * v59c (cooldown 30min): HURTS — re-entries too fast
+  * v59d (cooldown 25min): HURTS — same (MaxDD 0.47!)
+  * v59e (A 0.035 + B 0.175 tiered): P&L +32.98 (+0.86) — marginal
+  * v59f (A 0.040 + B 0.175 tiered): P&L +36.03 (+3.91) ← CHAMPION
+  * v59g (A 0.035 + B 0.20 tiered): P&L +33.75 (+1.63) — B 0.20 not as good as A 0.040
+  * v59h (A 0.030 + B 0.175 tiered): P&L +29.94 (-2.18) — A 0.030 too small with tiered
+  * v59i (partial3 1.15R): IDENTICAL to baseline — partial3 never triggers
+  * v59j (partial2 0.8R): IDENTICAL to baseline — partial2 hits 1.0R first
+  * v59k (combo aggressive): DISASTER (P&L -9.82) — too many bad trades
+  * v59l (max aggressive): CATASTROPHE (P&L -38.55, MaxDD 0.80!) — way too aggressive
+- KEY LEARNINGS:
+  1. TIERED adaptive sizing (0.4/0.7/1.0) is BETTER than simple 0.5 — finer control
+  2. Pushing A from 0.030→0.040 with tiered protection = clean +12% P&L
+  3. Pushing B from 0.15→0.175 with tiered = adds P&L without breaking MaxDD
+  4. Lower ATR floor HURTS — calm markets are net losers, more trades = more losses
+  5. Shorter cooldown HURTS — re-entries on same signal cause correlated losses
+  6. partial3 1.15R/1.10R NEVER TRIGGERS — price rarely reaches 1.15R before trailing
+  7. partial2 0.8R NEVER TRIGGERS — price hits 1.0R first or trails out
+  8. AGGRESSIVE COMBOS (v59k/l) blow up — can't combine all aggressive params
+
+v59f APPLICATION (scripts/v59f_patch.py):
+- 8 edits applied to src/lib/paper-trading-engine.ts:
+  1. Header comment v58d → v59f
+  2. Header comparison block updated with v59f line
+  3. A base size 0.030 → 0.040
+  4. A adaptive: simple 0.5x → TIERED 0.4/0.7/1.0
+  5. A strategy init comment v58d → v59f
+  6. B base size 0.15 → 0.175
+  7. B adaptive: simple 0.5x → TIERED 0.4/0.7/1.0
+  8. B strategy init comment v57i → v59f
+- Backup created: .bak.v58d
+- Braces 0/0/0, parens 0/0/0, brackets 0/0/0 — all balanced
+- 9 v59f markers verified in source
+
+Stage Summary:
+- 🎯 v59f is the NEW PRODUCTION CHAMPION (12-seed validated):
+  * WR 79.4% (same as v53h/v56d/v57i/v58d — plateau at 79.4%)
+  * P&L +36.03 per 4h = +216 USDT/day projected (vs v58d +192, v57i +173, v38g +66)
+  * AvgR +0.77 (same as v53h+)
+  * MaxDD 0.23% (vs v58d 0.21%, v57i 0.19%, v53h 0.28%, v38g 0.31%) — slight increase
+  * PF 2.63 (vs v58d 2.53, v57i 2.63, v53h 2.04, v38g 1.46)
+  * Profitable 67% of 12 seeds (same as v56d/v57i/v58d)
+- Stack: v11→v12→v13→v14→v15→v16(revert)→v31b→v37e→v38g→v43a→v49c→v51e→v53h→v56d→v57i→v58d→v59f
+- For revert: cp src/lib/paper-trading-engine.ts.bak.v58d src/lib/paper-trading-engine.ts
+- Next: v60 will explore 4-partial TP system (engine change), pyramiding on winners,
+  and new strategy types (scalp RSI 5/95, vol-breakout) to break the WR plateau
+  and push P&L higher. The user wants "mucha mas ganancia en menos tiempo".
