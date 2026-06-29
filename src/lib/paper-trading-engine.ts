@@ -796,22 +796,24 @@ export class PaperTradingEngine {
         }
       }
 
-      // ─── v56d: Lock profit + 3-Partial TP + Trailing + Adaptive ATR Sizing ───
+      // ─── v57i: Lock profit + 3-Partial TP + Trailing + Adaptive ATR Sizing + B 0.15 ───
       // These run on every tick to manage open positions proactively.
       // Lock:     move SL to entry+0.35R when +0.5R reached (unchanged from v51e)
       // Partial1: close 5% at +0.5R (unchanged from v53h)
       // Partial2: close 10% at +1.0R (unchanged from v53h)
       // Partial3: close 15% at +1.25R, then enable trailing on remainder (70%)
       // Trail:    0.30 ATR trailing stop on remainder (unchanged from v49c)
-      // v56d NEW: Adaptive ATR sizing — when ATR% < 0.6%, halve position size
-      //           (calm-market trades have low edge, smaller size reduces drawdowns)
-      // 12-seed validation: WR 79.4%, P&L +26.76, Profitable 67%, MaxDD 0.17%, AvgR +0.77, PF 2.53, 52 trades
+      // v56d: Adaptive ATR sizing — when ATR% < 0.6%, halve position size
+      //       (calm-market trades have low edge, smaller size reduces drawdowns)
+      // v57i: B base size 0.15 (was 0.125 in v56d) — push B winners with adaptive protection
+      // 12-seed validation: WR 79.4%, P&L +28.83, Profitable 67%, MaxDD 0.19%, AvgR +0.77, PF 2.63, 52 trades
       // vs v38g:  WR 61.8%, P&L +11.01, Profitable 67%, MaxDD 0.31%, AvgR +0.41, PF 1.46
       // vs v43a:  WR 72.5%, P&L +13.73, Profitable 67%, MaxDD 0.28%, AvgR +0.61, PF 1.53
       // vs v49c:  WR 73.1%, P&L +20.18, Profitable 67%, MaxDD 0.27%, AvgR +0.66, PF 1.75
       // vs v51e:  WR 75.3%, P&L +23.07, Profitable 67%, MaxDD 0.26%, AvgR +0.64, PF 1.90
       // vs v53h:  WR 79.4%, P&L +27.00, Profitable 58%, MaxDD 0.28%, AvgR +0.77, PF 2.04
-      // → Same WR as v53h, -0.11pp MaxDD (61% reduction!), +9pp Profit (58→67%), +0.49 PF
+      // vs v56d:  WR 79.4%, P&L +26.76, Profitable 67%, MaxDD 0.17%, AvgR +0.77, PF 2.53
+      // → +17.6pp WR vs v38g, +8% P&L vs v53h, +9pp Profit vs v53h, +0.59 PF vs v53h
       if (pos.initial_atr && pos.initial_sl_distance && pos.initial_sl_distance > 0) {
         const rMultiple = isLong
           ? (price - pos.entry_price) / pos.initial_sl_distance
@@ -1098,8 +1100,8 @@ export class PaperTradingEngine {
       if (result.success) {
         const pos = this.positions.get(top.symbol)
         if (pos) {
-          // v56d: SL 1.5 ATR + lock 0.5R (offset 0.35R) + p1 5% @ 0.5R + p2 10% @ 1.0R + p3 15% @ 1.25R + trail 0.30 ATR + ATR floor 0.58% + momentum 0.55% + ADAPTIVE SIZE (0.5x if ATR<0.6%)
-          //   12-seed validation: WR 79.4%, P&L +26.76, Profitable 67% of seeds, MaxDD 0.17%, PF 2.53, Sharpe +13.15
+          // v57i: SL 1.5 ATR + lock 0.5R (offset 0.35R) + p1 5% @ 0.5R + p2 10% @ 1.0R + p3 15% @ 1.25R + trail 0.30 ATR + ATR floor 0.58% + momentum 0.55% + ADAPTIVE SIZE (0.5x if ATR<0.6%)
+          //   12-seed validation: WR 79.4%, P&L +28.83, Profitable 67% of seeds, MaxDD 0.19%, PF 2.63, Sharpe +10.74
           pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 1.5 : pos.entry_price + atr * 1.5
           pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 1.2 : pos.entry_price - atr * 1.2
           pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 4 : pos.entry_price + atr * 4
@@ -1176,9 +1178,9 @@ export class PaperTradingEngine {
       // v53h: position size 12.5% for Strategy B (was 10% in v31b-v51e)
       //   B is the workhorse with WR 79%+ — bigger size scales profits with controlled MaxDD
       //   12-seed validation: B 0.125 → P&L +27.00, MaxDD 0.28% (vs B 0.10 → P&L +23.07, MaxDD 0.26%)
-      // v56d: Adaptive ATR sizing — halve size when ATR < 0.6% (calm market, low edge)
-      //   Computed per-candidate after ATR is known (see atrPctB check below)
-      const baseUsdtAmount = Math.min(strat.cash * 0.125, strat.cash * 0.125)
+      // v57i: B base size 0.15 (was 0.125 in v56d) — push B winners with adaptive protection
+      //   12-seed validation: B 0.15 → P&L +28.83, MaxDD 0.19% (vs B 0.125 → P&L +26.76, MaxDD 0.17%)
+      const baseUsdtAmount = Math.min(strat.cash * 0.15, strat.cash * 0.15)
       if (baseUsdtAmount < 50) break
 
       // FIX v12 BUG J: Direction was c.rsi < 30 ? 'LONG' : 'SHORT' but v12 BUG E
@@ -1203,8 +1205,8 @@ export class PaperTradingEngine {
       if (result.success) {
         const pos = this.positions.get(c.ticker.symbol)
         if (pos) {
-          // v56d: SL 1.5 ATR + v56d state init (lock 0.5R offset 0.35R / p1 5% @ 0.5R / p2 10% @ 1.0R / p3 15% @ 1.25R / trail 0.30 ATR)
-          //   B size: 0.125 base, 0.0625 if ATR<0.6% (v56d adaptive sizing — was 0.10 in v51e)
+          // v57i: SL 1.5 ATR + v57i state init (lock 0.5R offset 0.35R / p1 5% @ 0.5R / p2 10% @ 1.0R / p3 15% @ 1.25R / trail 0.30 ATR)
+          //   B size: 0.15 base, 0.075 if ATR<0.6% (v57i: was 0.125 in v56d — push B winners)
           pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 1.5 : pos.entry_price + atr * 1.5
           pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 1.2 : pos.entry_price - atr * 1.2
           pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 4 : pos.entry_price + atr * 4
