@@ -269,6 +269,13 @@ export interface TradingState {
     color: string
   }>
 
+  // ─── Trade Chart Modal ──────────────────────
+  // When set, opens a candlestick chart modal showing this trade/position
+  // with entry / exit / SL / TP markers + real-time price updates.
+  // Set to null to close the modal.
+  chartModalTrade: Position | TradeRecord | null
+  setChartModalTrade: (trade: Position | TradeRecord | null) => void
+
   // Actions
   setState: (data: Partial<TradingState>) => void
   setConnected: (connected: boolean, mode?: string) => void
@@ -392,6 +399,8 @@ const initialState = {
   suggestedPositionSize: 0,
   riskRewardRatio: 0,
   strategies_perf: {} as Record<string, any>,
+  // Trade chart modal — null by default (modal closed)
+  chartModalTrade: null,
 }
 
 function trimArray<T>(arr: T[], max: number = MAX_CHART_POINTS): T[] {
@@ -546,6 +555,9 @@ export const useTradingStore = create<TradingState>((set, get) => ({
 
   selectToken: (symbol) =>
     set({ selectedToken: symbol, symbol }),
+
+  setChartModalTrade: (trade) =>
+    set({ chartModalTrade: trade }),
 
   reset: () => set(initialState),
 }))

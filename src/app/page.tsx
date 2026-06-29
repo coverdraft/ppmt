@@ -17,6 +17,7 @@ import { OperationsChart } from '@/components/trading/operations-chart'
 import { PortfolioManager } from '@/components/trading/portfolio-manager'
 import { MoneyManager } from '@/components/trading/money-manager'
 import { TokenSelector } from '@/components/trading/token-selector'
+import { TradeChartModal } from '@/components/trading/trade-chart-modal'
 import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useState, useEffect } from 'react'
@@ -354,7 +355,7 @@ export default function TerminalPage() {
         </div>
         <div className="flex items-center gap-3">
           <span className="text-[9px] text-gray-600 font-mono">
-            PPMT v0.80 • PAPER TRADING • Live Coinbase+CoinGecko Prices • 82 Tokens
+            PPMT v0.81 • PAPER TRADING • Live Coinbase+CoinGecko Prices • 82 Tokens • Trade Chart
           </span>
           <span className="text-[9px] text-gray-600 font-mono">|</span>
           <span className="text-[9px] text-gray-500 font-mono">
@@ -362,6 +363,9 @@ export default function TerminalPage() {
           </span>
         </div>
       </footer>
+
+      {/* Trade Chart Modal — opens when user clicks a position or trade */}
+      <TradeChartModal />
     </div>
   )
 }
