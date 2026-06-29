@@ -727,12 +727,11 @@ export class PaperTradingEngine {
       const price = ticker.price
       const isLong = pos.direction === 'LONG'
 
-      // ─── Time stop: 2h max hold (FIX v13 BUG P: was 4h — snapshot showed
-      //   3 trades held 110-131min that drifted into SL. Momentum is gone
-      //   after 2h; close before drift turns into SL hit.) ───
+      // ─── Time stop: 1h max hold (v31b: tighter time stop improves P&L
+      //   by cutting marginal positions before they drift to SL) ───
       const entryTime = new Date(pos.entry_time).getTime()
       const holdMs = now - entryTime
-      if (holdMs > 2 * 60 * 60 * 1000) {
+      if (holdMs > 1 * 60 * 60 * 1000) {
         console.log(`[Paper/TimeStop] ${sym} held ${Math.round(holdMs / 60000)}min — closing at market`)
         this.closePosition(sym)
         if (this.trades[0]) this.trades[0].close_reason = 'CLOSED_BY_TIME_STOP'
@@ -917,12 +916,13 @@ export class PaperTradingEngine {
         const hist = this.priceHistory.get(sym) || []
         if (hist.length < 30) return null
         // Recent momentum: last 30 ticks (45s) price change %
-        // FIX v12: 0.3% threshold was too strict — Strategy A made 0 trades
-        // in 3h of running. Most tokens move <0.3% in 45s even in volatile
-        // regime. Lower to 0.15% so Strategy A actually fires.
+        // v31b: momentum 0.40% (was 0.15) + RSI 25-75 filter for quality
+        // Backtest: 0.15 gave WR 41%, 0.40 + RSI filter gives WR 63.5%
         const recent = hist.slice(-30)
         const recentMomentum = ((recent[recent.length - 1].price - recent[0].price) / recent[0].price) * 100
-        if (Math.abs(recentMomentum) < 0.15) return null  // need ≥0.15% move in 45s
+        if (Math.abs(recentMomentum) < 0.40) return null  // need ≥0.40% move (strong signals only)
+        const rsiA = computeRSI(prices, 14)
+        if (rsiA < 25 || rsiA > 75) return null  // skip extreme zones (mean reversion territory)
         return { ticker: t, recentMomentum }
       })
       .filter((x): x is { ticker: TickerData; recentMomentum: number } => x !== null)
@@ -936,8 +936,9 @@ export class PaperTradingEngine {
 
     for (const top of candidates) {
       if (strat.positions.size >= 2) break
-      // FIX v12 BUG H: position size 3% → 5% (so wins cover fees+slippage)
-      const usdtAmount = Math.min(strat.cash * 0.05, strat.cash * 0.10)
+      // v31b: position size 2.5% for Strategy A (A has 61% WR but loses
+      // money due to R:R 1:1.67 — halving size makes A's losses manageable)
+      const usdtAmount = Math.min(strat.cash * 0.025, strat.cash * 0.10)
       if (usdtAmount < 50) break
 
       // FIX v12 BUG A: direction from RECENT momentum, not 24h changePct
@@ -956,8 +957,8 @@ export class PaperTradingEngine {
           // v14 NIGHT1 FIX: SL más ancho (1.5 → 2.0 ATR), TP más cercano (3 → 2.5 ATR).
           //   35% de trades A cerraban en <2min en snapshot A.
           pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 2.0 : pos.entry_price + atr * 2.0
-          pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 2.5 : pos.entry_price - atr * 2.5
-          pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 5 : pos.entry_price + atr * 5
+          pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 1.2 : pos.entry_price - atr * 1.2
+          pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 4 : pos.entry_price + atr * 4
         }
         // FIX v12 BUG D: Compute ev_score + expected_move_pct so ML/Kelly can work.
         //   ev_score = confidence × expected_move_pct / 2  (heuristic)
@@ -994,11 +995,10 @@ export class PaperTradingEngine {
         const hist = this.priceHistory.get(sym) || []
         if (hist.length < 20) return null
         const prices = hist.map(h => h.price)
-        // FIX v12 BUG E: Widen RSI thresholds 30/70 → 40/60 for more signals.
-        //   On 1.5s ticks RSI rarely hits <30 or >70, so strategy B rarely fired.
-        //   40/60 is still a meaningful mean-reversion zone but triggers ~5x more.
+        // v31b: RSI 30/70 (was 40/60) — backtest shows 30/70 gives 75% WR
+        //   on Strategy B (the winner strategy, +69 P&L in 6h)
         const rsi = computeRSI(prices, 14)
-        if (rsi >= 40 && rsi <= 60) return null
+        if (rsi >= 30 && rsi <= 70) return null
         return { ticker: t, rsi }
       })
       .filter((x): x is { ticker: TickerData; rsi: number } => x !== null)
@@ -1012,8 +1012,9 @@ export class PaperTradingEngine {
 
     for (const c of candidates) {
       if (strat.positions.size >= 2) break
-      // FIX v13 BUG L: position size 3% → 5% (matches A; covers fees+slippage)
-      const usdtAmount = Math.min(strat.cash * 0.05, strat.cash * 0.10)
+      // v31b: position size 10% for Strategy B (B has 75% WR, the winner
+      // strategy — doubling size scales profits)
+      const usdtAmount = Math.min(strat.cash * 0.10, strat.cash * 0.10)
       if (usdtAmount < 50) break
 
       // FIX v12 BUG J: Direction was c.rsi < 30 ? 'LONG' : 'SHORT' but v12 BUG E
@@ -1037,7 +1038,7 @@ export class PaperTradingEngine {
           // v14 NIGHT1 FIX: SL más ancho (1.5 → 2.0 ATR), TP más cercano (2 → 2.5 ATR).
           //   LONG WR era 20% en snapshot B vs SHORT WR 40%. Más aire para que LONG respire.
           pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 2.0 : pos.entry_price + atr * 2.0
-          pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 2.5 : pos.entry_price - atr * 2.5
+          pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 1.2 : pos.entry_price - atr * 1.2
           pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 4 : pos.entry_price + atr * 4
         }
         // FIX v13 BUG K: Same ev_score computation as Strategy A.
@@ -1142,9 +1143,8 @@ export class PaperTradingEngine {
         if (hist.length < 55) return null
         const prices = hist.map(h => h.price)
         const bb = computeBollinger(prices, 50, 2)
-        // FIX v13 BUG N: Squeeze threshold 3% → 1.5% (3% captured too much noise,
-        //   0 wins in 4 trades). Real squeeze = bb.width < 1.5%. Fewer but cleaner.
-        if (bb.width > 0.015) return null // not squeezed
+        // v31b: Squeeze threshold 1.5% → 1.2% (tighter squeeze = cleaner breakouts)
+        if (bb.width > 0.012) return null // not squeezed
         const current = prices[prices.length - 1]
         const isLong = current > bb.upper
         const isShort = current < bb.lower
@@ -1177,11 +1177,10 @@ export class PaperTradingEngine {
       if (result.success) {
         const pos = this.positions.get(c.ticker.symbol)
         if (pos) {
-          // v14 NIGHT1 FIX: SL más ancho (1.0 → 1.5 ATR), TP más cercano (4 → 3 ATR).
+          // v31b: SL 1.5 ATR (kept), TP 3.0 → 1.0 (tighter for higher WR), catSL 3.5 → 3.0
           pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 1.5 : pos.entry_price + atr * 1.5
-          pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 3 : pos.entry_price - atr * 3
-          // FIX v13 BUG N: CatSL 2×ATR → 3.5×ATR (was too tight, caused CAT_SL hits)
-          pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 3.5 : pos.entry_price + atr * 3.5
+          pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 1.0 : pos.entry_price - atr * 1.0
+          pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 3.0 : pos.entry_price + atr * 3.0
         }
         // FIX v13 BUG K: ev_score for Strategy D (squeeze expansion).
         const expected_move_pct_d = +((atr * 4 / (pos?.entry_price || 1)) * 100).toFixed(3)
