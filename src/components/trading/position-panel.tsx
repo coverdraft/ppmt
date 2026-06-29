@@ -10,10 +10,10 @@ import { useTradingSocket } from '@/lib/use-trading-socket'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Target, ArrowUp, ArrowDown, ShieldAlert, X } from 'lucide-react'
+import { Target, ArrowUp, ArrowDown, ShieldAlert, X, CandlestickChart } from 'lucide-react'
 
 export function PositionPanel() {
-  const { positions, symbol, currentPrice } = useTradingStore()
+  const { positions, symbol, currentPrice, setChartModalTrade } = useTradingStore()
   const { emit } = useTradingSocket()
   const [closingSymbol, setClosingSymbol] = useState<string | null>(null)
 
@@ -62,8 +62,16 @@ export function PositionPanel() {
               : null
 
             return (
-              <div key={idx} className="space-y-2">
-                {/* Direction + Symbol */}
+              <div
+                key={idx}
+                className="space-y-2 cursor-pointer transition-all hover:bg-[#121a26]/50 -mx-1 px-1 py-1 rounded group"
+                onClick={(e) => {
+                  // Don't open chart if clicking the CLOSE button
+                  if ((e.target as HTMLElement).closest('button')) return
+                  setChartModalTrade(pos)
+                }}
+              >
+                {/* Direction + Symbol + Chart button */}
                 <div className="flex items-center gap-2">
                   {isLong ? (
                     <ArrowUp className="w-4 h-4 text-emerald-400" />
@@ -84,6 +92,16 @@ export function PositionPanel() {
                   <Badge variant="outline" className="text-[9px] font-mono text-gray-400 border-gray-600 ml-auto px-1.5">
                     {pos.status}
                   </Badge>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      setChartModalTrade(pos)
+                    }}
+                    title="Open candlestick chart"
+                    className="text-gray-500 hover:text-blue-400 transition-colors"
+                  >
+                    <CandlestickChart className="w-3.5 h-3.5" />
+                  </button>
                 </div>
 
                 {/* Entry Price */}

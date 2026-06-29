@@ -7,10 +7,10 @@ import { useTradingStore } from '@/stores/trading-store'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Badge } from '@/components/ui/badge'
-import { History, ArrowUp, ArrowDown, AlertCircle } from 'lucide-react'
+import { History, ArrowUp, ArrowDown, AlertCircle, CandlestickChart } from 'lucide-react'
 
 export function TradeLog() {
-  const { tradeHistory, signalsHistory } = useTradingStore()
+  const { tradeHistory, signalsHistory, setChartModalTrade } = useTradingStore()
 
   const closeReasonColors: Record<string, string> = {
     CLOSED_BY_TP: 'bg-emerald-500/20 text-emerald-400',
@@ -43,9 +43,11 @@ export function TradeLog() {
                 return (
                   <div
                     key={idx}
-                    className={`flex items-center gap-2 py-1.5 px-2 rounded text-[10px] font-mono border ${
+                    onClick={() => setChartModalTrade(trade)}
+                    title="Click to open candlestick chart"
+                    className={`flex items-center gap-2 py-1.5 px-2 rounded text-[10px] font-mono border cursor-pointer transition-colors ${
                       idx === 0 ? 'border-[#1e2a3d] bg-[#121a26]' : 'border-transparent'
-                    }`}
+                    } hover:border-blue-500/40 hover:bg-[#121a26]`}
                   >
                     {isLong ? (
                       <ArrowUp className="w-3 h-3 text-emerald-400 shrink-0" />
@@ -56,7 +58,8 @@ export function TradeLog() {
                     <span className={`px-1 rounded text-[8px] ${reasonColor}`}>
                       {(trade.close_reason || '').replace('CLOSED_BY_', '').replace('CLOSED_', '')}
                     </span>
-                    <span className={`ml-auto ${isWin ? 'text-emerald-400' : 'text-red-400'}`}>
+                    <CandlestickChart className="w-3 h-3 text-gray-600 ml-auto shrink-0" />
+                    <span className={`${isWin ? 'text-emerald-400' : 'text-red-400'}`}>
                       {isWin ? '+' : ''}{trade.pnl_pct?.toFixed(3)}%
                     </span>
                     <span className={`w-14 text-right ${isWin ? 'text-emerald-500' : 'text-red-500'}`}>

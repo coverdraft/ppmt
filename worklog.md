@@ -659,3 +659,67 @@ Stage Summary:
   2. kill -9 $(lsof -ti :3000) 2>/dev/null; sleep 1; npm run dev
   3. Let it run 30+ min
   4. Click EXPORT → paste in chat
+
+---
+Task ID: 14
+Agent: main (super-z)
+Task: Build candlestick chart modal for positions/trades — visualize entry/exit/SL/TP + real-time management
+
+Work Log:
+- Analyzed existing terminal-web code structure (position-panel, trade-log, trading-store, use-trading-socket)
+- Confirmed no existing candlestick/OHLCV code in the codebase
+- Installed `lightweight-charts@^4.2.3` (TradingView's charting library, ~45KB gzipped)
+- Created `/api/candles` route (src/app/api/candles/route.ts):
+  * Proxy to Coinbase Products candles API (primary) and Kraken OHLC (fallback)
+  * Avoids browser CORS issues — server-side fetch
+  * 15s in-memory cache per (symbol+interval)
+  * Maps 40+ tokens to exchange-specific pair formats (BTC/USDT -> BTC-USD, etc.)
+  * Generic fallback for unknown symbols (FOO/USDT -> FOO-USD)
+  * Supports intervals: 1m, 5m, 15m, 1h, 4h, 1d
+- Extended `trading-store.ts` with `chartModalTrade` state + `setChartModalTrade` action
+- Created `src/components/trading/trade-chart-modal.tsx`:
+  * Uses shadcn Dialog (already in the project)
+  * Renders candlestick chart with dark theme matching the terminal
+  * Overlays:
+    - Entry price: solid blue line with ENTRY label
+    - Take Profit: dashed green line with TP label
+    - Stop Loss: dashed red line with SL label
+    - Catastrophic SL: dotted dark red line (faint)
+    - Exit price: purple circle marker at exit time (closed trades only)
+    - Live price: updates last candle's close on every tick (open trades)
+  * Timeframe selector: 1m / 5m / 15m / 1h (default 5m)
+  * Stats panel: entry, TP, SL, exit/current, CatSL, P&L — all with % distance from entry
+  * Legend explaining all colors
+  * Source attribution (Coinbase / Kraken / generic) + candle count
+- Patched `position-panel.tsx`:
+  * Made each position card clickable (cursor-pointer + hover highlight)
+  * Added a dedicated chart icon button next to the status badge
+  * Click anywhere on the card (except the CLOSE button) opens the chart
+- Patched `trade-log.tsx`:
+  * Made each closed-trade row clickable with hover highlight
+  * Added chart icon between reason badge and P&L
+- Mounted `<TradeChartModal />` at the bottom of `page.tsx`
+- Bumped version to v0.81 in footer
+- Typecheck: 0 errors in modified files (pre-existing errors in other files untouched)
+- Production build: success — /api/candles route registered
+
+Stage Summary:
+- Feature complete and compiling
+- New files: src/app/api/candles/route.ts, src/components/trading/trade-chart-modal.tsx
+- Modified: src/stores/trading-store.ts, src/components/trading/position-panel.tsx,
+  src/components/trading/trade-log.tsx, src/app/page.tsx, package.json
+- New dep: lightweight-charts ^4.2.3
+- User flow:
+  1. git pull origin terminal-web
+  2. npm install (to install lightweight-charts)
+  3. npm run dev
+  4. Click any open position in POSITION panel -> candlestick chart modal opens
+  5. Click any closed trade in TRADE LOG -> candlestick chart modal opens
+  6. For open positions: chart shows live price updates + current SL/TP (trailing)
+  7. For closed trades: chart shows historical entry + exit marker
+- Known limitations:
+  * Tokens not on Coinbase or Kraken (some low-cap alts like BONK, FLOKI, GALA)
+    will show "No candle data available" — they only have CoinGecko spot prices
+  * Marker API: if exit time is older than the candle window, exit marker is skipped
+  * Real-time updates only work while the modal is open; chart doesn't auto-scroll
+    forward in time (only updates the current candle's close)
