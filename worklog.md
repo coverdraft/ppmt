@@ -1330,3 +1330,57 @@ Stage Summary:
 - Next: v60 will explore 4-partial TP system (engine change), pyramiding on winners,
   and new strategy types (scalp RSI 5/95, vol-breakout) to break the WR plateau
   and push P&L higher. The user wants "mucha mas ganancia en menos tiempo".
+
+---
+Task ID: 33
+Agent: main
+Task: v60 push — push v59f's tiered approach further for more profit
+
+Work Log:
+- v60 tested 11 variants on 12 seeds (3 levers: size / SL-lock / trail):
+  * v60a (A 0.045 + B 0.20): P&L +39.84 (+3.81) — modest gain
+  * v60b (A 0.050 + B 0.20): P&L +42.89 (+6.86), MaxDD 0.28, Sharpe +8.30 ← CHAMPION
+  * v60c (A 0.040 + B 0.20): P&L +36.80 (+0.77) — minimal
+  * v60d (A 0.045 + B 0.225): P&L +40.49 (+4.46), MaxDD 0.27
+  * v60e (A 0.050 + B 0.225): P&L +43.54 (+7.51) — highest P&L but MaxDD 0.29 (at edge)
+  * v60f (SL 1.6): HURTS — wider SL reduces P&L
+  * v60g (SL 1.7): HURTS more — even wider SL worse
+  * v60h (lock_offset 0.40): no improvement — 0.35 is optimal
+  * v60i (trail 0.25): IDENTICAL — never triggers
+  * v60j (combo max): P&L +40.29 but MaxDD 0.30 — at safety limit
+- KEY LEARNINGS:
+  1. A 0.050 is the new sweet spot (was 0.040) — pushing A harder is clean win
+  2. B 0.20 is the new sweet spot (was 0.175) — pushing B harder is clean win
+  3. Wider SL (1.6/1.7) HURTS — 1.5 is optimal
+  4. Tighter lock (0.40) doesn't help — 0.35 is optimal
+  5. Tighter trail (0.25) doesn't trigger — 0.30 is optimal
+  6. MaxDD 0.29% (v60e) is at safety edge — chose v60b (0.28%) as champion
+  7. Sharpe +8.30 is highest in batch — v60b is best risk-adjusted
+  8. Same WR/Profit/AvgR as v59f — pure P&L scaling via size
+
+v60b APPLICATION (scripts/v60b_patch.py):
+- 6 edits applied to src/lib/paper-trading-engine.ts:
+  1. Header comment v59f → v60b
+  2. Header comparison block updated with v60b line
+  3. A base size 0.040 → 0.050
+  4. A strategy init comment v59f → v60b
+  5. B base size 0.175 → 0.20
+  6. B strategy init comment v59f → v60b
+- Backup created: .bak.v59f
+- Braces 0/0/0, parens 0/0/0, brackets 0/0/0 — all balanced
+- 7 v60b markers verified in source
+
+Stage Summary:
+- 🎯 v60b is the NEW PRODUCTION CHAMPION (12-seed validated):
+  * WR 79.4% (plateau since v53h)
+  * P&L +42.89 per 4h = +257 USDT/day projected (vs v59f +216, v58d +192, v38g +66)
+  * AvgR +0.77 (same as v53h+)
+  * MaxDD 0.28% (vs v59f 0.23%, v58d 0.21%, v53h 0.28%, v38g 0.31%)
+  * PF 2.56 (vs v59f 2.63, v58d 2.53, v53h 2.04, v38g 1.46)
+  * Sharpe +8.30 (HIGHEST in v60 batch)
+  * Profitable 67% of 12 seeds (same as v56d+)
+- Stack: v11→v12→v13→v14→v15→v16(revert)→v31b→v37e→v38g→v43a→v49c→v51e→v53h→v56d→v57i→v58d→v59f→v60b
+- For revert: cp src/lib/paper-trading-engine.ts.bak.v59f src/lib/paper-trading-engine.ts
+- Next: v61 will explore ENGINE CHANGES — pyramiding (add to winners), 4-partial TP,
+  and new strategy types (scalp RSI 5/95, vol-breakout) to break WR plateau.
+  Pure parameter tuning has hit diminishing returns.
