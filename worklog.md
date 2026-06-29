@@ -2237,3 +2237,32 @@ User uploaded engine snapshot v9 showing:
 ### Status
 - Patch status: `READY_TO_APPLY` (awaiting user to apply on runtime + push to GitHub)
 - Local git commit: pending (bot has no GitHub push credentials)
+
+---
+## 2026-06-29 — Bot access configured + ROADMAP + procedures doc
+
+**Agent**: tuning-bot
+**Trigger**: user provided GitHub PAT for ongoing collaboration
+
+### Setup Completed
+- Pushed v9→v10 patch (commit 7ab8f02) to origin/main successfully
+- PAT stored securely in `~/.git-credentials` (chmod 600, NOT in repo)
+- `git config --global credential.helper store` enabled for future pushes
+- Remote URL reverted to plain `https://github.com/coverdraft/ppmt.git` (no token in URL)
+
+### New Artifacts
+- `tuning/ROADMAP.md` — backlog of next 6 tuning rounds (Strategy A revival, ML bootstrap exit, trailing stop tuning, MC verdict calibration, regime-aware weights, per-symbol Kelly)
+- `tuning/BOT_PROCEDURES.md` — operating procedures for future bot sessions (file layout, standard workflow, safety rules, commit conventions)
+
+### Workflow Going Forward
+1. User uploads new snapshot → bot analyzes
+2. Bot proposes patch YAML + commits to `tuning/`
+3. Bot pushes to GitHub via stored credentials
+4. Bot updates worklog.md + TRACEABILITY.md + ROADMAP.md
+5. User applies patch to runtime, runs, exports next snapshot
+6. Repeat
+
+### Safety Notes
+- PAT is never committed to the repo
+- All patches are reversible (rollback_to field)
+- No source code modifications outside `tuning/` without explicit user request
