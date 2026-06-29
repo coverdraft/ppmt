@@ -281,10 +281,12 @@ const TAKER_FEE_PCT = 0.10
 const SLIPPAGE_PCT = 0.05
 
 const STRATEGY_ALLOCATION: Record<StrategyName, number> = {
-  A: 3000,
-  B: 2500,
-  C: 2500,
-  D: 2000,
+  // v14 NIGHT1 FIX: Strategy C pausada (WR 10-20% en ambos snapshots paralelos).
+  //   Capital redistribuido a B (mejor WR 40-50%) y D (R/R mejor con TP 4x ATR).
+  A: 1000,   // bajado: A apenas opera, no necesita tanto cash
+  B: 4000,   // subido: B tiene mejor WR en ambos snapshots
+  C: 0,      // PAUSADA — Strategy C era defectuosa
+  D: 5000,   // subido: D tiene mejor R/R teórico
 }
 
 const STRATEGY_INFO: Record<StrategyName, { name: string; description: string; color: string }> = {
@@ -730,7 +732,8 @@ export class PaperTradingEngine {
         console.log(`[Paper/TimeStop] ${sym} held ${Math.round(holdMs / 60000)}min — closing at market`)
         this.closePosition(sym)
         if (this.trades[0]) this.trades[0].close_reason = 'CLOSED_BY_TIME_STOP'
-        this.cooldownUntil.set(sym, now + 30 * 60 * 1000)
+        // v14 NIGHT1 FIX: cooldown 30min → 45min
+        this.cooldownUntil.set(sym, now + 45 * 60 * 1000)
         continue
       }
 
@@ -744,15 +747,17 @@ export class PaperTradingEngine {
         const prices = hist.map(h => h.price)
         const atr = computeATR(prices, 60)
         if (atr > 0) {
+          // v14 NIGHT1 FIX: SL fallback más ancho (1.5 → 2.0 ATR) y TP más cercano (3 → 2.5 ATR).
+          //   Reducía trades cerrados en <2min (35% en snapshot A).
           if (pos.current_sl === null) {
             pos.current_sl = isLong
-              ? pos.entry_price - atr * 1.5
-              : pos.entry_price + atr * 1.5
+              ? pos.entry_price - atr * 2.0
+              : pos.entry_price + atr * 2.0
           }
           if (pos.current_tp === null) {
             pos.current_tp = isLong
-              ? pos.entry_price + atr * 3
-              : pos.entry_price - atr * 3
+              ? pos.entry_price + atr * 2.5
+              : pos.entry_price - atr * 2.5
           }
         }
       }
@@ -833,7 +838,8 @@ export class PaperTradingEngine {
         )
         // Cooldown 30min after SL/CatSL (not after TP or trailing SL)
         if (reason === 'CLOSED_BY_SL' || reason === 'CLOSED_BY_CAT_SL') {
-          this.cooldownUntil.set(sym, now + 30 * 60 * 1000)
+          // v14 NIGHT1 FIX: cooldown 30min → 45min (reduce reentradas prematuras)
+          this.cooldownUntil.set(sym, now + 45 * 60 * 1000)
         }
         this.closePosition(sym)
         if (this.trades[0]) this.trades[0].close_reason = reason
@@ -858,7 +864,8 @@ export class PaperTradingEngine {
 
     this.runStrategyA_Momentum()
     this.runStrategyB_MeanRev()
-    this.runStrategyC_Breakout()
+    // v14 NIGHT1 FIX: Strategy C PAUSADA — WR 10-20% en 2 snapshots paralelos, pierde siempre.
+    // this.runStrategyC_Breakout()
     this.runStrategyD_Squeeze()
   }
 
@@ -917,9 +924,11 @@ export class PaperTradingEngine {
       if (result.success) {
         const pos = this.positions.get(top.symbol)
         if (pos) {
-          pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 1.5 : pos.entry_price + atr * 1.5
-          pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 3 : pos.entry_price - atr * 3
-          pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 4 : pos.entry_price + atr * 4
+          // v14 NIGHT1 FIX: SL más ancho (1.5 → 2.0 ATR), TP más cercano (3 → 2.5 ATR).
+          //   35% de trades A cerraban en <2min en snapshot A.
+          pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 2.0 : pos.entry_price + atr * 2.0
+          pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 2.5 : pos.entry_price - atr * 2.5
+          pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 5 : pos.entry_price + atr * 5
         }
         // FIX v12 BUG D: Compute ev_score + expected_move_pct so ML/Kelly can work.
         //   ev_score = confidence × expected_move_pct / 2  (heuristic)
@@ -996,9 +1005,11 @@ export class PaperTradingEngine {
       if (result.success) {
         const pos = this.positions.get(c.ticker.symbol)
         if (pos) {
-          pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 1.5 : pos.entry_price + atr * 1.5
-          pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 2 : pos.entry_price - atr * 2
-          pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 3 : pos.entry_price + atr * 3
+          // v14 NIGHT1 FIX: SL más ancho (1.5 → 2.0 ATR), TP más cercano (2 → 2.5 ATR).
+          //   LONG WR era 20% en snapshot B vs SHORT WR 40%. Más aire para que LONG respire.
+          pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 2.0 : pos.entry_price + atr * 2.0
+          pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 2.5 : pos.entry_price - atr * 2.5
+          pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 4 : pos.entry_price + atr * 4
         }
         // FIX v13 BUG K: Same ev_score computation as Strategy A.
         const expected_move_pct_b = +((atr * 2 / (pos?.entry_price || 1)) * 100).toFixed(3)
@@ -1137,8 +1148,9 @@ export class PaperTradingEngine {
       if (result.success) {
         const pos = this.positions.get(c.ticker.symbol)
         if (pos) {
-          pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 1 : pos.entry_price + atr * 1
-          pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 4 : pos.entry_price - atr * 4
+          // v14 NIGHT1 FIX: SL más ancho (1.0 → 1.5 ATR), TP más cercano (4 → 3 ATR).
+          pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 1.5 : pos.entry_price + atr * 1.5
+          pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 3 : pos.entry_price - atr * 3
           // FIX v13 BUG N: CatSL 2×ATR → 3.5×ATR (was too tight, caused CAT_SL hits)
           pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 3.5 : pos.entry_price + atr * 3.5
         }
