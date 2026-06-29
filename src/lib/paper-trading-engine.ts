@@ -356,6 +356,9 @@ export class PaperTradingEngine {
   private lastReportTime: number = 0
   private lastCBLogTime: number = 0
 
+  // FIX v0.84: Throttle "no price data" warnings per symbol (once per 30s)
+  private _noPriceWarn: Map<string, number> = new Map()
+
   constructor(priceFeed: LivePriceFeed) {
     this.priceFeed = priceFeed
     this.strategies = {
@@ -702,7 +705,19 @@ export class PaperTradingEngine {
 
     for (const [sym, pos] of Array.from(this.positions.entries())) {
       const ticker = this.priceFeed.getData(sym)
-      if (!ticker) continue
+      if (!ticker) {
+        // FIX v0.84: No price data for this symbol — can't check SL/TP.
+        // Log warning so we can diagnose (priceFeed may have dropped the
+        // WS subscription for this token). Position stays open but we
+        // can't risk closing it at a stale price.
+        // Throttle: only log once per 30s per symbol to avoid spam.
+        const lastWarn = this._noPriceWarn.get(sym) || 0
+        if (now - lastWarn > 30_000) {
+          console.warn(`[Paper/checkStops] ⚠️ No live price for ${sym} — SL/TP check skipped. Position stays open.`)
+          this._noPriceWarn.set(sym, now)
+        }
+        continue
+      }
       const price = ticker.price
       const isLong = pos.direction === 'LONG'
 
@@ -780,6 +795,24 @@ export class PaperTradingEngine {
       if (!skipStopLoss && pos.current_sl !== null) {
         if (isLong && price <= pos.current_sl) { hit = true; reason = pnlPct > 0 ? 'CLOSED_BY_TRAILING_SL' : 'CLOSED_BY_SL' }
         if (!isLong && price >= pos.current_sl) { hit = true; reason = pnlPct > 0 ? 'CLOSED_BY_TRAILING_SL' : 'CLOSED_BY_SL' }
+      }
+      // FIX v0.84: Debug log when SL is breached but skipped due to minHoldMs
+      if (skipStopLoss && pos.current_sl !== null) {
+        const slBreached = (isLong && price <= pos.current_sl) || (!isLong && price >= pos.current_sl)
+        if (slBreached) {
+          const lastWarn = this._noPriceWarn.get(sym + ':slskip') || 0
+          if (now - lastWarn > 10_000) {
+            console.warn(`[Paper/checkStops] ⏳ ${sym} SL=${pos.current_sl} breached (price=${price}) but held <3min — SL deferred`)
+            this._noPriceWarn.set(sym + ':slskip', now)
+          }
+        }
+      }
+      // FIX v0.84: Debug log when SL is breached but NOT closing (sanity check)
+      if (!skipStopLoss && pos.current_sl !== null && !hit) {
+        const slBreached = (isLong && price <= pos.current_sl) || (!isLong && price >= pos.current_sl)
+        if (slBreached) {
+          console.error(`[Paper/checkStops] 🚨 BUG: ${sym} SL=${pos.current_sl} breached (price=${price}) but hit=false — investigating`)
+        }
       }
       if (pos.current_tp !== null) {
         if (isLong && price >= pos.current_tp) { hit = true; reason = 'CLOSED_BY_TP' }

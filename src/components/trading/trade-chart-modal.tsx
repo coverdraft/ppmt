@@ -418,8 +418,15 @@ export function TradeChartModal() {
   const entryPrice = (trade as any).entry_price
   const entryTime = (trade as any).entry_time
   const sizeUsdt = (trade as any).size_usdt
-  const pnlPct = (trade as any).pnl_pct ?? 0
-  const pnlUsdt = (trade as any).pnl_usdt ?? 0
+  // For open positions, use LIVE P&L from the store's current positions array
+  // (not the stale snapshot from click time). For closed trades, use the
+  // historical P&L from the trade record (it never changes after close).
+  const pnlPct = isOpenPosition
+    ? (livePosition?.pnl_pct ?? (trade as any).pnl_pct ?? 0)
+    : ((trade as any).pnl_pct ?? 0)
+  const pnlUsdt = isOpenPosition
+    ? (livePosition?.pnl_usdt ?? (trade as any).pnl_usdt ?? 0)
+    : ((trade as any).pnl_usdt ?? 0)
   const isWin = pnlPct >= 0
 
   const tp = isOpenPosition ? (livePosition?.current_tp ?? (trade as any).current_tp) : (trade as any).current_tp
