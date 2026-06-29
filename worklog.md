@@ -1444,3 +1444,56 @@ Stage Summary:
 - For revert: cp src/lib/paper-trading-engine.ts.bak.v60b src/lib/paper-trading-engine.ts
 - Next: v62 will explore new strategies (scalp RSI 5/95, vol-breakout) and
   try pyramiding with different trigger R values (1.25R, 1.5R) to push further.
+
+---
+Task ID: 35
+Agent: main
+Task: v62 push — refine v61b's pyramiding (size / R / multi-pyramid)
+
+Work Log:
+- v62 tested 11 variants on 12 seeds (4 levers):
+  * v62a (Pyr75 B): P&L +48.56 (+2.58), MaxDD 0.29, PF 2.72, Sharpe +9.82 ← CHAMPION
+  * v62b (Pyr100 B): P&L +47.31 (+1.33), MaxDD 0.30 — at edge, +100% too aggressive
+  * v62c (Pyr50 0.8R B): P&L +46.59 (+0.61), Sharpe +11.51 (BEST) — earlier trigger marginal
+  * v62d (Pyr50 1.25R B): P&L +44.04 (-1.94) — later trigger misses some winners
+  * v62e (multi-pyramid +50/+30 @1R/2R): P&L +45.50 (-0.48) — 2nd pyramid rarely fires
+  * v62f (Pyr50 + A 0.055): P&L +49.03 (+3.05) BUT MaxDD 0.31 — over safe limit
+  * v62g (Pyr75 + A 0.055): P&L +51.62 (+5.64) BUT MaxDD 0.31 — over safe limit
+  * v62h (Pyr50 + trail 0.25): IDENTICAL — trail 0.25 never triggers
+  * v62i (Pyr50 + lock 0.40): P&L +46.21 (+0.23) — marginal
+  * v62j (max): P&L +45.53, MaxDD 0.34 — too aggressive
+- KEY LEARNINGS:
+  1. Pyramid +75% is the new sweet spot (was +50%) — clean +2.58 P&L with same risk
+  2. Pyramid +100% is at the edge (MaxDD 0.30%) — too aggressive
+  3. Pyramid at +0.8R doesn't help much (most winners reach +1.0R quickly anyway)
+  4. Pyramid at +1.25R MISSES winners (price trails out before reaching 1.25R)
+  5. Multi-pyramid (2nd at +2.0R) rarely fires — most trades close before +2.0R
+  6. A 0.055 with pyramid blows MaxDD (0.31%) — A's still too volatile for bigger size
+  7. Sharpe improvement: +8.78 → +9.82 (v62a) — better risk-adjusted returns
+  8. PF improvement: 2.66 → 2.72 — confirms +75% is right size
+
+v62a APPLICATION (inline edit, no patch script needed):
+- 5 edits applied to src/lib/paper-trading-engine.ts:
+  1. Header comment v61b → v62a
+  2. Header comparison block updated with v62a line
+  3. pyramidPct 0.50 → 0.75
+  4. PYRAMID log message v61b → v62a, +50% → +75%
+  5. A strategy init comment v61b → v62a
+  6. B strategy init comment v61b → v62a
+- Backup created: .bak.v61b
+- Braces 0/0/0, parens 0/0/0, brackets 0/0/0 — all balanced
+- 7 v62a markers verified in source
+
+Stage Summary:
+- 🎯 v62a is the NEW PRODUCTION CHAMPION (12-seed validated):
+  * WR 79.6% (same as v61b)
+  * P&L +48.56 per 4h = +291 USDT/day projected (vs v61b +276, v60b +257, v38g +66)
+  * AvgR +0.75 (slight drop from +0.76 due to bigger pyramided positions closing at smaller R)
+  * MaxDD 0.29% (same as v61b — well managed)
+  * PF 2.72 (vs v61b 2.66, v60b 2.56, v59f 2.63, v58d 2.53, v53h 2.04, v38g 1.46)
+  * Sharpe +9.82 (vs v61b +8.78 — BIG improvement in risk-adjusted returns)
+  * Profitable 67% of 12 seeds (same as v56d+)
+- Stack: v11→v12→v13→v14→v15→v16(revert)→v31b→v37e→v38g→v43a→v49c→v51e→v53h→v56d→v57i→v58d→v59f→v60b→v61b→v62a
+- For revert: cp src/lib/paper-trading-engine.ts.bak.v61b src/lib/paper-trading-engine.ts
+- Next: v63 will explore new strategy types (scalp RSI 5/95, vol-breakout) to add
+  trade frequency. Pyramiding has been optimized — next gains come from NEW signals.
