@@ -2184,3 +2184,56 @@ Stage Summary:
 - Rolling retrain pipeline ready with acceptance gate (AUC-based)
 - Monitor CLI provides real-time visibility into system health
 - All new modules tested and working correctly
+
+---
+## 2026-06-29 — Tuning Round v9 → v10 (paper engine)
+
+**Agent**: tuning-bot (post-snapshot analysis)
+**Trigger**: user-provided snapshot `ppmt-export-v9` (2026-06-28 18:45:23 local)
+
+### Context
+User uploaded engine snapshot v9 showing:
+- 20 closed trades, 40% win rate, **PF 0.92** (losing)
+- L7 losing streak at close
+- Strategy A (Momentum) never fired (3,000 USDT idle)
+- Strategy C (Breakout) 30% WR, -1.25 USDT realized
+- ML in BOOTSTRAP, confidence clavada 0.9 SHORT con EV 0.27
+- Monte Carlo PASS but `prob_profit=45.4%`, `p95_dd=0` → false positive (session 12.5 min)
+
+### Diagnosis (full: `tuning/v9_snapshot_analysis.md`)
+1. R:R configured 2.5 vs realized payoff ratio 1.39 → TP not reached, SL hits first
+2. ML overconfident on weak EV signals
+3. Capital ocioso en Strategy A; Strategy C destruye valor
+4. Monte Carlo PASS engañoso por dataset corto
+
+### Patch Applied (full: `tuning/v9_to_v10_tuning_patch.yaml`)
+7 changes, all with explicit `before` / `after` / `rollback_to`:
+- CHANGE_1: TP 2.5 → 1.8, SL 1.5 → 1.2 ATR
+- CHANGE_2: Strategy C capital 2500 → 1000
+- CHANGE_3: Strategy A debug log rejections ON (diagnostic, no capital change)
+- CHANGE_4: min_confidence 0.65 → 0.75, min_ev_score 0 → 0.30
+- CHANGE_5: Exposure cap 80% → 30% during BOOTSTRAP (lift when ML=LEARNED & trades≥500 & PF≥1.10)
+- CHANGE_6: Streak circuit breaker L10 → auto-pause + 30min cooldown
+- CHANGE_7: Trailing stop activation 1.0% → 0.7%
+
+### Traceability
+- `tuning/TRACEABILITY.md` contains comparison table v9 vs v10 (to fill post-run)
+- Rollback procedure documented in the patch YAML
+- Lift conditions for bootstrap caps explicitly defined
+
+### Next Steps
+1. User applies patch to runtime engine (config keys are documented; the multi-strategy engine that produced v9 is NOT in this repo — runtime lives elsewhere)
+2. Run ≥24h, accumulate ≥100 trades
+3. Export `ppmt-export-v10`
+4. Fill TRACEABILITY.md with v10 metrics
+5. Decision: KEEP / REFINE / ROLLBACK based on rules in TRACEABILITY.md
+
+### Artifacts Added
+- `tuning/README.md` — directory index + workflow
+- `tuning/v9_snapshot_analysis.md` — full diagnostic report
+- `tuning/v9_to_v10_tuning_patch.yaml` — explicit parameter changes
+- `tuning/TRACEABILITY.md` — per-round result log
+
+### Status
+- Patch status: `READY_TO_APPLY` (awaiting user to apply on runtime + push to GitHub)
+- Local git commit: pending (bot has no GitHub push credentials)

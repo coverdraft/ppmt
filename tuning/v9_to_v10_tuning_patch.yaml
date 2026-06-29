@@ -1,0 +1,214 @@
+# PPMT Tuning Patch — v9 → v10
+# ─────────────────────────────────────────────────────────────────────────────
+# Snapshot base:  ppmt-export-v9  (2026-06-28 18:45:23 local)
+# Snapshot target: ppmt-export-v10 (post-application, run ≥24h)
+#
+# Convención:
+#   each change block has:
+#     path:        dotted path in the engine config (informational)
+#     before:      value in v9 snapshot
+#     after:       new value for v10
+#     rationale:   why this change
+#     rollback_to: value to restore if regression (== before for single changes)
+#     expected_effect: qualitative expectation
+# ─────────────────────────────────────────────────────────────────────────────
+
+patch_id: "v9_to_v10"
+patch_date: "2026-06-29"
+base_snapshot: "ppmt-export-v9"
+target_snapshot: "ppmt-export-v10"
+applied_by: "tuning-bot"
+status: "READY_TO_APPLY"   # READY_TO_APPLY | APPLIED | ROLLED_BACK
+
+# Runtime context at v9 baseline
+baseline_metrics:
+  total_trades: 20
+  win_rate_pct: 40
+  profit_factor: 0.92
+  total_pnl_pct: -0.03
+  max_drawdown_pct: 0.03
+  avg_hold_min: 13
+  avg_win_usdt: 0.68
+  avg_loss_usdt: -0.49
+  payoff_ratio: 1.39           # avg_win / |avg_loss|
+  last_streak: "L7"
+  ml_stage: "BOOTSTRAP"
+  exposure_pct: 5.8
+  monte_carlo_verdict: "PASS"  # ⚠️ false positive, see rationale below
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CHANGE 1 — Take-profit / Stop-loss rebalance
+# ─────────────────────────────────────────────────────────────────────────────
+# Problem: R:R configured 2.5 but realized payoff ratio = 1.39.
+#          SL hits before TP systematically → TP almost never reached.
+# Solution: lower TP target to make it reachable, tighten SL slightly
+#           to cap losses, target payoff ratio >= 1.7.
+- id: CHANGE_1_TP_SL_REBALANCE
+  path: "risk.money_manager.takeProfitMultiplier"
+  before: 2.5
+  after: 1.8
+  rationale: >
+    Snapshot v9 showed TP hit only 8/20 trades (40%) while SL hit 12/20 (60%).
+    Avg win +0.68 / avg loss -0.49 → realized payoff ratio 1.39, far below
+    the configured R:R of 2.5. Lowering TP multiplier to 1.8 brings the
+    target closer to the avg realized move and should lift TP hit-rate
+    toward 50-55%.
+  rollback_to: 2.5
+  expected_effect: "win_rate +5-10pp, payoff_ratio → 1.6-1.8, PF → 1.05-1.20"
+
+- id: CHANGE_1B_SL_ATR_TIGHTEN
+  path: "risk.money_manager.stopLossATR"
+  before: 1.5
+  after: 1.2
+  rationale: >
+    Complementary to CHANGE_1: tighten SL to 1.2 ATR so loss per trade
+    shrinks proportionally. With TP=1.8 ATR × and SL=1.2 ATR, configured
+    R:R = 1.5 (more realistic given the choppy regime observed in v9).
+  rollback_to: 1.5
+  expected_effect: "avg_loss -20% (from -0.49 to ~-0.39), slight increase in SL hits"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CHANGE 2 — Strategy C (Breakout) capital reduction
+# ─────────────────────────────────────────────────────────────────────────────
+- id: CHANGE_2_STRATEGY_C_CAPITAL_REDUCE
+  path: "strategies.C.allocated"
+  before: 2500
+  after: 1000
+  rationale: >
+    Strategy C (Breakout) closed 10 trades with only 30% win rate and
+    realized PnL -1.25 USDT (worst of all 4 strategies). Reducing its
+    allocation from 2500 to 1000 caps the bleeding while we collect
+    more data. The 1500 USDT freed stays as cash until Strategy C
+    proves edge in next 50 trades.
+  rollback_to: 2500
+  expected_effect: "Strategy C max loss per session -60%, total portfolio PF improvement"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CHANGE 3 — Strategy A (Momentum) diagnostic instrumentation
+# ─────────────────────────────────────────────────────────────────────────────
+- id: CHANGE_3_STRATEGY_A_DIAGNOSTIC
+  path: "strategies.A.debug_log_rejections"
+  before: false
+  after: true
+  rationale: >
+    Strategy A has 0 trades in 12.5 min session with 3,000 USDT allocated.
+    We need to know WHY it's not firing: signal threshold too strict,
+    volume filter rejecting everything, or upstream data issue.
+    Enable verbose rejection logging so the next snapshot's logs expose
+    the reason. No capital change yet — diagnose first.
+  rollback_to: false
+  expected_effect: >
+    Next 1h of logs will show rejection reasons: 'vol_filter' /
+    'confidence_too_low' / 'cooldown' / 'no_candidate'. Depending on
+    the dominant reason, a follow-up patch will adjust thresholds.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CHANGE 4 — Confidence & EV score thresholds raised
+# ─────────────────────────────────────────────────────────────────────────────
+- id: CHANGE_4_MIN_CONFIDENCE_RAISE
+  path: "signal.min_confidence"
+  before: 0.65
+  after: 0.75
+  rationale: >
+    v9 generated 20 signals at 20/h rate, but win_rate is only 40%.
+    Many signals had confidence 0.65 (BREAKOUT_* family) which is
+    the minimum threshold. Raising to 0.75 filters out the marginal
+    BREAKOUT signals while keeping the strong MEANREV_RSI100_SHORT
+    (confidence 0.9) and SQUEEZE_* (0.7+).
+  rollback_to: 0.65
+  expected_effect: "signal_rate -30% (from 20/h to ~14/h), win_rate +5-8pp"
+
+- id: CHANGE_4B_EV_SCORE_FILTER
+  path: "signal.min_ev_score"
+  before: 0.0    # not enforced in v9
+  after: 0.30
+  rationale: >
+    v9 had signals with ev_score 0.27 (MEANREV_RSI100_SHORT) which
+    is below 0.30. These signals had confidence 0.9 but their EV
+    was weak — overconfidence. Hard floor at 0.30 EV ensures we
+    only take signals with positive expected value.
+  rollback_to: 0.0
+  expected_effect: "filters ~30% of low-EV signals, avg EV per taken trade +20%"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CHANGE 5 — Exposure cap until ML exits BOOTSTRAP
+# ─────────────────────────────────────────────────────────────────────────────
+- id: CHANGE_5_EXPOSURE_CAP_BOOTSTRAP
+  path: "risk.money_manager.maxExposurePctDuringBootstrap"
+  before: 0.80   # default cap
+  after: 0.30
+  rationale: >
+    ML is in BOOTSTRAP stage (no retrain yet, drift_detected=false).
+    v9 Monte Carlo verdict PASS is a false positive because session
+    is only 12.5 min long and p95_dd=0 (insufficient paths). Cap
+    exposure to 30% until ML exits BOOTSTRAP AND total_trades >= 500.
+    This prevents catastrophic loss if the bootstrap signals are wrong.
+  rollback_to: 0.80
+  expected_effect: "max portfolio at risk -62% during bootstrap, lower tail risk"
+  lift_condition: "ml_stage == 'LEARNED' AND total_trades >= 500"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CHANGE 6 — Streak circuit breaker (auto-pause on L10+)
+# ─────────────────────────────────────────────────────────────────────────────
+- id: CHANGE_6_STREAK_CIRCUIT_BREAKER
+  path: "risk.circuit_breakers.losing_streak_pause"
+  before:
+    enabled: false
+    threshold: null
+  after:
+    enabled: true
+    threshold: 10          # consecutive losses
+    action: "pause_auto_mode"
+    cooldown_min: 30
+  rationale: >
+    v9 closed with L7 streak. If it reaches L10, the probability of
+    a systematic regime mismatch is high (>80% based on binomial test
+    with p=0.4 win rate). Auto-pause prevents revenge trading and
+    forces manual review of drift / regime change.
+  rollback_to:
+    enabled: false
+    threshold: null
+  expected_effect: "auto-pause triggers within 30 min of L10; manual review required to resume"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CHANGE 7 — Trailing stop activation lowered
+# ─────────────────────────────────────────────────────────────────────────────
+- id: CHANGE_7_TRAILING_ACTIVATION_LOWER
+  path: "risk.money_manager.trailingStopActivationPct"
+  before: 1.0   # 1.0% unrealized profit
+  after: 0.7
+  rationale: >
+    v9 had 0 trailing-stop closes — activation at 1.0% was never reached
+    because TP at 0.6-0.9% expected move was hit first OR SL was hit.
+    Lowering activation to 0.7% means trailing kicks in earlier and
+    protects gains on the trades that do move in our favor.
+  rollback_to: 1.0
+  expected_effect: "trailing closes 10-20% of trades, reducing give-back on reversals"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POST-APPLICATION CHECKLIST
+# ─────────────────────────────────────────────────────────────────────────────
+post_application_checks:
+  - "Restart paper engine to pick up new config"
+  - "Confirm config diff visible in startup log"
+  - "Run ≥24h before evaluating"
+  - "Minimum 100 trades before judging PF"
+  - "Export next snapshot as ppmt-export-v10"
+  - "Fill TRACEABILITY.md entry with v10 metrics"
+  - "Compare v9 vs v10 in TRACEABILITY.md table"
+
+# LIFT CONDITIONS (when to undo bootstrap caps)
+lift_conditions:
+  change_5_exposure_cap:
+    requires:
+      - "ml_stage == 'LEARNED'"
+      - "total_trades >= 500"
+      - "profit_factor >= 1.10 over last 100 trades"
+    action: "rollback_to 0.80"
+
+# ROLLBACK PROCEDURE
+# If v10 shows regression (PF < 0.92 OR win_rate < 35% OR L10+ streak):
+#   1. Set status: ROLLED_BACK in this file
+#   2. Restore all `rollback_to` values in the engine config
+#   3. Re-export snapshot as ppmt-export-v9_rolled_back
+#   4. Add entry to TRACEABILITY.md noting rollback + reason
