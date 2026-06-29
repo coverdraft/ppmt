@@ -134,7 +134,6 @@ export interface PaperPosition {
   partial1_done?: boolean       // v53h: first partial at +0.5R (close 5%)
   partial2_done?: boolean       // v53h: second partial at +1.0R (close 10%, no trail yet)
   partial3_done?: boolean       // v53h NEW: third partial at +1.25R (close 15%, enable trail)
-  pyramid_done?: boolean         // v61b NEW: pyramid at +1.0R (B only, +50% size, reset partials)
   trail_active?: boolean
   max_favorable_price?: number
   initial_atr?: number
@@ -797,7 +796,7 @@ export class PaperTradingEngine {
         }
       }
 
-      // ─── v61b: Lock + 3-Partial TP + Trailing + TIERED Adaptive + A 0.050 + B 0.20 + PYRAMID B @+1.0R ───
+      // ─── v60b: Lock profit + 3-Partial TP + Trailing + TIERED Adaptive ATR + A 0.050 + B 0.20 ───
       // These run on every tick to manage open positions proactively.
       // Lock:     move SL to entry+0.35R when +0.5R reached (unchanged from v51e)
       // Partial1: close 5% at +0.5R (unchanged from v53h)
@@ -818,10 +817,9 @@ export class PaperTradingEngine {
       // vs v57i:  WR 79.4%, P&L +28.83, Profitable 67%, MaxDD 0.19%, AvgR +0.77, PF 2.63
       // vs v58d:  WR 79.4%, P&L +32.12, Profitable 67%, MaxDD 0.21%, AvgR +0.77, PF 2.53
       // vs v59f:  WR 79.4%, P&L +36.03, Profitable 67%, MaxDD 0.23%, AvgR +0.77, PF 2.63
-      // vs v60b:  WR 79.4%, P&L +42.89, Profitable 67%, MaxDD 0.28%, AvgR +0.77, PF 2.56
-      // → +17.6pp WR vs v38g, +318% P&L vs v38g, +43% P&L vs v58d, +7.3% P&L vs v60b
+      // → +17.6pp WR vs v38g, +295% P&L vs v38g, +33.6% P&L vs v58d, +19% P&L vs v59f
       if (pos.initial_atr && pos.initial_sl_distance && pos.initial_sl_distance > 0) {
-        let rMultiple = isLong
+        const rMultiple = isLong
           ? (price - pos.entry_price) / pos.initial_sl_distance
           : (pos.entry_price - price) / pos.initial_sl_distance
 
@@ -829,46 +827,6 @@ export class PaperTradingEngine {
         if (pos.max_favorable_price === undefined) pos.max_favorable_price = pos.entry_price
         if (isLong && price > pos.max_favorable_price) pos.max_favorable_price = price
         if (!isLong && price < pos.max_favorable_price) pos.max_favorable_price = price
-
-        // v61b NEW: PYRAMID at +1.0R (Strategy B only) — add 50% more size at current price
-        //   - Increases pos.qty by 50%
-        //   - Recomputes pos.entry_price as weighted average
-        //   - Resets SL to new_entry - 1.5*ATR (gives pyramided position room)
-        //   - Resets partial1/2/3_done, lock_done, trail_active so they re-fire on pyramided pos
-        //   12-seed validation: +3.13 P&L vs v60b, MaxDD +0.01% (negligible risk increase)
-        if (!pos.pyramid_done && pos.strategy === 'B' && rMultiple >= 1.0) {
-          const pyramidPct = 0.50
-          const oldQty = pos.qty
-          const oldEntry = pos.entry_price
-          const addQty = oldQty * pyramidPct
-          const newQty = oldQty + addQty
-          const newEntry = (oldQty * oldEntry + addQty * price) / newQty
-          pos.qty = newQty
-          pos.entry_price = newEntry
-          // Recompute ATR and SL distance for pyramided position
-          const newATR = computeATR(hist.map(h => h.price), 60)
-          if (newATR > 0) {
-            pos.initial_atr = newATR
-            pos.initial_sl_distance = newATR * 1.5
-            pos.current_sl = isLong ? newEntry - newATR * 1.5 : newEntry + newATR * 1.5
-            pos.catastrophic_sl = isLong ? newEntry - newATR * 4 : newEntry + newATR * 4
-            pos.current_tp = null
-          }
-          // Reset partials + lock + trail so they fire again on pyramided position
-          pos.partial1_done = false
-          pos.partial2_done = false
-          pos.partial3_done = false
-          pos.lock_done = false
-          pos.trail_active = false
-          pos.max_favorable_price = price
-          pos.pyramid_done = true
-          console.log(`[Paper/v61b] ${sym} PYRAMID +50% @ ${price} (R was ${rMultiple.toFixed(2)}, new entry ${newEntry.toFixed(4)})`)
-        }
-
-        // v61b: Recompute rMultiple after pyramid (entry_price may have changed)
-        rMultiple = isLong
-          ? (price - pos.entry_price) / (pos.initial_sl_distance || 1)
-          : (pos.entry_price - price) / (pos.initial_sl_distance || 1)
 
         // 1. Lock profit at +0.5R → move SL to entry+0.35R (v51e: 0.2→0.35, tighter BE)
         if (!pos.lock_done && rMultiple >= 0.5) {
@@ -1150,8 +1108,8 @@ export class PaperTradingEngine {
       if (result.success) {
         const pos = this.positions.get(top.symbol)
         if (pos) {
-          // v61b: SL 1.5 ATR + lock 0.5R (offset 0.35R) + p1 5% @ 0.5R + p2 10% @ 1.0R + p3 15% @ 1.25R + trail 0.30 ATR + ATR floor 0.58% + momentum 0.55% + TIERED SIZE (0.4/0.7/1.0 by ATR) + PYRAMID B @+1.0R
-          //   12-seed validation: WR 79.4%, P&L +42.89 (A), Profitable 67% of seeds, MaxDD 0.28%, PF 2.56
+          // v60b: SL 1.5 ATR + lock 0.5R (offset 0.35R) + p1 5% @ 0.5R + p2 10% @ 1.0R + p3 15% @ 1.25R + trail 0.30 ATR + ATR floor 0.58% + momentum 0.55% + TIERED SIZE (0.4/0.7/1.0 by ATR)
+          //   12-seed validation: WR 79.4%, P&L +42.89, Profitable 67% of seeds, MaxDD 0.28%, PF 2.56, Sharpe +8.30
           pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 1.5 : pos.entry_price + atr * 1.5
           pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 1.2 : pos.entry_price - atr * 1.2
           pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 4 : pos.entry_price + atr * 4
@@ -1162,7 +1120,6 @@ export class PaperTradingEngine {
           pos.partial1_done = false
           pos.partial2_done = false
           pos.partial3_done = false
-          pos.pyramid_done = false
           pos.trail_active = false
           pos.max_favorable_price = pos.entry_price
         }
@@ -1257,8 +1214,8 @@ export class PaperTradingEngine {
       if (result.success) {
         const pos = this.positions.get(c.ticker.symbol)
         if (pos) {
-          // v61b: SL 1.5 ATR + v61b state init (lock 0.5R offset 0.35R / p1 5% @ 0.5R / p2 10% @ 1.0R / p3 15% @ 1.25R / trail 0.30 ATR / PYRAMID +50% @ +1.0R)
-          //   B size: 0.20 base, TIERED 0.4/0.7/1.0 by ATR, pyramided +50% at +1.0R (v61b: was 0.175 in v59f)
+          // v60b: SL 1.5 ATR + v60b state init (lock 0.5R offset 0.35R / p1 5% @ 0.5R / p2 10% @ 1.0R / p3 15% @ 1.25R / trail 0.30 ATR)
+          //   B size: 0.20 base, TIERED 0.4/0.7/1.0 by ATR (v60b: was 0.175 in v59f)
           pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 1.5 : pos.entry_price + atr * 1.5
           pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 1.2 : pos.entry_price - atr * 1.2
           pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 4 : pos.entry_price + atr * 4
@@ -1269,7 +1226,6 @@ export class PaperTradingEngine {
           pos.partial1_done = false
           pos.partial2_done = false
           pos.partial3_done = false
-          pos.pyramid_done = false
           pos.trail_active = false
           pos.max_favorable_price = pos.entry_price
         }
