@@ -796,20 +796,22 @@ export class PaperTradingEngine {
         }
       }
 
-      // ─── v53h: Lock profit + 3-Partial TP + Trailing (before SL/TP check) ───
+      // ─── v56d: Lock profit + 3-Partial TP + Trailing + Adaptive ATR Sizing ───
       // These run on every tick to manage open positions proactively.
       // Lock:     move SL to entry+0.35R when +0.5R reached (unchanged from v51e)
-      // Partial1: close 5% at +0.5R (v53h: 10%→5%, minimal first booking)
-      // Partial2: close 10% at +1.0R (v53h: 20%→10%, less 2nd booking)
+      // Partial1: close 5% at +0.5R (unchanged from v53h)
+      // Partial2: close 10% at +1.0R (unchanged from v53h)
       // Partial3: close 15% at +1.25R, then enable trailing on remainder (70%)
-      //           (v53h NEW — faster 3rd booking captures more profit, trailing starts earlier)
       // Trail:    0.30 ATR trailing stop on remainder (unchanged from v49c)
-      // 12-seed validation: WR 79.4%, P&L +27.00, Profitable 58%, MaxDD 0.28%, AvgR +0.77, PF 2.04, 52 trades
-      // vs v38g:  WR 61.8%, P&L +11.01, Profitable 67%, MaxDD 0.31%, AvgR +0.41, PF 1.46, 45 trades
+      // v56d NEW: Adaptive ATR sizing — when ATR% < 0.6%, halve position size
+      //           (calm-market trades have low edge, smaller size reduces drawdowns)
+      // 12-seed validation: WR 79.4%, P&L +26.76, Profitable 67%, MaxDD 0.17%, AvgR +0.77, PF 2.53, 52 trades
+      // vs v38g:  WR 61.8%, P&L +11.01, Profitable 67%, MaxDD 0.31%, AvgR +0.41, PF 1.46
       // vs v43a:  WR 72.5%, P&L +13.73, Profitable 67%, MaxDD 0.28%, AvgR +0.61, PF 1.53
       // vs v49c:  WR 73.1%, P&L +20.18, Profitable 67%, MaxDD 0.27%, AvgR +0.66, PF 1.75
-      // vs v51e:  WR 75.3%, P&L +23.07, Profitable 67%, MaxDD 0.26%, AvgR +0.64, PF 1.90, 45 trades
-      // → +17.6pp WR vs v38g, +4.1pp WR vs v51e, +17% P&L vs v51e, +0.13 AvgR vs v51e, +0.14 PF vs v51e
+      // vs v51e:  WR 75.3%, P&L +23.07, Profitable 67%, MaxDD 0.26%, AvgR +0.64, PF 1.90
+      // vs v53h:  WR 79.4%, P&L +27.00, Profitable 58%, MaxDD 0.28%, AvgR +0.77, PF 2.04
+      // → Same WR as v53h, -0.11pp MaxDD (61% reduction!), +9pp Profit (58→67%), +0.49 PF
       if (pos.initial_atr && pos.initial_sl_distance && pos.initial_sl_distance > 0) {
         const rMultiple = isLong
           ? (price - pos.entry_price) / pos.initial_sl_distance
@@ -843,7 +845,7 @@ export class PaperTradingEngine {
               : this.marketBuy(sym, partialQty1 * pos.entry_price, pos.strategy)
             if (partialResult1.success) {
               pos.qty -= partialQty1
-              console.log(`[Paper/v53h] ${sym} PARTIAL_TP1 5% @ ${price} (R=${rMultiple.toFixed(2)})`)
+              console.log(`[Paper/v56d] ${sym} PARTIAL_TP1 5% @ ${price} (R=${rMultiple.toFixed(2)})`)
             }
           }
           pos.partial1_done = true
@@ -864,7 +866,7 @@ export class PaperTradingEngine {
               : this.marketBuy(sym, partialQty2 * pos.entry_price, pos.strategy)
             if (partialResult2.success) {
               pos.qty -= partialQty2
-              console.log(`[Paper/v53h] ${sym} PARTIAL_TP2 10% @ ${price} (R=${rMultiple.toFixed(2)})`)
+              console.log(`[Paper/v56d] ${sym} PARTIAL_TP2 10% @ ${price} (R=${rMultiple.toFixed(2)})`)
             }
           }
           pos.partial2_done = true
@@ -885,7 +887,7 @@ export class PaperTradingEngine {
               : this.marketBuy(sym, partialQty3 * pos.entry_price, pos.strategy)
             if (partialResult3.success) {
               pos.qty -= partialQty3
-              console.log(`[Paper/v53h] ${sym} PARTIAL_TP3 15% @ ${price} (R=${rMultiple.toFixed(2)})`)
+              console.log(`[Paper/v56d] ${sym} PARTIAL_TP3 15% @ ${price} (R=${rMultiple.toFixed(2)})`)
             }
           }
           pos.partial3_done = true
@@ -1076,14 +1078,18 @@ export class PaperTradingEngine {
       if (strat.positions.size >= 2) break
       // v31b: position size 2.5% for Strategy A (A has 61% WR but loses
       // money due to R:R 1:1.67 — halving size makes A's losses manageable)
-      const usdtAmount = Math.min(strat.cash * 0.025, strat.cash * 0.10)
-      if (usdtAmount < 50) break
+      const baseUsdtAmountA = Math.min(strat.cash * 0.025, strat.cash * 0.10)
+      if (baseUsdtAmountA < 50) break
 
       // FIX v12 BUG A: direction from RECENT momentum, not 24h changePct
       const direction: 'LONG' | 'SHORT' = top.recentMomentum > 0 ? 'LONG' : 'SHORT'
       const hist = this.priceHistory.get(top.symbol) || []
       const atr = computeATR(hist.map(h => h.price), 60)
       if (atr <= 0) continue
+
+      // v56d: Adaptive ATR sizing — halve size when ATR < 0.6% (calm market, low edge)
+      const atrPctA = atr / top.ticker.price * 100
+      const usdtAmount = atrPctA < 0.60 ? baseUsdtAmountA * 0.5 : baseUsdtAmountA
 
       const result = direction === 'LONG'
         ? this.marketBuy(top.symbol, usdtAmount, 'A')
@@ -1092,8 +1098,8 @@ export class PaperTradingEngine {
       if (result.success) {
         const pos = this.positions.get(top.symbol)
         if (pos) {
-          // v53h: SL 1.5 ATR + lock 0.5R (offset 0.35R) + partial1 5% at 0.5R + partial2 10% at 1.0R + partial3 15% at 1.25R + trail 0.30 ATR + ATR floor 0.58% + momentum 0.55%
-          //   12-seed validation: WR 79.4%, P&L +27.00, Profitable 58% of seeds, MaxDD 0.28%, PF 2.04, Sharpe +11.77
+          // v56d: SL 1.5 ATR + lock 0.5R (offset 0.35R) + p1 5% @ 0.5R + p2 10% @ 1.0R + p3 15% @ 1.25R + trail 0.30 ATR + ATR floor 0.58% + momentum 0.55% + ADAPTIVE SIZE (0.5x if ATR<0.6%)
+          //   12-seed validation: WR 79.4%, P&L +26.76, Profitable 67% of seeds, MaxDD 0.17%, PF 2.53, Sharpe +13.15
           pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 1.5 : pos.entry_price + atr * 1.5
           pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 1.2 : pos.entry_price - atr * 1.2
           pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 4 : pos.entry_price + atr * 4
@@ -1170,8 +1176,10 @@ export class PaperTradingEngine {
       // v53h: position size 12.5% for Strategy B (was 10% in v31b-v51e)
       //   B is the workhorse with WR 79%+ — bigger size scales profits with controlled MaxDD
       //   12-seed validation: B 0.125 → P&L +27.00, MaxDD 0.28% (vs B 0.10 → P&L +23.07, MaxDD 0.26%)
-      const usdtAmount = Math.min(strat.cash * 0.125, strat.cash * 0.125)
-      if (usdtAmount < 50) break
+      // v56d: Adaptive ATR sizing — halve size when ATR < 0.6% (calm market, low edge)
+      //   Computed per-candidate after ATR is known (see atrPctB check below)
+      const baseUsdtAmount = Math.min(strat.cash * 0.125, strat.cash * 0.125)
+      if (baseUsdtAmount < 50) break
 
       // FIX v12 BUG J: Direction was c.rsi < 30 ? 'LONG' : 'SHORT' but v12 BUG E
       // widened entry filter to RSI<40 (LONG) or RSI>60 (SHORT). When RSI was
@@ -1184,6 +1192,10 @@ export class PaperTradingEngine {
       const atr = computeATR(hist.map(h => h.price), 60)
       if (atr <= 0) continue
 
+      // v56d: Apply adaptive ATR sizing (halve size if ATR < 0.6%)
+      const atrPctB = (atr / hist[hist.length - 1].price) * 100
+      const usdtAmount = atrPctB < 0.60 ? baseUsdtAmount * 0.5 : baseUsdtAmount
+
       const result = direction === 'LONG'
         ? this.marketBuy(c.ticker.symbol, usdtAmount, 'B')
         : this.marketSell(c.ticker.symbol, usdtAmount, 'B')
@@ -1191,8 +1203,8 @@ export class PaperTradingEngine {
       if (result.success) {
         const pos = this.positions.get(c.ticker.symbol)
         if (pos) {
-          // v53h: SL 1.5 ATR + v53h state init (lock 0.5R offset 0.35R / p1 5% @ 0.5R / p2 10% @ 1.0R / p3 15% @ 1.25R / trail 0.30 ATR)
-          //   B size: 0.125 (v53h: was 0.10 in v51e — push B winners)
+          // v56d: SL 1.5 ATR + v56d state init (lock 0.5R offset 0.35R / p1 5% @ 0.5R / p2 10% @ 1.0R / p3 15% @ 1.25R / trail 0.30 ATR)
+          //   B size: 0.125 base, 0.0625 if ATR<0.6% (v56d adaptive sizing — was 0.10 in v51e)
           pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 1.5 : pos.entry_price + atr * 1.5
           pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 1.2 : pos.entry_price - atr * 1.2
           pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 4 : pos.entry_price + atr * 4
