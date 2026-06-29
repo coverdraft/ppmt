@@ -762,3 +762,47 @@ Stage Summary:
 - Build verified, typecheck clean (only pre-existing errors in scripts/terminal/)
 - User flow unchanged: git pull origin terminal-web && npm run dev
 - Click any position or trade → chart opens with correct live data
+
+---
+Task ID: 22
+Agent: main
+Task: v14 — Night 1 Fix basado en análisis de 2 snapshots paralelos
+
+Work Log:
+- Analizados 2 snapshots EXPORT de noche 1 (paralelos):
+  * Snapshot A: 20 trades, WR 15%, PF 0.24, P&L -$38.12
+  * Snapshot B: 20 trades, WR 30%, PF 0.41, P&L -$13.44
+- Hallazgos CONFIRMADOS en ambos:
+  1. Strategy A NUNCA opera (0 trades en ambos)
+  2. Strategy C peor estrategia (WR 10-20%)
+  3. SL domina cierres (70-85%)
+  4. R/R real 1.0-1.35 (vs 2.5 configurado)
+  5. LONG WR 20% vs SHORT WR 40% en B
+- v13 ya hizo mejoras (recent momentum, RSI 40/60, ev_score, CatSL anchos)
+  pero faltaba ajustar SL/TP/cooldown y pausar C.
+- Aplicados 8 cambios v14 a src/lib/paper-trading-engine.ts:
+  1. STRATEGY_ALLOCATION: A:1k B:4k C:0 D:5k (C pausada)
+  2. Strategy C comentada en maybeAutoTrade()
+  3. Strategy A SL 1.5→2.0 ATR, TP 3→2.5, CatSL 4→5
+  4. Strategy B SL 1.5→2.0 ATR, TP 2→2.5, CatSL 3→4
+  5. Strategy D SL 1.0→1.5 ATR, TP 4→3, CatSL 3.5 (sin cambio)
+  6. SL/TP fallback manuales: SL 1.5→2.0, TP 3→2.5
+  7. Cooldown post-SL: 30→45 min
+  8. Cooldown post-TimeStop: 30→45 min
+- Verificada integridad sintáctica:
+  * Braces balanceadas: 287/287
+  * Parens balanceadas: 821/821
+  * 8 marcadores "v14 NIGHT1 FIX" presentes
+- Creado scripts/v14_night1_fix.py (documental, no se ejecuta)
+
+Stage Summary:
+- 8 cambios conservadores enfocados en:
+  1. Pausar la peor estrategia (C)
+  2. Dar más aire a posiciones (SL más ancho)
+  3. TP más cercano para mejorar R/R real
+  4. Cooldown más largo para reducir reentradas
+- No hay cambios estructurales: store, UI, DB intactos
+- Compatible con v0.85 (SL inmediato), v0.86 (trader notes), v0.87 (header fix)
+- Compatible con v12/v13 (recent momentum, RSI 40/60, ev_score)
+- Esperado tras 24h: WR 15-30% → 35-45%, PF 0.24-0.41 → 0.8-1.2
+- Rollback trivial: git checkout HEAD~1 -- src/lib/paper-trading-engine.ts
