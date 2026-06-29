@@ -175,6 +175,17 @@ export function PositionPanel() {
                   Cat SL: {pos.catastrophic_sl !== null ? pos.catastrophic_sl.toFixed(4) : '—'}
                 </div>
 
+                {/* VIEW CHART button — opens candlestick chart modal */}
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="w-full h-7 text-[10px] font-mono bg-blue-500/10 border-blue-500/40 text-blue-300 hover:bg-blue-500/20 hover:text-blue-200"
+                  onClick={() => setChartModalTrade(pos)}
+                >
+                  <CandlestickChart className="w-3 h-3 mr-1" />
+                  VIEW CHART
+                </Button>
+
                 {/* Close button (paper trading) */}
                 <Button
                   size="sm"

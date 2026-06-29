@@ -32,6 +32,9 @@ export function TradeLog() {
         </CardTitle>
       </CardHeader>
       <CardContent className="px-3 pb-0">
+        <div className="text-[9px] text-gray-600 font-mono mb-1 italic">
+          ↳ Click any trade to view chart
+        </div>
         <ScrollArea className="h-[260px]">
           {tradeHistory.length > 0 ? (
             <div className="space-y-1">
