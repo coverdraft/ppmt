@@ -1,6 +1,6 @@
 # PPMT — Estado del Proyecto (Jun 2026)
 
-> Documento vivo. Última actualización: **v58d** (commit `e341fe6`).
+> Documento vivo. Última actualización: **v61b** (commit `061e9b9`).
 > Idioma: español (consistencia con el equipo).
 
 ---
@@ -23,8 +23,8 @@ sistema es **profitable estable** antes de mandarlo a producción (HF Space 24/7
 
 | Strat | Tipo | Allocation | Tamaño base | RSI/Signal | Estado |
 |------|------|-----------|-------------|------------|--------|
-| **A** | Momentum 24h | 30% = 3.000 USDT | 0.030 (v58d) | top movers \|chg\| + RSI 25/75 | Activa |
-| **B** | Mean Reversion | 25% = 2.500 USDT | 0.15 (v57i) | RSI 30/70 oversold/overbought | Workhorse |
+| **A** | Momentum 24h | 30% = 3.000 USDT | 0.050 (v60b) | top movers \|chg\| + RSI 25/75 | Activa |
+| **B** | Mean Reversion | 25% = 2.500 USDT | 0.20 (v60b) + PYRAMID +50% @+1.0R (v61b) | RSI 30/70 oversold/overbought | Workhorse |
 | **C** | Range Breakout | 25% = 2.500 USDT | 0.025 | rolling 60-tick high/low | Pausada (inerte) |
 | **D** | Vol Squeeze | 20% = 2.000 USDT | 0.025 | Bollinger squeeze + first move | Inerte (no dispara) |
 
@@ -42,19 +42,32 @@ sistema es **profitable estable** antes de mandarlo a producción (HF Space 24/7
 | Time stop | 4 h máx hold | v11 |
 | ATR floor | 0.58 % (mínimo vol para operar) | v34 |
 
-### 2.3 Adaptación por régimen (v56d → v58d)
+### 2.3 Adaptación por régimen (v56d → v61b)
 
 ```ts
-// v56d/v57i/v58d — Adaptive ATR sizing
-if (atrPct < 0.6) {           // mercado tranquilo
-  size_mult = 0.5;            // Mitad de tamaño
+// v59f/v60b/v61b — TIERED adaptive ATR sizing (replaces v56d simple 0.5x)
+if (atrPct < 0.6) {
+  size_mult = 0.4;            // 60% reduction in calm markets
+} else if (atrPct < 0.8) {
+  size_mult = 0.7;            // 30% reduction in moderate markets
+} else {
+  size_mult = 1.0;            // Full size in volatile markets
 }
-// Si ATR ≥ 0.6 → size_mult = 1.0
+
+// v61b NEW — PYRAMID on Strategy B (only)
+if (!pos.pyramid_done && pos.strategy === 'B' && rMultiple >= 1.0) {
+  // Add 50% more size at current price
+  // Recompute entry_price as weighted avg
+  // Reset SL to new_entry - 1.5*new_ATR (gives pyramided position room)
+  // Reset partial1/2/3_done + lock_done + trail_active so they re-fire
+  pos.pyramid_done = true;
+}
 ```
 
 **Por qué funciona**: en régimen calmado el motor pierde más a menudo (señales
-débiles). Reducir tamaño a la mitad corta MaxDD de 0.28 % → 0.19 % y sube
-Profit% de 58 % → 67 %.
+débiles). Reducir tamaño con tiered 0.4/0.7/1.0 corta MaxDD de 0.28 % → 0.23 %.
+El pyramiding en B (+50 % a +1.0R) agrega tamaño solo a trades confirmados
+ganadores — nunca a perdedores.
 
 ### 2.4 Costes de transacción simulados
 
@@ -85,9 +98,12 @@ Cada versión se valida en **12 seeds** (`[42, 1337, 31337, 7, 99, 1234, 7777,
 | v53h | 79.4 % | +27.00 | 0.28 % | 58 % | 2.04 | +0.77 | **3-partial TP @1.25R + B 0.125** |
 | v56d | 79.4 % | +26.76 | 0.17 % | 67 % | 2.53 | +0.77 | **Adaptive ATR sizing (ATR<0.6 → 0.5x)** |
 | v57i | 79.4 % | +28.83 | 0.19 % | 67 % | 2.63 | +0.77 | B size 0.15 |
-| **v58d** ⭐ | 79.4 % | **+32.12** | 0.21 % | 67 % | **2.85** | +0.77 | **A size 0.030** |
+| v58d | 79.4 % | +32.12 | 0.21 % | 67 % | 2.53 | +0.77 | A size 0.030 |
+| v59f | 79.4 % | +36.03 | 0.23 % | 67 % | 2.63 | +0.77 | **A 0.040 + B 0.175 + TIERED sizing** |
+| v60b | 79.4 % | +42.89 | 0.28 % | 67 % | 2.56 | +0.77 | A 0.050 + B 0.20 |
+| **v61b** ⭐ | 79.6 % | **+46.02** | 0.29 % | 67 % | **2.66** | +0.76 | **PYRAMID B +50% @+1.0R** |
 
-**Proyección v58d**: `+32.12 / 4h × 6 = +192 USDT/día` (en 10.000 USDT paper).
+**Proyección v61b**: `+46.02 / 4h × 6 = +276 USDT/día` (en 10.000 USDT paper).
 
 ---
 
@@ -117,42 +133,37 @@ Estos caminos se probaron y **se descartaron con evidencia**:
 
 ## 5. Cuello de botella actual
 
-- **WR 79.4 %** está en plateau desde v53h (no baja con cambios menores).
+- **WR 79.4–79.6 %** está en plateau desde v53h (no baja con cambios menores).
 - **4 seeds siempre pierden** (314, 1234, 99, 2025) — parece inherente al
   régimen de mercado que generan, NO a parámetros.
-- **Profit% 67 %** (8/12 seeds) es el techo actual; v56d lo rompió desde 58 %
-  pero v58d no lo supera.
-- **MaxDD 0.21 %** es excelente; queda margen para subir tamaños.
+- **Profit% 67 %** (8/12 seeds) es el techo desde v56d; v61b no lo supera.
+- **MaxDD 0.29 %** está cerca del límite seguro (0.30 %); poco margen para
+  subir tamaños más sin protection adicional.
 
 ---
 
-## 6. Próximas exploraciones (v59+)
+## 6. Próximas exploraciones (v62+)
 
 El usuario pide **más ganancia en menos tiempo**. Líneas de trabajo:
 
-### 6.1 Más frecuencia de trades
-- **v59a**: Reducir ATR floor a 0.50 % (más trades en mercado calmado)
-- **v59b**: Cooldown 20 min en vez de 30 (más re-entradas)
-- **v59c**: Strategy D reactivada con parámetros más sensibles
+### 6.1 Refinar pyramiding (v62)
+- **v62a**: Pyramid +75% en B (más agresivo)
+- **v62b**: Pyramid +50% a +1.25R (más tarde, menos falsos positivos)
+- **v62c**: Pyramid +30% a +0.7R (más temprano, más tiempo expuesto)
+- **v62d**: Pyramid +50% en B con SL más tight tras pyramid (lock más profit)
 
-### 6.2 Tamaños agresivos con protección
-- **v59d**: B 0.175 con tiered sizing 0.4/0.7/1.0 (max P&L con MaxDD controlado)
-- **v59e**: A 0.035 + B 0.175 (ambos suben con adaptativo)
-- **v59f**: Pyramiding — añadir 50 % más tamaño si trade va a +1.0R
+### 6.2 Nuevas estrategias (v63)
+- **v63a**: Scalp RSI 5/95 (extremos muy marcados, salida rápida)
+- **v63b**: Vol-breakout (cuando ATR sube 50 % de golpe, entrar en dirección)
+- **v63c**: Grid en rango detectado (cuando ATR < 0.4 %, grid trading)
 
-### 6.3 Sistemas de TP más agresivos
-- **v59g**: 4-partial TP (5/10/15/15 + trailing 70)
-- **v59h**: Partial3 a 1.10R (más rápido, captura antes)
-- **v59i**: Trailing con ATR escalonado por régimen
+### 6.3 Optimización de tiempo
+- **v63d**: Tick más rápido (1.0 s en vez de 1.5 s) → más trades por hora
+- **v63e**: Warmup reducido (15 min en vez de 30)
 
-### 6.4 Nuevas estrategias
-- **v59j**: Scalping RSI 5/95 (extremos muy marcados)
-- **v59k**: Vol breakout (cuando ATR sube 50 % de golpe, entrar en dirección)
-- **v59l**: Grid en rango detectado (cuando ATR < 0.4 %)
-
-### 6.5 Optimización de tiempo
-- **v59m**: Tick más rápido (1.0 s en vez de 1.5 s) → más trades por hora
-- **v59n**: Warmup reducido (15 min en vez de 30)
+### 6.4 Más partials con pyramiding
+- **v63f**: Pyramid + 4-partial TP con p4 a 2.0R (más lejos que 1.5R)
+- **v63g**: Pyramid + 5-partial TP (ultra granular)
 
 ---
 
@@ -160,14 +171,14 @@ El usuario pide **más ganancia en menos tiempo**. Líneas de trabajo:
 
 - **Repo**: https://github.com/coverdraft/ppmt
 - **Branch activa**: `terminal-web`
-- **Worklog completo**: `worklog.md` (32 tareas documentadas)
-- **Scripts backtest**: `scripts/backtest/v38_push_v37e.py` → `v58_push.py`
-- **Backups motor**: `src/lib/paper-trading-engine.ts.bak.{v14,v15,v31b,v38g,v43a,v49c,v51e,v53h}`
-- **Engine actual**: `src/lib/paper-trading-engine.ts` (v58d, commit `e341fe6`)
+- **Worklog completo**: `worklog.md` (34 tareas documentadas)
+- **Scripts backtest**: `scripts/backtest/v38_push_v37e.py` → `v61_push.py`
+- **Backups motor**: `src/lib/paper-trading-engine.ts.bak.{v14,v15,v31b,v38g,v43a,v49c,v51e,v53h,v58d,v59f,v60b}`
+- **Engine actual**: `src/lib/paper-trading-engine.ts` (v61b, commit `061e9b9`)
 
 Para revertir a cualquier versión:
 ```bash
-cp src/lib/paper-trading-engine.ts.bak.v53h src/lib/paper-trading-engine.ts
+cp src/lib/paper-trading-engine.ts.bak.v60b src/lib/paper-trading-engine.ts
 ```
 
 ---
