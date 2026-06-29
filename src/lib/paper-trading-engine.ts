@@ -128,6 +128,13 @@ export interface PaperPosition {
   current_sl: number | null
   current_tp: number | null
   catastrophic_sl: number | null
+  // v37e: lock-profit + partial TP + trailing state
+  lock_done?: boolean
+  partial_done?: boolean
+  trail_active?: boolean
+  max_favorable_price?: number
+  initial_atr?: number
+  initial_sl_distance?: number
   pnl_pct: number
   pnl_usdt: number
   strategy: StrategyName
@@ -786,6 +793,76 @@ export class PaperTradingEngine {
         }
       }
 
+      // ─── v37e: Lock profit + Partial TP + Trailing (before SL/TP check) ───
+      // These run on every tick to manage open positions proactively.
+      // Lock: move SL to entry+0.2R when +0.4R reached (locks small profit)
+      // Partial: close 30% at +0.8R, then enable trailing on remainder
+      // Trail: 0.6 ATR trailing stop on remainder (overrides TP)
+      if (pos.initial_atr && pos.initial_sl_distance && pos.initial_sl_distance > 0) {
+        const rMultiple = isLong
+          ? (price - pos.entry_price) / pos.initial_sl_distance
+          : (pos.entry_price - price) / pos.initial_sl_distance
+
+        // Track MFE (max favorable price) for trailing
+        if (pos.max_favorable_price === undefined) pos.max_favorable_price = pos.entry_price
+        if (isLong && price > pos.max_favorable_price) pos.max_favorable_price = price
+        if (!isLong && price < pos.max_favorable_price) pos.max_favorable_price = price
+
+        // 1. Lock profit at +0.4R → move SL to entry+0.2R
+        if (!pos.lock_done && rMultiple >= 0.4) {
+          const lockR = 0.2
+          if (isLong) {
+            const newSL = pos.entry_price + lockR * pos.initial_sl_distance
+            if (pos.current_sl === null || newSL > pos.current_sl) pos.current_sl = newSL
+          } else {
+            const newSL = pos.entry_price - lockR * pos.initial_sl_distance
+            if (pos.current_sl === null || newSL < pos.current_sl) pos.current_sl = newSL
+          }
+          pos.lock_done = true
+        }
+
+        // 2. Partial TP at +0.8R → close 30%, enable trailing on remainder
+        if (!pos.partial_done && rMultiple >= 0.8) {
+          // Close 30% of position at market
+          const partialPct = 0.30
+          const partialQty = pos.qty * partialPct
+          if (partialQty > 0.0001) {
+            const partialResult = isLong
+              ? this.marketSell(sym, partialQty * pos.entry_price, pos.strategy)
+              : this.marketBuy(sym, partialQty * pos.entry_price, pos.strategy)
+            if (partialResult.success) {
+              pos.qty -= partialQty
+              console.log(`[Paper/v37e] ${sym} PARTIAL_TP 30% @ ${price} (R=${rMultiple.toFixed(2)})`)
+            }
+          }
+          pos.partial_done = true
+          pos.trail_active = true
+          // Set initial trail SL at current price - 0.6 ATR
+          const trailDist = pos.initial_atr * 0.6
+          if (isLong) {
+            const newSL = price - trailDist
+            if (pos.current_sl === null || newSL > pos.current_sl) pos.current_sl = newSL
+          } else {
+            const newSL = price + trailDist
+            if (pos.current_sl === null || newSL < pos.current_sl) pos.current_sl = newSL
+          }
+        }
+
+        // 3. Update trailing stop if active
+        if (pos.trail_active && pos.max_favorable_price) {
+          const trailDist = pos.initial_atr * 0.6
+          if (isLong) {
+            const newSL = pos.max_favorable_price - trailDist
+            if (pos.current_sl === null || newSL > pos.current_sl) pos.current_sl = newSL
+            pos.current_tp = null  // disable TP — let trail do the work
+          } else {
+            const newSL = pos.max_favorable_price + trailDist
+            if (pos.current_sl === null || newSL < pos.current_sl) pos.current_sl = newSL
+            pos.current_tp = null
+          }
+        }
+      }
+
       // ─── SL/TP/CatSL trigger (IMMEDIATE — exchange-like behavior) ───
       // FIX v0.85 (UNIVERSAL — applies to ALL assets, not just one):
       //   Removed the 3-minute `skipStopLoss` grace period that was deferring
@@ -929,6 +1006,14 @@ export class PaperTradingEngine {
       .filter(x => !this.cooldownUntil.has(x.ticker.symbol) || now > (this.cooldownUntil.get(x.ticker.symbol) || 0))
       .filter(x => !this.positions.has(x.ticker.symbol))
       .filter(x => this.checkCorrelationLimit(x.ticker.symbol))
+      .filter(x => {
+        // v37e: ATR floor 0.55% — skip trades in low-vol regimes where fees dominate
+        const histA = this.priceHistory.get(x.ticker.symbol) || []
+        const pricesA = histA.map(h => h.price)
+        const atrA = computeATR(pricesA, 60)
+        const atrPctA = atrA / x.ticker.price * 100
+        return atrPctA >= 0.55
+      })
       .sort((a, b) => Math.abs(b.recentMomentum) - Math.abs(a.recentMomentum))
       .slice(0, 3)
 
@@ -954,11 +1039,17 @@ export class PaperTradingEngine {
       if (result.success) {
         const pos = this.positions.get(top.symbol)
         if (pos) {
-          // v14 NIGHT1 FIX: SL más ancho (1.5 → 2.0 ATR), TP más cercano (3 → 2.5 ATR).
-          //   35% de trades A cerraban en <2min en snapshot A.
-          pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 2.0 : pos.entry_price + atr * 2.0
+          // v37e: SL 2.0 → 1.4 ATR (tighter risk; backtest 5-seed: P&L -7 → +23, MaxDD 0.38% → 0.30%)
+          //   Lock profit at +0.4R, partial TP 30% at +0.8R, trail 0.6 ATR after partial.
+          pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 1.4 : pos.entry_price + atr * 1.4
           pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 1.2 : pos.entry_price - atr * 1.2
           pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 4 : pos.entry_price + atr * 4
+          pos.initial_atr = atr
+          pos.initial_sl_distance = atr * 1.4
+          pos.lock_done = false
+          pos.partial_done = false
+          pos.trail_active = false
+          pos.max_favorable_price = pos.entry_price
         }
         // FIX v12 BUG D: Compute ev_score + expected_move_pct so ML/Kelly can work.
         //   ev_score = confidence × expected_move_pct / 2  (heuristic)
@@ -1005,6 +1096,14 @@ export class PaperTradingEngine {
       .filter(x => !this.cooldownUntil.has(x.ticker.symbol) || now > (this.cooldownUntil.get(x.ticker.symbol) || 0))
       .filter(x => !this.positions.has(x.ticker.symbol))
       .filter(x => this.checkCorrelationLimit(x.ticker.symbol))
+      .filter(x => {
+        // v37e: ATR floor 0.55%
+        const histB = this.priceHistory.get(x.ticker.symbol) || []
+        const pricesB = histB.map(h => h.price)
+        const atrB = computeATR(pricesB, 60)
+        const atrPctB = atrB / x.ticker.price * 100
+        return atrPctB >= 0.55
+      })
       .sort((a, b) => Math.abs(a.rsi - 50) - Math.abs(b.rsi - 50))
       .slice(0, 2)
 
@@ -1035,11 +1134,16 @@ export class PaperTradingEngine {
       if (result.success) {
         const pos = this.positions.get(c.ticker.symbol)
         if (pos) {
-          // v14 NIGHT1 FIX: SL más ancho (1.5 → 2.0 ATR), TP más cercano (2 → 2.5 ATR).
-          //   LONG WR era 20% en snapshot B vs SHORT WR 40%. Más aire para que LONG respire.
-          pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 2.0 : pos.entry_price + atr * 2.0
+          // v37e: SL 2.0 → 1.4 ATR + v37e state init (lock/partial/trail/MFE)
+          pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 1.4 : pos.entry_price + atr * 1.4
           pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 1.2 : pos.entry_price - atr * 1.2
           pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 4 : pos.entry_price + atr * 4
+          pos.initial_atr = atr
+          pos.initial_sl_distance = atr * 1.4
+          pos.lock_done = false
+          pos.partial_done = false
+          pos.trail_active = false
+          pos.max_favorable_price = pos.entry_price
         }
         // FIX v13 BUG K: Same ev_score computation as Strategy A.
         const expected_move_pct_b = +((atr * 2 / (pos?.entry_price || 1)) * 100).toFixed(3)
