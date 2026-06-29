@@ -39,6 +39,7 @@ export default function TerminalPage() {
     positions,
     realizedPnl,
     totalTrades,
+    winningTrades,
     winRate,
     portfolioValue,
     tokenStates,
@@ -82,6 +83,16 @@ export default function TerminalPage() {
 
   const hasPosition = positions && positions.length > 0
   const pnlPositive = realizedPnl >= 0
+  const openPositionsCount = positions?.length ?? 0
+
+  // v0.87 FIX: winRate comes from engine as a fraction (0.0-1.0) but if
+  // the engine reported 0 winning trades out of 86 closed, winRate is 0
+  // and the header shows '--' which is misleading. Show '0.0%' instead
+  // when there are closed trades but no wins, and only show '--' when
+  // there are literally zero closed trades to compute WR from.
+  const wrDisplay = totalTrades > 0
+    ? (winRate * 100).toFixed(1) + '%'
+    : '--'
   const activeTokens = Object.values(tokenStates).filter(t => t.isActive)
 
   // Page transition variants
@@ -125,12 +136,19 @@ export default function TerminalPage() {
           </div>
           <div className="flex items-center gap-1.5">
             <span className="text-[10px] text-gray-500 font-mono">TRADES</span>
-            <span className="text-xs text-white font-mono font-bold">{totalTrades}</span>
+            <span className="text-xs text-white font-mono font-bold" title="Closed trades (historical)">
+              {totalTrades}
+            </span>
           </div>
           <div className="flex items-center gap-1.5">
             <span className="text-[10px] text-gray-500 font-mono">WR</span>
-            <span className={`text-xs font-mono font-bold ${winRate > 0.55 ? 'text-emerald-400' : winRate > 0 ? 'text-yellow-400' : 'text-gray-500'}`}>
-              {winRate > 0 ? (winRate * 100).toFixed(1) + '%' : '--'}
+            <span className={`text-xs font-mono font-bold ${
+              winRate > 0.55 ? 'text-emerald-400'
+                : winRate > 0 ? 'text-yellow-400'
+                : totalTrades > 0 ? 'text-red-400'
+                : 'text-gray-500'
+            }`} title={`${totalTrades} closed · ${winningTrades} wins`}>
+              {wrDisplay}
             </span>
           </div>
           <div className="flex items-center gap-1.5">
@@ -148,8 +166,9 @@ export default function TerminalPage() {
                   ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30'
                   : 'bg-gray-500/20 text-gray-400 border-gray-500/30'
               }`}
+              title={hasPosition ? `${openPositionsCount} open position${openPositionsCount === 1 ? '' : 's'}` : 'No open positions'}
             >
-              {hasPosition ? 'OPEN' : 'FLAT'}
+              {hasPosition ? `${openPositionsCount} OPEN` : 'FLAT'}
             </Badge>
           </div>
           <div className="flex items-center gap-1">
@@ -355,7 +374,7 @@ export default function TerminalPage() {
         </div>
         <div className="flex items-center gap-3">
           <span className="text-[9px] text-gray-600 font-mono">
-            PPMT v0.86 • PAPER TRADING • Live Coinbase+CoinGecko Prices • 82 Tokens • Trade Chart • Immediate SL • Trader Notes
+            PPMT v0.87 • PAPER TRADING • Live Coinbase+CoinGecko Prices • 82 Tokens • Trade Chart • Immediate SL • Trader Notes
           </span>
           <span className="text-[9px] text-gray-600 font-mono">|</span>
           <span className="text-[9px] text-gray-500 font-mono">
