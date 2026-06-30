@@ -4,8 +4,9 @@
   "private": true,
   "scripts": {
     "dev": "next dev -p 3000 2>&1 | tee dev.log",
-    "build": "next build && cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/",
-    "start": "NODE_ENV=production bun .next/standalone/server.js 2>&1 | tee server.log",
+    "prebuild": "bash -c 'git rev-parse --short HEAD > .git-short 2>/dev/null || echo unknown > .git-short'",
+    "build": "next build && (if [ -d .next/standalone ]; then cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/ && echo '[build] standalone OK'; else echo '[build] no .next/standalone — start script will use bun next start fallback'; fi)",
+    "start": "bash -c 'if [ -f .next/standalone/server.js ]; then echo \"[start] standalone mode\" && NODE_ENV=production bun .next/standalone/server.js; else echo \"[start] fallback mode (bun next start)\" && NODE_ENV=production bun next start -p 3000; fi'",
     "lint": "eslint .",
     "db:push": "prisma db push",
     "db:generate": "prisma generate",

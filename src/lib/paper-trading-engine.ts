@@ -43,7 +43,43 @@ import { SUPPORTED_TOKENS_LIST, getTokenName } from './live-price-feed'
 
 const ENGINE_PKG_VERSION = '0.2.0'  // mirrors package.json "version"
 const ENGINE_STRATEGY_STACK = 'v82j-A-v82j-B-v83b-F-v82j-D'  // bump on strategy changes
-const ENGINE_GIT_SHORT = (typeof process !== 'undefined' && process.env?.PPMT_GIT_SHORT) || 'dev'
+
+// v82j+: resolve git short at module-load time. Three sources, in priority order:
+//   1) PPMT_GIT_SHORT env var (still works if set externally)
+//   2) .git-short file written by `bun run prebuild` (most reliable across Next 16 standalone/non-standalone)
+//   3) 'dev' fallback
+// Why: previously this showed 'dev' in production because Next build didn't propagate the env var
+// to runtime. Reading from a file is deterministic.
+function resolveGitShort(): string {
+  try {
+    if (typeof process !== 'undefined' && process.env?.PPMT_GIT_SHORT) {
+      return String(process.env.PPMT_GIT_SHORT).trim()
+    }
+  } catch {}
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fs = require('fs')
+    const path = require('path')
+    // Try several locations: CWD, project root (.. from CWD), and __dirname chain
+    const candidates = [
+      process.cwd() + '/.git-short',
+      __dirname + '/../../.git-short',
+      __dirname + '/../../../.git-short',
+      process.cwd() + '/ppmt/.git-short',
+    ]
+    for (const p of candidates) {
+      try {
+        if (fs.existsSync(p)) {
+          const v = fs.readFileSync(p, 'utf8').trim()
+          if (v && v.length > 0 && v.length < 40) return v
+        }
+      } catch {}
+    }
+  } catch {}
+  return 'dev'
+}
+
+const ENGINE_GIT_SHORT = resolveGitShort()
 const ENGINE_BUILT_AT = new Date().toISOString()
 
 export const ENGINE_VERSION = {
@@ -100,7 +136,28 @@ interface StrategyState {
   positions: Set<string>
 }
 
+export interface EngineBanner {
+  version: string
+  strategy_stack: string
+  git_short: string
+  pkg_version: string
+  built_at: string
+  running_for_ms: number
+  uptime_human: string
+  is_running: boolean
+  kill_switch_active: boolean
+  open_positions_count: number
+  portfolio_value: number
+  total_pnl_pct: number
+  last_tick_age_ms: number
+  ws_connected: boolean
+  active_tokens_count: number
+  candles_processed: number
+  notes: string
+}
+
 export interface PaperTradingState {
+  __engine_banner: EngineBanner  // v82j+: top-of-snapshot one-line summary
   is_running: boolean
   mode: 'paper'
   started_at: number
@@ -2100,6 +2157,33 @@ export class PaperTradingEngine {
     }
 
     return {
+      // v82j+: top-of-snapshot banner — one-line readable summary for instant identification.
+      // Pinned to the top so when the user pastes a snapshot, the AI sees version+status first.
+      __engine_banner: {
+        version: ENGINE_VERSION.summary,
+        strategy_stack: ENGINE_STRATEGY_STACK,
+        git_short: ENGINE_GIT_SHORT,
+        pkg_version: ENGINE_PKG_VERSION,
+        built_at: ENGINE_BUILT_AT,
+        running_for_ms: Date.now() - this.startedAt * 1000,
+        uptime_human: (() => {
+          const ms = Date.now() - this.startedAt * 1000
+          const s = Math.floor(ms / 1000)
+          const h = Math.floor(s / 3600)
+          const m = Math.floor((s % 3600) / 60)
+          return `${h}h ${m}m ${s % 60}s`
+        })(),
+        is_running: this.tradingEnabled,
+        kill_switch_active: !this.tradingEnabled,
+        open_positions_count: positionsArray.length,
+        portfolio_value: parseFloat(totalValue.toFixed(2)),
+        total_pnl_pct: parseFloat(((totalValue - INITIAL_CAPITAL) / INITIAL_CAPITAL * 100).toFixed(2)),
+        last_tick_age_ms: this.lastTickAt > 0 ? (Date.now() - this.lastTickAt) : -1,
+        ws_connected: wsConnected,
+        active_tokens_count: liveSymbols.length,
+        candles_processed: this.candlesProcessed,
+        notes: 'v82j exit stack live on A/B/D. C disabled. F=v83b grid for stablecoins. Old positions opened before v82j lack initial_atr/initial_sl_distance and skip the new exit logic — close them manually if you want them managed by v82j.',
+      },
       is_running: this.tradingEnabled,
       mode: 'paper',
       started_at: this.startedAt,

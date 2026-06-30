@@ -84,12 +84,14 @@ step "3/5  Bun install + build"
 log "Instalando dependencias..."
 bun install --frozen-lockfile 2>&1 | tail -5 || bun install 2>&1 | tail -5
 
-# v82j+: capture git short hash for engine_version tag (read by paper-trading-engine.ts)
+# v82j+: git short hash is now baked into .git-short by `bun run prebuild`
+# (see package.json). paper-trading-engine.ts reads that file at module load.
+# We still log it here so the user can verify.
 GIT_SHORT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-log "Git short: $GIT_SHORT (se inyectará como PPMT_GIT_SHORT en el build)"
+log "Git short: $GIT_SHORT (se inyectará via .git-short en el build)"
 
 log "Build de producción (esto tarda 10-30s)..."
-PPMT_GIT_SHORT="$GIT_SHORT" bun run build 2>&1 | tail -20
+bun run build 2>&1 | tail -20
 
 # ─── 4. Parar el bot viejo ─────────────────────────────────────
 step "4/5  Parar bot viejo"
@@ -131,19 +133,13 @@ log "Bot viejo detenido."
 # ─── 5. Arrancar el bot nuevo ──────────────────────────────────
 step "5/5  Arrancar bot nuevo"
 
-# ─── Decidir comando de arranque ──────────────────────────────
-# Estrategia:
-#   1. Si existe .next/standalone/server.js  →  bun run start  (standalone, óptimo)
-#   2. Si no                                  →  bun next start (estándar, siempre funciona)
-START_CMD=""
-if [[ -f "$REPO_DIR/.next/standalone/server.js" ]]; then
-  START_CMD="bun run start"
-  log "Modo arranque: bun run start (.next/standalone/server.js encontrado)"
-else
-  START_CMD="bun next start -p 3000"
-  warn ".next/standalone/server.js NO existe — usando fallback 'bun next start'"
-  warn "  (Esto es normal en algunas versiones de Next 16/Turbopack en Mac.)"
-fi
+# v82j+: package.json `start` now has built-in fallback:
+#   if .next/standalone/server.js exists  →  bun .next/standalone/server.js
+#   else                                  →  bun next start -p 3000
+# So we just call `bun run start` and let package.json handle it.
+# This avoids restart.sh and package.json disagreeing about which mode to use.
+START_CMD="bun run start"
+log "Modo arranque: bun run start (package.json decide standalone vs fallback)"
 
 # ─── Arrancar el bot ──────────────────────────────────────────
 if command -v pm2 >/dev/null; then
@@ -164,7 +160,7 @@ else
   if ! kill -0 "$NEW_PID" 2>/dev/null; then
     err "El bot murió en los primeros 5s. Últimas 50 líneas del log:"
     tail -50 "$BOT_LOG"
-    err "Intento de fallback manual: bash -lc 'cd $REPO_DIR && bun next start -p 3000'"
+    err "Intento de fallback manual: cd $REPO_DIR && NODE_ENV=production bun next start -p 3000"
     exit 1
   fi
   log "Bot vivo tras 5s ✓"
