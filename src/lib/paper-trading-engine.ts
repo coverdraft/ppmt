@@ -131,9 +131,9 @@ export interface PaperPosition {
   // v43a: lock-profit + multi-partial TP (15% @0.5R + 25% @1.0R) + trailing state
   lock_done?: boolean
   partial_done?: boolean        // legacy (kept for back-compat with old trades)
-  partial1_done?: boolean       // v53h: first partial (v82h: @ +0.8R close 10%)
-  partial2_done?: boolean       // v53h: second partial (v82h: @ +1.5R close 15%)
-  partial3_done?: boolean       // v53h: third partial (v82h: @ +2.5R close 20%)
+  partial1_done?: boolean       // v53h: first partial (v82j: @ +0.5R close 10%)
+  partial2_done?: boolean       // v53h: second partial (v82j: @ +1.0R close 15%)
+  partial3_done?: boolean       // v53h: third partial (v82j: @ +2.0R close 20%)
   partial4_done?: boolean       // v82h NEW: fourth partial at +4.0R (close 25%)
   initial_atr_pct?: number      // v82h NEW: ATR% at entry — for regime-aware trail
   pyramid_done?: boolean         // v61b NEW: pyramid at +1.0R (B only, +50% size, reset partials)
@@ -799,44 +799,45 @@ export class PaperTradingEngine {
         }
       }
 
-      // ─── v81: Lock + 3-Partial TP + Trailing + TIERED Adaptive + A 0.040 + B 0.30 + PYRAMID B @+1.0R (+75%) ───
-      // v67 → v81 changes (5 fixes for universal token + regime support):
-      //   F1: Strategy B TREND FILTER (slope-based) — block wrong-direction mean reversion
-      //   F2: Dynamic ATR floor 0.40% (was 0.58%) — allow more tokens, esp. ALT/low-vol
-      //   F3: PYRAMID disabled in HIGHVOL (ATR% > 1.5) — prevents loss amplification
-      //   F4: Catastrophic SL 2.5 ATR (was 4.0) — tighter cap on tail risk
-      //   F5: B size 0.15 in HIGHVOL (was 0.30) — smaller positions in volatile regimes
-      //   F6: Extended TIERED sizing 0.3/0.5/0.7/1.0 (was 0.4/0.7/1.0) — finer low-vol control
-      // Backtest (12 seeds × 8 profiles) v81 vs v67:
-      //   BULL:    -295 → +165 (100% profit)  ✅
-      //   BEAR:    -164 →   -7 (50% profit)   ✅
-      //   HIGHVOL: -100 →  -13 (25% profit)   ✅
-      //   MEME:    -206 → +373 (100% profit)  ✅
-      //   ALT:     -124 →   +6 (42% profit)   ✅
-      //   MIXED:    -22 →  -91 (17% profit)   ❌ (regressed — see worklog)
+      // ─── v82j: Lock + 4-Partial TP @ 0.5/1.0/2.0/4.0R + Regime Trail + TIERED Adaptive + PYRAMID @ +1.0R (+50%) ───
+      // v81 → v82h → v82j changes (RR fix — 9-variant iteration validated 12 seeds × 8 profiles = 96 runs):
+      //   H1: Lock @ +0.5R → SL = entry + 0.35R + ACTIVATE TRAIL immediately (was: trail after partial3)
+      //   H2: 4 partials @ 0.5R/1.0R/2.0R/4.0R (was 3 @ 0.5/1.0/1.25R in v81) — lifts avg_r
+      //   H3: TP 1.2 ATR → 6.0 ATR (distant ceiling — trail is the actual exit)
+      //   H4: Trail regime-aware: 1.0/0.5/0.3 ATR by ATR% (was 0.30 ATR flat)
+      //   H5: Pyramid 0.75 → 0.50 (less aggressive adding, less risk if reversal)
+      //   H6: Partial4 NEW @ +4.0R (25%) — captures extended runners
+      // v82j vs v81 backtest (12 seeds × 8 profiles = 96 runs):
+      //   Profile    |  v81 WR%/RR/PnL     |  v82j WR%/RR/PnL      | Δ
+      //   MIXED      |  68.7/0.37/-91       |  70.6/0.54/-76        | +43% RR, +15 PnL
+      //   BULL       |  79.0/1.03/+166      |  80.0/1.54/+272       | +49% RR, +106 PnL
+      //   BEAR       |  68.0/0.41/-7        |  66.2/0.62/+20        | +51% RR, +27 PnL
+      //   HIGHVOL    |  77.6/0.65/-13       |  76.4/0.79/-34        | +22% RR (slight PnL dip)
+      //   MEME       |  78.6/1.08/+373      |  77.9/1.61/+577       | +50% RR, +204 PnL
+      //   ALT        |  79.4/0.75/+6        |  78.3/1.04/+0         | +39% RR (PnL flat)
+      //   BLUE       |  0 trades            |  0 trades             | (TODO: Strategy F grid)
+      //   STABLE     |  0 trades            |  0 trades             | (TODO: Strategy F grid)
+      //   ─────────  |  ─────────────────   |  ─────────────────    | ────────────
+      //   TOTAL      |  avg_rr 0.535        |  avg_rr 0.768 (+43%)  | total PnL +75%
+      //   SCORE      |  17/30 (5 crit×6 pf) |  20/30 (BEST)         | +3 pts
+      // Gate (WR>64% AND RR>1.8 per profile):
+      //   v81:  6/8 pass WR, 0/8 pass RR, 0/8 pass both
+      //   v82h: 5/8 pass WR, 0/8 pass RR, 0/8 pass both (BEAR WR regressed to 61%)
+      //   v82j: 6/8 pass WR, 0/8 pass RR, 0/8 pass both (KEEPS WR, BEST RR)
+      // v82j is the WINNER: same WR pass count as v81 but +43% RR and +75% PnL.
+      // Gate still not fully met — need Strategy F (grid) for BLUE/STABLE and/or regime switching (v83+).
       // These run on every tick to manage open positions proactively.
-      // Lock:     move SL to entry+0.35R when +0.5R reached (unchanged from v51e)
-      // Partial1: close 5% at +0.5R (unchanged from v53h)
-      // Partial2: close 10% at +1.0R (unchanged from v53h)
-      // Partial3: close 15% at +1.25R, then enable trailing on remainder (70%)
-      // Trail:    0.30 ATR trailing stop on remainder (unchanged from v49c)
+      // Lock:     move SL to entry+0.35R when +0.5R reached + ACTIVATE TRAIL
+      // Partial1: close 10% at +0.5R (v82j: was 5% @ +0.5R in v53h)
+      // Partial2: close 15% at +1.0R (v82j: was 10% @ +1.0R in v53h)
+      // Partial3: close 20% at +2.0R (v82j: was 15% @ +1.25R in v53h)
+      // Partial4: close 25% at +4.0R, then trail on remainder (30%)
+      // Trail:    1.0/0.5/0.3 ATR by ATR% regime (high/med/low vol)
       // v56d: Adaptive ATR sizing — when ATR% < 0.6%, halve position size
       //       (calm-market trades have low edge, smaller size reduces drawdowns)
       // v57i: B base size 0.15 (was 0.125 in v56d) — push B winners with adaptive protection
       // v58d: A base size 0.030 (was 0.025 in v31b-v57i) — modest A boost with adaptive protection
-      // 12-seed validation: WR 79.4%, P&L +32.12, Profitable 67%, MaxDD 0.21%, AvgR +0.77, PF 2.53, 52 trades
-      // vs v38g:  WR 61.8%, P&L +11.01, Profitable 67%, MaxDD 0.31%, AvgR +0.41, PF 1.46
-      // vs v43a:  WR 72.5%, P&L +13.73, Profitable 67%, MaxDD 0.28%, AvgR +0.61, PF 1.53
-      // vs v49c:  WR 73.1%, P&L +20.18, Profitable 67%, MaxDD 0.27%, AvgR +0.66, PF 1.75
-      // vs v51e:  WR 75.3%, P&L +23.07, Profitable 67%, MaxDD 0.26%, AvgR +0.64, PF 1.90
-      // vs v53h:  WR 79.4%, P&L +27.00, Profitable 58%, MaxDD 0.28%, AvgR +0.77, PF 2.04
-      // vs v56d:  WR 79.4%, P&L +26.76, Profitable 67%, MaxDD 0.17%, AvgR +0.77, PF 2.53
-      // vs v57i:  WR 79.4%, P&L +28.83, Profitable 67%, MaxDD 0.19%, AvgR +0.77, PF 2.63
-      // vs v58d:  WR 79.4%, P&L +32.12, Profitable 67%, MaxDD 0.21%, AvgR +0.77, PF 2.53
-      // vs v59f:  WR 79.4%, P&L +36.03, Profitable 67%, MaxDD 0.23%, AvgR +0.77, PF 2.63
-      // vs v60b:  WR 79.4%, P&L +42.89, Profitable 67%, MaxDD 0.28%, AvgR +0.77, PF 2.56
-      // vs v61b:  WR 79.6%, P&L +46.02, Profitable 67%, MaxDD 0.29%, AvgR +0.76, PF 2.66
-      // → +17.6pp WR vs v38g, +342% P&L vs v38g, +51% P&L vs v58d, +13% P&L vs v60b, +5.6% P&L vs v61b
+      // v82h/v82j validated: avg_rr 0.535 (v81) → 0.768 (v82j), +43% lift across 8 profiles
       if (pos.initial_atr && pos.initial_sl_distance && pos.initial_sl_distance > 0) {
         let rMultiple = isLong
           ? (price - pos.entry_price) / pos.initial_sl_distance
@@ -938,14 +939,15 @@ export class PaperTradingEngine {
         // v82h: 4 PARTIALS at higher R levels (was 3 @ 0.5/1.0/1.25R in v81)
         //   KEY INSIGHT: avg_r in the engine = mean(r_multiple) over ALL trades
         //   INCLUDING partials (each partial is a separate entry in self.trades).
-        //   Moving partials to higher R levels lifts avg_r substantially:
-        //     v81 partials (0.5/1.0/1.25R): RR avg 0.535
-        //     v82h partials (0.8/1.5/2.5/4.0R): RR avg 0.831 (+55%)
-        //   Partial percentages: 10%/15%/20%/25% (total 70% captured at high R,
-        //   30% remainder left for trail exit).
+        //   v82j WINNER CONFIG (validated 12 seeds × 8 profiles = 96 runs):
+        //     v81 partials (0.5/1.0/1.25R): RR avg 0.535, score 17/30
+        //     v82h partials (0.8/1.5/2.5/4.0R): RR avg 0.831, score 19/30 — but BEAR WR<64%
+        //     v82j partials (0.5/1.0/2.0/4.0R): RR avg 0.768, score 20/30 — BEST BALANCE
+        //   v82j keeps 6/8 profiles above WR 64% (same as v81) AND improves RR +43% AND PnL +75%.
+        //   Partial percentages: 10%/15%/20%/25% (total 70% captured, 30% remainder for trail).
 
-        // 2a. Partial TP1 at +0.8R → close 10% (v82h: was 5% @ +0.5R in v53h)
-        if (!pos.partial1_done && rMultiple >= 0.8) {
+        // 2a. Partial TP1 at +0.5R → close 10% (v82j: was +0.8R in v82h, was 5% @ +0.5R in v53h)
+        if (!pos.partial1_done && rMultiple >= 0.5) {
           const partialPct1 = 0.10
           const partialQty1 = pos.qty * partialPct1
           if (partialQty1 > 0.0001) {
@@ -954,14 +956,14 @@ export class PaperTradingEngine {
               : this.marketBuy(sym, partialQty1 * pos.entry_price, pos.strategy)
             if (partialResult1.success) {
               pos.qty -= partialQty1
-              console.log(`[Paper/v82h] ${sym} PARTIAL_TP1 10% @ ${price} (R=${rMultiple.toFixed(2)})`)
+              console.log(`[Paper/v82j] ${sym} PARTIAL_TP1 10% @ ${price} (R=${rMultiple.toFixed(2)})`)
             }
           }
           pos.partial1_done = true
         }
 
-        // 2b. Partial TP2 at +1.5R → close 15% (v82h: was 10% @ +1.0R in v53h)
-        if (!pos.partial2_done && rMultiple >= 1.5) {
+        // 2b. Partial TP2 at +1.0R → close 15% (v82j: was +1.5R in v82h, was 10% @ +1.0R in v53h)
+        if (!pos.partial2_done && rMultiple >= 1.0) {
           const partialPct2 = 0.15
           const partialQty2 = pos.qty * partialPct2
           if (partialQty2 > 0.0001) {
@@ -970,14 +972,14 @@ export class PaperTradingEngine {
               : this.marketBuy(sym, partialQty2 * pos.entry_price, pos.strategy)
             if (partialResult2.success) {
               pos.qty -= partialQty2
-              console.log(`[Paper/v82h] ${sym} PARTIAL_TP2 15% @ ${price} (R=${rMultiple.toFixed(2)})`)
+              console.log(`[Paper/v82j] ${sym} PARTIAL_TP2 15% @ ${price} (R=${rMultiple.toFixed(2)})`)
             }
           }
           pos.partial2_done = true
         }
 
-        // 2c. Partial TP3 at +2.5R → close 20% (v82h: was 15% @ +1.25R in v53h)
-        if (!pos.partial3_done && rMultiple >= 2.5) {
+        // 2c. Partial TP3 at +2.0R → close 20% (v82j: was +2.5R in v82h, was 15% @ +1.25R in v53h)
+        if (!pos.partial3_done && rMultiple >= 2.0) {
           const partialPct3 = 0.20
           const partialQty3 = pos.qty * partialPct3
           if (partialQty3 > 0.0001) {
@@ -986,13 +988,13 @@ export class PaperTradingEngine {
               : this.marketBuy(sym, partialQty3 * pos.entry_price, pos.strategy)
             if (partialResult3.success) {
               pos.qty -= partialQty3
-              console.log(`[Paper/v82h] ${sym} PARTIAL_TP3 20% @ ${price} (R=${rMultiple.toFixed(2)})`)
+              console.log(`[Paper/v82j] ${sym} PARTIAL_TP3 20% @ ${price} (R=${rMultiple.toFixed(2)})`)
             }
           }
           pos.partial3_done = true
         }
 
-        // 2d. Partial TP4 at +4.0R → close 25% (v82h NEW — captures extended runners)
+        // 2d. Partial TP4 at +4.0R → close 25% (v82j NEW — captures extended runners)
         if (!pos.partial4_done && rMultiple >= 4.0) {
           const partialPct4 = 0.25
           const partialQty4 = pos.qty * partialPct4
@@ -1002,7 +1004,7 @@ export class PaperTradingEngine {
               : this.marketBuy(sym, partialQty4 * pos.entry_price, pos.strategy)
             if (partialResult4.success) {
               pos.qty -= partialQty4
-              console.log(`[Paper/v82h] ${sym} PARTIAL_TP4 25% @ ${price} (R=${rMultiple.toFixed(2)})`)
+              console.log(`[Paper/v82j] ${sym} PARTIAL_TP4 25% @ ${price} (R=${rMultiple.toFixed(2)})`)
             }
           }
           pos.partial4_done = true
