@@ -127,24 +127,40 @@ log "Bot viejo detenido."
 # ─── 5. Arrancar el bot nuevo ──────────────────────────────────
 step "5/5  Arrancar bot nuevo"
 
+# ─── Decidir comando de arranque ──────────────────────────────
+# Estrategia:
+#   1. Si existe .next/standalone/server.js  →  bun run start  (standalone, óptimo)
+#   2. Si no                                  →  bun next start (estándar, siempre funciona)
+START_CMD=""
+if [[ -f "$REPO_DIR/.next/standalone/server.js" ]]; then
+  START_CMD="bun run start"
+  log "Modo arranque: bun run start (.next/standalone/server.js encontrado)"
+else
+  START_CMD="bun next start -p 3000"
+  warn ".next/standalone/server.js NO existe — usando fallback 'bun next start'"
+  warn "  (Esto es normal en algunas versiones de Next 16/Turbopack en Mac.)"
+fi
+
+# ─── Arrancar el bot ──────────────────────────────────────────
 if command -v pm2 >/dev/null; then
   log "Iniciando con PM2 (auto-restart en crash)..."
-  pm2 start "bun run start" --name "$PM2_NAME" --cwd "$REPO_DIR"
+  pm2 start "$START_CMD" --name "$PM2_NAME" --cwd "$REPO_DIR"
   pm2 save
   log "PM2 iniciado. Estado:"
   pm2 list
 else
   log "Iniciando con nohup (sin auto-restart)..."
   : > "$BOT_LOG"  # truncar log viejo
-  nohup bun run start > "$BOT_LOG" 2>&1 &
+  nohup bash -c "$START_CMD" > "$BOT_LOG" 2>&1 &
   NEW_PID=$!
   echo "$NEW_PID" > "$PID_FILE"
   disown "$NEW_PID" 2>/dev/null || true
   log "Bot arrancado. PID=$NEW_PID (guardado en $PID_FILE)"
   sleep 5
   if ! kill -0 "$NEW_PID" 2>/dev/null; then
-    err "El bot murió en los primeros 5s. Últimas 30 líneas del log:"
-    tail -30 "$BOT_LOG"
+    err "El bot murió en los primeros 5s. Últimas 50 líneas del log:"
+    tail -50 "$BOT_LOG"
+    err "Intento de fallback manual: bash -lc 'cd $REPO_DIR && bun next start -p 3000'"
     exit 1
   fi
   log "Bot vivo tras 5s ✓"
