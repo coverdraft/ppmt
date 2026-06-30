@@ -797,7 +797,7 @@ export class PaperTradingEngine {
         }
       }
 
-      // ─── v67: Lock + 3-Partial TP + Trailing + TIERED Adaptive + A 0.040 + B 0.30 + PYRAMID B @+1.0R (+75%) ───
+      // ─── v62a: Lock + 3-Partial TP + Trailing + TIERED Adaptive + A 0.050 + B 0.20 + PYRAMID B @+1.0R (+75%) ───
       // These run on every tick to manage open positions proactively.
       // Lock:     move SL to entry+0.35R when +0.5R reached (unchanged from v51e)
       // Partial1: close 5% at +0.5R (unchanged from v53h)
@@ -837,7 +837,7 @@ export class PaperTradingEngine {
         //   - Resets SL to new_entry - 1.5*ATR (gives pyramided position room)
         //   - Resets partial1/2/3_done, lock_done, trail_active so they re-fire on pyramided pos
         //   12-seed validation: +3.13 P&L vs v60b, MaxDD +0.01% (negligible risk increase)
-        // v62a→v67: Pyramid pct 0.50 → 0.75 (push B winners even harder)
+        // v62a: Pyramid pct 0.50 → 0.75 (push B winners even harder)
         //   12-seed validation: +2.58 P&L vs v61b, MaxDD same 0.29%, PF 2.66→2.72, Sharpe +8.69→+9.82
         if (!pos.pyramid_done && pos.strategy === 'B' && rMultiple >= 1.0) {
           const pyramidPct = 0.75
@@ -865,7 +865,7 @@ export class PaperTradingEngine {
           pos.trail_active = false
           pos.max_favorable_price = price
           pos.pyramid_done = true
-          console.log(`[Paper/v67] ${sym} PYRAMID +75% @ ${price} (R was ${rMultiple.toFixed(2)}, new entry ${newEntry.toFixed(4)})`)
+          console.log(`[Paper/v62a] ${sym} PYRAMID +75% @ ${price} (R was ${rMultiple.toFixed(2)}, new entry ${newEntry.toFixed(4)})`)
         }
 
         // v61b: Recompute rMultiple after pyramid (entry_price may have changed)
@@ -1129,10 +1129,9 @@ export class PaperTradingEngine {
       if (strat.positions.size >= 2) break
       // v31b: position size 2.5% for Strategy A (A has 61% WR but loses
       // money due to R:R 1:1.67 — halving size makes A's losses manageable)
-      // v67: A base size 0.040 (was 0.050 in v62a) — reduce A's drag while pushing B harder
-      //   12-seed validation: A 0.040 + B 0.30 + pyramid +75% → P&L +46.93, MaxDD 0.29%, PF 3.01 (vs v62a P&L +48.56, PF 2.72)
-      //   A was net LOSER at 0.050 (-7.51 in seed 2024 trace) — at 0.040 with B 0.30, PF jumps 2.72 → 3.01 (+10.7%)
-      const baseUsdtAmountA = Math.min(strat.cash * 0.040, strat.cash * 0.10)
+      // v60b: A base size 0.050 (was 0.040 in v59f) — push A harder with TIERED adaptive protection
+      //   12-seed validation: A 0.050 + B 0.20 + tiered → P&L +42.89, MaxDD 0.28% (vs v59f P&L +36.03, MaxDD 0.23%)
+      const baseUsdtAmountA = Math.min(strat.cash * 0.050, strat.cash * 0.10)
       if (baseUsdtAmountA < 50) break
 
       // FIX v12 BUG A: direction from RECENT momentum, not 24h changePct
@@ -1154,7 +1153,7 @@ export class PaperTradingEngine {
       if (result.success) {
         const pos = this.positions.get(top.symbol)
         if (pos) {
-          // v67: SL 1.5 ATR + lock 0.5R (offset 0.35R) + p1 5% @ 0.5R + p2 10% @ 1.0R + p3 15% @ 1.25R + trail 0.30 ATR + ATR floor 0.58% + momentum 0.55% + TIERED SIZE (0.4/0.7/1.0 by ATR) + PYRAMID B @+1.0R (+75%) + A 0.040 + B 0.30
+          // v62a: SL 1.5 ATR + lock 0.5R (offset 0.35R) + p1 5% @ 0.5R + p2 10% @ 1.0R + p3 15% @ 1.25R + trail 0.30 ATR + ATR floor 0.58% + momentum 0.55% + TIERED SIZE (0.4/0.7/1.0 by ATR) + PYRAMID B @+1.0R (+75%)
           //   12-seed validation: WR 79.6%, P&L +48.56 (A), Profitable 67% of seeds, MaxDD 0.29%, PF 2.72
           pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 1.5 : pos.entry_price + atr * 1.5
           pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 1.2 : pos.entry_price - atr * 1.2
@@ -1233,11 +1232,9 @@ export class PaperTradingEngine {
       // v53h: position size 12.5% for Strategy B (was 10% in v31b-v51e)
       //   B is the workhorse with WR 79%+ — bigger size scales profits with controlled MaxDD
       //   12-seed validation: B 0.125 → P&L +27.00, MaxDD 0.28% (vs B 0.10 → P&L +23.07, MaxDD 0.26%)
-      // v67: B base size 0.30 (was 0.20 in v62a) — push B HARDER (+50% bigger) since B is the workhorse
-      //   12-seed validation: A 0.040 + B 0.30 → P&L +46.93, PF 3.01 (vs v62a P&L +48.56, PF 2.72)
-      //   PF improvement +0.29 (+10.7%) means each dollar lost generates $3.01 profit (vs $2.72 in v62a)
-      //   MaxDD stays at 0.29% — TIERED adaptive sizing + pyramid +75% keep drawdown controlled
-      const baseUsdtAmount = Math.min(strat.cash * 0.30, strat.cash * 0.30)
+      // v60b: B base size 0.20 (was 0.175 in v59f) — push B harder with TIERED adaptive protection
+      //   12-seed validation: A 0.050 + B 0.20 + tiered → P&L +42.89, MaxDD 0.28% (vs v59f P&L +36.03, MaxDD 0.23%)
+      const baseUsdtAmount = Math.min(strat.cash * 0.20, strat.cash * 0.20)
       if (baseUsdtAmount < 50) break
 
       // FIX v12 BUG J: Direction was c.rsi < 30 ? 'LONG' : 'SHORT' but v12 BUG E
@@ -1263,8 +1260,8 @@ export class PaperTradingEngine {
       if (result.success) {
         const pos = this.positions.get(c.ticker.symbol)
         if (pos) {
-          // v67: SL 1.5 ATR + v67 state init (lock 0.5R offset 0.35R / p1 5% @ 0.5R / p2 10% @ 1.0R / p3 15% @ 1.25R / trail 0.30 ATR / PYRAMID +75% @ +1.0R)
-          //   B size: 0.30 base (was 0.20 in v62a), TIERED 0.4/0.7/1.0 by ATR, pyramided +75% at +1.0R (v62a: was +50% in v61b)
+          // v62a: SL 1.5 ATR + v62a state init (lock 0.5R offset 0.35R / p1 5% @ 0.5R / p2 10% @ 1.0R / p3 15% @ 1.25R / trail 0.30 ATR / PYRAMID +75% @ +1.0R)
+          //   B size: 0.20 base, TIERED 0.4/0.7/1.0 by ATR, pyramided +75% at +1.0R (v62a: was +50% in v61b)
           pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 1.5 : pos.entry_price + atr * 1.5
           pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 1.2 : pos.entry_price - atr * 1.2
           pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 4 : pos.entry_price + atr * 4
