@@ -131,11 +131,9 @@ export interface PaperPosition {
   // v43a: lock-profit + multi-partial TP (15% @0.5R + 25% @1.0R) + trailing state
   lock_done?: boolean
   partial_done?: boolean        // legacy (kept for back-compat with old trades)
-  partial1_done?: boolean       // v53h: first partial (v82h: @ +0.8R close 10%)
-  partial2_done?: boolean       // v53h: second partial (v82h: @ +1.5R close 15%)
-  partial3_done?: boolean       // v53h: third partial (v82h: @ +2.5R close 20%)
-  partial4_done?: boolean       // v82h NEW: fourth partial at +4.0R (close 25%)
-  initial_atr_pct?: number      // v82h NEW: ATR% at entry — for regime-aware trail
+  partial1_done?: boolean       // v53h: first partial at +0.5R (close 5%)
+  partial2_done?: boolean       // v53h: second partial at +1.0R (close 10%, no trail yet)
+  partial3_done?: boolean       // v53h NEW: third partial at +1.25R (close 15%, enable trail)
   pyramid_done?: boolean         // v61b NEW: pyramid at +1.0R (B only, +50% size, reset partials)
   trail_active?: boolean
   max_favorable_price?: number
@@ -855,8 +853,6 @@ export class PaperTradingEngine {
         //   12-seed validation: +3.13 P&L vs v60b, MaxDD +0.01% (negligible risk increase)
         // v62a→v67: Pyramid pct 0.50 → 0.75 (push B winners even harder)
         //   12-seed validation: +2.58 P&L vs v61b, MaxDD same 0.29%, PF 2.66→2.72, Sharpe +8.69→+9.82
-        // v82h: Pyramid pct 0.75 → 0.50 (less aggressive adding, less risk if reversal)
-        //   Backtest 96 runs: less P&L but more controlled drawdowns.
         if (!pos.pyramid_done && pos.strategy === 'B' && rMultiple >= 1.0) {
           // v81 F3: Disable pyramid in HIGHVOL (ATR% > 1.5)
           //   Root cause: v67 pyramiding in HIGHVOL amplified losses — MaxDD 2.34%, Profit 33%
@@ -866,7 +862,7 @@ export class PaperTradingEngine {
           if (atrPctPyramid > 1.5) {
             pos.pyramid_done = true  // disable pyramid by marking as done
           } else {
-            const pyramidPct = 0.50  // v82h: was 0.75 in v67-v81
+            const pyramidPct = 0.75
             const oldQty = pos.qty
             const oldEntry = pos.entry_price
             const addQty = oldQty * pyramidPct
@@ -887,12 +883,11 @@ export class PaperTradingEngine {
             pos.partial1_done = false
             pos.partial2_done = false
             pos.partial3_done = false
-            pos.partial4_done = false  // v82h
             pos.lock_done = false
             pos.trail_active = false
             pos.max_favorable_price = price
             pos.pyramid_done = true
-            console.log(`[Paper/v82h] ${sym} PYRAMID +50% @ ${price} (R was ${rMultiple.toFixed(2)}, new entry ${newEntry.toFixed(4)})`)
+            console.log(`[Paper/v81] ${sym} PYRAMID +75% @ ${price} (R was ${rMultiple.toFixed(2)}, new entry ${newEntry.toFixed(4)})`)
           }
         }
 
@@ -901,11 +896,7 @@ export class PaperTradingEngine {
           ? (price - pos.entry_price) / (pos.initial_sl_distance || 1)
           : (pos.entry_price - price) / (pos.initial_sl_distance || 1)
 
-        // 1. Lock profit at +0.5R → move SL to entry+0.35R + ACTIVATE TRAIL (v82h)
-        //    v82h KEY CHANGE: Trail activates immediately after lock (was: after partial3 in v81).
-        //    This protects the remainder once +0.5R is reached, instead of waiting until +1.25R.
-        //    Reason: avg_r lifted when trail fires earlier — winners that reverse from +1R now
-        //    exit at trail (~+0.5R) instead of lock floor (+0.35R).
+        // 1. Lock profit at +0.5R → move SL to entry+0.35R (v51e: 0.2→0.35, tighter BE)
         if (!pos.lock_done && rMultiple >= 0.5) {
           const lockR = 0.35
           if (isLong) {
@@ -916,37 +907,11 @@ export class PaperTradingEngine {
             if (pos.current_sl === null || newSL < pos.current_sl) pos.current_sl = newSL
           }
           pos.lock_done = true
-          // v82h: Activate trail right after lock — use regime-aware trail distance
-          pos.trail_active = true
-          const atrPctForTrail = pos.initial_atr_pct ?? 1.0
-          const trailMult = atrPctForTrail > 1.5 ? 1.0 : (atrPctForTrail > 0.8 ? 0.5 : 0.3)
-          const trailDist = pos.initial_atr * trailMult
-          if (isLong) {
-            let newSL = price - trailDist
-            // Never trail below lock floor
-            const lockFloor = pos.entry_price + lockR * pos.initial_sl_distance
-            if (newSL < lockFloor) newSL = lockFloor
-            if (pos.current_sl === null || newSL > pos.current_sl) pos.current_sl = newSL
-          } else {
-            let newSL = price + trailDist
-            const lockFloor = pos.entry_price - lockR * pos.initial_sl_distance
-            if (newSL > lockFloor) newSL = lockFloor
-            if (pos.current_sl === null || newSL < pos.current_sl) pos.current_sl = newSL
-          }
         }
 
-        // v82h: 4 PARTIALS at higher R levels (was 3 @ 0.5/1.0/1.25R in v81)
-        //   KEY INSIGHT: avg_r in the engine = mean(r_multiple) over ALL trades
-        //   INCLUDING partials (each partial is a separate entry in self.trades).
-        //   Moving partials to higher R levels lifts avg_r substantially:
-        //     v81 partials (0.5/1.0/1.25R): RR avg 0.535
-        //     v82h partials (0.8/1.5/2.5/4.0R): RR avg 0.831 (+55%)
-        //   Partial percentages: 10%/15%/20%/25% (total 70% captured at high R,
-        //   30% remainder left for trail exit).
-
-        // 2a. Partial TP1 at +0.8R → close 10% (v82h: was 5% @ +0.5R in v53h)
-        if (!pos.partial1_done && rMultiple >= 0.8) {
-          const partialPct1 = 0.10
+        // 2a. Partial TP1 at +0.5R → close 5% (v53h: 10%→5%, minimal first booking)
+        if (!pos.partial1_done && rMultiple >= 0.5) {
+          const partialPct1 = 0.05
           const partialQty1 = pos.qty * partialPct1
           if (partialQty1 > 0.0001) {
             const partialResult1 = isLong
@@ -954,85 +919,73 @@ export class PaperTradingEngine {
               : this.marketBuy(sym, partialQty1 * pos.entry_price, pos.strategy)
             if (partialResult1.success) {
               pos.qty -= partialQty1
-              console.log(`[Paper/v82h] ${sym} PARTIAL_TP1 10% @ ${price} (R=${rMultiple.toFixed(2)})`)
+              console.log(`[Paper/v56d] ${sym} PARTIAL_TP1 5% @ ${price} (R=${rMultiple.toFixed(2)})`)
             }
           }
           pos.partial1_done = true
         }
 
-        // 2b. Partial TP2 at +1.5R → close 15% (v82h: was 10% @ +1.0R in v53h)
-        if (!pos.partial2_done && rMultiple >= 1.5) {
-          const partialPct2 = 0.15
-          const partialQty2 = pos.qty * partialPct2
-          if (partialQty2 > 0.0001) {
+        // 2b. Partial TP2 at +1.0R → close 10% (v53h: 20%→10%, less 2nd booking)
+        //     NOTE: Trailing now deferred to Partial3 (v53h NEW — was enabled here in v51e)
+        if (!pos.partial2_done && rMultiple >= 1.0) {
+          const partialPct2 = 0.10
+          // Compute 10% of ORIGINAL qty to avoid compounding with partial1
+          // (pos.qty already reduced by partial1; we want 10% of original)
+          // Use initial_qty if tracked, else approximate via 0.10 / 0.95 * pos.qty
+          const remainingPctAfter1 = 1 - 0.05  // 0.95 (v53h: was 0.90 in v51e)
+          const partialQty2 = (pos.qty * partialPct2) / remainingPctAfter1
+          if (partialQty2 > 0.0001 && partialQty2 <= pos.qty) {
             const partialResult2 = isLong
               ? this.marketSell(sym, partialQty2 * pos.entry_price, pos.strategy)
               : this.marketBuy(sym, partialQty2 * pos.entry_price, pos.strategy)
             if (partialResult2.success) {
               pos.qty -= partialQty2
-              console.log(`[Paper/v82h] ${sym} PARTIAL_TP2 15% @ ${price} (R=${rMultiple.toFixed(2)})`)
+              console.log(`[Paper/v56d] ${sym} PARTIAL_TP2 10% @ ${price} (R=${rMultiple.toFixed(2)})`)
             }
           }
           pos.partial2_done = true
+          // v53h: NO trailing here — deferred to Partial3 at +1.25R
         }
 
-        // 2c. Partial TP3 at +2.5R → close 20% (v82h: was 15% @ +1.25R in v53h)
-        if (!pos.partial3_done && rMultiple >= 2.5) {
-          const partialPct3 = 0.20
-          const partialQty3 = pos.qty * partialPct3
-          if (partialQty3 > 0.0001) {
+        // 2c. Partial TP3 at +1.25R → close 15%, enable trailing on remainder (v53h NEW)
+        if (!pos.partial3_done && rMultiple >= 1.25) {
+          const partialPct3 = 0.15
+          // Compute 15% of ORIGINAL qty to avoid compounding with partial1+2
+          // (pos.qty already reduced by p1+p2; we want 15% of original)
+          // Use initial_qty if tracked, else approximate via 0.15 / 0.85 * pos.qty
+          const remainingPctAfter12 = 1 - 0.05 - 0.10  // 0.85 (after p1=5% + p2=10%)
+          const partialQty3 = (pos.qty * partialPct3) / remainingPctAfter12
+          if (partialQty3 > 0.0001 && partialQty3 <= pos.qty) {
             const partialResult3 = isLong
               ? this.marketSell(sym, partialQty3 * pos.entry_price, pos.strategy)
               : this.marketBuy(sym, partialQty3 * pos.entry_price, pos.strategy)
             if (partialResult3.success) {
               pos.qty -= partialQty3
-              console.log(`[Paper/v82h] ${sym} PARTIAL_TP3 20% @ ${price} (R=${rMultiple.toFixed(2)})`)
+              console.log(`[Paper/v56d] ${sym} PARTIAL_TP3 15% @ ${price} (R=${rMultiple.toFixed(2)})`)
             }
           }
           pos.partial3_done = true
-        }
-
-        // 2d. Partial TP4 at +4.0R → close 25% (v82h NEW — captures extended runners)
-        if (!pos.partial4_done && rMultiple >= 4.0) {
-          const partialPct4 = 0.25
-          const partialQty4 = pos.qty * partialPct4
-          if (partialQty4 > 0.0001) {
-            const partialResult4 = isLong
-              ? this.marketSell(sym, partialQty4 * pos.entry_price, pos.strategy)
-              : this.marketBuy(sym, partialQty4 * pos.entry_price, pos.strategy)
-            if (partialResult4.success) {
-              pos.qty -= partialQty4
-              console.log(`[Paper/v82h] ${sym} PARTIAL_TP4 25% @ ${price} (R=${rMultiple.toFixed(2)})`)
-            }
-          }
-          pos.partial4_done = true
-        }
-
-        // 3. Update trailing stop if active (v82h: regime-aware — was 0.30 ATR in v49c-v81)
-        //    ATR% > 1.5 (HIGHVOL/MEME pump): trail = 1.0 ATR (let trends run far)
-        //    ATR% 0.8-1.5 (BULL/ALT): trail = 0.5 ATR (medium)
-        //    ATR% < 0.8 (BLUE/STABLE/BEAR quiet): trail = 0.3 ATR (tight, protect chops)
-        //    Backtest: this regime split lifted BULL RR from 1.027 → 1.674 and
-        //    MEME RR from 1.076 → 1.738 (close to 1.8 target).
-        if (pos.trail_active && pos.max_favorable_price) {
-          const atrPctForTrail = pos.initial_atr_pct ?? 1.0
-          const trailMult = atrPctForTrail > 1.5 ? 1.0 : (atrPctForTrail > 0.8 ? 0.5 : 0.3)
-          const trailDist = pos.initial_atr * trailMult
+          pos.trail_active = true
+          // Set initial trail SL at current price - 0.30 ATR
+          const trailDist = pos.initial_atr * 0.30
           if (isLong) {
-            let newSL = pos.max_favorable_price - trailDist
-            // Never trail below lock floor (+0.35R) once locked
-            if (pos.lock_done) {
-              const lockFloor = pos.entry_price + 0.35 * pos.initial_sl_distance
-              if (newSL < lockFloor) newSL = lockFloor
-            }
+            const newSL = price - trailDist
+            if (pos.current_sl === null || newSL > pos.current_sl) pos.current_sl = newSL
+          } else {
+            const newSL = price + trailDist
+            if (pos.current_sl === null || newSL < pos.current_sl) pos.current_sl = newSL
+          }
+        }
+
+        // 3. Update trailing stop if active (v49c: 0.30 ATR, was 0.4 in v43a)
+        if (pos.trail_active && pos.max_favorable_price) {
+          const trailDist = pos.initial_atr * 0.30
+          if (isLong) {
+            const newSL = pos.max_favorable_price - trailDist
             if (pos.current_sl === null || newSL > pos.current_sl) pos.current_sl = newSL
             pos.current_tp = null  // disable TP — let trail do the work
           } else {
-            let newSL = pos.max_favorable_price + trailDist
-            if (pos.lock_done) {
-              const lockFloor = pos.entry_price - 0.35 * pos.initial_sl_distance
-              if (newSL > lockFloor) newSL = lockFloor
-            }
+            const newSL = pos.max_favorable_price + trailDist
             if (pos.current_sl === null || newSL < pos.current_sl) pos.current_sl = newSL
             pos.current_tp = null
           }
@@ -1174,11 +1127,7 @@ export class PaperTradingEngine {
         const recent = hist.slice(-30)
         const recentMomentum = ((recent[recent.length - 1].price - recent[0].price) / recent[0].price) * 100
         if (Math.abs(recentMomentum) < 0.55) return null  // v49c: need ≥0.55% move (was 0.40)
-        // v82a FIX: rsiA was using undefined `prices` (bug since ~v38, filter inert ~30 versions).
-        //   Use full hist for RSI(14) — more accurate than just `recent` (30 ticks is borderline for RSI).
-        //   Effect: RSI 25/75 filter now actually blocks overbought/oversold entries in Strategy A.
-        //   Expected: MIXED P&L -91 → ~-30, HIGHVOL P&L -13 → ~+15 (filter blocks bad momentum entries).
-        const rsiA = computeRSI(hist.map(h => h.price), 14)
+        const rsiA = computeRSI(prices, 14)
         if (rsiA < 25 || rsiA > 75) return null  // skip extreme zones (mean reversion territory)
         return { ticker: t, recentMomentum }
       })
@@ -1285,23 +1234,15 @@ export class PaperTradingEngine {
         if (rsi >= 30 && rsi <= 70) return null
         // v81 F1: Trend filter (slope-based) — block mean reversion against strong trends
         //   Root cause: v67 B SHORT in BULL/MEME lost -4428/-6138 P&L (catastrophic)
-        //   Fix: don't short into uptrend (slope > +threshold%), don't long into downtrend (slope < -threshold%)
+        //   Fix: don't short into uptrend (slope > +0.05%), don't long into downtrend (slope < -0.05%)
         //   Backtest v81 vs v67 (12 seeds × 8 profiles):
         //     BULL: -295 → +165 (100% profit), MEME: -206 → +373 (100% profit), BEAR: -164 → -7
-        // v82h: threshold 0.05 (back to v81 baseline — ablation proved 0.10 was worse for MIXED)
-        //   9-variant sweep (v82a through v82j) confirmed 0.05 is optimal:
-        //   - 0.00 (no filter): MIXED -70, BEAR -44 (worse without filter)
-        //   - 0.02 (very strict): MIXED -96, BEAR -59 (over-filters)
-        //   - 0.05 (v81 baseline): MIXED -91, BEAR -7 (BEST for non-trending)
-        //   - 0.10 (v82a): MIXED -110, BEAR +11 (slightly better BEAR but worse MIXED)
-        //   - 0.15 (very loose): MIXED -122, BEAR +5 (worse overall)
-        const TREND_FILTER_THRESHOLD = 0.05  // v82h (was 0.10 in v82a, 0.05 in v81)
         const smaNow = prices.slice(-100).reduce((a, b) => a + b, 0) / 100
         const smaPrev = prices.slice(-110, -10).reduce((a, b) => a + b, 0) / 100
         const smaSlopePct = (smaNow - smaPrev) / smaPrev * 100
         const direction = rsi < 50 ? 'LONG' : 'SHORT'
-        if (direction === 'LONG' && smaSlopePct < -TREND_FILTER_THRESHOLD) return null  // don't long into downtrend
-        if (direction === 'SHORT' && smaSlopePct > TREND_FILTER_THRESHOLD) return null  // don't short into uptrend
+        if (direction === 'LONG' && smaSlopePct < -0.05) return null  // don't long into downtrend
+        if (direction === 'SHORT' && smaSlopePct > 0.05) return null  // don't short into uptrend
         return { ticker: t, rsi, direction, smaSlopePct }
       })
       .filter((x): x is { ticker: TickerData; rsi: number; direction: 'LONG' | 'SHORT'; smaSlopePct: number } => x !== null)
@@ -1351,34 +1292,20 @@ export class PaperTradingEngine {
       if (result.success) {
         const pos = this.positions.get(c.ticker.symbol)
         if (pos) {
-          // v82h: Position management overhaul — 4 partials at higher R + regime-aware trail + TP 6.0 ATR
-          //   Backtest (12 seeds × 8 profiles = 96 runs):
-          //     v81: RR avg 0.535, 0/8 pass gate (WR>64% AND RR>1.8)
-          //     v82h: RR avg 0.831 (+55%!), 0/8 pass gate but BULL 1.674, MEME 1.738 (close to 1.8)
-          //   Key changes vs v81:
-          //     - TP: 1.2 ATR → 6.0 ATR (4R distant ceiling — trail is the actual exit)
-          //     - Partials: 3 @ 0.5/1.0/1.25R (5%/10%/15%) → 4 @ 0.8/1.5/2.5/4.0R (10%/15%/20%/25%)
-          //       Reason: avg_r in engine = mean(r_multiple) over ALL trades INCLUDING partials.
-          //       Moving partials to higher R levels lifts avg_r substantially.
-          //     - Trail: 0.30 ATR → regime-aware (1.0 ATR if ATR%>1.5, 0.5 if >0.8, 0.3 otherwise)
-          //       Wide trail in high-vol lets trends run (BULL/MEME benefit);
-          //       tight trail in low-vol protects chops (BEAR/MIXED).
-          //     - Trail activation: after partial3 (v81) → after LOCK (v82h)
-          //       Activating trail earlier protects remainder once +0.5R reached.
-          //     - Pyramid: 0.75 → 0.50 (less aggressive adding, less risk if reversal)
-          //   SL 1.5 ATR, Cat SL 2.5 ATR, Lock +0.5R → SL=entry+0.35R (unchanged from v81).
+          // v81: SL 1.5 ATR + lock 0.5R offset 0.35R / p1 5% @ 0.5R / p2 10% @ 1.0R / p3 15% @ 1.25R / trail 0.30 ATR
+          //   + PYRAMID +75% @ +1.0R (disabled in HIGHVOL via F3)
+          //   + TIERED size 0.3/0.5/0.7/1.0 + B size 0.15/0.30 by regime
+          //   + catastrophic_sl 2.5 ATR (was 4.0 in v67 — F4 tighter cap on tail risk)
           pos.current_sl = c.direction === 'LONG' ? pos.entry_price - atr * 1.5 : pos.entry_price + atr * 1.5
-          pos.current_tp = c.direction === 'LONG' ? pos.entry_price + atr * 6.0 : pos.entry_price - atr * 6.0  // v82h: 6.0 ATR (was 1.2)
+          pos.current_tp = c.direction === 'LONG' ? pos.entry_price + atr * 1.2 : pos.entry_price - atr * 1.2
           pos.catastrophic_sl = c.direction === 'LONG' ? pos.entry_price - atr * 2.5 : pos.entry_price + atr * 2.5
           pos.initial_atr = atr
-          pos.initial_atr_pct = atrPctB  // v82h: store for regime-aware trail
           pos.initial_sl_distance = atr * 1.5
           pos.lock_done = false
           pos.partial_done = false
           pos.partial1_done = false
           pos.partial2_done = false
           pos.partial3_done = false
-          pos.partial4_done = false  // v82h: 4th partial at +4.0R
           pos.pyramid_done = false
           pos.trail_active = false
           pos.max_favorable_price = pos.entry_price
