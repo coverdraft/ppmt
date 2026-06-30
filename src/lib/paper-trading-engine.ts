@@ -1446,18 +1446,24 @@ export class PaperTradingEngine {
       if (result.success) {
         const pos = this.positions.get(top.symbol)
         if (pos) {
-          // v81: SL 1.5 ATR + lock 0.5R (offset 0.35R) + p1 5% @ 0.5R + p2 10% @ 1.0R + p3 15% @ 1.25R + trail 0.30 ATR + ATR floor 0.58% + momentum 0.55% + TIERED SIZE (0.4/0.7/1.0 by ATR) + PYRAMID B @+1.0R (+75%) + A 0.040 + B 0.30
-          //   12-seed validation: WR 79.6%, P&L +48.56 (A), Profitable 67% of seeds, MaxDD 0.29%, PF 2.72
+          // v82j PORT to Strategy A (was v81: TP 1.2 ATR — INVERTED RR 0.80, lost money long-term).
+          //   Root cause (diagnosed 2026-06-30 on live BTC trade): A had TP 1.2 ATR vs SL 1.5 ATR,
+          //   meaning TP was CLOSER than SL. Even with 60% WR the EV was negative after fees.
+          //   Fix: apply v82j exit stack — TP 6.0 ATR (4R distant ceiling), 4 partials at
+          //   0.5/1.0/2.0/4.0R (10/15/20/25%), lock @+0.5R → SL=entry+0.35R + activate trail,
+          //   regime-aware trail (1.0/0.5/0.3 ATR by ATR% band). Same exit stack as Strategy B.
           pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 1.5 : pos.entry_price + atr * 1.5
-          pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 1.2 : pos.entry_price - atr * 1.2
-          pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 4 : pos.entry_price + atr * 4
+          pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 6.0 : pos.entry_price - atr * 6.0  // v82j: 6.0 ATR (was 1.2)
+          pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 2.5 : pos.entry_price + atr * 2.5  // v82j: 2.5 ATR (was 4.0)
           pos.initial_atr = atr
+          pos.initial_atr_pct = atrPctA  // v82j: store for regime-aware trail
           pos.initial_sl_distance = atr * 1.5
           pos.lock_done = false
           pos.partial_done = false
           pos.partial1_done = false
           pos.partial2_done = false
           pos.partial3_done = false
+          pos.partial4_done = false  // v82j: 4th partial at +4.0R
           pos.pyramid_done = false
           pos.trail_active = false
           pos.max_favorable_price = pos.entry_price
@@ -1729,6 +1735,7 @@ export class PaperTradingEngine {
       const hist = this.priceHistory.get(c.ticker.symbol) || []
       const atr = computeATR(hist.map(h => h.price), 60)
       if (atr <= 0) continue
+      const atrPctD = (atr / (hist[hist.length - 1]?.price || 1)) * 100  // v82j: for regime-aware trail
 
       const result = direction === 'LONG'
         ? this.marketBuy(c.ticker.symbol, usdtAmount, 'D')
@@ -1737,10 +1744,30 @@ export class PaperTradingEngine {
       if (result.success) {
         const pos = this.positions.get(c.ticker.symbol)
         if (pos) {
-          // v31b: SL 1.5 ATR (kept), TP 3.0 → 1.0 (tighter for higher WR), catSL 3.5 → 3.0
+          // v82j PORT to Strategy D (was v31b: TP 1.0 ATR — INVERTED RR 0.67, the WORST offender).
+          //   Root cause (diagnosed 2026-06-30 on live BTC trade #59508.63):
+          //     TP at +0.30% (1.0 ATR), SL at -0.45% (1.5 ATR), CAT SL at -0.90% (3.0 ATR).
+          //     TP was 33% CLOSER than SL → even at 70% WR, EV = 0.70×1.0 - 0.30×1.5 = +0.25R
+          //     but with fees+slippage ~0.10R per round-trip, EV ≈ 0.05R — basically breakeven,
+          //     and catastrophic SL hits (-2R each) wiped out 10 winners.
+          //   Fix: apply v82j exit stack — TP 6.0 ATR (4R distant ceiling), 4 partials at
+          //   0.5/1.0/2.0/4.0R (10/15/20/25%), lock @+0.5R → SL=entry+0.35R + activate trail,
+          //   regime-aware trail (1.0/0.5/0.3 ATR by ATR% band). Same exit stack as Strategy B.
           pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 1.5 : pos.entry_price + atr * 1.5
-          pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 1.0 : pos.entry_price - atr * 1.0
-          pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 3.0 : pos.entry_price + atr * 3.0
+          pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 6.0 : pos.entry_price - atr * 6.0  // v82j: 6.0 ATR (was 1.0)
+          pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 2.5 : pos.entry_price + atr * 2.5  // v82j: 2.5 ATR (was 3.0)
+          pos.initial_atr = atr
+          pos.initial_atr_pct = atrPctD  // v82j: store for regime-aware trail
+          pos.initial_sl_distance = atr * 1.5
+          pos.lock_done = false
+          pos.partial_done = false
+          pos.partial1_done = false
+          pos.partial2_done = false
+          pos.partial3_done = false
+          pos.partial4_done = false  // v82j: 4th partial at +4.0R
+          pos.pyramid_done = false  // v82j: not used by D (pyramid is B-only), but set for cleanliness
+          pos.trail_active = false
+          pos.max_favorable_price = pos.entry_price
         }
         // FIX v13 BUG K: ev_score for Strategy D (squeeze expansion).
         const expected_move_pct_d = +((atr * 4 / (pos?.entry_price || 1)) * 100).toFixed(3)
