@@ -75,6 +75,9 @@ export function useTradingSocket() {
       if (!mountedRef.current) return
       setState({
         isRunning: data.is_running,
+        // v82j+: capture engine version for snapshot traceability.
+        // Falls back to null if engine doesn't send it (older builds).
+        engineVersion: data.engine_version ?? null,
         currentPrice: data.current_price,
         symbol: data.symbol,
         timeframe: data.timeframe,

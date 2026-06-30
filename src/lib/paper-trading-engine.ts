@@ -29,6 +29,48 @@ import type { TokenState, MoneyManagerSettings } from '@/stores/trading-store'
 import type { LivePriceFeed, TickerData } from './live-price-feed'
 import { SUPPORTED_TOKENS_LIST, getTokenName } from './live-price-feed'
 
+// ─── Engine version (for snapshot/export traceability) ────────────────
+// Captured at build time from package.json + git. Bumped on every strategy
+// change so snapshots report which code generated them.
+// Format: "<strategy_stack> (<pkg_version>) @ <git_short>"
+//   - strategy_stack: human-readable name of the active strategy versions
+//   - pkg_version:    package.json "version" field
+//   - git_short:      short commit hash (set at build via PPMT_GIT_SHORT env var,
+//                     falls back to 'dev' if unset)
+//
+// Update ENGINE_STRATEGY_STACK when you change any strategy's exit/entry logic.
+// restart.sh injects the git short hash as PPMT_GIT_SHORT env var at build time.
+
+const ENGINE_PKG_VERSION = '0.2.0'  // mirrors package.json "version"
+const ENGINE_STRATEGY_STACK = 'v82j-A-v82j-B-v83b-F-v82j-D'  // bump on strategy changes
+const ENGINE_GIT_SHORT = (typeof process !== 'undefined' && process.env?.PPMT_GIT_SHORT) || 'dev'
+const ENGINE_BUILT_AT = new Date().toISOString()
+
+export const ENGINE_VERSION = {
+  strategy_stack: ENGINE_STRATEGY_STACK,
+  pkg_version: ENGINE_PKG_VERSION,
+  git_short: ENGINE_GIT_SHORT,
+  built_at: ENGINE_BUILT_AT,
+  // Per-strategy exit stack — readable at a glance from a snapshot
+  strategies: {
+    A: { name: 'Momentum',     exit_stack: 'v82j', tp_mult_atr: 6.0, sl_mult_atr: 1.5, cat_sl_mult_atr: 2.5, partials: '0.5R/1.0R/2.0R/4.0R', lock: '+0.5R -> +0.35R', trail: 'regime-aware 1.0/0.5/0.3 ATR' },
+    B: { name: 'MeanRev',      exit_stack: 'v82j', tp_mult_atr: 6.0, sl_mult_atr: 1.5, cat_sl_mult_atr: 2.5, partials: '0.5R/1.0R/2.0R/4.0R', lock: '+0.5R -> +0.35R', trail: 'regime-aware 1.0/0.5/0.3 ATR', pyramid: '+50% @ +1.0R (B-only)' },
+    C: { name: 'Breakout',     exit_stack: 'DISABLED', tp_mult_atr: 3.0, sl_mult_atr: 1.0, cat_sl_mult_atr: 3.5, partials: 'none', lock: 'none', trail: 'none' },
+    D: { name: 'Squeeze',      exit_stack: 'v82j', tp_mult_atr: 6.0, sl_mult_atr: 1.5, cat_sl_mult_atr: 2.5, partials: '0.5R/1.0R/2.0R/4.0R', lock: '+0.5R -> +0.35R', trail: 'regime-aware 1.0/0.5/0.3 ATR' },
+    F: { name: 'Grid (v83b)',  exit_stack: 'v83b', tp_mult_atr: null, sl_mult_atr: null, cat_sl_mult_atr: null, partials: '4 levels above + 4 below SMA60, spacing 0.15%, TP 0.20%, SL 0.50%, max 3 per token, max 12 total', lock: 'n/a', trail: 'n/a' },
+  },
+  // Status flags captured from the source — useful to verify fixes are live
+  flags: {
+    v82j_exit_stack_on_A: true,   // 2026-06-30: was false (TP 1.2 ATR, inverted RR)
+    v82j_exit_stack_on_B: true,   // baseline
+    v82j_exit_stack_on_D: true,   // 2026-06-30: was false (TP 1.0 ATR, inverted RR)
+    strategy_C_enabled: false,    // commented out in maybeAutoTrade()
+    strategy_F_enabled: true,     // v83b for BLUE/STABLE (ATR% < 0.40)
+  },
+  // Human-readable summary — the AI can read this in one line
+  summary: `${ENGINE_STRATEGY_STACK} (pkg ${ENGINE_PKG_VERSION}) @ ${ENGINE_GIT_SHORT}`,
+} as const
+
 // ─── Types ────────────────────────────────────────────────────────────
 export type StrategyName = 'A' | 'B' | 'C' | 'D'
 
@@ -62,6 +104,7 @@ export interface PaperTradingState {
   is_running: boolean
   mode: 'paper'
   started_at: number
+  engine_version: typeof ENGINE_VERSION  // v82j+: for snapshot/export traceability
   current_price: number
   symbol: string
   timeframe: string
@@ -462,7 +505,7 @@ export class PaperTradingEngine {
       this.positions.set(symbol, {
         symbol,
         direction: 'LONG',
-        status: 'ACTIVE',
+        status: 'OPEN',  // v82j+: was 'ACTIVE' — export filter expected 'OPEN', causing open_positions: [] bug
         entry_price: fillPrice,
         entry_time: new Date().toISOString(),
         size_usdt: grossUsdt,
@@ -562,7 +605,7 @@ export class PaperTradingEngine {
       this.positions.set(symbol, {
         symbol,
         direction: 'SHORT',
-        status: 'ACTIVE',
+        status: 'OPEN',  // v82j+: was 'ACTIVE' — export filter expected 'OPEN', causing open_positions: [] bug
         entry_price: fillPrice,
         entry_time: new Date().toISOString(),
         size_usdt: grossUsdt,
@@ -2060,6 +2103,7 @@ export class PaperTradingEngine {
       is_running: this.tradingEnabled,
       mode: 'paper',
       started_at: this.startedAt,
+      engine_version: ENGINE_VERSION,  // v82j+: version tag for snapshot traceability
       current_price: parseFloat(currentPrice.toFixed(currentPrice < 1 ? 6 : currentPrice < 100 ? 4 : 2)),
       symbol: this.selectedToken,
       timeframe: 'live',

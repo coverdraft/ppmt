@@ -91,6 +91,8 @@ export function StatusHeader({ onStartStop, onKillSwitch, onToggleAuto }: Status
     riskRewardRatio,
     // v0.86 — trader notes (Camino B labels for post-close analysis)
     traderNotes,
+    // v82j+ — engine version tag for snapshot traceability
+    engineVersion,
   } = useTradingStore()
 
   // Optimistic local state for the auto-mode switch.
@@ -135,6 +137,17 @@ export function StatusHeader({ onStartStop, onKillSwitch, onToggleAuto }: Status
           {isConnected ? <Wifi className="w-3 h-3 mr-1" /> : <WifiOff className="w-3 h-3 mr-1" />}
           {modeLabel}
         </Badge>
+
+        {/* v82j+: engine version badge — at-a-glance identification of running build */}
+        {engineVersion && (
+          <Badge
+            variant="outline"
+            className="text-[9px] font-mono text-gray-500 border-gray-700 px-1.5 py-0 hidden md:inline-flex"
+            title={`Engine: ${engineVersion.summary}\nBuilt: ${engineVersion.built_at}\nStack: ${engineVersion.strategy_stack}`}
+          >
+            {engineVersion.strategy_stack} @ {engineVersion.git_short}
+          </Badge>
+        )}
 
         {isRunning && (
           <div className="flex items-center gap-1">
@@ -658,6 +671,18 @@ export function StatusHeader({ onStartStop, onKillSwitch, onToggleAuto }: Status
       _version: 'ppmt-export-v9',
       _exported_at: iso,
       _hints: hints,
+      // v82j+: engine version tag — identifies which code generated this snapshot.
+      // Captured at build time from package.json + strategy stack + git short hash.
+      // The AI can read this in one glance to know which fixes are live.
+      engine_version: engineVersion ?? {
+        strategy_stack: 'unknown',
+        pkg_version: 'unknown',
+        git_short: 'unknown',
+        built_at: 'unknown',
+        strategies: {},
+        flags: {},
+        summary: 'unknown (engine version not reported — likely pre-v82j build)',
+      },
       meta,
       money,
       strategies,
@@ -682,7 +707,11 @@ export function StatusHeader({ onStartStop, onKillSwitch, onToggleAuto }: Status
       ? '### Auto-detected issues\n' + hints.map(h => `- ${h}`).join('\n') + '\n\n'
       : ''
     const mdFence = '```'
-    const markdown = `## PPMT Engine Snapshot v9 — ${ts}\n\n${hintsSection}${mdFence}json\n${json}\n${mdFence}`
+    // v82j+: include engine version summary in the title for at-a-glance identification
+    const versionLine = engineVersion
+      ? `\n**Engine:** \`${engineVersion.summary}\`\n`
+      : '\n**Engine:** `unknown (pre-v82j build)`\n'
+    const markdown = `## PPMT Engine Snapshot v9 — ${ts}\n${versionLine}\n${hintsSection}${mdFence}json\n${json}\n${mdFence}`
 
     // Copy to clipboard
     if (navigator.clipboard && navigator.clipboard.writeText) {

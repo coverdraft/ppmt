@@ -84,8 +84,12 @@ step "3/5  Bun install + build"
 log "Instalando dependencias..."
 bun install --frozen-lockfile 2>&1 | tail -5 || bun install 2>&1 | tail -5
 
+# v82j+: capture git short hash for engine_version tag (read by paper-trading-engine.ts)
+GIT_SHORT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+log "Git short: $GIT_SHORT (se inyectará como PPMT_GIT_SHORT en el build)"
+
 log "Build de producción (esto tarda 10-30s)..."
-bun run build 2>&1 | tail -20
+PPMT_GIT_SHORT="$GIT_SHORT" bun run build 2>&1 | tail -20
 
 # ─── 4. Parar el bot viejo ─────────────────────────────────────
 step "4/5  Parar bot viejo"

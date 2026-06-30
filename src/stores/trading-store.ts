@@ -183,6 +183,18 @@ export interface TradingState {
   engineMode: 'demo' | 'paper' | 'live' | 'disconnected'
   isRunning: boolean
 
+  // Engine version (v82j+: for snapshot/export traceability — captures git commit
+  // + strategy stack so any snapshot identifies which code generated it)
+  engineVersion: {
+    strategy_stack: string
+    pkg_version: string
+    git_short: string
+    built_at: string
+    strategies: Record<string, any>
+    flags: Record<string, boolean>
+    summary: string
+  } | null
+
   // Market
   currentPrice: number
   symbol: string
@@ -368,6 +380,9 @@ const initialState = {
   isConnected: false,
   engineMode: 'disconnected' as const,
   isRunning: true,
+  // v82j+: null until first engine snapshot arrives, then populated from
+  // state.engine_version (set by paper-trading-engine.ts snapshot())
+  engineVersion: null as TradingState['engineVersion'],
   currentPrice: 0,
   // Aligned with PaperTradingEngine defaults (BTC/USDT, 'live')
   symbol: 'BTC/USDT',
