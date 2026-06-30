@@ -42,7 +42,7 @@ import { SUPPORTED_TOKENS_LIST, getTokenName } from './live-price-feed'
 // restart.sh injects the git short hash as PPMT_GIT_SHORT env var at build time.
 
 const ENGINE_PKG_VERSION = '0.2.0'  // mirrors package.json "version"
-const ENGINE_STRATEGY_STACK = 'v82j-A-v82j-B-v83b-F-v82j-D'  // bump on strategy changes
+const ENGINE_STRATEGY_STACK = 'v82k-A-v82j-B-v83b-F-v82k-D'  // v82k: trend filter + SL widen + marketBuy SHORT fix
 
 // v82j+: resolve git short at module-load time. Three sources, in priority order:
 //   1) PPMT_GIT_SHORT env var (still works if set externally)
@@ -92,16 +92,17 @@ export const ENGINE_VERSION = {
     A: { name: 'Momentum',     exit_stack: 'v82j', tp_mult_atr: 6.0, sl_mult_atr: 1.5, cat_sl_mult_atr: 2.5, partials: '0.5R/1.0R/2.0R/4.0R', lock: '+0.5R -> +0.35R', trail: 'regime-aware 1.0/0.5/0.3 ATR' },
     B: { name: 'MeanRev',      exit_stack: 'v82j', tp_mult_atr: 6.0, sl_mult_atr: 1.5, cat_sl_mult_atr: 2.5, partials: '0.5R/1.0R/2.0R/4.0R', lock: '+0.5R -> +0.35R', trail: 'regime-aware 1.0/0.5/0.3 ATR', pyramid: '+50% @ +1.0R (B-only)' },
     C: { name: 'Breakout',     exit_stack: 'DISABLED', tp_mult_atr: 3.0, sl_mult_atr: 1.0, cat_sl_mult_atr: 3.5, partials: 'none', lock: 'none', trail: 'none' },
-    D: { name: 'Squeeze',      exit_stack: 'v82j', tp_mult_atr: 6.0, sl_mult_atr: 1.5, cat_sl_mult_atr: 2.5, partials: '0.5R/1.0R/2.0R/4.0R', lock: '+0.5R -> +0.35R', trail: 'regime-aware 1.0/0.5/0.3 ATR' },
+    D: { name: 'Squeeze',      exit_stack: 'v82k', tp_mult_atr: 6.0, sl_mult_atr: 2.0, cat_sl_mult_atr: 2.5, partials: '0.5R/1.0R/2.0R/4.0R', lock: '+0.5R -> +0.35R', trail: 'regime-aware 1.0/0.5/0.3 ATR', trend_filter: '24h >+3% skip SHORT, <-3% skip LONG', atr_filter: 'min ATR% 0.20' },
     F: { name: 'Grid (v83b)',  exit_stack: 'v83b', tp_mult_atr: null, sl_mult_atr: null, cat_sl_mult_atr: null, partials: '4 levels above + 4 below SMA60, spacing 0.15%, TP 0.20%, SL 0.50%, max 3 per token, max 12 total', lock: 'n/a', trail: 'n/a' },
   },
   // Status flags captured from the source — useful to verify fixes are live
   flags: {
     v82j_exit_stack_on_A: true,   // 2026-06-30: was false (TP 1.2 ATR, inverted RR)
     v82j_exit_stack_on_B: true,   // baseline
-    v82j_exit_stack_on_D: true,   // 2026-06-30: was false (TP 1.0 ATR, inverted RR)
+    v82k_exit_stack_on_D: true,   // 2026-06-30: v82k = v82j + SL 2.0 ATR + trend filter + ATR filter
     strategy_C_enabled: false,    // commented out in maybeAutoTrade()
     strategy_F_enabled: true,     // v83b for BLUE/STABLE (ATR% < 0.40)
+    v82k_marketBuy_SHORT_close_fix: true,  // 2026-06-30: marketBuy now closes existing SHORT instead of overwriting with LONG
   },
   // Human-readable summary — the AI can read this in one line
   summary: `${ENGINE_STRATEGY_STACK} (pkg ${ENGINE_PKG_VERSION}) @ ${ENGINE_GIT_SHORT}`,
@@ -552,6 +553,57 @@ export class PaperTradingEngine {
     strat.cash -= totalCost
 
     const existing = this.positions.get(symbol)
+    // v82j+ BUG FIX (2026-06-30): marketBuy was missing the "close existing SHORT" branch.
+    //   Symptom: when a SHORT position hit a partial TP and v82j logic called marketBuy to
+    //   buy back part of the SHORT, marketBuy would:
+    //     1. Deduct cash from strat (line above)
+    //     2. OVERWRITE the existing SHORT with a NEW LONG position (the else branch below)
+    //   The new LONG had no SL/TP/CAT_SL, and the stale `pos` reference in v82j logic
+    //   would have its qty reduced without affecting the actual position in this.positions.
+    //   This silently corrupted position state and leaked cash.
+    //   Fix: mirror the same "close existing opposite-side" branch that marketSell has.
+    if (existing && existing.direction === 'SHORT') {
+      const origStrat = this.strategies[existing.strategy]
+      const closeQty = Math.min(grossUsdt / fillPrice, existing.qty)
+      const proceeds = closeQty * fillPrice
+      const closeFee = (proceeds * TAKER_FEE_PCT) / 100
+      const pnl = (existing.entry_price - fillPrice) * closeQty - closeFee
+      // Credit back: original margin (proportional to closed qty) + pnl, minus the fee we
+      // already deducted at line 552 above (refund it because we're not opening a new LONG).
+      const marginReturned = closeQty * existing.entry_price
+      origStrat.cash += marginReturned + pnl - closeFee + fee  // +fee refunds the line-552 deduction
+      origStrat.realizedPnl += pnl
+      origStrat.totalTrades++
+      if (pnl > 0) origStrat.winningTrades++
+
+      const closedFully = closeQty >= existing.qty - 1e-9
+      if (closedFully) {
+        this.trades.unshift({
+          ...existing,
+          close_price: fillPrice,
+          close_reason: 'CLOSED_BY_USER_BUY',
+          closed_at: new Date().toISOString(),
+          pnl_usdt: pnl,
+        })
+        this.positions.delete(symbol)
+        origStrat.positions.delete(symbol)
+      } else {
+        existing.qty -= closeQty
+        existing.size_usdt -= closeQty * existing.entry_price
+        this.trades.unshift({
+          ...existing,
+          qty: closeQty,
+          close_price: fillPrice,
+          close_reason: 'CLOSED_BY_USER_BUY_PARTIAL',
+          closed_at: new Date().toISOString(),
+          pnl_usdt: pnl,
+        })
+      }
+      if (this.trades.length > 100) this.trades = this.trades.slice(0, 100)
+      console.log(`[Paper/${existing.strategy}] BUY (close SHORT) ${symbol} ${closeQty.toFixed(6)} @ ${fillPrice} (pnl ${pnl.toFixed(2)})`)
+      return { success: true, fillPrice, qty: closeQty, fee: closeFee, pnl }
+    }
+
     if (existing && existing.direction === 'LONG') {
       const newQty = existing.qty + qty
       const newAvgEntry = (existing.entry_price * existing.qty + fillPrice * qty) / newQty
@@ -1815,6 +1867,26 @@ export class PaperTradingEngine {
         const isLong = current > bb.upper
         const isShort = current < bb.lower
         if (!isLong && !isShort) return null
+
+        // v82j+ TREND FILTER (2026-06-30): avoid SHORTing uptrends and LONGing downtrends.
+        //   Diagnosed on live run: 5 of 5 SHORTs (BTC, ETH, SOL, LTC, SUI) closed by SL
+        //   because the market was trending UP and D kept shorting the rally.
+        //   Rule: use 24h changePct as a slow trend proxy.
+        //     - If 24h change > +3% → SKIP SHORT (strong uptrend, don't fight it)
+        //     - If 24h change < -3% → SKIP LONG  (strong downtrend, don't catch knife)
+        //   This eliminates the worst counter-trend entries without hurting true breakouts.
+        const change24h = t.changePct
+        if (isShort && change24h > 3) return null
+        if (isLong && change24h < -3) return null
+
+        // v82j+ ATR FILTER (2026-06-30): skip entries in dead-low-vol regimes.
+        //   When ATR% < 0.15%, the SL (even at 1.5 ATR) is so tight that normal
+        //   tick noise stops it out in seconds. Require ATR% >= 0.20% to enter.
+        const atrCheck = computeATR(prices, 60)
+        const lastPrice = prices[prices.length - 1] || 1
+        const atrPctCheck = (atrCheck / lastPrice) * 100
+        if (atrPctCheck < 0.20) return null
+
         return { ticker: t, isLong, bbWidth: bb.width }
       })
       .filter((x): x is { ticker: TickerData; isLong: boolean; bbWidth: number } => x !== null)
@@ -1853,12 +1925,19 @@ export class PaperTradingEngine {
           //   Fix: apply v82j exit stack — TP 6.0 ATR (4R distant ceiling), 4 partials at
           //   0.5/1.0/2.0/4.0R (10/15/20/25%), lock @+0.5R → SL=entry+0.35R + activate trail,
           //   regime-aware trail (1.0/0.5/0.3 ATR by ATR% band). Same exit stack as Strategy B.
-          pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 1.5 : pos.entry_price + atr * 1.5
+          //
+          // v82j+ SL WIDEN (2026-06-30): 1.5 ATR → 2.0 ATR.
+          //   Live snapshot showed 85% SL hit rate with 1.5 ATR (17/20 trades stopped out,
+          //   most in 0-2 minutes = noise stopouts). Widening to 2.0 ATR gives the trade
+          //   more room to breathe without changing the TP distance (RR drops from 4.0 to 3.0,
+          //   still healthy). CAT SL stays at 2.5 ATR (only 0.5 ATR beyond regular SL = tight
+          //   protection against catastrophic moves).
+          pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 2.0 : pos.entry_price + atr * 2.0
           pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 6.0 : pos.entry_price - atr * 6.0  // v82j: 6.0 ATR (was 1.0)
           pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 2.5 : pos.entry_price + atr * 2.5  // v82j: 2.5 ATR (was 3.0)
           pos.initial_atr = atr
           pos.initial_atr_pct = atrPctD  // v82j: store for regime-aware trail
-          pos.initial_sl_distance = atr * 1.5
+          pos.initial_sl_distance = atr * 2.0  // v82j+: was 1.5, widened to reduce noise stopouts
           pos.lock_done = false
           pos.partial_done = false
           pos.partial1_done = false
@@ -2182,7 +2261,7 @@ export class PaperTradingEngine {
         ws_connected: wsConnected,
         active_tokens_count: liveSymbols.length,
         candles_processed: this.candlesProcessed,
-        notes: 'v82j exit stack live on A/B/D. C disabled. F=v83b grid for stablecoins. Old positions opened before v82j lack initial_atr/initial_sl_distance and skip the new exit logic — close them manually if you want them managed by v82j.',
+        notes: 'v82k: marketBuy SHORT-close fix + Strategy D trend/ATR filters + SL 2.0 ATR. v82j exit stack live on A/B/D. C disabled. F=v83b grid for stablecoins. Old positions opened before v82j lack initial_atr/initial_sl_distance and skip the new exit logic — close them manually if you want them managed by v82j.',
       },
       is_running: this.tradingEnabled,
       mode: 'paper',
