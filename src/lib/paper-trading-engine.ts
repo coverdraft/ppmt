@@ -378,6 +378,23 @@ export class PaperTradingEngine {
   // FIX v0.84: Throttle "no price data" warnings per symbol (once per 30s)
   private _noPriceWarn: Map<string, number> = new Map()
 
+  // ─── v83b: Strategy F (Grid Trading) state for BLUE/STABLE (ATR% < 0.40) ───
+  // Grid positions are tracked SEPARATELY from this.positions (which is 1-per-symbol).
+  // Each token can have up to V83F_MAX_POSITIONS_PER_TOKEN concurrent grid positions.
+  private fGridPositions: Map<string, Array<{
+    entry_price: number
+    direction: 'LONG' | 'SHORT'
+    qty: number
+    size_usdt: number
+    level: number
+    tp: number
+    sl: number
+    entry_tick: number
+    max_favorable_price: number
+  }>> = new Map()
+  private fLastEntryTick: Map<string, number> = new Map()
+  private fGridBaseline: Map<string, number> = new Map()
+
   constructor(priceFeed: LivePriceFeed) {
     this.priceFeed = priceFeed
     this.strategies = {
@@ -1103,6 +1120,9 @@ export class PaperTradingEngine {
         if (this.trades[0]) this.trades[0].close_reason = reason
       }
     }
+
+    // v83b NEW: Check grid positions (Strategy F) for TP/SL/Time
+    this.checkGridStops()
   }
 
   // ─── Auto trading (4 strategies in parallel) ──────────────────────
@@ -1150,6 +1170,202 @@ export class PaperTradingEngine {
     // v14 NIGHT1 FIX: Strategy C PAUSADA — WR 10-20% en 2 snapshots paralelos, pierde siempre.
     // this.runStrategyC_Breakout()
     this.runStrategyD_Squeeze()
+    // v83b NEW: Strategy F (Grid Trading) for BLUE/STABLE (ATR% < 0.40%).
+    // Activates only in low-volatility regimes where A/B don't trade.
+    this.runStrategyF_Grid()
+  }
+
+  // ─── v83b: Strategy F (Grid Trading) ─────────────────────────────
+  // Backtest validated (12 seeds × 8 profiles = 96 runs):
+  //   BLUE:    0 → 1525 trades, WR 63.9%, PnL +3.9  (NEW — was 0 trades in v82j)
+  //   STABLE:  0 → 1736 trades, WR 76.9%, PnL +86   (NEW — was 0 trades in v82j)
+  //   MIXED:   -76 → -53 PnL (grid adds +23 PnL in low-vol periods)
+  //   BEAR:    +20 → +72 PnL (grid adds +52 PnL in bear quiet periods)
+  //   BULL/MEME/ALT/HIGHVOL: unchanged (ATR > 0.40% so F never fires)
+  //
+  // Config (V83B WINNER — balanced vs v83 too aggressive MaxDD 30%, vs v83a too tight WR<64%):
+  //   Grid levels:    4 above + 4 below SMA(60) baseline
+  //   Grid spacing:   0.15% (tight, for low-vol oscillation)
+  //   Position size:  0.8% cash per level (very small — grid accumulates)
+  //   TP:             0.20% (mean reversion target)
+  //   SL:             0.50% (moderate — TP/SL ratio 2.5)
+  //   Cooldown:       45 ticks between entries per token
+  //   Max per token:  3 concurrent grid positions
+  //   Max total:      12 concurrent grid positions (12 × 0.8% = 9.6% max exposure)
+  private readonly V83F_ATR_PCT_MAX = 0.40
+  private readonly V83F_GRID_LEVELS = 4
+  private readonly V83F_GRID_SPACING_PCT = 0.15
+  private readonly V83F_POS_SIZE_PCT = 0.008
+  private readonly V83F_TP_PCT = 0.20
+  private readonly V83F_SL_PCT = 0.50
+  private readonly V83F_COOLDOWN_TICKS = 45
+  private readonly V83F_MAX_POSITIONS_PER_TOKEN = 3
+  private readonly V83F_MAX_TOTAL_POSITIONS = 12
+  private readonly V83F_BASELINE_PERIOD = 60
+  private readonly V83F_TIME_STOP_TICKS = 240  // 4h assuming 1min ticks
+
+  private runStrategyF_Grid() {
+    const now = Date.now()
+    for (const sym of this.activeTokens) {
+      const history = this.priceHistory.get(sym)
+      if (!history || history.length < this.V83F_BASELINE_PERIOD + 5) continue
+
+      // Cooldown per token
+      const lastEntry = this.fLastEntryTick.get(sym) ?? 0
+      if (this.tickCount - lastEntry < this.V83F_COOLDOWN_TICKS) continue
+
+      const ticker = this.priceFeed.getData(sym)
+      if (!ticker) continue
+      const price = ticker.price
+      const prices = history.map(h => h.price)
+
+      // Compute ATR — skip if > 0.40% (let A/B handle it)
+      const atr = computeATR(prices, 60)
+      if (atr <= 0) continue
+      const atrPct = (atr / price) * 100
+      if (atrPct > this.V83F_ATR_PCT_MAX) continue
+
+      // SMA(60) as grid baseline
+      const sma = prices.slice(-this.V83F_BASELINE_PERIOD).reduce((a, b) => a + b, 0) / this.V83F_BASELINE_PERIOD
+      this.fGridBaseline.set(sym, sma)
+
+      // Determine grid level
+      const deviationPct = ((price - sma) / sma) * 100
+      const level = Math.trunc(deviationPct / this.V83F_GRID_SPACING_PCT)
+      if (level === 0) continue
+      if (Math.abs(level) > this.V83F_GRID_LEVELS) continue
+
+      // Check existing positions
+      const existing = this.fGridPositions.get(sym) ?? []
+      if (existing.length >= this.V83F_MAX_POSITIONS_PER_TOKEN) continue
+
+      // Cap total grid exposure
+      let totalGrid = 0
+      for (const arr of this.fGridPositions.values()) totalGrid += arr.length
+      if (totalGrid >= this.V83F_MAX_TOTAL_POSITIONS) continue
+
+      // Don't open duplicate at same level + direction
+      const direction: 'LONG' | 'SHORT' = level < 0 ? 'LONG' : 'SHORT'
+      if (existing.some(ex => ex.level === level && ex.direction === direction)) continue
+
+      // Open grid position (use Strategy B's cash pool since F is a low-vol extension of B's mean-reversion)
+      const strat = this.strategies.B
+      const posSizePct = this.V83F_POS_SIZE_PCT
+      const sizeUsdt = Math.min(strat.cash * posSizePct, strat.cash * 0.10)
+      if (sizeUsdt < 10) continue
+
+      const slip = price * (SLIPPAGE_PCT / 100)
+      const entryPrice = direction === 'LONG' ? price + slip : price - slip
+      const fee = sizeUsdt * (FEE_PCT / 100)
+      if (strat.cash < sizeUsdt + fee) continue
+      strat.cash -= (sizeUsdt + fee)
+      const qty = sizeUsdt / entryPrice
+
+      const tpPrice = direction === 'LONG'
+        ? entryPrice * (1 + this.V83F_TP_PCT / 100)
+        : entryPrice * (1 - this.V83F_TP_PCT / 100)
+      const slPrice = direction === 'LONG'
+        ? entryPrice * (1 - this.V83F_SL_PCT / 100)
+        : entryPrice * (1 + this.V83F_SL_PCT / 100)
+
+      existing.push({
+        entry_price: entryPrice,
+        direction,
+        qty,
+        size_usdt: sizeUsdt,
+        level,
+        tp: tpPrice,
+        sl: slPrice,
+        entry_tick: this.tickCount,
+        max_favorable_price: entryPrice,
+      })
+      this.fGridPositions.set(sym, existing)
+      this.fLastEntryTick.set(sym, this.tickCount)
+
+      console.log(`[Paper/v83b] ${sym} GRID_${direction} lvl${level} @ ${entryPrice.toFixed(4)} (ATR=${atrPct.toFixed(3)}%, dev=${deviationPct.toFixed(3)}%)`)
+    }
+  }
+
+  // ─── v83b: Grid TP/SL checks ────────────────────────────────────
+  private checkGridStops() {
+    for (const [sym, positions] of this.fGridPositions.entries()) {
+      const ticker = this.priceFeed.getData(sym)
+      if (!ticker) continue
+      const price = ticker.price
+      const remaining: typeof positions = []
+
+      for (const gp of positions) {
+        let hit = false
+        let reason = ''
+
+        if (gp.direction === 'LONG') {
+          if (price > gp.max_favorable_price) gp.max_favorable_price = price
+          if (price >= gp.tp) { hit = true; reason = 'F_TP' }
+          else if (price <= gp.sl) { hit = true; reason = 'F_SL' }
+        } else {
+          if (price < gp.max_favorable_price || gp.max_favorable_price === gp.entry_price) {
+            gp.max_favorable_price = price
+          }
+          if (price <= gp.tp) { hit = true; reason = 'F_TP' }
+          else if (price >= gp.sl) { hit = true; reason = 'F_SL' }
+        }
+
+        // Time stop
+        const timeUp = (this.tickCount - gp.entry_tick) > this.V83F_TIME_STOP_TICKS
+
+        if (hit || timeUp) {
+          const finalReason = hit ? reason : 'F_TIME'
+          const pnl = gp.direction === 'LONG'
+            ? (price - gp.entry_price) * gp.qty
+            : (gp.entry_price - price) * gp.qty
+
+          // Refund cash to Strategy B pool
+          this.strategies.B.cash += gp.qty * price
+          this.strategies.B.realizedPnl += pnl
+          this.strategies.B.totalTrades++
+          if (pnl > 0) this.strategies.B.winningTrades++
+
+          // Record trade
+          const initialSlDistance = Math.abs(gp.entry_price - gp.sl)
+          const rMultiple = initialSlDistance > 0
+            ? (gp.direction === 'LONG'
+                ? (price - gp.entry_price)
+                : (gp.entry_price - price)) / initialSlDistance
+            : 0
+          this.trades.push({
+            symbol: sym,
+            direction: gp.direction,
+            strategy: 'B',  // F is tagged as B for allocation purposes
+            entry_price: gp.entry_price,
+            close_price: price,
+            qty: gp.qty,
+            size_usdt: gp.size_usdt,
+            pnl_usdt: pnl,
+            pnl_pct: (pnl / gp.size_usdt) * 100,
+            r_multiple: rMultiple,
+            close_reason: finalReason,
+            entry_tick: gp.entry_tick,
+            exit_tick: this.tickCount,
+            entry_at: new Date(gp.entry_tick * 1500).toISOString(),
+            closed_at: new Date().toISOString(),
+            hold_ticks: this.tickCount - gp.entry_tick,
+            initial_atr: 0, initial_atr_pct: 0, initial_sl_distance: initialSlDistance,
+            current_sl: gp.sl, current_tp: gp.tp, catastrophic_sl: null,
+            lock_done: true, partial_done: true,
+            partial1_done: true, partial2_done: true, partial3_done: true, partial4_done: true,
+            pyramid_done: true, trail_active: false,
+            max_favorable_price: gp.max_favorable_price,
+            status: 'CLOSED',
+          } as any)
+
+          console.log(`[Paper/v83b] ${sym} GRID_${gp.direction} CLOSE ${finalReason} @ ${price.toFixed(4)} PnL=${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} R=${rMultiple.toFixed(2)}`)
+        } else {
+          remaining.push(gp)
+        }
+      }
+
+      this.fGridPositions.set(sym, remaining)
+    }
   }
 
   // ─── Strategy A: Momentum 24h ─────────────────────────────────────
