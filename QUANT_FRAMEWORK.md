@@ -19,22 +19,47 @@
 
 ---
 
-## Current State (after v63 analysis)
+## Current State (after v63-v69 analysis)
 
-### ❌ v62a REJECTED as production champion
+### ❌ v62a DEFINITIVELY REJECTED as production champion
 
-The 12-seed validation that crowned v62a was **statistically underpowered** and gave false confidence.
+The 12-seed validation that crowned v62a was **statistically underpowered** and gave false confidence. With proper 50-seed × 6-regime testing (300 runs), v62a is completely broken.
 
 | Metric | 12-seed (v62a claim) | 50-seed reality | Verdict |
 |---|---|---|---|
-| Composite score | (not measured) | **33/100** | ❌ Low |
-| MIXED P&L | +48.56 | **-0.90** | ❌ Breakeven |
-| MIXED profitable seeds | 67% | **33%** | ❌ Worse than coin flip |
-| Regime stability | (not measured) | **17%** (1/6) | ❌ Fragile |
+| Composite score | (not measured) | **31/100** | ❌ Low |
+| MIXED P&L | +48.56 | **-1.75** | ❌ Negative |
+| MIXED profitable seeds | 67% | **34%** | ❌ Worse than coin flip |
+| Regime stability | (not measured) | **0%** (0/6) | ❌ NO regime profitable |
+| BEAR P&L | (not measured) | **-2546** | ❌ Catastrophic |
 | BEAR MaxDD | (not measured) | **21.91%** | ❌ Catastrophic |
+| HIGHVOL P&L | (not measured) | **-5388** | ❌ Catastrophic |
 | HIGHVOL MaxDD | (not measured) | **47.06%** | ❌ Catastrophic |
 | LOWVOL trades | (not measured) | **0** | ❌ No signals |
-| MIXED MaxDD | 0.29% | **0.42%** | ❌ Over 0.35% limit |
+| SIDE trades | (not measured) | **2** | ❌ No signals |
+| MIXED MaxDD | 0.29% | **0.44%** | ❌ Over 0.35% limit |
+
+### Additional findings (v66-v69)
+
+**v66 Correlation**: A↔B = **-1.00** (perfectly anti-correlated)
+- A (momentum) and B (mean reversion) enter at the same signals but opposite directions
+- Having both A and B provides ZERO diversification
+- This means v62a's "multi-strategy" approach is actually a single strategy
+
+**v67 Monte Carlo**:
+- MIXED: P(yearly loss) = 0% (optimistic — bootstrap assumes future = past)
+- BEAR: P(yearly loss) = **100%**, mean yearly P&L -715,063
+
+**v68 Real Costs**:
+- v62a retains only **44.7%** of P&L under realistic costs (0.18% fee + 0.10% slippage)
+- MaxDD increases from 0.25% to **0.40%** (over the 0.35% limit)
+- Profitable seeds: 83% → 50%
+
+**v69 Generalization** (4 asset profiles tested):
+- v62a profitable on only **1/4 profiles** (LARGE, marginally with 1 trade)
+- BTC: -11.97 P&L
+- STABLE: 0 trades (ATR floor blocks everything)
+- MEME: -39,472 P&L, MaxDD 328% (catastrophic)
 
 ### Root causes of fragility
 
@@ -43,6 +68,8 @@ The 12-seed validation that crowned v62a was **statistically underpowered** and 
 3. **Pyramiding amplifies losses** — The +75% pyramid at +1R (v62a's headline feature) becomes a liability in BEAR/HIGHVOL where SL is hit frequently.
 4. **ATR floor blocks calm markets** — The 0.58% ATR floor (sweet spot for MIXED) prevents ANY trades in LOWVOL (0.20% vol).
 5. **Strategy A/B don't trigger in SIDE/LOWVOL** — Momentum (A) needs trend, RSI (B) needs volatility. Side and low-vol markets produce no signals.
+6. **A↔B anti-correlation** — A and B are the same signal with opposite positions, providing zero diversification.
+7. **Cost sensitivity** — Realistic costs (0.28% per side vs 0.15%) destroy 55% of P&L.
 
 ---
 

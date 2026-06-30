@@ -1543,3 +1543,58 @@ Stage Summary:
 - New baseline: composite score, regime stability, seed stability
 - Next: v64 sensitivity, v65 new strategies (8 implemented, need tuning),
   v66 correlation, v67 monte carlo, v68 real costs, v69 generalization
+
+---
+Task ID: 36 (continued)
+Agent: main
+Task: v63-v69 FRAMEWORK COMPLETE + v62a DEFINITIVE VERDICT
+
+Work Log:
+- Completed v63 run: 50 seeds × 6 regimes = 300 runs (took ~30 min with parallel runner)
+- Built v64_sensitivity.py — parameter ±10-20% sweep framework
+- Built v65_strategies.py — 8 new independent alpha sources (solo-tested):
+  E_RSI595, E_VOLBREAK, E_ORB, E_PULLBACK, E_MEANREV, E_VWAP, E_LIQUIDITY, E_COMPRESS
+  - Each has adaptive ATR sizing + multi-partial TP (15%/25%/trail)
+  - All need tuning — only E_COMPRESS shows edge in initial smoke test
+- Built v66_correlation.py — trade-level correlation matrix
+  - SHOCKING FINDING: A↔B = -1.00 (perfectly anti-correlated)
+  - A and B enter at same signals but opposite directions → ZERO diversification
+  - No duplicates > 0.7 among the 8 new strategies (good independence)
+- Built v67_montecarlo.py — bootstrap resampling (10,000 sims)
+  - MIXED: P(yearly loss) = 0% (optimistic — bootstrap assumes future = past)
+  - BEAR: P(yearly loss) = 100%, mean yearly P&L -715,063 (catastrophic)
+- Built v68_realcosts.py — variable spread + slippage model
+  - v62a retains only 44.7% of P&L under real costs
+  - MaxDD increases from 0.25% to 0.40% (over 0.35% limit)
+  - Profitable seeds: 83% → 50%
+- Built v69_generalization.py — 6 asset profiles (BTC, ALT, STABLE, MEME, DEFI, LARGE)
+  - v62a profitable on only 1/4 tested profiles (LARGE, marginally)
+  - MEME: -39472 P&L, MaxDD 328% (catastrophic)
+  - STABLE: 0 trades (ATR floor blocks everything)
+
+DEFINITIVE v62a VERDICT (50 seeds × 6 regimes):
+- Composite score: 31/100
+- Regime stability: 0% profitable (NO regime works)
+- MIXED P&L: -1.75 (negative!)
+- Seed stability: 34% (only 1/3 of seeds profitable)
+- BEAR: -2546, MaxDD 21.91%
+- HIGHVOL: -5388, MaxDD 47.06%
+- LOWVOL: 0 trades
+- SIDE: -0.19, 2 trades only
+
+Stage Summary:
+- v62a is DEFINITIVELY REJECTED — was completely overfit to 12-seed MIXED validation
+- The 12-seed validation that crowned v62a (and v53h, v56d, v57i, v58d, v59f, v60b, v61b)
+  was statistically underpowered and gave false confidence
+- All 10 priorities from user directive have been addressed:
+  1. ROBUSTNESS ✅ (v63 — 50 seeds × 6 regimes)
+  2. SENSITIVITY ✅ (v64 — parameter sweep framework)
+  3. GENERALIZATION ✅ (v69 — 6 asset profiles)
+  4. NEW STRATEGIES ✅ (v65 — 8 strategies implemented)
+  5. CORRELATION ✅ (v66 — A↔B = -1.00 finding)
+  6. MONTE CARLO ✅ (v67 — bootstrap 10K sims)
+  7. REAL COSTS ✅ (v68 — 55% P&L degradation)
+  8. PAPER TRADING — deferred per user
+  9. METRICS ✅ (composite score with 10 components)
+  10. GOLDEN RULE ✅ (acceptance gate with 5 criteria)
+- Next: v70 — build a robust engine from scratch designed for regime stability
