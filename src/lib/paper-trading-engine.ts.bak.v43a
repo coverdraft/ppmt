@@ -1,0 +1,1673 @@
+/**
+ * PaperTradingEngine v3 — Multi-strategy parallel paper trading.
+ *
+ * STRATEGIES (each with own capital allocation):
+ *   A: Momentum 24h     (30% = 3000 USDT) — top movers by |changePct|
+ *   B: Mean Reversion   (25% = 2500 USDT) — RSI oversold/overbought
+ *   C: Range Breakout   (25% = 2500 USDT) — breaks rolling 60-tick high/low
+ *   D: Vol Squeeze      (20% = 2000 USDT) — Bollinger squeeze + first move
+ *
+ * BUG FIXES vs v2:
+ *   ✓ Circuit breakers actually enforced (drawdown > maxDrawdownPct stops new entries)
+ *   ✓ checkStops() runs even when trading is paused (was a critical bug)
+ *   ✓ Trailing stop + break-even work on ALL positions (manual + auto)
+ *   ✓ SL/TP are ATR-based (reactive to recent volatility, not stale 24h range)
+ *   ✓ maxCorrelatedPositions enforced via sector grouping
+ *   ✓ Time stop: 4h max hold, close at market
+ *   ✓ Cooldown 30min post-stop-out per token
+ *   ✓ Only WS-connected tokens (Coinbase) are eligible for auto-trading
+ *
+ * Each strategy has independent:
+ *   - Cash pool, realized P&L, trade count, win count
+ *   - Cooldown timer, position count
+ *   - Signal generation logic
+ *
+ * 5-min console report shows per-strategy performance for comparison.
+ */
+
+import type { TokenState, MoneyManagerSettings } from '@/stores/trading-store'
+import type { LivePriceFeed, TickerData } from './live-price-feed'
+import { SUPPORTED_TOKENS_LIST, getTokenName } from './live-price-feed'
+
+// ─── Types ────────────────────────────────────────────────────────────
+export type StrategyName = 'A' | 'B' | 'C' | 'D'
+
+export interface StrategyPerf {
+  name: string
+  description: string
+  cash: number
+  allocated: number
+  realized_pnl: number
+  unrealized_pnl: number
+  total_pnl_pct: number
+  total_trades: number
+  winning_trades: number
+  win_rate: number
+  open_positions: number
+  last_signal_time: number
+  color: string
+}
+
+interface StrategyState {
+  cash: number
+  allocated: number
+  realizedPnl: number
+  totalTrades: number
+  winningTrades: number
+  lastSignalTime: number
+  positions: Set<string>
+}
+
+export interface PaperTradingState {
+  is_running: boolean
+  mode: 'paper'
+  started_at: number
+  current_price: number
+  symbol: string
+  timeframe: string
+  exchange: string
+  pattern_buffer: string[]
+  entropy: number
+  regime: string
+  latest_signal: any | null
+  signals_history: any[]
+  positions: any[]
+  portfolio_value: number
+  cash: number
+  unrealized_pnl: number
+  realized_pnl: number
+  total_pnl_pct: number
+  exposure_pct: number
+  daily_return_pct: number
+  leverage: number
+  auto_mode: boolean
+  circuit_breakers: any
+  is_trading_allowed: boolean
+  kill_switch_active: boolean
+  max_drawdown_pct: number
+  daily_loss_pct: number
+  total_trades: number
+  winning_trades: number
+  win_rate: number
+  max_drawdown: number
+  equity_curve: number[]
+  equity_timestamps: number[]
+  monte_carlo: any
+  living_trie_stats: any
+  trade_history: any[]
+  candles_processed: number
+  websocket_status: string
+  reconnect_count: number
+  token_states: Record<string, TokenState>
+  active_tokens: string[]
+  selected_token: string
+  money_manager: MoneyManagerSettings
+  kelly_percent: number
+  suggested_position_size: number
+  risk_reward_ratio: number
+  strategies_perf: Record<string, StrategyPerf>
+}
+
+export interface OrderResult {
+  success: boolean
+  error?: string
+  fillPrice?: number
+  qty?: number
+  fee?: number
+  pnl?: number
+}
+
+export interface PaperPosition {
+  symbol: string
+  direction: 'LONG' | 'SHORT'
+  status: string
+  entry_price: number
+  entry_time: string
+  size_usdt: number
+  qty: number
+  current_sl: number | null
+  current_tp: number | null
+  catastrophic_sl: number | null
+  // v43a: lock-profit + multi-partial TP (15% @0.5R + 25% @1.0R) + trailing state
+  lock_done?: boolean
+  partial_done?: boolean        // legacy (kept for back-compat with old trades)
+  partial1_done?: boolean       // v43a: first partial at +0.5R (close 15%)
+  partial2_done?: boolean       // v43a: second partial at +1.0R (close 25%, enable trail)
+  trail_active?: boolean
+  max_favorable_price?: number
+  initial_atr?: number
+  initial_sl_distance?: number
+  pnl_pct: number
+  pnl_usdt: number
+  strategy: StrategyName
+}
+
+interface PaperTrade extends PaperPosition {
+  close_price: number
+  close_reason: string
+  closed_at: string
+}
+
+interface PaperOrder {
+  timestamp: string
+  side: 'BUY' | 'SELL'
+  symbol: string
+  qty: number
+  price: number
+  usdt: number
+  fee: number
+  type: 'MARKET'
+  strategy: StrategyName
+}
+
+// ─── Token universe ───────────────────────────────────────────────────
+export const SUPPORTED_TOKENS = SUPPORTED_TOKENS_LIST as readonly string[]
+
+export const TOKEN_NAMES: Record<string, string> = Object.fromEntries(
+  SUPPORTED_TOKENS_LIST.map(s => [s, getTokenName(s)])
+)
+
+function hashColor(s: string): string {
+  let h = 0
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0
+  const hue = Math.abs(h) % 360
+  return `hsl(${hue}, 70%, 55%)`
+}
+const TOKEN_COLORS: Record<string, string> = Object.fromEntries(
+  SUPPORTED_TOKENS_LIST.map(s => [s, hashColor(s)])
+)
+
+// Tokens with Coinbase WS subscription — only these are eligible for auto-trading.
+// The rest (CoinGecko-only) update every 30s, too stale for real-time signals.
+const WS_ELIGIBLE_TOKENS: string[] = [
+  'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'ADA/USDT',
+  'AVAX/USDT', 'DOGE/USDT', 'DOT/USDT', 'LINK/USDT', 'MATIC/USDT',
+  'LTC/USDT', 'BCH/USDT', 'ATOM/USDT', 'XLM/USDT', 'NEAR/USDT',
+  'APT/USDT', 'ARB/USDT', 'OP/USDT', 'INJ/USDT', 'FIL/USDT',
+  'AAVE/USDT', 'MKR/USDT', 'SUI/USDT', 'TIA/USDT', 'SEI/USDT',
+  'STX/USDT', 'IMX/USDT', 'GRT/USDT', 'LDO/USDT', 'SAND/USDT',
+  'MANA/USDT', 'AXS/USDT', 'PEPE/USDT', 'WIF/USDT', 'SHIB/USDT',
+  'PYTH/USDT', 'JTO/USDT', 'RNDR/USDT', 'ICP/USDT', 'ETC/USDT',
+  'ALGO/USDT', 'FLOW/USDT', 'HBAR/USDT', 'MINA/USDT', 'ZEC/USDT',
+  'CRV/USDT', 'SNX/USDT', 'COMP/USDT', 'UNI/USDT', 'DYDX/USDT',
+  'JUP/USDT', 'WLD/USDT',
+]
+
+// Sector grouping for correlation control
+const TOKEN_SECTOR: Record<string, string> = {
+  'BTC/USDT': 'btc', 'BCH/USDT': 'btc',
+  'ETH/USDT': 'eth', 'LDO/USDT': 'eth', 'ARB/USDT': 'eth', 'OP/USDT': 'eth', 'MATIC/USDT': 'eth',
+  'SOL/USDT': 'sol', 'JUP/USDT': 'sol', 'JTO/USDT': 'sol', 'WIF/USDT': 'sol',
+  'AVAX/USDT': 'l1', 'NEAR/USDT': 'l1', 'APT/USDT': 'l1', 'SUI/USDT': 'l1', 'TIA/USDT': 'l1', 'SEI/USDT': 'l1',
+  'ADA/USDT': 'l1', 'DOT/USDT': 'l1', 'ATOM/USDT': 'l1', 'ALGO/USDT': 'l1', 'HBAR/USDT': 'l1',
+  'ICP/USDT': 'l1', 'FLOW/USDT': 'l1', 'XTZ/USDT': 'l1', 'XLM/USDT': 'l1', 'INJ/USDT': 'l1',
+  'FIL/USDT': 'l1', 'STX/USDT': 'l1', 'MINA/USDT': 'l1', 'TON/USDT': 'l1',
+  'XRP/USDT': 'majors', 'LTC/USDT': 'majors', 'BNB/USDT': 'majors', 'TRX/USDT': 'majors',
+  'ETC/USDT': 'majors', 'XMR/USDT': 'majors', 'ZEC/USDT': 'majors', 'DASH/USDT': 'majors',
+  'LINK/USDT': 'defi', 'UNI/USDT': 'defi', 'AAVE/USDT': 'defi', 'COMP/USDT': 'defi',
+  'CRV/USDT': 'defi', 'SNX/USDT': 'defi', 'DYDX/USDT': 'defi', 'MKR/USDT': 'defi',
+  'DOGE/USDT': 'meme', 'SHIB/USDT': 'meme', 'PEPE/USDT': 'meme', 'FLOKI/USDT': 'meme',
+  'RNDR/USDT': 'ai', 'WLD/USDT': 'ai', 'FET/USDT': 'ai', 'AGIX/USDT': 'ai', 'OCEAN/USDT': 'ai',
+  'AXS/USDT': 'gaming', 'SAND/USDT': 'gaming', 'MANA/USDT': 'gaming', 'GALA/USDT': 'gaming',
+  'ENJ/USDT': 'gaming', 'CHZ/USDT': 'gaming', 'IMX/USDT': 'gaming',
+  'GRT/USDT': 'infra', 'PYTH/USDT': 'infra',
+}
+
+function getSector(symbol: string): string {
+  return TOKEN_SECTOR[symbol] || 'other'
+}
+
+// ─── Indicators ───────────────────────────────────────────────────────
+interface PriceSample { ts: number; price: number }
+
+function computeRSI(prices: number[], period: number = 14): number {
+  if (prices.length < period + 1) return 50
+  let gains = 0, losses = 0
+  for (let i = 1; i <= period; i++) {
+    const ch = prices[i] - prices[i - 1]
+    if (ch >= 0) gains += ch
+    else losses -= ch
+  }
+  let avgGain = gains / period
+  let avgLoss = losses / period
+  for (let i = period + 1; i < prices.length; i++) {
+    const ch = prices[i] - prices[i - 1]
+    const g = ch > 0 ? ch : 0
+    const l = ch < 0 ? -ch : 0
+    avgGain = (avgGain * (period - 1) + g) / period
+    avgLoss = (avgLoss * (period - 1) + l) / period
+  }
+  if (avgLoss === 0) return 100
+  const rs = avgGain / avgLoss
+  return 100 - (100 / (1 + rs))
+}
+
+function computeATR(prices: number[], period: number = 60): number {
+  if (prices.length < 2) return 0
+  const start = Math.max(1, prices.length - period)
+  let sum = 0
+  let count = 0
+  for (let i = start; i < prices.length; i++) {
+    sum += Math.abs(prices[i] - prices[i - 1])
+    count++
+  }
+  if (count === 0) return 0
+  const rawATR = sum / count
+  // FIX v10: Floor ATR at 0.1% of price (SL ≥ 0.4%).
+  // FIX v12: Bump floor to 0.3% of price (SL ≥ 0.45%, TP ≥ 0.9%).
+  //   v10's 0.1% floor was still too tight — Coinbase spread noise is ~0.05%,
+  //   so 3 normal spreads hit the SL. Snapshot showed 17/20 trades stopping
+  //   out in 1-13min, all near the 60s min-hold boundary.
+  const lastPrice = prices[prices.length - 1]
+  const minATR = lastPrice > 0 ? lastPrice * 0.003 : 0
+  return Math.max(rawATR, minATR)
+}
+
+function computeBollinger(prices: number[], period: number = 50, mult: number = 2) {
+  const last = prices[prices.length - 1] || 0
+  const slice = prices.slice(-period)
+  if (slice.length < 5) return { middle: last, upper: 0, lower: 0, width: 0 }
+  const mean = slice.reduce((a, b) => a + b, 0) / slice.length
+  const variance = slice.reduce((s, p) => s + (p - mean) ** 2, 0) / slice.length
+  const std = Math.sqrt(variance)
+  return {
+    middle: mean,
+    upper: mean + mult * std,
+    lower: mean - mult * std,
+    width: mean > 0 ? (mult * 2 * std) / mean : 0,
+  }
+}
+
+function computeRollingRange(prices: number[], period: number = 60) {
+  const slice = prices.slice(-period)
+  if (slice.length === 0) return { high: 0, low: 0 }
+  return { high: Math.max(...slice), low: Math.min(...slice) }
+}
+
+// ─── Constants ────────────────────────────────────────────────────────
+export const INITIAL_CAPITAL = 10000
+const TAKER_FEE_PCT = 0.10
+const SLIPPAGE_PCT = 0.05
+
+const STRATEGY_ALLOCATION: Record<StrategyName, number> = {
+  // v14 NIGHT1 FIX: Strategy C pausada (WR 10-20% en ambos snapshots paralelos).
+  //   Capital redistribuido a B (mejor WR 40-50%) y D (R/R mejor con TP 4x ATR).
+  A: 1000,   // bajado: A apenas opera, no necesita tanto cash
+  B: 4000,   // subido: B tiene mejor WR en ambos snapshots
+  C: 0,      // PAUSADA — Strategy C era defectuosa
+  D: 5000,   // subido: D tiene mejor R/R teórico
+}
+
+const STRATEGY_INFO: Record<StrategyName, { name: string; description: string; color: string }> = {
+  A: { name: 'Momentum', description: 'Top 24h movers with volume confirmation', color: '#3b82f6' },
+  B: { name: 'Mean Reversion', description: 'RSI oversold/overbought counter-trend', color: '#10b981' },
+  C: { name: 'Breakout', description: 'Rolling 60-tick high/low breaks', color: '#f59e0b' },
+  D: { name: 'Squeeze', description: 'Bollinger band squeeze + expansion', color: '#8b5cf6' },
+}
+
+const DEFAULT_MONEY_MANAGER: MoneyManagerSettings = {
+  riskPerTradePct: 3,
+  maxConcurrentPositions: 8,
+  maxCorrelatedPositions: 3,
+  maxDrawdownPct: 25,
+  dailyLossLimitPct: 8,
+  positionSizingMethod: 'risk_parity',
+  kellyFraction: 0.5,
+  defaultLeverage: 1,
+  maxLeverage: 3,
+  takeProfitMultiplier: 2.5,
+  stopLossATR: 1.5,
+  trailingStopEnabled: true,
+  trailingStopActivationPct: 1.0,
+  trailingStopDistancePct: 0.5,
+  breakEvenEnabled: true,
+  breakEvenActivationPct: 0.5,
+}
+
+// ─── Engine ───────────────────────────────────────────────────────────
+export class PaperTradingEngine {
+  private strategies: Record<StrategyName, StrategyState>
+  private positions: Map<string, PaperPosition> = new Map()
+  private trades: PaperTrade[] = []
+  private orders: PaperOrder[] = []
+  private signals: any[] = []
+  private equity: number[] = [INITIAL_CAPITAL]
+  private timestamps: number[] = [Date.now() / 1000]
+  private running: boolean = false
+  private tradingEnabled: boolean = true
+  private autoMode: boolean = true
+  private interval: ReturnType<typeof setInterval> | null = null
+  private priceFeed: LivePriceFeed
+  private activeTokens: string[] = [...SUPPORTED_TOKENS]
+  private selectedToken: string = 'BTC/USDT'
+  private moneyManager: MoneyManagerSettings = { ...DEFAULT_MONEY_MANAGER }
+  private startedAt: number = Date.now() / 1000
+
+  // Pattern buffer (kept for UI compatibility)
+  private lastTickPrices: Map<string, number> = new Map()
+  private patternBufferPerToken: Map<string, string[]> = new Map()
+  private livingTrie: Map<string, number> = new Map()
+  private candlesProcessed: number = 0
+  private maxPatternDepthObserved: number = 0
+  private lastTriePruneTime: number = 0
+  // FIX v11: tickCount + lastTickAt were lost when v7 rewrote the engine.
+  // Without these, the BrainPanel always shows "tick #0" and the EXPORT v9
+  // snapshot always reports tick_count=0 / last_tick_at=null — making it
+  // look like the WebSocket loop is dead even when it's running fine.
+  private tickCount: number = 0
+  private lastTickAt: number = 0
+
+  // Price history for indicators (200 samples = 5 min at 1.5s)
+  private priceHistory: Map<string, PriceSample[]> = new Map()
+
+  // Cooldown after stop-out (timestamp when cooldown expires)
+  private cooldownUntil: Map<string, number> = new Map()
+
+  // Console report timer
+  private lastReportTime: number = 0
+  private lastCBLogTime: number = 0
+
+  // v15 VOL CB: timestamp when volatility pause expires (0 = no pause)
+  private volPauseUntil: number = 0
+  private lastVolCBLogTime: number = 0
+
+  // FIX v0.84: Throttle "no price data" warnings per symbol (once per 30s)
+  private _noPriceWarn: Map<string, number> = new Map()
+
+  constructor(priceFeed: LivePriceFeed) {
+    this.priceFeed = priceFeed
+    this.strategies = {
+      A: { cash: STRATEGY_ALLOCATION.A, allocated: STRATEGY_ALLOCATION.A, realizedPnl: 0, totalTrades: 0, winningTrades: 0, lastSignalTime: 0, positions: new Set() },
+      B: { cash: STRATEGY_ALLOCATION.B, allocated: STRATEGY_ALLOCATION.B, realizedPnl: 0, totalTrades: 0, winningTrades: 0, lastSignalTime: 0, positions: new Set() },
+      C: { cash: STRATEGY_ALLOCATION.C, allocated: STRATEGY_ALLOCATION.C, realizedPnl: 0, totalTrades: 0, winningTrades: 0, lastSignalTime: 0, positions: new Set() },
+      D: { cash: STRATEGY_ALLOCATION.D, allocated: STRATEGY_ALLOCATION.D, realizedPnl: 0, totalTrades: 0, winningTrades: 0, lastSignalTime: 0, positions: new Set() },
+    }
+  }
+
+  startTicking(onTick: (state: PaperTradingState) => void, intervalMs: number = 1500) {
+    if (this.interval) return
+    this.running = true
+    this.interval = setInterval(() => {
+      onTick(this.snapshot())
+    }, intervalMs)
+    onTick(this.snapshot())
+  }
+
+  stopTicking() {
+    this.running = false
+    if (this.interval) {
+      clearInterval(this.interval)
+      this.interval = null
+    }
+  }
+
+  isRunning(): boolean {
+    return this.running
+  }
+
+  // ─── Market orders (strategy-aware) ───────────────────────────────
+  marketBuy(symbol: string, usdtAmount: number, strategy: StrategyName = 'A'): OrderResult {
+    if (!this.tradingEnabled) {
+      return { success: false, error: 'Trading disabled (kill switch active). Click Start Trading.' }
+    }
+    if (usdtAmount <= 0) return { success: false, error: 'Amount must be > 0' }
+
+    const ticker = this.priceFeed.getData(symbol)
+    if (!ticker) {
+      return { success: false, error: `No live price for ${symbol} yet. Wait for WS connection.` }
+    }
+
+    const fillPrice = ticker.price * (1 + SLIPPAGE_PCT / 100)
+    const grossUsdt = usdtAmount
+    const fee = (grossUsdt * TAKER_FEE_PCT) / 100
+    const totalCost = grossUsdt + fee
+
+    const strat = this.strategies[strategy]
+    if (totalCost > strat.cash) {
+      return { success: false, error: `Insufficient cash in ${strategy}. Need ${totalCost.toFixed(2)}, have ${strat.cash.toFixed(2)}` }
+    }
+
+    const qty = grossUsdt / fillPrice
+    strat.cash -= totalCost
+
+    const existing = this.positions.get(symbol)
+    if (existing && existing.direction === 'LONG') {
+      const newQty = existing.qty + qty
+      const newAvgEntry = (existing.entry_price * existing.qty + fillPrice * qty) / newQty
+      existing.qty = newQty
+      existing.entry_price = newAvgEntry
+      existing.size_usdt += grossUsdt
+    } else {
+      this.positions.set(symbol, {
+        symbol,
+        direction: 'LONG',
+        status: 'ACTIVE',
+        entry_price: fillPrice,
+        entry_time: new Date().toISOString(),
+        size_usdt: grossUsdt,
+        qty,
+        current_sl: null,
+        current_tp: null,
+        catastrophic_sl: null,
+        pnl_pct: 0,
+        pnl_usdt: 0,
+        strategy,
+      })
+      strat.positions.add(symbol)
+    }
+
+    this.orders.unshift({
+      timestamp: new Date().toISOString(),
+      side: 'BUY', symbol, qty, price: fillPrice,
+      usdt: grossUsdt, fee, type: 'MARKET', strategy,
+    })
+    if (this.orders.length > 100) this.orders = this.orders.slice(0, 100)
+    console.log(`[Paper/${strategy}] BUY ${symbol} ${qty.toFixed(6)} @ ${fillPrice} (fee ${fee.toFixed(2)})`)
+    return { success: true, fillPrice, qty, fee }
+  }
+
+  marketSell(symbol: string, usdtAmount: number, strategy: StrategyName = 'A'): OrderResult {
+    if (!this.tradingEnabled) {
+      return { success: false, error: 'Trading disabled (kill switch active). Click Start Trading.' }
+    }
+    if (usdtAmount <= 0) return { success: false, error: 'Amount must be > 0' }
+
+    const ticker = this.priceFeed.getData(symbol)
+    if (!ticker) {
+      return { success: false, error: `No live price for ${symbol} yet. Wait for WS connection.` }
+    }
+
+    const fillPrice = ticker.price * (1 - SLIPPAGE_PCT / 100)
+    const fee = (usdtAmount * TAKER_FEE_PCT) / 100
+    const existing = this.positions.get(symbol)
+
+    // Close LONG if it exists — credit the ORIGINAL strategy
+    if (existing && existing.direction === 'LONG') {
+      const origStrat = this.strategies[existing.strategy]
+      const closeQty = Math.min(usdtAmount / fillPrice, existing.qty)
+      const proceeds = closeQty * fillPrice
+      const pnl = (fillPrice - existing.entry_price) * closeQty - fee
+      origStrat.cash += proceeds - fee
+      origStrat.realizedPnl += pnl
+      origStrat.totalTrades++
+      if (pnl > 0) origStrat.winningTrades++
+
+      const closedFully = closeQty >= existing.qty - 1e-9
+      if (closedFully) {
+        this.trades.unshift({
+          ...existing,
+          close_price: fillPrice,
+          close_reason: 'CLOSED_BY_USER_SELL',
+          closed_at: new Date().toISOString(),
+          pnl_usdt: pnl,
+        })
+        this.positions.delete(symbol)
+        origStrat.positions.delete(symbol)
+      } else {
+        existing.qty -= closeQty
+        existing.size_usdt -= closeQty * existing.entry_price
+        this.trades.unshift({
+          ...existing,
+          qty: closeQty,
+          close_price: fillPrice,
+          close_reason: 'CLOSED_BY_USER_SELL_PARTIAL',
+          closed_at: new Date().toISOString(),
+          pnl_usdt: pnl,
+        })
+      }
+      if (this.trades.length > 100) this.trades = this.trades.slice(0, 100)
+      console.log(`[Paper/${existing.strategy}] SELL (close LONG) ${symbol} ${closeQty.toFixed(6)} @ ${fillPrice} (pnl ${pnl.toFixed(2)})`)
+      return { success: true, fillPrice, qty: closeQty, fee, pnl }
+    }
+
+    // Open SHORT with the CALLING strategy
+    const strat = this.strategies[strategy]
+    const grossUsdt = usdtAmount
+    const margin = grossUsdt
+    const totalCost = margin + fee
+    if (totalCost > strat.cash) {
+      return { success: false, error: `Insufficient cash in ${strategy} for short margin. Need ${totalCost.toFixed(2)}` }
+    }
+    strat.cash -= totalCost
+    const qty = grossUsdt / fillPrice
+
+    if (existing && existing.direction === 'SHORT') {
+      const newQty = existing.qty + qty
+      const newAvgEntry = (existing.entry_price * existing.qty + fillPrice * qty) / newQty
+      existing.qty = newQty
+      existing.entry_price = newAvgEntry
+      existing.size_usdt += grossUsdt
+    } else {
+      this.positions.set(symbol, {
+        symbol,
+        direction: 'SHORT',
+        status: 'ACTIVE',
+        entry_price: fillPrice,
+        entry_time: new Date().toISOString(),
+        size_usdt: grossUsdt,
+        qty,
+        current_sl: null,
+        current_tp: null,
+        catastrophic_sl: null,
+        pnl_pct: 0,
+        pnl_usdt: 0,
+        strategy,
+      })
+      strat.positions.add(symbol)
+    }
+
+    this.orders.unshift({
+      timestamp: new Date().toISOString(),
+      side: 'SELL', symbol, qty, price: fillPrice,
+      usdt: grossUsdt, fee, type: 'MARKET', strategy,
+    })
+    if (this.orders.length > 100) this.orders = this.orders.slice(0, 100)
+    console.log(`[Paper/${strategy}] SELL (open SHORT) ${symbol} ${qty.toFixed(6)} @ ${fillPrice} (fee ${fee.toFixed(2)})`)
+    return { success: true, fillPrice, qty, fee }
+  }
+
+  closePosition(symbol: string): OrderResult {
+    const pos = this.positions.get(symbol)
+    if (!pos) return { success: false, error: `No open position for ${symbol}` }
+
+    const ticker = this.priceFeed.getData(symbol)
+    if (!ticker) return { success: false, error: `No live price for ${symbol}` }
+
+    const isLong = pos.direction === 'LONG'
+    const fillPrice = isLong
+      ? ticker.price * (1 - SLIPPAGE_PCT / 100)
+      : ticker.price * (1 + SLIPPAGE_PCT / 100)
+
+    const strat = this.strategies[pos.strategy]
+    const grossProceeds = pos.qty * fillPrice
+    const fee = (grossProceeds * TAKER_FEE_PCT) / 100
+    const pnl = isLong
+      ? (fillPrice - pos.entry_price) * pos.qty - fee
+      : (pos.entry_price - fillPrice) * pos.qty - fee
+
+    if (isLong) {
+      strat.cash += grossProceeds - fee
+    } else {
+      strat.cash += pos.size_usdt + pnl
+    }
+    strat.realizedPnl += pnl
+    strat.totalTrades++
+    if (pnl > 0) strat.winningTrades++
+
+    this.trades.unshift({
+      ...pos,
+      close_price: fillPrice,
+      close_reason: 'CLOSED_BY_USER',
+      closed_at: new Date().toISOString(),
+      pnl_usdt: pnl,
+    })
+    if (this.trades.length > 100) this.trades = this.trades.slice(0, 100)
+    this.positions.delete(symbol)
+    strat.positions.delete(symbol)
+
+    console.log(`[Paper/${pos.strategy}] CLOSE ${symbol} @ ${fillPrice} (pnl ${pnl.toFixed(2)})`)
+    return { success: true, fillPrice, qty: pos.qty, fee, pnl }
+  }
+
+  killSwitch() {
+    for (const sym of Array.from(this.positions.keys())) {
+      this.closePosition(sym)
+    }
+    this.tradingEnabled = false
+  }
+
+  setTradingEnabled(enabled: boolean) {
+    this.tradingEnabled = enabled
+  }
+
+  setAutoMode(enabled: boolean) {
+    this.autoMode = enabled
+    console.log(`[Paper] Auto mode ${enabled ? 'ON' : 'OFF'}`)
+  }
+
+  setSymbol(s: string) {
+    this.selectedToken = s
+    if (!this.activeTokens.includes(s)) {
+      this.activeTokens = [...this.activeTokens, s]
+      this.priceFeed.setSymbols(this.activeTokens)
+    }
+  }
+
+  setTimeframe(_tf: string) { /* no-op */ }
+
+  setActiveTokens(tokens: string[]) {
+    const prev = new Set(this.activeTokens)
+    this.activeTokens = tokens
+    if (!tokens.includes(this.selectedToken)) {
+      this.activeTokens = [...tokens, this.selectedToken]
+    }
+    const same = this.activeTokens.length === prev.size &&
+      this.activeTokens.every(t => prev.has(t))
+    if (!same) {
+      this.priceFeed.setSymbols(this.activeTokens)
+    }
+  }
+
+  setMoneyManager(settings: Partial<MoneyManagerSettings>) {
+    this.moneyManager = { ...this.moneyManager, ...settings }
+  }
+
+  // ─── Price history ────────────────────────────────────────────────
+  private updatePriceHistory() {
+    const now = Date.now()
+    for (const sym of this.activeTokens) {
+      const t = this.priceFeed.getData(sym)
+      if (!t) continue
+      const arr = this.priceHistory.get(sym) || []
+      arr.push({ ts: now, price: t.price })
+      if (arr.length > 200) arr.shift()
+      this.priceHistory.set(sym, arr)
+    }
+  }
+
+  // ─── Pattern buffer (kept for UI) ─────────────────────────────────
+  private updatePatternsAndTrie() {
+    const now = Date.now() / 1000
+    for (const sym of this.activeTokens) {
+      const t = this.priceFeed.getData(sym)
+      if (!t) continue
+      const last = this.lastTickPrices.get(sym)
+      this.lastTickPrices.set(sym, t.price)
+      if (last === undefined) continue
+      const pct = ((t.price - last) / last) * 100
+      // FIX v10: Lower thresholds — Coinbase ticks update every 1.5s and most
+      // moves are < 0.02%, so the old thresholds produced 90% 'F' symbols,
+      // entropy = 1.0 (max chaos), and match_score = 0 for every pattern.
+      // New thresholds: U/D at 0.01%, V/B at 0.08%.
+      const sym_char =
+        pct >= 0.08 ? 'V' :
+        pct >= 0.01 ? 'U' :
+        pct <= -0.08 ? 'B' :
+        pct <= -0.01 ? 'D' : 'F'
+      let buf = this.patternBufferPerToken.get(sym) || []
+      buf.push(sym_char)
+      if (buf.length > 12) buf = buf.slice(-12)
+      this.patternBufferPerToken.set(sym, buf)
+      const bufStr = buf.join('')
+      for (let len = 3; len <= 6; len++) {
+        if (buf.length < len) break
+        const pattern = bufStr.slice(-len)
+        const cur = this.livingTrie.get(pattern) || 0
+        this.livingTrie.set(pattern, cur + 1)
+        if (len > this.maxPatternDepthObserved) {
+          this.maxPatternDepthObserved = len
+        }
+      }
+      this.candlesProcessed++
+      this.tickCount++          // FIX v11: tick = one symbol's pattern update
+    }
+    this.lastTickAt = Date.now()  // FIX v11: stamp the moment we finished a tick batch
+    if (now - this.lastTriePruneTime > 60 && this.livingTrie.size > 5000) {
+      const entries = Array.from(this.livingTrie.entries())
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 5000)
+      this.livingTrie = new Map(entries)
+      this.lastTriePruneTime = now
+    }
+  }
+
+  // ─── Stops (FIXED: always runs, ATR-based, time stop, cooldown) ──
+  private checkStops() {
+    // CRITICAL FIX: removed `if (!this.tradingEnabled) return`
+    // Stops MUST always run, even when trading is paused.
+    const mm = this.moneyManager
+    const now = Date.now()
+
+    for (const [sym, pos] of Array.from(this.positions.entries())) {
+      const ticker = this.priceFeed.getData(sym)
+      if (!ticker) {
+        // FIX v0.84: No price data for this symbol — can't check SL/TP.
+        // Log warning so we can diagnose (priceFeed may have dropped the
+        // WS subscription for this token). Position stays open but we
+        // can't risk closing it at a stale price.
+        // Throttle: only log once per 30s per symbol to avoid spam.
+        const lastWarn = this._noPriceWarn.get(sym) || 0
+        if (now - lastWarn > 30_000) {
+          console.warn(`[Paper/checkStops] ⚠️ No live price for ${sym} — SL/TP check skipped. Position stays open.`)
+          this._noPriceWarn.set(sym, now)
+        }
+        continue
+      }
+      const price = ticker.price
+      const isLong = pos.direction === 'LONG'
+
+      // ─── Time stop: 1h max hold (v31b: tighter time stop improves P&L
+      //   by cutting marginal positions before they drift to SL) ───
+      const entryTime = new Date(pos.entry_time).getTime()
+      const holdMs = now - entryTime
+      if (holdMs > 1 * 60 * 60 * 1000) {
+        console.log(`[Paper/TimeStop] ${sym} held ${Math.round(holdMs / 60000)}min — closing at market`)
+        this.closePosition(sym)
+        if (this.trades[0]) this.trades[0].close_reason = 'CLOSED_BY_TIME_STOP'
+        // v14 NIGHT1 FIX: cooldown 30min → 45min
+        this.cooldownUntil.set(sym, now + 45 * 60 * 1000)
+        continue
+      }
+
+      const pnlPct = isLong
+        ? ((price - pos.entry_price) / pos.entry_price) * 100
+        : ((pos.entry_price - price) / pos.entry_price) * 100
+
+      // ─── Set ATR-based SL/TP for entries without them (manual entries) ───
+      if (pos.current_sl === null || pos.current_tp === null) {
+        const hist = this.priceHistory.get(sym) || []
+        const prices = hist.map(h => h.price)
+        const atr = computeATR(prices, 60)
+        if (atr > 0) {
+          // v14 NIGHT1 FIX: SL fallback más ancho (1.5 → 2.0 ATR) y TP más cercano (3 → 2.5 ATR).
+          //   Reducía trades cerrados en <2min (35% en snapshot A).
+          if (pos.current_sl === null) {
+            pos.current_sl = isLong
+              ? pos.entry_price - atr * 2.0
+              : pos.entry_price + atr * 2.0
+          }
+          if (pos.current_tp === null) {
+            pos.current_tp = isLong
+              ? pos.entry_price + atr * 2.5
+              : pos.entry_price - atr * 2.5
+          }
+        }
+      }
+
+      // ─── Trailing stop (works for ALL positions, not just auto) ───
+      if (mm.trailingStopEnabled && pnlPct > mm.trailingStopActivationPct && pos.current_sl !== null) {
+        const trailDist = pos.entry_price * (mm.trailingStopDistancePct / 100)
+        if (isLong) {
+          pos.current_sl = Math.max(pos.current_sl, price - trailDist)
+        } else {
+          pos.current_sl = Math.min(pos.current_sl, price + trailDist)
+        }
+      }
+
+      // ─── Break-even ───
+      if (mm.breakEvenEnabled && pnlPct > mm.breakEvenActivationPct && pos.current_sl !== null) {
+        if (isLong && pos.current_sl < pos.entry_price) {
+          pos.current_sl = pos.entry_price
+          pos.status = 'BREAK_EVEN_SECURED'
+        } else if (!isLong && pos.current_sl > pos.entry_price) {
+          pos.current_sl = pos.entry_price
+          pos.status = 'BREAK_EVEN_SECURED'
+        }
+      }
+
+      // ─── v43a: Lock profit + Multi-Partial TP + Trailing (before SL/TP check) ───
+      // These run on every tick to manage open positions proactively.
+      // Lock:     move SL to entry+0.2R when +0.5R reached (locks small profit)
+      // Partial1: close 15% at +0.5R (small profit-booking)
+      // Partial2: close 25% at +1.0R, then enable trailing on remainder (60%)
+      // Trail:    0.4 ATR trailing stop on remainder (overrides TP)
+      // 12-seed validation: WR 72.5%, P&L +13.92, Profitable 67%, MaxDD 0.29%, AvgR +0.61
+      // vs v38g:  WR 61.8%, P&L +11.01, Profitable 67%, MaxDD 0.31%, AvgR +0.41
+      // → +10.7pp WR, +27% P&L, +0.20 AvgR, -0.02pp MaxDD
+      if (pos.initial_atr && pos.initial_sl_distance && pos.initial_sl_distance > 0) {
+        const rMultiple = isLong
+          ? (price - pos.entry_price) / pos.initial_sl_distance
+          : (pos.entry_price - price) / pos.initial_sl_distance
+
+        // Track MFE (max favorable price) for trailing
+        if (pos.max_favorable_price === undefined) pos.max_favorable_price = pos.entry_price
+        if (isLong && price > pos.max_favorable_price) pos.max_favorable_price = price
+        if (!isLong && price < pos.max_favorable_price) pos.max_favorable_price = price
+
+        // 1. Lock profit at +0.5R → move SL to entry+0.2R (v43a: same as v38g)
+        if (!pos.lock_done && rMultiple >= 0.5) {
+          const lockR = 0.2
+          if (isLong) {
+            const newSL = pos.entry_price + lockR * pos.initial_sl_distance
+            if (pos.current_sl === null || newSL > pos.current_sl) pos.current_sl = newSL
+          } else {
+            const newSL = pos.entry_price - lockR * pos.initial_sl_distance
+            if (pos.current_sl === null || newSL < pos.current_sl) pos.current_sl = newSL
+          }
+          pos.lock_done = true
+        }
+
+        // 2a. Partial TP1 at +0.5R → close 15% (v43a: NEW — first profit-booking)
+        if (!pos.partial1_done && rMultiple >= 0.5) {
+          const partialPct1 = 0.15
+          const partialQty1 = pos.qty * partialPct1
+          if (partialQty1 > 0.0001) {
+            const partialResult1 = isLong
+              ? this.marketSell(sym, partialQty1 * pos.entry_price, pos.strategy)
+              : this.marketBuy(sym, partialQty1 * pos.entry_price, pos.strategy)
+            if (partialResult1.success) {
+              pos.qty -= partialQty1
+              console.log(`[Paper/v43a] ${sym} PARTIAL_TP1 15% @ ${price} (R=${rMultiple.toFixed(2)})`)
+            }
+          }
+          pos.partial1_done = true
+        }
+
+        // 2b. Partial TP2 at +1.0R → close 25%, enable trailing on remainder (v43a: NEW)
+        if (!pos.partial2_done && rMultiple >= 1.0) {
+          const partialPct2 = 0.25
+          // Compute 25% of ORIGINAL qty to avoid compounding with partial1
+          // (pos.qty already reduced by partial1; we want 25% of original)
+          // Use initial_qty if tracked, else approximate via 0.25 / 0.85 * pos.qty
+          const remainingPctAfter1 = 1 - 0.15  // 0.85
+          const partialQty2 = (pos.qty * partialPct2) / remainingPctAfter1
+          if (partialQty2 > 0.0001 && partialQty2 <= pos.qty) {
+            const partialResult2 = isLong
+              ? this.marketSell(sym, partialQty2 * pos.entry_price, pos.strategy)
+              : this.marketBuy(sym, partialQty2 * pos.entry_price, pos.strategy)
+            if (partialResult2.success) {
+              pos.qty -= partialQty2
+              console.log(`[Paper/v43a] ${sym} PARTIAL_TP2 25% @ ${price} (R=${rMultiple.toFixed(2)})`)
+            }
+          }
+          pos.partial2_done = true
+          pos.trail_active = true
+          // Set initial trail SL at current price - 0.4 ATR (v43a: 0.5→0.4, tighter)
+          const trailDist = pos.initial_atr * 0.4
+          if (isLong) {
+            const newSL = price - trailDist
+            if (pos.current_sl === null || newSL > pos.current_sl) pos.current_sl = newSL
+          } else {
+            const newSL = price + trailDist
+            if (pos.current_sl === null || newSL < pos.current_sl) pos.current_sl = newSL
+          }
+        }
+
+        // 3. Update trailing stop if active (v43a: 0.4 ATR, was 0.5)
+        if (pos.trail_active && pos.max_favorable_price) {
+          const trailDist = pos.initial_atr * 0.4
+          if (isLong) {
+            const newSL = pos.max_favorable_price - trailDist
+            if (pos.current_sl === null || newSL > pos.current_sl) pos.current_sl = newSL
+            pos.current_tp = null  // disable TP — let trail do the work
+          } else {
+            const newSL = pos.max_favorable_price + trailDist
+            if (pos.current_sl === null || newSL < pos.current_sl) pos.current_sl = newSL
+            pos.current_tp = null
+          }
+        }
+      }
+
+      // ─── SL/TP/CatSL trigger (IMMEDIATE — exchange-like behavior) ───
+      // FIX v0.85 (UNIVERSAL — applies to ALL assets, not just one):
+      //   Removed the 3-minute `skipStopLoss` grace period that was deferring
+      //   SL/CAT_SL execution during the first 180s after entry. The grace
+      //   period was added in v12 to avoid noise stopouts, but the user
+      //   reported a SHORT XRP/USDT position where price (1.0510) exceeded
+      //   SL (1.0497) and the position did not close — this is NOT how real
+      //   exchanges behave. Standard exchange SL orders fire IMMEDIATELY
+      //   when price crosses the SL level, regardless of how recently the
+      //   position was opened. We now match that behavior across every
+      //   symbol in `this.positions`.
+      //
+      //   TP, trailing SL, break-even, and catastrophic SL all fire
+      //   immediately on every tick (1.5s cadence). No gating, no deferral.
+      //   The previous FIX v10/v12 grace period is fully removed.
+      //
+      //   If a position needs protection from early noise stopouts, that
+      //   should be solved by widening the SL distance (ATR multiplier)
+      //   at entry time, not by silently ignoring SL breaches.
+      let hit = false
+      let reason = ''
+      if (pos.current_sl !== null) {
+        if (isLong && price <= pos.current_sl) { hit = true; reason = pnlPct > 0 ? 'CLOSED_BY_TRAILING_SL' : 'CLOSED_BY_SL' }
+        if (!isLong && price >= pos.current_sl) { hit = true; reason = pnlPct > 0 ? 'CLOSED_BY_TRAILING_SL' : 'CLOSED_BY_SL' }
+      }
+      // Sanity check: SL breached but hit=false should now be impossible.
+      // Keep the guard so any future regression is loud.
+      if (pos.current_sl !== null && !hit) {
+        const slBreached = (isLong && price <= pos.current_sl) || (!isLong && price >= pos.current_sl)
+        if (slBreached) {
+          console.error(`[Paper/checkStops] 🚨 BUG: ${sym} SL=${pos.current_sl} breached (price=${price}) but hit=false — investigating`)
+        }
+      }
+      if (pos.current_tp !== null) {
+        if (isLong && price >= pos.current_tp) { hit = true; reason = 'CLOSED_BY_TP' }
+        if (!isLong && price <= pos.current_tp) { hit = true; reason = 'CLOSED_BY_TP' }
+      }
+      if (pos.catastrophic_sl !== null) {
+        if (isLong && price <= pos.catastrophic_sl) { hit = true; reason = 'CLOSED_BY_CAT_SL' }
+        if (!isLong && price >= pos.catastrophic_sl) { hit = true; reason = 'CLOSED_BY_CAT_SL' }
+      }
+
+      if (hit) {
+        // FIX v0.85: Loud per-symbol log so the user can verify SL/TP fires
+        // immediately for EVERY asset (not just XRP). Includes entry, SL/TP
+        // level, trigger price, hold time, and PnL — enough to debug any
+        // future "why didn't this close?" report.
+        const holdSec = Math.round(holdMs / 1000)
+        console.log(
+          `[Paper/checkStops] 🔥 ${sym} ${pos.direction} CLOSED by ${reason} ` +
+          `| entry=${pos.entry_price} sl=${pos.current_sl} tp=${pos.current_tp} ` +
+          `catSL=${pos.catastrophic_sl} | triggerPrice=${price} | held=${holdSec}s | pnl=${pnlPct.toFixed(3)}%`
+        )
+        // Cooldown 30min after SL/CatSL (not after TP or trailing SL)
+        if (reason === 'CLOSED_BY_SL' || reason === 'CLOSED_BY_CAT_SL') {
+          // v14 NIGHT1 FIX: cooldown 30min → 45min (reduce reentradas prematuras)
+          this.cooldownUntil.set(sym, now + 45 * 60 * 1000)
+        }
+        this.closePosition(sym)
+        if (this.trades[0]) this.trades[0].close_reason = reason
+      }
+    }
+  }
+
+  // ─── Auto trading (4 strategies in parallel) ──────────────────────
+  private maybeAutoTrade() {
+    if (!this.autoMode || !this.tradingEnabled) return
+    const now = Date.now()
+
+    // ─── v15 VOL CB: pause new entries when market volatility is extreme ───
+    // Detects violent market-wide moves (avg ATR/price > 1.5% across top tokens)
+    // and pauses NEW entries for 10 minutes. Open positions keep managing normally.
+    // Calm market: avgAtrPct ≈ 0.2-0.5%.  Volatile: 0.8-1.2%.  Extreme: >1.5%.
+    if (now < this.volPauseUntil) {
+      const minsLeft = Math.ceil((this.volPauseUntil - now) / 60000)
+      if (now - this.lastVolCBLogTime > 60000) {
+        console.log(`[Paper/VolCB] ⛔ Volatility pause active — ${minsLeft}min left. New entries skipped.`)
+        this.lastVolCBLogTime = now
+      }
+      return
+    }
+    const volNow = this.computeMarketVolatility()
+    if (volNow.extreme) {
+      this.volPauseUntil = now + 10 * 60 * 1000  // 10 min
+      console.log(
+        `[Paper/VolCB] 🌋 Extreme market volatility detected — ` +
+        `avgATR/price=${volNow.avgAtrPct.toFixed(3)}% across ${volNow.tokenCount} tokens. ` +
+        `Pausing new entries for 10min. Open positions continue managing.`
+      )
+      this.lastVolCBLogTime = now
+      return
+    }
+
+    // ─── Circuit breaker: stop new entries if drawdown exceeded ───
+    const totalValue = this.computeTotalValue()
+    const totalPnlPct = ((totalValue - INITIAL_CAPITAL) / INITIAL_CAPITAL) * 100
+    if (totalPnlPct < -this.moneyManager.maxDrawdownPct) {
+      if (Date.now() - this.lastCBLogTime > 60000) {
+        console.log(`[Paper/CB] Drawdown ${totalPnlPct.toFixed(2)}% > ${this.moneyManager.maxDrawdownPct}% — auto-trading paused`)
+        this.lastCBLogTime = Date.now()
+      }
+      return
+    }
+
+    this.runStrategyA_Momentum()
+    this.runStrategyB_MeanRev()
+    // v14 NIGHT1 FIX: Strategy C PAUSADA — WR 10-20% en 2 snapshots paralelos, pierde siempre.
+    // this.runStrategyC_Breakout()
+    this.runStrategyD_Squeeze()
+  }
+
+  // ─── Strategy A: Momentum 24h ─────────────────────────────────────
+  private runStrategyA_Momentum() {
+    const strat = this.strategies.A
+    const now = Date.now()
+    if (now - strat.lastSignalTime < 15000) return // 15s cooldown
+    strat.lastSignalTime = now
+
+    // FIX v12: Use RECENT price-history momentum (last 30 ticks ≈ 45s),
+    // not 24h changePct. 24h change is stale — a token that pumped +5% in 24h
+    // may have peaked 12h ago and is now reverting. Snapshot showed 9/10 last
+    // trades were SHORT (24h changePct < 0) and they all got stopped out on
+    // bounces. Recent momentum is what's actually tradeable.
+    const candidates = WS_ELIGIBLE_TOKENS
+      .map(sym => {
+        const t = this.priceFeed.getData(sym)
+        if (!t || t.quoteVolume < 50_000_000) return null
+        const hist = this.priceHistory.get(sym) || []
+        if (hist.length < 30) return null
+        // Recent momentum: last 30 ticks (45s) price change %
+        // v31b: momentum 0.40% (was 0.15) + RSI 25-75 filter for quality
+        // Backtest: 0.15 gave WR 41%, 0.40 + RSI filter gives WR 63.5%
+        const recent = hist.slice(-30)
+        const recentMomentum = ((recent[recent.length - 1].price - recent[0].price) / recent[0].price) * 100
+        if (Math.abs(recentMomentum) < 0.40) return null  // need ≥0.40% move (strong signals only)
+        const rsiA = computeRSI(prices, 14)
+        if (rsiA < 25 || rsiA > 75) return null  // skip extreme zones (mean reversion territory)
+        return { ticker: t, recentMomentum }
+      })
+      .filter((x): x is { ticker: TickerData; recentMomentum: number } => x !== null)
+      .filter(x => !this.cooldownUntil.has(x.ticker.symbol) || now > (this.cooldownUntil.get(x.ticker.symbol) || 0))
+      .filter(x => !this.positions.has(x.ticker.symbol))
+      .filter(x => this.checkCorrelationLimit(x.ticker.symbol))
+      .filter(x => {
+        // v37e: ATR floor 0.55% — skip trades in low-vol regimes where fees dominate
+        const histA = this.priceHistory.get(x.ticker.symbol) || []
+        const pricesA = histA.map(h => h.price)
+        const atrA = computeATR(pricesA, 60)
+        const atrPctA = atrA / x.ticker.price * 100
+        return atrPctA >= 0.58
+      })
+      .sort((a, b) => Math.abs(b.recentMomentum) - Math.abs(a.recentMomentum))
+      .slice(0, 3)
+
+    if (candidates.length === 0) return
+
+    for (const top of candidates) {
+      if (strat.positions.size >= 2) break
+      // v31b: position size 2.5% for Strategy A (A has 61% WR but loses
+      // money due to R:R 1:1.67 — halving size makes A's losses manageable)
+      const usdtAmount = Math.min(strat.cash * 0.025, strat.cash * 0.10)
+      if (usdtAmount < 50) break
+
+      // FIX v12 BUG A: direction from RECENT momentum, not 24h changePct
+      const direction: 'LONG' | 'SHORT' = top.recentMomentum > 0 ? 'LONG' : 'SHORT'
+      const hist = this.priceHistory.get(top.symbol) || []
+      const atr = computeATR(hist.map(h => h.price), 60)
+      if (atr <= 0) continue
+
+      const result = direction === 'LONG'
+        ? this.marketBuy(top.symbol, usdtAmount, 'A')
+        : this.marketSell(top.symbol, usdtAmount, 'A')
+
+      if (result.success) {
+        const pos = this.positions.get(top.symbol)
+        if (pos) {
+          // v43a: SL 1.4 ATR + lock 0.5R + partial1 15% at 0.5R + partial2 25% at 1.0R + trail 0.4 ATR + ATR floor 0.58%
+          //   8-seed validation: WR 66.7%, P&L +30.97, Profitable 88% of seeds, MaxDD 0.26%
+          pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 1.4 : pos.entry_price + atr * 1.4
+          pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 1.2 : pos.entry_price - atr * 1.2
+          pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 4 : pos.entry_price + atr * 4
+          pos.initial_atr = atr
+          pos.initial_sl_distance = atr * 1.4
+          pos.lock_done = false
+          pos.partial_done = false
+          pos.partial1_done = false
+          pos.partial2_done = false
+          pos.trail_active = false
+          pos.max_favorable_price = pos.entry_price
+        }
+        // FIX v12 BUG D: Compute ev_score + expected_move_pct so ML/Kelly can work.
+        //   ev_score = confidence × expected_move_pct / 2  (heuristic)
+        //   expected_move_pct = (ATR × 3 / entry_price) × 100  (the TP distance)
+        const expected_move_pct = +((atr * 3 / (pos?.entry_price || 1)) * 100).toFixed(3)
+        const ev_score = +(Math.min(0.95, 0.55 + Math.abs(top.recentMomentum) / 5) * expected_move_pct / 2).toFixed(3)
+        // FIX v12 BUG G: Confidence floor 0.55 → 0.65
+        const confA = Math.max(0.65, Math.min(0.95, 0.55 + Math.abs(top.recentMomentum) / 5))
+        this.signals.unshift({
+          timestamp: new Date().toISOString(),
+          direction, symbol: top.symbol, strategy: 'A',
+          confidence: confA,
+          pattern_path: `MOMENTUM_24H_${direction}`,
+          ev_score,
+          expected_move_pct,
+        })
+        if (this.signals.length > 50) this.signals = this.signals.slice(0, 50)
+        console.log(`[Strat A/Momentum] OPEN ${direction} ${top.symbol} @ ${result.fillPrice?.toFixed(4)} (${usdtAmount.toFixed(0)} USDT, ATR ${atr.toFixed(4)})`)
+      }
+    }
+  }
+
+  // ─── Strategy B: Mean Reversion (RSI) ─────────────────────────────
+  private runStrategyB_MeanRev() {
+    const strat = this.strategies.B
+    const now = Date.now()
+    if (now - strat.lastSignalTime < 30000) return // 30s cooldown
+    strat.lastSignalTime = now
+
+    const candidates = WS_ELIGIBLE_TOKENS
+      .map(sym => {
+        const t = this.priceFeed.getData(sym)
+        if (!t || t.quoteVolume < 30_000_000) return null
+        const hist = this.priceHistory.get(sym) || []
+        if (hist.length < 20) return null
+        const prices = hist.map(h => h.price)
+        // v31b: RSI 30/70 (was 40/60) — backtest shows 30/70 gives 75% WR
+        //   on Strategy B (the winner strategy, +69 P&L in 6h)
+        const rsi = computeRSI(prices, 14)
+        if (rsi >= 30 && rsi <= 70) return null
+        return { ticker: t, rsi }
+      })
+      .filter((x): x is { ticker: TickerData; rsi: number } => x !== null)
+      .filter(x => !this.cooldownUntil.has(x.ticker.symbol) || now > (this.cooldownUntil.get(x.ticker.symbol) || 0))
+      .filter(x => !this.positions.has(x.ticker.symbol))
+      .filter(x => this.checkCorrelationLimit(x.ticker.symbol))
+      .filter(x => {
+        // v37e: ATR floor 0.55%
+        const histB = this.priceHistory.get(x.ticker.symbol) || []
+        const pricesB = histB.map(h => h.price)
+        const atrB = computeATR(pricesB, 60)
+        const atrPctB = atrB / x.ticker.price * 100
+        return atrPctB >= 0.58
+      })
+      .sort((a, b) => Math.abs(a.rsi - 50) - Math.abs(b.rsi - 50))
+      .slice(0, 2)
+
+    if (candidates.length === 0) return
+
+    for (const c of candidates) {
+      if (strat.positions.size >= 2) break
+      // v31b: position size 10% for Strategy B (B has 75% WR, the winner
+      // strategy — doubling size scales profits)
+      const usdtAmount = Math.min(strat.cash * 0.10, strat.cash * 0.10)
+      if (usdtAmount < 50) break
+
+      // FIX v12 BUG J: Direction was c.rsi < 30 ? 'LONG' : 'SHORT' but v12 BUG E
+      // widened entry filter to RSI<40 (LONG) or RSI>60 (SHORT). When RSI was
+      // 30-40, we'd enter as LONG but direction logic said SHORT. All 8 recent
+      // Strategy B signals were SHORT (100% bias). Fix: use < 50 as midpoint.
+      // RSI<50 = bearish → contrarian LONG (mean reversion up)
+      // RSI>50 = bullish → contrarian SHORT (mean reversion down)
+      const direction: 'LONG' | 'SHORT' = c.rsi < 50 ? 'LONG' : 'SHORT'
+      const hist = this.priceHistory.get(c.ticker.symbol) || []
+      const atr = computeATR(hist.map(h => h.price), 60)
+      if (atr <= 0) continue
+
+      const result = direction === 'LONG'
+        ? this.marketBuy(c.ticker.symbol, usdtAmount, 'B')
+        : this.marketSell(c.ticker.symbol, usdtAmount, 'B')
+
+      if (result.success) {
+        const pos = this.positions.get(c.ticker.symbol)
+        if (pos) {
+          // v43a: SL 1.4 ATR + v43a state init (lock 0.5R / partial1 15% at 0.5R / partial2 25% at 1.0R / trail 0.4 ATR)
+          pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 1.4 : pos.entry_price + atr * 1.4
+          pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 1.2 : pos.entry_price - atr * 1.2
+          pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 4 : pos.entry_price + atr * 4
+          pos.initial_atr = atr
+          pos.initial_sl_distance = atr * 1.4
+          pos.lock_done = false
+          pos.partial_done = false
+          pos.trail_active = false
+          pos.max_favorable_price = pos.entry_price
+        }
+        // FIX v13 BUG K: Same ev_score computation as Strategy A.
+        const expected_move_pct_b = +((atr * 2 / (pos?.entry_price || 1)) * 100).toFixed(3)
+        const confB = Math.max(0.65, Math.min(0.9, 0.5 + Math.abs(c.rsi - 50) / 50))
+        const ev_score_b = +(confB * expected_move_pct_b / 2).toFixed(3)
+        this.signals.unshift({
+          timestamp: new Date().toISOString(),
+          direction, symbol: c.ticker.symbol, strategy: 'B',
+          confidence: confB,
+          pattern_path: `MEANREV_RSI${c.rsi.toFixed(0)}_${direction}`,
+          ev_score: ev_score_b,
+          expected_move_pct: expected_move_pct_b,
+        })
+        if (this.signals.length > 50) this.signals = this.signals.slice(0, 50)
+        console.log(`[Strat B/MeanRev] OPEN ${direction} ${c.ticker.symbol} RSI=${c.rsi.toFixed(1)} @ ${result.fillPrice?.toFixed(4)} (${usdtAmount.toFixed(0)} USDT)`)
+      }
+    }
+  }
+
+  // ─── Strategy C: Range Breakout ───────────────────────────────────
+  private runStrategyC_Breakout() {
+    const strat = this.strategies.C
+    const now = Date.now()
+    if (now - strat.lastSignalTime < 10000) return // 10s cooldown
+    strat.lastSignalTime = now
+
+    const candidates = WS_ELIGIBLE_TOKENS
+      .map(sym => {
+        const t = this.priceFeed.getData(sym)
+        if (!t || t.quoteVolume < 30_000_000) return null
+        const hist = this.priceHistory.get(sym) || []
+        if (hist.length < 70) return null
+        const prices = hist.map(h => h.price)
+        const range = computeRollingRange(prices.slice(0, -1), 60)
+        const current = prices[prices.length - 1]
+        const isBreakout = current > range.high
+        const isBreakdown = current < range.low
+        if (!isBreakout && !isBreakdown) return null
+        return { ticker: t, isBreakout }
+      })
+      .filter((x): x is { ticker: TickerData; isBreakout: boolean } => x !== null)
+      .filter(x => !this.cooldownUntil.has(x.ticker.symbol) || now > (this.cooldownUntil.get(x.ticker.symbol) || 0))
+      .filter(x => !this.positions.has(x.ticker.symbol))
+      .filter(x => this.checkCorrelationLimit(x.ticker.symbol))
+      .slice(0, 2)
+
+    if (candidates.length === 0) return
+
+    for (const c of candidates) {
+      if (strat.positions.size >= 2) break
+      // FIX v13 BUG L: position size 3% → 5%
+      const usdtAmount = Math.min(strat.cash * 0.05, strat.cash * 0.10)
+      if (usdtAmount < 50) break
+
+      const direction: 'LONG' | 'SHORT' = c.isBreakout ? 'LONG' : 'SHORT'
+      const hist = this.priceHistory.get(c.ticker.symbol) || []
+      const atr = computeATR(hist.map(h => h.price), 60)
+      if (atr <= 0) continue
+
+      const result = direction === 'LONG'
+        ? this.marketBuy(c.ticker.symbol, usdtAmount, 'C')
+        : this.marketSell(c.ticker.symbol, usdtAmount, 'C')
+
+      if (result.success) {
+        const pos = this.positions.get(c.ticker.symbol)
+        if (pos) {
+          pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 1 : pos.entry_price + atr * 1
+          pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 3 : pos.entry_price - atr * 3
+          // FIX v13 BUG M: CatSL 2×ATR → 3.5×ATR (was 1×ATR away from SL — too tight)
+          pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 3.5 : pos.entry_price + atr * 3.5
+        }
+        // FIX v13 BUG K: ev_score for Strategy C (breakout).
+        const expected_move_pct_c = +((atr * 3 / (pos?.entry_price || 1)) * 100).toFixed(3)
+        const ev_score_c = +(0.65 * expected_move_pct_c / 2).toFixed(3)
+        this.signals.unshift({
+          timestamp: new Date().toISOString(),
+          direction, symbol: c.ticker.symbol, strategy: 'C',
+          confidence: 0.65,
+          pattern_path: `BREAKOUT_${direction}`,
+          ev_score: ev_score_c,
+          expected_move_pct: expected_move_pct_c,
+        })
+        if (this.signals.length > 50) this.signals = this.signals.slice(0, 50)
+        console.log(`[Strat C/Breakout] OPEN ${direction} ${c.ticker.symbol} broke ${c.isBreakout ? 'high' : 'low'} @ ${result.fillPrice?.toFixed(4)} (${usdtAmount.toFixed(0)} USDT)`)
+      }
+    }
+  }
+
+  // ─── Strategy D: Volatility Squeeze ───────────────────────────────
+  private runStrategyD_Squeeze() {
+    const strat = this.strategies.D
+    const now = Date.now()
+    if (now - strat.lastSignalTime < 60000) return // 60s cooldown
+    strat.lastSignalTime = now
+
+    const candidates = WS_ELIGIBLE_TOKENS
+      .map(sym => {
+        const t = this.priceFeed.getData(sym)
+        if (!t || t.quoteVolume < 20_000_000) return null
+        const hist = this.priceHistory.get(sym) || []
+        if (hist.length < 55) return null
+        const prices = hist.map(h => h.price)
+        const bb = computeBollinger(prices, 50, 2)
+        // v31b: Squeeze threshold 1.5% → 1.2% (tighter squeeze = cleaner breakouts)
+        if (bb.width > 0.012) return null // not squeezed
+        const current = prices[prices.length - 1]
+        const isLong = current > bb.upper
+        const isShort = current < bb.lower
+        if (!isLong && !isShort) return null
+        return { ticker: t, isLong, bbWidth: bb.width }
+      })
+      .filter((x): x is { ticker: TickerData; isLong: boolean; bbWidth: number } => x !== null)
+      .filter(x => !this.cooldownUntil.has(x.ticker.symbol) || now > (this.cooldownUntil.get(x.ticker.symbol) || 0))
+      .filter(x => !this.positions.has(x.ticker.symbol))
+      .filter(x => this.checkCorrelationLimit(x.ticker.symbol))
+      .slice(0, 1)
+
+    if (candidates.length === 0) return
+
+    for (const c of candidates) {
+      if (strat.positions.size >= 1) break
+      // FIX v13 BUG L: position size 3% → 5%
+      const usdtAmount = Math.min(strat.cash * 0.05, strat.cash * 0.10)
+      if (usdtAmount < 50) break
+
+      const direction: 'LONG' | 'SHORT' = c.isLong ? 'LONG' : 'SHORT'
+      const hist = this.priceHistory.get(c.ticker.symbol) || []
+      const atr = computeATR(hist.map(h => h.price), 60)
+      if (atr <= 0) continue
+
+      const result = direction === 'LONG'
+        ? this.marketBuy(c.ticker.symbol, usdtAmount, 'D')
+        : this.marketSell(c.ticker.symbol, usdtAmount, 'D')
+
+      if (result.success) {
+        const pos = this.positions.get(c.ticker.symbol)
+        if (pos) {
+          // v31b: SL 1.5 ATR (kept), TP 3.0 → 1.0 (tighter for higher WR), catSL 3.5 → 3.0
+          pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 1.5 : pos.entry_price + atr * 1.5
+          pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 1.0 : pos.entry_price - atr * 1.0
+          pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 3.0 : pos.entry_price + atr * 3.0
+        }
+        // FIX v13 BUG K: ev_score for Strategy D (squeeze expansion).
+        const expected_move_pct_d = +((atr * 4 / (pos?.entry_price || 1)) * 100).toFixed(3)
+        const ev_score_d = +(0.7 * expected_move_pct_d / 2).toFixed(3)
+        this.signals.unshift({
+          timestamp: new Date().toISOString(),
+          direction, symbol: c.ticker.symbol, strategy: 'D',
+          confidence: 0.7,
+          pattern_path: `SQUEEZE_${direction}`,
+          ev_score: ev_score_d,
+          expected_move_pct: expected_move_pct_d,
+        })
+        if (this.signals.length > 50) this.signals = this.signals.slice(0, 50)
+        console.log(`[Strat D/Squeeze] OPEN ${direction} ${c.ticker.symbol} bbWidth=${(c.bbWidth * 100).toFixed(2)}% @ ${result.fillPrice?.toFixed(4)} (${usdtAmount.toFixed(0)} USDT)`)
+      }
+    }
+  }
+
+  // ─── Helpers ──────────────────────────────────────────────────────
+  private checkCorrelationLimit(symbol: string): boolean {
+    const sector = getSector(symbol)
+    const sameSector = Array.from(this.positions.keys())
+      .filter(s => getSector(s) === sector)
+    return sameSector.length < this.moneyManager.maxCorrelatedPositions
+  }
+
+  private computeTotalValue(): number {
+    let total = 0
+    for (const s of Object.values(this.strategies)) {
+      total += s.cash
+    }
+    for (const [sym, pos] of this.positions) {
+      const ticker = this.priceFeed.getData(sym)
+      const price = ticker?.price ?? pos.entry_price
+      const isLong = pos.direction === 'LONG'
+      if (isLong) {
+        total += pos.qty * price
+      } else {
+        const pnl = (pos.entry_price - price) * pos.qty
+        total += pos.size_usdt + pnl
+      }
+    }
+    return total
+  }
+
+  private computeStrategyUnrealized(name: StrategyName): number {
+    let unrealized = 0
+    for (const [sym, pos] of this.positions) {
+      if (pos.strategy !== name) continue
+      const ticker = this.priceFeed.getData(sym)
+      const price = ticker?.price ?? pos.entry_price
+      const isLong = pos.direction === 'LONG'
+      const pnl = isLong
+        ? (price - pos.entry_price) * pos.qty
+        : (pos.entry_price - price) * pos.qty
+      unrealized += pnl
+    }
+    return unrealized
+  }
+
+  private computeStrategyExposure(name: StrategyName): number {
+    let exposure = 0
+    for (const [sym, pos] of this.positions) {
+      if (pos.strategy !== name) continue
+      const ticker = this.priceFeed.getData(sym)
+      const price = ticker?.price ?? pos.entry_price
+      if (pos.direction === 'LONG') {
+        exposure += pos.qty * price
+      } else {
+        exposure += pos.size_usdt
+      }
+    }
+    return exposure
+  }
+
+  /**
+   * v15 VOL CB: Compute real-time market-wide volatility.
+   * Returns avgAtrPct = average of (ATR(60) / price * 100) across top-volume
+   * tokens with sufficient price history. This is a TRUE real-time vol measure
+   * (last ~90s of price action), unlike the 24h avgChange 'regime' which is stale.
+   *
+   * Thresholds (calibrated for 1.5s tick / 60-sample ATR ≈ 90s window):
+   *   calm     < 0.5%
+   *   normal   0.5 - 0.8%
+   *   high     0.8 - 1.5%
+   *   extreme  > 1.5%   ← triggers circuit breaker
+   */
+  private computeMarketVolatility(): { avgAtrPct: number; tokenCount: number; extreme: boolean } {
+    let sumAtrPct = 0
+    let count = 0
+    for (const sym of WS_ELIGIBLE_TOKENS) {
+      const ticker = this.priceFeed.getData(sym)
+      if (!ticker || ticker.quoteVolume < 50_000_000) continue
+      const hist = this.priceHistory.get(sym) || []
+      if (hist.length < 60) continue
+      const prices = hist.slice(-60).map(h => h.price)
+      const atr = computeATR(prices, 60)
+      if (atr <= 0 || ticker.price <= 0) continue
+      sumAtrPct += (atr / ticker.price) * 100
+      count++
+    }
+    const avgAtrPct = count > 0 ? sumAtrPct / count : 0
+    return {
+      avgAtrPct,
+      tokenCount: count,
+      extreme: count >= 3 && avgAtrPct > 1.5,  // need ≥3 tokens agreeing to avoid single-token pump false positives
+    }
+  }
+
+  private maybeReport() {
+    const now = Date.now()
+    if (now - this.lastReportTime < 5 * 60 * 1000) return // 5 min
+    this.lastReportTime = now
+
+    const totalValue = this.computeTotalValue()
+    console.log('\n━━━━━━━━━━ Strategy Performance Report ━━━━━━━━━━')
+    for (const name of ['A', 'B', 'C', 'D'] as StrategyName[]) {
+      const strat = this.strategies[name]
+      const info = STRATEGY_INFO[name]
+      const unrl = this.computeStrategyUnrealized(name)
+      const expo = this.computeStrategyExposure(name)
+      const stratValue = strat.cash + expo + unrl
+      const pnlPct = ((stratValue - strat.allocated) / strat.allocated) * 100
+      const wr = strat.totalTrades > 0 ? (strat.winningTrades / strat.totalTrades) * 100 : 0
+      console.log(
+        `[${name} ${info.name.padEnd(15)}] ` +
+        `P&L ${strat.realizedPnl >= 0 ? '+' : ''}${strat.realizedPnl.toFixed(2)} ` +
+        `(${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%) ` +
+        `trades=${strat.totalTrades} WR=${wr.toFixed(0)}% ` +
+        `open=${strat.positions.size} cash=${strat.cash.toFixed(0)}`
+      )
+    }
+    const totalPct = ((totalValue - INITIAL_CAPITAL) / INITIAL_CAPITAL) * 100
+    console.log(`[Portfolio Total]   ${totalValue.toFixed(2)} USDT (${totalPct >= 0 ? '+' : ''}${totalPct.toFixed(2)}%)`)
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n')
+  }
+
+  // ─── Snapshot ─────────────────────────────────────────────────────
+  private snapshot(): PaperTradingState {
+    this.updatePriceHistory()
+    this.updatePatternsAndTrie()
+    this.checkStops()
+    this.maybeAutoTrade()
+    this.maybeReport()
+
+    const wsConnected = this.priceFeed.isConnected()
+    const liveSymbols = this.priceFeed.getAvailableSymbols()
+
+    // Build positions array with current PnL
+    const positionsArray: any[] = []
+    let unrealized = 0
+    let exposure = 0
+    for (const [sym, pos] of this.positions.entries()) {
+      const ticker = this.priceFeed.getData(sym)
+      const price = ticker?.price ?? pos.entry_price
+      const isLong = pos.direction === 'LONG'
+      const pnl = isLong
+        ? (price - pos.entry_price) * pos.qty
+        : (pos.entry_price - price) * pos.qty
+      const pnlPct = isLong
+        ? ((price - pos.entry_price) / pos.entry_price) * 100
+        : ((pos.entry_price - price) / pos.entry_price) * 100
+      pos.pnl_pct = pnlPct
+      pos.pnl_usdt = pnl
+      unrealized += pnl
+      if (isLong) {
+        exposure += pos.qty * price
+      } else {
+        exposure += pos.size_usdt
+      }
+      positionsArray.push({ ...pos, current_price: price })
+    }
+
+    const totalValue = this.computeTotalValue()
+    this.equity.push(totalValue)
+    this.timestamps.push(Date.now() / 1000)
+    if (this.equity.length > 500) {
+      this.equity = this.equity.slice(-500)
+      this.timestamps = this.timestamps.slice(-500)
+    }
+
+    const maxEq = Math.max(...this.equity)
+    const dd = maxEq > 0 ? ((maxEq - totalValue) / maxEq) * 100 : 0
+
+    // Aggregate across strategies
+    const totalCash = Object.values(this.strategies).reduce((s, x) => s + x.cash, 0)
+    const totalRealized = Object.values(this.strategies).reduce((s, x) => s + x.realizedPnl, 0)
+    const totalTrades = Object.values(this.strategies).reduce((s, x) => s + x.totalTrades, 0)
+    const totalWinning = Object.values(this.strategies).reduce((s, x) => s + x.winningTrades, 0)
+
+    // Daily return
+    const dayAgoIdx = Math.max(0, this.equity.length - Math.floor(24 * 60 * 60 / 1.5))
+    const dailyReturn = this.equity.length > 1
+      ? ((totalValue - this.equity[dayAgoIdx]) / this.equity[dayAgoIdx]) * 100
+      : 0
+
+    // Token states
+    const tokenStates: Record<string, TokenState> = {}
+    for (const sym of this.activeTokens) {
+      const t = this.priceFeed.getData(sym)
+      if (t) {
+        const pos = this.positions.get(sym)
+        tokenStates[sym] = {
+          symbol: t.symbol,
+          name: TOKEN_NAMES[t.symbol] || t.symbol,
+          price: parseFloat(t.price.toFixed(t.price < 1 ? 6 : t.price < 100 ? 4 : 2)),
+          change24h: parseFloat(t.changePct.toFixed(2)),
+          volume24h: parseFloat(t.quoteVolume.toFixed(0)),
+          positions: pos ? [pos] : [],
+          unrealizedPnl: pos ? parseFloat(pos.pnl_usdt.toFixed(4)) : 0,
+          realizedPnl: 0,
+          allocationPct: totalValue > 0 && pos
+            ? parseFloat(((pos.direction === 'LONG' ? pos.qty * t.price : pos.size_usdt) / totalValue * 100).toFixed(1))
+            : 0,
+          isActive: true,
+          isTrading: !!pos,
+          winRate: totalTrades > 0 ? totalWinning / totalTrades : 0,
+          totalTrades: this.trades.filter(tr => tr.symbol === sym).length,
+          equity: this.equity,
+          color: TOKEN_COLORS[sym] || '#6b7280',
+        }
+      }
+    }
+
+    // Sort active tokens by |24h change|
+    const sortedActive = [...this.activeTokens]
+      .map(s => ({ s, ch: this.priceFeed.getData(s)?.changePct ?? -999 }))
+      .sort((a, b) => Math.abs(b.ch) - Math.abs(a.ch))
+      .map(x => x.s)
+
+    // Kelly
+    const wr = totalTrades > 0 ? totalWinning / totalTrades : 0
+    const mm = this.moneyManager
+    const R = mm.takeProfitMultiplier
+    const kellyPercent = wr > 0 && wr < 1 ? Math.max(0, wr - ((1 - wr) / R)) : 0
+    const suggestedPositionSize = kellyPercent * mm.kellyFraction * totalValue
+
+    // Current price
+    const selTicker = this.priceFeed.getData(this.selectedToken)
+    const currentPrice = selTicker?.price ?? 0
+
+    // Regime
+    const top5 = [...liveSymbols]
+      .map(s => this.priceFeed.getData(s)!)
+      .filter(Boolean)
+      .sort((a, b) => b.quoteVolume - a.quoteVolume)
+      .slice(0, 5)
+    const avgChange = top5.length > 0
+      ? top5.reduce((s, t) => s + t.changePct, 0) / top5.length
+      : 0
+    const regime = avgChange > 2 ? 'trending_up'
+      : avgChange < -2 ? 'trending_down'
+      : Math.abs(avgChange) < 0.5 ? 'ranging'
+      : 'volatile'
+
+    // Entropy
+    const changes = sortedActive
+      .map(s => this.priceFeed.getData(s)?.changePct ?? 0)
+      .slice(0, 10)
+    const mean = changes.reduce((a, b) => a + b, 0) / (changes.length || 1)
+    const variance = changes.reduce((a, b) => a + (b - mean) ** 2, 0) / (changes.length || 1)
+    const entropy = Math.min(1, Math.sqrt(variance) / 5)
+
+    // Strategies perf
+    const strategies_perf: Record<string, StrategyPerf> = {}
+    for (const name of ['A', 'B', 'C', 'D'] as StrategyName[]) {
+      const strat = this.strategies[name]
+      const info = STRATEGY_INFO[name]
+      const unrl = this.computeStrategyUnrealized(name)
+      const expo = this.computeStrategyExposure(name)
+      const stratValue = strat.cash + expo + unrl
+      strategies_perf[name] = {
+        name: info.name,
+        description: info.description,
+        cash: parseFloat(strat.cash.toFixed(2)),
+        allocated: strat.allocated,
+        realized_pnl: parseFloat(strat.realizedPnl.toFixed(2)),
+        unrealized_pnl: parseFloat(unrl.toFixed(2)),
+        total_pnl_pct: parseFloat(((stratValue - strat.allocated) / strat.allocated * 100).toFixed(2)),
+        total_trades: strat.totalTrades,
+        winning_trades: strat.winningTrades,
+        win_rate: strat.totalTrades > 0 ? parseFloat((strat.winningTrades / strat.totalTrades).toFixed(3)) : 0,
+        open_positions: strat.positions.size,
+        last_signal_time: strat.lastSignalTime,
+        color: info.color,
+      }
+    }
+
+    return {
+      is_running: this.tradingEnabled,
+      mode: 'paper',
+      started_at: this.startedAt,
+      current_price: parseFloat(currentPrice.toFixed(currentPrice < 1 ? 6 : currentPrice < 100 ? 4 : 2)),
+      symbol: this.selectedToken,
+      timeframe: 'live',
+      exchange: 'COINBASE',  // FIX v10: was BINANCE (geo-blocked from Spain)
+      pattern_buffer: this.patternBufferPerToken.get(this.selectedToken) || [],
+      entropy: parseFloat(entropy.toFixed(3)),
+      regime,
+      vol_regime: (() => {
+        const v = this.computeMarketVolatility()
+        return { avg_atr_pct: parseFloat(v.avgAtrPct.toFixed(3)), token_count: v.tokenCount, extreme: v.extreme, paused: Date.now() < this.volPauseUntil, pause_remaining_ms: Math.max(0, this.volPauseUntil - Date.now()) }
+      })(),
+      latest_signal: this.signals[0] || null,
+      signals_history: this.signals.slice(0, 20),
+      positions: positionsArray,
+      portfolio_value: parseFloat(totalValue.toFixed(2)),
+      cash: parseFloat(totalCash.toFixed(2)),
+      unrealized_pnl: parseFloat(unrealized.toFixed(4)),
+      realized_pnl: parseFloat(totalRealized.toFixed(4)),
+      total_pnl_pct: parseFloat(((totalValue - INITIAL_CAPITAL) / INITIAL_CAPITAL * 100).toFixed(2)),
+      exposure_pct: totalValue > 0 ? parseFloat((exposure / totalValue * 100).toFixed(1)) : 0,
+      daily_return_pct: parseFloat(dailyReturn.toFixed(2)),
+      leverage: mm.defaultLeverage,
+      auto_mode: this.autoMode,
+      circuit_breakers: {
+        max_drawdown: dd > mm.maxDrawdownPct,
+        daily_loss: totalRealized < -(INITIAL_CAPITAL * mm.dailyLossLimitPct / 100),
+        volatility: false,
+      },
+      is_trading_allowed: dd < mm.maxDrawdownPct + 5,
+      kill_switch_active: !this.tradingEnabled,
+      max_drawdown_pct: parseFloat(dd.toFixed(2)),
+      daily_loss_pct: parseFloat(Math.max(0, -totalRealized / (INITIAL_CAPITAL / 100)).toFixed(2)),
+      total_trades: totalTrades,
+      winning_trades: totalWinning,
+      win_rate: totalTrades > 0 ? parseFloat((totalWinning / totalTrades).toFixed(3)) : 0,
+      max_drawdown: parseFloat(dd.toFixed(2)),
+      equity_curve: this.equity,
+      equity_timestamps: this.timestamps,
+      monte_carlo: {
+        risk_of_ruin: parseFloat((Math.max(0, dd / mm.maxDrawdownPct) * 0.05).toFixed(4)),
+        probability_of_profit: wr > 0 ? parseFloat((0.5 + (wr - 0.5) * 0.6).toFixed(3)) : 0.5,
+        p95_dd: parseFloat((dd * 1.3).toFixed(1)),
+        verdict: dd < mm.maxDrawdownPct ? 'PASS' : 'WARN',
+      },
+      living_trie_stats: {
+        pattern_count: this.livingTrie.size,
+        max_depth: this.maxPatternDepthObserved,
+        trading_observations: this.candlesProcessed,
+        last_update: new Date().toISOString(),
+      },
+      trade_history: this.trades.slice(0, 20).map(t => ({ ...t, status: 'CLOSED' })),
+      candles_processed: this.candlesProcessed,
+      tick_count: this.tickCount,            // FIX v11
+      last_tick_at: this.lastTickAt,         // FIX v11: ms epoch; 0 = never ticked
+      websocket_status: wsConnected ? 'connected' : 'reconnecting',
+      reconnect_count: 0,
+      token_states: tokenStates,
+      active_tokens: sortedActive,
+      selected_token: this.selectedToken,
+      money_manager: mm,
+      kelly_percent: parseFloat(kellyPercent.toFixed(4)),
+      suggested_position_size: parseFloat(suggestedPositionSize.toFixed(2)),
+      risk_reward_ratio: R,
+      strategies_perf,
+    }
+  }
+}

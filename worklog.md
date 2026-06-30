@@ -1497,3 +1497,49 @@ Stage Summary:
 - For revert: cp src/lib/paper-trading-engine.ts.bak.v61b src/lib/paper-trading-engine.ts
 - Next: v63 will explore new strategy types (scalp RSI 5/95, vol-breakout) to add
   trade frequency. Pyramiding has been optimized — next gains come from NEW signals.
+
+---
+Task ID: 36
+Agent: main
+Task: v63 ROBUSTNESS FRAMEWORK — multi-regime × 50-seed validator + composite score
+
+Work Log:
+- User directive: "Piensa como un quantitative researcher de un hedge fund.
+  No busques el mejor backtest. Busca la estrategia más difícil de romper."
+- Built v63_robustness.py with:
+  * 6 regimes: BULL (drift +3%), BEAR (drift -3%), SIDE (chop), HIGHVOL (0.8% vol),
+    LOWVOL (0.2% vol), MIXED (v38 backward-compat)
+  * 50-seed validator (up from 12) for statistical power
+  * Extended metrics: Sortino, Calmar, Recovery Factor (in addition to PF/Sharpe/WR/MaxDD/AvgR)
+  * Composite score (0-100) combining 10 components
+  * Acceptance gate: 5 criteria all must pass
+- Built v63_parallel.py — multiprocessing runner (6 regimes in parallel)
+- Ran v62a baseline through 50 seeds × 6 regimes
+
+CRITICAL FINDINGS:
+- ❌ v62a is FRAGILE — composite score only 33/100
+- ❌ Only 17% of regimes profitable (1 of 6: SIDE marginally)
+- ❌ MIXED P&L: -0.90 (was +48.56 with 12 seeds — PURE LUCK)
+- ❌ MIXED profitable seeds: 33% (was 67% with 12 seeds)
+- ❌ BEAR: P&L -2546, MaxDD 21.91% (catastrophic)
+- ❌ HIGHVOL: P&L -5388, MaxDD 47% (catastrophic — pyramiding blows up)
+- ❌ LOWVOL: 0 trades (ATR floor blocks all entries)
+- ❌ SIDE: 2 trades (barely any signals)
+- ⚠️ BULL: P&L -3.20 (marginal, few trades)
+- ⚠️ MIXED MaxDD 0.42% — OVER the 0.35% user limit
+
+ROOT CAUSES:
+1. 12-seed validation was statistically underpowered — gave false confidence
+2. v62a's edge is regime-specific (only works in v38's mixed regime distribution)
+3. Pyramiding (+75% at +1R) amplifies losses in BEAR/HIGHVOL
+4. ATR floor 0.58% blocks all trades in LOWVOL
+5. Strategy A's momentum and B's RSI don't trigger in SIDE/LOWVOL
+
+Stage Summary:
+- v62a composite score: 33.07/100 (baseline to beat)
+- Regime stability: 17% (1/6 profitable)
+- Seed stability: 33% (MIXED)
+- v62a is REJECTED as production champion — was overfit to 12-seed MIXED
+- New baseline: composite score, regime stability, seed stability
+- Next: v64 sensitivity, v65 new strategies (8 implemented, need tuning),
+  v66 correlation, v67 monte carlo, v68 real costs, v69 generalization
