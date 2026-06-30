@@ -797,21 +797,7 @@ export class PaperTradingEngine {
         }
       }
 
-      // ─── v81: Lock + 3-Partial TP + Trailing + TIERED Adaptive + A 0.040 + B 0.30 + PYRAMID B @+1.0R (+75%) ───
-      // v67 → v81 changes (5 fixes for universal token + regime support):
-      //   F1: Strategy B TREND FILTER (slope-based) — block wrong-direction mean reversion
-      //   F2: Dynamic ATR floor 0.40% (was 0.58%) — allow more tokens, esp. ALT/low-vol
-      //   F3: PYRAMID disabled in HIGHVOL (ATR% > 1.5) — prevents loss amplification
-      //   F4: Catastrophic SL 2.5 ATR (was 4.0) — tighter cap on tail risk
-      //   F5: B size 0.15 in HIGHVOL (was 0.30) — smaller positions in volatile regimes
-      //   F6: Extended TIERED sizing 0.3/0.5/0.7/1.0 (was 0.4/0.7/1.0) — finer low-vol control
-      // Backtest (12 seeds × 8 profiles) v81 vs v67:
-      //   BULL:    -295 → +165 (100% profit)  ✅
-      //   BEAR:    -164 →   -7 (50% profit)   ✅
-      //   HIGHVOL: -100 →  -13 (25% profit)   ✅
-      //   MEME:    -206 → +373 (100% profit)  ✅
-      //   ALT:     -124 →   +6 (42% profit)   ✅
-      //   MIXED:    -22 →  -91 (17% profit)   ❌ (regressed — see worklog)
+      // ─── v67: Lock + 3-Partial TP + Trailing + TIERED Adaptive + A 0.040 + B 0.30 + PYRAMID B @+1.0R (+75%) ───
       // These run on every tick to manage open positions proactively.
       // Lock:     move SL to entry+0.35R when +0.5R reached (unchanged from v51e)
       // Partial1: close 5% at +0.5R (unchanged from v53h)
@@ -854,41 +840,32 @@ export class PaperTradingEngine {
         // v62a→v67: Pyramid pct 0.50 → 0.75 (push B winners even harder)
         //   12-seed validation: +2.58 P&L vs v61b, MaxDD same 0.29%, PF 2.66→2.72, Sharpe +8.69→+9.82
         if (!pos.pyramid_done && pos.strategy === 'B' && rMultiple >= 1.0) {
-          // v81 F3: Disable pyramid in HIGHVOL (ATR% > 1.5)
-          //   Root cause: v67 pyramiding in HIGHVOL amplified losses — MaxDD 2.34%, Profit 33%
-          //   Fix: skip pyramid when ATR% > 1.5 → MaxDD 1.54%, less profit but controlled risk
-          //   Backtest v81 vs v67: HIGHVOL P&L -100 → -13, MaxDD 2.34% → 1.54%
-          const atrPctPyramid = (pos.initial_atr / pos.entry_price) * 100
-          if (atrPctPyramid > 1.5) {
-            pos.pyramid_done = true  // disable pyramid by marking as done
-          } else {
-            const pyramidPct = 0.75
-            const oldQty = pos.qty
-            const oldEntry = pos.entry_price
-            const addQty = oldQty * pyramidPct
-            const newQty = oldQty + addQty
-            const newEntry = (oldQty * oldEntry + addQty * price) / newQty
-            pos.qty = newQty
-            pos.entry_price = newEntry
-            // Recompute ATR and SL distance for pyramided position
-            const newATR = computeATR(hist.map(h => h.price), 60)
-            if (newATR > 0) {
-              pos.initial_atr = newATR
-              pos.initial_sl_distance = newATR * 1.5
-              pos.current_sl = isLong ? newEntry - newATR * 1.5 : newEntry + newATR * 1.5
-              pos.catastrophic_sl = isLong ? newEntry - newATR * 2.5 : newEntry + newATR * 2.5  // v81 F4: 2.5 ATR (was 4.0)
-              pos.current_tp = null
-            }
-            // Reset partials + lock + trail so they fire again on pyramided position
-            pos.partial1_done = false
-            pos.partial2_done = false
-            pos.partial3_done = false
-            pos.lock_done = false
-            pos.trail_active = false
-            pos.max_favorable_price = price
-            pos.pyramid_done = true
-            console.log(`[Paper/v81] ${sym} PYRAMID +75% @ ${price} (R was ${rMultiple.toFixed(2)}, new entry ${newEntry.toFixed(4)})`)
+          const pyramidPct = 0.75
+          const oldQty = pos.qty
+          const oldEntry = pos.entry_price
+          const addQty = oldQty * pyramidPct
+          const newQty = oldQty + addQty
+          const newEntry = (oldQty * oldEntry + addQty * price) / newQty
+          pos.qty = newQty
+          pos.entry_price = newEntry
+          // Recompute ATR and SL distance for pyramided position
+          const newATR = computeATR(hist.map(h => h.price), 60)
+          if (newATR > 0) {
+            pos.initial_atr = newATR
+            pos.initial_sl_distance = newATR * 1.5
+            pos.current_sl = isLong ? newEntry - newATR * 1.5 : newEntry + newATR * 1.5
+            pos.catastrophic_sl = isLong ? newEntry - newATR * 4 : newEntry + newATR * 4
+            pos.current_tp = null
           }
+          // Reset partials + lock + trail so they fire again on pyramided position
+          pos.partial1_done = false
+          pos.partial2_done = false
+          pos.partial3_done = false
+          pos.lock_done = false
+          pos.trail_active = false
+          pos.max_favorable_price = price
+          pos.pyramid_done = true
+          console.log(`[Paper/v67] ${sym} PYRAMID +75% @ ${price} (R was ${rMultiple.toFixed(2)}, new entry ${newEntry.toFixed(4)})`)
         }
 
         // v61b: Recompute rMultiple after pyramid (entry_price may have changed)
@@ -1152,7 +1129,7 @@ export class PaperTradingEngine {
       if (strat.positions.size >= 2) break
       // v31b: position size 2.5% for Strategy A (A has 61% WR but loses
       // money due to R:R 1:1.67 — halving size makes A's losses manageable)
-      // v81: A base size 0.040 (was 0.050 in v62a) — reduce A's drag while pushing B harder
+      // v67: A base size 0.040 (was 0.050 in v62a) — reduce A's drag while pushing B harder
       //   12-seed validation: A 0.040 + B 0.30 + pyramid +75% → P&L +46.93, MaxDD 0.29%, PF 3.01 (vs v62a P&L +48.56, PF 2.72)
       //   A was net LOSER at 0.050 (-7.51 in seed 2024 trace) — at 0.040 with B 0.30, PF jumps 2.72 → 3.01 (+10.7%)
       const baseUsdtAmountA = Math.min(strat.cash * 0.040, strat.cash * 0.10)
@@ -1177,7 +1154,7 @@ export class PaperTradingEngine {
       if (result.success) {
         const pos = this.positions.get(top.symbol)
         if (pos) {
-          // v81: SL 1.5 ATR + lock 0.5R (offset 0.35R) + p1 5% @ 0.5R + p2 10% @ 1.0R + p3 15% @ 1.25R + trail 0.30 ATR + ATR floor 0.58% + momentum 0.55% + TIERED SIZE (0.4/0.7/1.0 by ATR) + PYRAMID B @+1.0R (+75%) + A 0.040 + B 0.30
+          // v67: SL 1.5 ATR + lock 0.5R (offset 0.35R) + p1 5% @ 0.5R + p2 10% @ 1.0R + p3 15% @ 1.25R + trail 0.30 ATR + ATR floor 0.58% + momentum 0.55% + TIERED SIZE (0.4/0.7/1.0 by ATR) + PYRAMID B @+1.0R (+75%) + A 0.040 + B 0.30
           //   12-seed validation: WR 79.6%, P&L +48.56 (A), Profitable 67% of seeds, MaxDD 0.29%, PF 2.72
           pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 1.5 : pos.entry_price + atr * 1.5
           pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 1.2 : pos.entry_price - atr * 1.2
@@ -1226,38 +1203,25 @@ export class PaperTradingEngine {
         const t = this.priceFeed.getData(sym)
         if (!t || t.quoteVolume < 30_000_000) return null
         const hist = this.priceHistory.get(sym) || []
-        if (hist.length < 100) return null  // v81: need 100 ticks for SMA100 slope
+        if (hist.length < 20) return null
         const prices = hist.map(h => h.price)
         // v31b: RSI 30/70 (was 40/60) — backtest shows 30/70 gives 75% WR
         //   on Strategy B (the winner strategy, +69 P&L in 6h)
         const rsi = computeRSI(prices, 14)
         if (rsi >= 30 && rsi <= 70) return null
-        // v81 F1: Trend filter (slope-based) — block mean reversion against strong trends
-        //   Root cause: v67 B SHORT in BULL/MEME lost -4428/-6138 P&L (catastrophic)
-        //   Fix: don't short into uptrend (slope > +0.05%), don't long into downtrend (slope < -0.05%)
-        //   Backtest v81 vs v67 (12 seeds × 8 profiles):
-        //     BULL: -295 → +165 (100% profit), MEME: -206 → +373 (100% profit), BEAR: -164 → -7
-        const smaNow = prices.slice(-100).reduce((a, b) => a + b, 0) / 100
-        const smaPrev = prices.slice(-110, -10).reduce((a, b) => a + b, 0) / 100
-        const smaSlopePct = (smaNow - smaPrev) / smaPrev * 100
-        const direction = rsi < 50 ? 'LONG' : 'SHORT'
-        if (direction === 'LONG' && smaSlopePct < -0.05) return null  // don't long into downtrend
-        if (direction === 'SHORT' && smaSlopePct > 0.05) return null  // don't short into uptrend
-        return { ticker: t, rsi, direction, smaSlopePct }
+        return { ticker: t, rsi }
       })
-      .filter((x): x is { ticker: TickerData; rsi: number; direction: 'LONG' | 'SHORT'; smaSlopePct: number } => x !== null)
+      .filter((x): x is { ticker: TickerData; rsi: number } => x !== null)
       .filter(x => !this.cooldownUntil.has(x.ticker.symbol) || now > (this.cooldownUntil.get(x.ticker.symbol) || 0))
       .filter(x => !this.positions.has(x.ticker.symbol))
       .filter(x => this.checkCorrelationLimit(x.ticker.symbol))
       .filter(x => {
-        // v81 F2: Dynamic ATR floor 0.40% (was 0.58% in v67) — allow more tokens to trade
-        //   Backtest: 0.58% blocked ALL BLUE/STABLE trades; 0.40% keeps MIXED quality
-        //   For BLUE/STABLE (ATR < 0.40%), use grid strategy (future v82)
+        // v37e: ATR floor 0.55%
         const histB = this.priceHistory.get(x.ticker.symbol) || []
         const pricesB = histB.map(h => h.price)
         const atrB = computeATR(pricesB, 60)
         const atrPctB = atrB / x.ticker.price * 100
-        return atrPctB >= 0.40
+        return atrPctB >= 0.58
       })
       .sort((a, b) => Math.abs(a.rsi - 50) - Math.abs(b.rsi - 50))
       .slice(0, 2)
@@ -1266,39 +1230,44 @@ export class PaperTradingEngine {
 
     for (const c of candidates) {
       if (strat.positions.size >= 2) break
+      // v53h: position size 12.5% for Strategy B (was 10% in v31b-v51e)
+      //   B is the workhorse with WR 79%+ — bigger size scales profits with controlled MaxDD
+      //   12-seed validation: B 0.125 → P&L +27.00, MaxDD 0.28% (vs B 0.10 → P&L +23.07, MaxDD 0.26%)
+      // v67: B base size 0.30 (was 0.20 in v62a) — push B HARDER (+50% bigger) since B is the workhorse
+      //   12-seed validation: A 0.040 + B 0.30 → P&L +46.93, PF 3.01 (vs v62a P&L +48.56, PF 2.72)
+      //   PF improvement +0.29 (+10.7%) means each dollar lost generates $3.01 profit (vs $2.72 in v62a)
+      //   MaxDD stays at 0.29% — TIERED adaptive sizing + pyramid +75% keep drawdown controlled
+      const baseUsdtAmount = Math.min(strat.cash * 0.30, strat.cash * 0.30)
+      if (baseUsdtAmount < 50) break
+
+      // FIX v12 BUG J: Direction was c.rsi < 30 ? 'LONG' : 'SHORT' but v12 BUG E
+      // widened entry filter to RSI<40 (LONG) or RSI>60 (SHORT). When RSI was
+      // 30-40, we'd enter as LONG but direction logic said SHORT. All 8 recent
+      // Strategy B signals were SHORT (100% bias). Fix: use < 50 as midpoint.
+      // RSI<50 = bearish → contrarian LONG (mean reversion up)
+      // RSI>50 = bullish → contrarian SHORT (mean reversion down)
+      const direction: 'LONG' | 'SHORT' = c.rsi < 50 ? 'LONG' : 'SHORT'
       const hist = this.priceHistory.get(c.ticker.symbol) || []
       const atr = computeATR(hist.map(h => h.price), 60)
       if (atr <= 0) continue
+
+      // v59f: Apply TIERED adaptive ATR sizing (0.4x if <0.6%, 0.7x if <0.8%, 1.0x otherwise)
       const atrPctB = (atr / hist[hist.length - 1].price) * 100
-
-      // v81 F5: Regime-aware B size — 0.15 if HIGHVOL (ATR% > 1.2), 0.30 otherwise
-      //   Root cause: v67 B at 0.30 in HIGHVOL had MaxDD 2.34%, Profit 33%
-      //   Fix: smaller B in HIGHVOL → MaxDD 1.54%, Profit 25% (less profit but controlled risk)
-      //   v67 B at 0.30 in normal vol = OK (PF 3.01 on MIXED)
-      const bBaseSize = atrPctB > 1.2 ? 0.15 : 0.30
-      const baseUsdtAmount = Math.min(strat.cash * bBaseSize, strat.cash * 0.30)
-      if (baseUsdtAmount < 50) break
-
-      // v81 F2: Extended tiered sizing (lower for low-vol tokens)
-      //   v67 had 0.4/0.7/1.0 (only 3 tiers, all >= 0.4)
-      //   v81 has 0.3/0.5/0.7/1.0 (4 tiers, starts at 0.3 for ATR < 0.4%)
-      const sizeMultB = atrPctB < 0.40 ? 0.3 : (atrPctB < 0.60 ? 0.5 : (atrPctB < 0.80 ? 0.7 : 1.0))
+      const sizeMultB = atrPctB < 0.60 ? 0.4 : (atrPctB < 0.80 ? 0.7 : 1.0)
       const usdtAmount = baseUsdtAmount * sizeMultB
 
-      const result = c.direction === 'LONG'
+      const result = direction === 'LONG'
         ? this.marketBuy(c.ticker.symbol, usdtAmount, 'B')
         : this.marketSell(c.ticker.symbol, usdtAmount, 'B')
 
       if (result.success) {
         const pos = this.positions.get(c.ticker.symbol)
         if (pos) {
-          // v81: SL 1.5 ATR + lock 0.5R offset 0.35R / p1 5% @ 0.5R / p2 10% @ 1.0R / p3 15% @ 1.25R / trail 0.30 ATR
-          //   + PYRAMID +75% @ +1.0R (disabled in HIGHVOL via F3)
-          //   + TIERED size 0.3/0.5/0.7/1.0 + B size 0.15/0.30 by regime
-          //   + catastrophic_sl 2.5 ATR (was 4.0 in v67 — F4 tighter cap on tail risk)
-          pos.current_sl = c.direction === 'LONG' ? pos.entry_price - atr * 1.5 : pos.entry_price + atr * 1.5
-          pos.current_tp = c.direction === 'LONG' ? pos.entry_price + atr * 1.2 : pos.entry_price - atr * 1.2
-          pos.catastrophic_sl = c.direction === 'LONG' ? pos.entry_price - atr * 2.5 : pos.entry_price + atr * 2.5
+          // v67: SL 1.5 ATR + v67 state init (lock 0.5R offset 0.35R / p1 5% @ 0.5R / p2 10% @ 1.0R / p3 15% @ 1.25R / trail 0.30 ATR / PYRAMID +75% @ +1.0R)
+          //   B size: 0.30 base (was 0.20 in v62a), TIERED 0.4/0.7/1.0 by ATR, pyramided +75% at +1.0R (v62a: was +50% in v61b)
+          pos.current_sl = direction === 'LONG' ? pos.entry_price - atr * 1.5 : pos.entry_price + atr * 1.5
+          pos.current_tp = direction === 'LONG' ? pos.entry_price + atr * 1.2 : pos.entry_price - atr * 1.2
+          pos.catastrophic_sl = direction === 'LONG' ? pos.entry_price - atr * 4 : pos.entry_price + atr * 4
           pos.initial_atr = atr
           pos.initial_sl_distance = atr * 1.5
           pos.lock_done = false
@@ -1316,14 +1285,14 @@ export class PaperTradingEngine {
         const ev_score_b = +(confB * expected_move_pct_b / 2).toFixed(3)
         this.signals.unshift({
           timestamp: new Date().toISOString(),
-          direction: c.direction, symbol: c.ticker.symbol, strategy: 'B',
+          direction, symbol: c.ticker.symbol, strategy: 'B',
           confidence: confB,
-          pattern_path: `MEANREV_RSI${c.rsi.toFixed(0)}_${c.direction}_slope${c.smaSlopePct.toFixed(2)}`,
+          pattern_path: `MEANREV_RSI${c.rsi.toFixed(0)}_${direction}`,
           ev_score: ev_score_b,
           expected_move_pct: expected_move_pct_b,
         })
         if (this.signals.length > 50) this.signals = this.signals.slice(0, 50)
-        console.log(`[Strat B/MeanRev] OPEN ${c.direction} ${c.ticker.symbol} RSI=${c.rsi.toFixed(1)} slope=${c.smaSlopePct.toFixed(2)}% @ ${result.fillPrice?.toFixed(4)} (${usdtAmount.toFixed(0)} USDT, ATR ${atrPctB.toFixed(2)}%)`)
+        console.log(`[Strat B/MeanRev] OPEN ${direction} ${c.ticker.symbol} RSI=${c.rsi.toFixed(1)} @ ${result.fillPrice?.toFixed(4)} (${usdtAmount.toFixed(0)} USDT)`)
       }
     }
   }
