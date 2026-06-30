@@ -129,6 +129,8 @@ Estos caminos se probaron y **se descartaron con evidencia**:
 | SL 1.45 o 1.6 | Peor que 1.5 | ❌ Descartado (v52) |
 | Tiered sizing 0.4/0.7/1.0 | MaxDD baja pero P&L cae mucho | ⚠️ No adoptado (v57h) |
 | B 0.20 sin adaptativo | MaxDD >0.30 % | ⚠️ Demasiado arriesgado (v58b) |
+| Equity Curve Protection on A (v63) | MaxDD ↓0.04 pero Profit% 67→58 y Sharpe 9.82→2-5 | ❌ Descartado (v63) |
+| Strategy E RSI 5/95 scalp (v63) | RSI<5 imposible en datos sintéticos (0/95k samples) | ⏸ Shelved (v63) |
 
 ---
 

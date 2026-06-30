@@ -1497,3 +1497,106 @@ Stage Summary:
 - For revert: cp src/lib/paper-trading-engine.ts.bak.v61b src/lib/paper-trading-engine.ts
 - Next: v63 will explore new strategy types (scalp RSI 5/95, vol-breakout) to add
   trade frequency. Pyramiding has been optimized — next gains come from NEW signals.
+
+---
+Task ID: 36
+Agent: main
+Task: v63 — Equity Curve Protection (ECP) — ROBUSTNESS-FIRST RESEARCH
+
+User directive:
+  "Piensa como un quantitative researcher de un hedge fund.
+   No busques el mejor backtest. Busca la estrategia más difícil de romper."
+
+Diagnosis of v62a (per-strategy breakdown, seed 2024):
+  - A (Momentum): 53 trades, WR 75%, P&L -7.51  ← NET LOSER dragging system down
+  - B (Mean Rev):  7 trades, WR 100%, P&L +41.89 ← WORKHORSE via pyramiding
+  - D (Squeeze):   0 trades (inert)
+  - 4 seeds always lose (314, 1234, 99, 2025) — appears inherent to regime
+
+Strategy E (RSI extremes 5/95) — REJECTED BEFORE TESTING:
+  - RSI distribution analysis on synthetic GBM data (95,400 samples):
+    * RSI <5:  0 occurrences (0.00%) — IMPOSSIBLE in synthetic data
+    * RSI 5-10: 0 occurrences (0.00%)
+    * RSI 10-15: 35 (0.04%)
+    * RSI 15-20: 266 (0.28%)
+    * RSI 80-85: 384 (0.40%)
+    * RSI 85-90: 71 (0.07%)
+  - Thresholds 5/95 would NEVER fire on synthetic data → test would be meaningless
+  - Strategy E shelved for now; would only make sense on REAL Coinbase data
+    where extreme RSI events actually occur
+
+ECP DESIGN (Equity Curve Protection — Priority 1: ROBUSTNESS):
+  Track rolling sum of last N trades per strategy. When sum drops below threshold,
+  halve position size until equity recovers.
+
+  Config (v63a, the default):
+    ecp_window = 8 trades  (rolling window of recent P&L)
+    ecp_threshold = -3.0 USDT  (trigger when sum < -3.0)
+    ecp_size_mult = 0.5  (when active, strategy trades at 50% size)
+    ecp_recovery = +1.0 USDT  (re-enable when rolling sum > +1.0)
+    ecp_strategies = ['A']  (only A, the proven loser; B untouched)
+
+  Why this should be robust (not overfit):
+    - No parameter optimization (window 8 / threshold 3.0 are heuristic)
+    - Logic is universal: "stop digging when in a hole"
+    - Works across any market regime (no regime-specific tuning)
+    - One threshold = low degrees of freedom = low overfit risk
+
+VARIANTS TESTED (12-seed validation, 14400 ticks × 10 tokens each):
+  v62a_control      — baseline, no ECP
+  v63a_ecp_a        — ECP on A, window 8, threshold -3.0, size 0.5 (DEFAULT)
+  v63b_ecp_a_strict — threshold -2.0 (trigger faster)
+  v63c_ecp_a_loose  — threshold -5.0 (trigger slower)
+  v63d_ecp_a_w5     — window 5 (faster detection)
+  v63e_ecp_a_w12    — window 12 (slower detection)
+  v63f_ecp_all      — ECP on A AND B (also protect B)
+  v63g_ecp_a_size03 — size mult 0.3 (more aggressive cut)
+
+12-SEED RESULTS (sorted by MaxDD):
+  Config                  P&L      MaxDD    Profit%  PF    Sharpe
+  v62a_control            +48.56   0.29%    67%      2.72  +9.82   ← CHAMPION (untouched)
+  v63g_ecp_a_size03       +46.01   0.25%    58%      2.90  +2.23   ← Best MaxDD but Profit -9%
+  v63b_ecp_a_strict       +46.80   0.26%    58%      2.86  +3.07
+  v63d_ecp_a_w5           +46.81   0.26%    58%      2.98  +0.98
+  v63e_ecp_a_w12          +46.03   0.26%    58%      2.66  +5.02
+  v63a_ecp_a              +46.01   0.27%    58%      2.83  +4.57
+  v63f_ecp_all            +46.01   0.27%    58%      2.83  +4.57
+  v63c_ecp_a_loose        +45.43   0.27%    58%      2.81  +2.81
+
+VERDICT: ❌ ECP REJECTED — does NOT improve robustness per cardinal rule
+  - MaxDD improves marginally: 0.29% → 0.25-0.27% (small, -0.02 to -0.04)
+  - P&L drops: -1.75 to -2.55 USDT per 4h session
+  - Profit% DROPS from 67% → 58% (this is the killer — 9% fewer profitable seeds!)
+  - PF improves: 2.72 → 2.66-2.98 (mixed, v63e actually lower)
+  - Sharpe DROPS dramatically: +9.82 → +0.98 to +5.02 (ECP kills Sharpe — likely because
+    it cuts size during losing streaks but those streaks often precede recoveries)
+
+ROOT CAUSE ANALYSIS:
+  ECP fails because the "losing streak" in A is NOT predictive of continued losses.
+  A's WR is 75% — when A has 8 losing trades in a row (rare), the next trade still
+  has ~75% probability of winning. Cutting size at the bottom = selling the dip.
+  Classic overfitting trap: looks smart in-sample, hurts out-of-sample.
+
+  Also: the 4 always-losing seeds (314, 1234, 99, 2025) lose because of MARKET
+  REGIME (GBM parameters generate unfavorable price action), not because A is in
+  a streak. ECP cannot fix regime-level losses.
+
+LESSONS LEARNED (added to "what doesn't work" table):
+  - Equity Curve Protection on A: ❌ reduces Profit% 67→58%, Sharpe 9.82→2-5
+  - RSI 5/95 thresholds on synthetic data: ❌ impossible (0 occurrences in 95k samples)
+  - Strategy E (RSI extremes scalp): ⏸ shelved — only valid on real Coinbase data
+
+NEXT EXPLORATIONS (v64+):
+  - Try ECP on B instead of A (B has higher WR, may benefit more from protection)
+  - Try volatility-regime detection (VIX-like): reduce size across ALL strategies
+    when 60-tick ATR spikes > 2x baseline (different from current tiered sizing)
+  - Try correlation-based position filter: skip new entry if existing positions
+    are highly correlated (e.g., BTC + ETH both open = 0.85 correlation)
+  - Try real Coinbase historical data backtest (not synthetic GBM) — Strategy E
+    may finally make sense there
+
+Stage Summary:
+- v62a REMAINS CHAMPION — 12-seed validated, no improvement found in v63
+- Script v63_push.py committed to scripts/backtest/ for reproducibility
+- worklog.md updated with full diagnosis + lessons
+- Next iteration: v64 will try a different angle (volatility regime or correlation)
