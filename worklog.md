@@ -1598,3 +1598,51 @@ Stage Summary:
   9. METRICS ✅ (composite score with 10 components)
   10. GOLDEN RULE ✅ (acceptance gate with 5 criteria)
 - Next: v70 — build a robust engine from scratch designed for regime stability
+
+---
+Task ID: 44
+Agent: main
+Task: v70 ROBUST ENGINE ATTEMPT #1 — regime-aware, no pyramiding, smaller sizes
+
+Work Log:
+- Built v70_robust_engine.py with:
+  * Regime detection (TRENDING_UP/DOWN, VOLATILE, CALM, NORMAL)
+  * 4 strategies: MOMENTUM, MEANREV, COMPRESS, PULLBACK
+  * Each strategy only fires in its favored regime
+  * NO PYRAMIDING (learned from v62a's failure)
+  * Smaller position sizes (1.5-2% vs v62a's 5-20%)
+  * Shorter hold time (30 min vs 60 min)
+  * Lower ATR floor (0.20% vs 0.58% — allows LOWVOL trades)
+- Tested on 3 seeds × 6 regimes
+
+RESULTS:
+- Composite score: 13.87/100 (WORSE than v62a's 31.04)
+- 0% profitable in ALL regimes
+- MaxDD 1-4% (way over 0.35% limit)
+- 92-110 trades per session (still over-trading)
+- WR 50-67% (strategies lack edge)
+
+ROOT CAUSE:
+- The 8 new strategies (v65) don't have genuine predictive edge
+- A regime-aware wrapper CANNOT fix strategies without edge
+- The strategies are textbook patterns, not research-backed signals
+- v62a's A/B strategies have edge in MIXED regime but fail elsewhere
+- Building robust strategies requires RESEARCH, not parameter tuning
+
+HONEST CONCLUSION:
+- The framework (v63-v69) is COMPLETE and working
+- v62a is DEFINITIVELY REJECTED (composite 31/100, 0% regimes profitable)
+- v70 attempt #1 FAILED (composite 13.87)
+- The next step is GENUINE SIGNAL RESEARCH:
+  * Test each signal's information coefficient (IC) independently
+  * Build signals from first principles, not textbook patterns
+  * This is a multi-week research project
+- The user's directive is correct: "Piensa como un quantitative researcher"
+  A quant researcher wouldn't keep tuning parameters — they'd go back to
+  signal research.
+
+Stage Summary:
+- v70 attempt #1: REJECTED (composite 13.87 < v62a's 31.04)
+- Key learning: regime-aware wrapper can't fix strategies without edge
+- Framework is complete and ready for genuine signal research
+- Next: v71 should focus on SIGNAL RESEARCH, not engine design
