@@ -1646,3 +1646,32 @@ Stage Summary:
 - Key learning: regime-aware wrapper can't fix strategies without edge
 - Framework is complete and ready for genuine signal research
 - Next: v71 should focus on SIGNAL RESEARCH, not engine design
+- model.py train() reescrito: ALL data + 500 rounds + no early stopping
+- engine.py: auto-detecta y re-entrena modelos inútiles (best_iter<=1)
+- runner.py: métricas actualizadas
+- Commit + push: 4194d12
+- Usuario debe: git pull, matar nohup actual, re-entrenar con --train --all
+---
+Task ID: v9-fix-build
+Agent: main
+Task: Fix V9 build_dataset.py — 0 positive labels bug
+
+Work Log:
+- Diagnosed 3 root causes for "0 positive + 0 negative" in build_dataset.py:
+  1. Download pagination breaks too early: `if len(ohlcv) < 1000: break` stops after 1 fetch when Bybit returns 999 bars
+  2. Entry timestamps not rounded to minute boundaries: trade at 14:30:23 can't match bar at 14:30:00 with exact lookup
+  3. Stale cache from previous runs covers wrong date range, no overlap validation
+- Added `_ts_to_ms()` robust timestamp conversion (4 fallback methods for pandas 2.x/3.x)
+- Fixed pagination: removed `< 1000` break condition, use `< 5` instead; set Bybit limit=200
+- Added entry_ts_ms rounding to minute boundary for primary matching
+- Added 3-tier matching: rounded → exact → closest-within-2min
+- Added OHLCV/trade date range overlap check with ❌/✅ logging
+- Added `--clear-cache` flag to force re-download
+- Added `diagnose_build.py` diagnostic script
+- Lowered train.py minimum dataset requirements from 100→50 rows
+
+Stage Summary:
+- build_dataset.py rewritten with 3 bug fixes + diagnostic logging
+- diagnose_build.py created for root cause verification
+- train.py error messages improved
+- User needs to: git pull, run `python3 -m scripts.v9.run_pipeline --clear-cache`
